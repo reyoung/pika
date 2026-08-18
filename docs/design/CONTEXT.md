@@ -1,0 +1,197 @@
+# Pika Kernel 自动调优
+
+Pika 管理从计算边界定义到最终优化结果交付的完整 Kernel 自动调优过程。本文件只定义领域语言，不描述具体实现。
+
+## Language
+
+**调优任务（Optimization Campaign）**：
+围绕一个已确认的计算边界、正确性契约、性能指标与停止条件开展的完整调优活动；它与一个 Pika Server 一一对应，系统重启不会改变其身份。
+_Avoid_: 任务、Job、Run
+
+**Campaign Workspace**：
+一次完整优化从源仓库创建的独立工作空间，包含 Campaign Best Branch、状态数据库、Artifact 和候选 worktree；它不修改源仓库原分支。
+_Avoid_: 主仓库、Attempt Worktree、多个 Campaign 的共享目录
+
+**Managed Repo**：
+用户显式交给当前 Pika Server 独占管理的本地 Git 仓库；Campaign Workspace 通过软链接把它暴露为 `repo/`。
+_Avoid_: 只读源仓库、远端仓库、临时 worktree
+
+**Campaign Spec**：
+用户明确确认的调优边界，包括计算语义、输入契约、Fusion 范围、Shapes、正确性要求、Metrics、Benchmark 协议和停止条件。
+_Avoid_: 用户 Prompt、README、Plan
+
+**Spec Revision**：
+Campaign Spec 在优化开始后的显式新版本；涉及语义、Shapes、Metrics、Benchmark 或正确性要求的变化都会产生新 Revision，并重新建立 Baseline。
+_Avoid_: 全局指导、配置热更新、Plan 变更
+
+**基线（Baseline）**：
+调优任务进入迭代前，已经通过正确性验证并完成性能测量的初始实现。
+_Avoid_: Reference、第一版优化
+
+**参考实现（Reference Implementation）**：
+用 PyTorch 表达计算语义、输入约束和正确性标准的权威实现，不承诺性能。
+_Avoid_: Baseline、Oracle Kernel
+
+**受保护 Harness（Protected Harness）**：
+已随 Campaign Spec 确认的 Reference、正确性测试与 Benchmark Harness；候选尝试只能读取和执行，不能修改。
+_Avoid_: 普通测试、Iteration 代码、Profiler 配置
+
+**候选尝试（Optimization Attempt）**：
+在独立工作空间中执行的一次有边界的性能改进实验，最终只能被接受或拒绝。
+_Avoid_: Iteration、版本、分支
+
+**Plan Artifact**：
+可选 Plan 阶段生成、供后续 Agent 使用但永不归并到 Campaign Best Branch 的 `plan.md`。
+_Avoid_: Campaign Spec、提交说明、最终 Summary
+
+**Reference Catalog**：
+Pika 可注入 Attempt `ref/` 的 Kernel 实现仓库清单，初始集合来自 Atrex Kernel Agent 的 `reference-projects/`；用户在 Alignment 中选择，默认全选。
+_Avoid_: Git submodule 状态、运行时依赖、包管理清单
+
+**Skill Registry**：
+Pika 提供给 Agent Session 的外部 Skill 清单，与 `ref/` Kernel 仓库相互独立；Skill 不进入候选 Patch 或 Campaign Best Branch。
+_Avoid_: Reference Catalog、Agent Backend、Pika MCP tools
+
+**Agent 会话（Agent Session）**：
+由 Pika 启动、为一个候选尝试执行规划或实现工作的外部编码 Agent 进程；其可用工具和 GPU 执行方式由 Agent 自身环境决定。
+_Avoid_: GPU Worker、执行节点、子 Agent
+
+**Agent Profile**：
+为一次 Agent 会话选择 Agent Backend、模型、reasoning effort、环境和权限行为的命名配置。
+_Avoid_: Benchmark Harness、Campaign Spec、Agent Session
+
+**Agent Backend**：
+能够作为 ACP v1 Server 启动的编码 Agent 运行后端，例如 Cursor 原生 ACP Server 或 Codex ACP Adapter。
+_Avoid_: Agent Harness、Benchmark Harness、模型
+
+**Agent 邮箱（Agent Mailbox）**：
+Pika 为同一调优任务内的 Agent 持久化并按目标路由消息的通信通道；发送方和接收方不直接建立连接。
+_Avoid_: ACP Session、共享 Prompt、进程标准输入
+
+**Pika MCP**：
+所有 Agent 读取调优状态、历史与用户指导，以及提交计划、Metrics、Git 结果和完成状态的强制语义接口。
+_Avoid_: Agent stdout、ACP 事件流、自然语言结果解析
+
+**Iteration 开发 Agent（Iteration Agent）**：
+在候选尝试的独立工作空间中规划、修改、提交、测试和报告结果，并在轮到该候选归并时操作 Git 的编码 Agent。
+_Avoid_: Worker、Benchmark Agent
+
+**已接受尝试（Accepted Attempt）**：
+至少一个目标指标改善超过验收阈值，且所有保护指标均未退化的候选尝试。
+_Avoid_: 成功运行、最快版本
+
+**已拒绝尝试（Rejected Attempt）**：
+未通过正确性验证、未达到改善阈值，或导致任一保护指标退化的候选尝试。
+_Avoid_: 失败代码、无用尝试
+
+**最佳已知版本（Best Known Revision）**：
+调优任务中由所有已接受尝试依次归并形成、作为后续候选尝试起点的代码版本。
+_Avoid_: main、HEAD、最新版本
+
+**Campaign Best Branch**：
+位于 Campaign Workspace 中、由已接受尝试串行推进并代表该次优化最佳已知版本的分支；源仓库原分支不随 Iteration 改变。
+_Avoid_: Target Branch、main、用户原分支
+
+**Best Advanced**：
+Campaign Best Branch 因 Accepted Attempt、Sync 或 Revert 产生新版本的持久化事实；所有活跃 Iteration Agent 都必须获知并刷新自己的基础版本。
+_Avoid_: Git hook、聊天通知、Metric 更新
+
+**Sync**：
+由用户显式触发、通过专用 Agent 同步 Campaign Best Branch 与远端并重新测量 Best Metrics 的维护流程；执行期间不创建新 Attempt。
+_Avoid_: 自动 fetch、Iteration Merge、Pika 自动 Push
+
+**Sync Trail**：
+记录一次 Sync 的远端版本、Git 结果、Metric 更新、Agent Summary 和时间的持久化审计记录。
+_Avoid_: Agent 日志、Git reflog、Attempt History
+
+**Sync Intent**：
+Sync 修改 Git 或远端前持久化的预期操作，包含本地起点、远端目标与候选 SHA，用于崩溃后判断操作是否已经发生并幂等恢复。
+_Avoid_: Sync Trail、Agent Plan、Git reflog
+
+**Domain Event**：
+Pika 在状态事务中追加、用于恢复调度决策和构造 UI 时间线的领域事实；它不保存被覆盖的旧 Metric 快照。
+_Avoid_: ACP 流式事件、Agent JSONL、应用日志
+
+**归并队列（Integration Queue）**：
+将并发候选尝试按确定顺序逐个验证并归并到最佳已知版本的队列；同一时刻最多处理一个候选尝试。
+_Avoid_: Merge Agent、并行 Merge、提交队列
+
+**归并租约（Integration Lease）**：
+绑定一个 Integration Agent Session 与预期 Best SHA、授权其独占推进 Campaign Best Branch 的临时权利；进程失效不会在 Git 状态核对前直接释放。
+_Avoid_: 固定超时锁、Git lock 文件、Agent 自报状态
+
+**主线复验（Mainline Validation）**：
+可选的、发生在候选尝试已经归并到 Campaign Best Branch 之后的串行正确性与性能复测；它不阻塞后续归并，并以最新结果修正已记录 Metrics，但默认不运行。
+_Avoid_: 验收门禁、Iteration Benchmark、合入前测试
+
+**待撤销事件（Revert Required）**：
+主线复验失败后产生、要求从 Campaign Best Branch 撤销指定已接受尝试的事实；所有正在运行和之后启动的 Agent 都必须获知它。
+_Avoid_: Rebase 请求、回滚建议、失败日志
+
+**阻塞（Blocked）**：
+系统无法安全恢复 Campaign Best Branch 时的调优任务状态；已有候选可以保存工作，但任何新归并都被禁止。
+_Avoid_: Paused、Stopped、Failed
+
+**中断（Interrupted）**：
+Agent 会话意外结束但候选尝试的工作空间与持久状态仍可继续使用的状态；恢复不要求重新使用原 Agent 会话。
+_Avoid_: Failed、Blocked、Cancelled
+
+**Metric 快照（Metric Snapshot）**：
+某个版本当前最新的一组结构化性能测量；主线复验产生修正时替换旧值，而不保留多套结构化观测。
+_Avoid_: Metric Observation、测量历史、曲线点集合
+
+**噪声容忍值（Noise Tolerance）**：
+Baseline 重复测量后为每个 Metric 自动估算的正常波动范围，用于区分真实改善或退化与测量噪声。
+_Avoid_: 1% 接受阈值、正确性容差、用户拍脑袋阈值
+
+**Benchmark Case**：
+由 shape、dtype、layout、输入分布和可选线上频率权重共同定义的一组可重复性能输入；每个 Case 上的 Metric 独立参与判定。
+_Avoid_: Shape、测试样例、一次测量
+
+**目标 Case（Target Case）**：
+至少需要有一个 Metric 取得真实改善的 Benchmark Case。
+_Avoid_: 高频 Shape、性能目标
+
+**保护 Case（Guard Case）**：
+任何受保护 Metric 都不能退化超过噪声容忍值的 Benchmark Case。
+_Avoid_: 回归测试、次要 Shape
+
+**观察 Case（Informational Case）**：
+只记录和展示 Metrics、不参与候选接受判断的 Benchmark Case。
+_Avoid_: Target Case、Guard Case
+
+**配对测量（Paired Measurement）**：
+交错执行当前最佳版本和候选版本，并基于同轮测量比值判断改善与噪声的正式性能比较。
+_Avoid_: Baseline 单次测量、Agent 临时 Benchmark、主线复验
+
+**Artifact Workspace**：
+保存 Patch、Prompt、Agent 输出、日志与 Profiler 文件等文件型产物的本地目录树；结构化状态只通过相对路径引用其中的文件。
+_Avoid_: SQLite Blob、S3 Bucket、Git 仓库
+
+**全局指导（Campaign Guidance）**：
+用户明确要求注入此后每个候选尝试的信息，属于调优任务持续生效的约束或知识。
+_Avoid_: By the way、系统提示词
+
+**当次指导（Attempt Guidance）**：
+用户明确要求只注入当前候选尝试的信息，在该尝试结束后失效。
+_Avoid_: 即时消息、临时 Prompt
+
+**旁路对话（Side Conversation）**：
+不注入调优上下文、只用于用户与系统交流的信息。
+_Avoid_: 普通 By the way、指导
+
+**目标对齐对话（Alignment Conversation）**：
+优化开始前由用户与 Boundary Agent 共同形成和确认 Campaign Spec 的独立对话。
+_Avoid_: Attempt Conversation、BTW Conversation、Campaign Guidance
+
+**Attempt 对话（Attempt Conversation）**：
+用户查看某个正在运行的 Attempt 时看到的 Agent 原始工作会话，也是创建 BTW Conversation 的唯一入口。
+_Avoid_: 目标对齐对话、Agent JSONL、汇总报告
+
+**BTW Conversation**：
+从一个指定 Attempt Conversation 当前上下文 fork 出来的用户对话；其消息默认不注入，只有用户显式选择当次或后续指导时才改变优化上下文。
+_Avoid_: 全局聊天、无来源对话、自动指导
+
+**Metrics Timeline**：
+以真实时间为横轴、把每次尝试的各项最新 Metrics 连成折线的可视化；不同 Spec Revision 分段展示。
+_Avoid_: Best-only 阶梯图、Attempt 散点图、旧 Metric 观测历史
