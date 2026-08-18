@@ -9,7 +9,7 @@
 ## 视图
 
 1. **目标对齐**：独立 Alignment Conversation、Shape 采集 Artifact、Campaign Spec 草稿和显式确认入口。
-2. **Attempts**：并发 Attempt 列表、单个 ACP Session 工作流、实时摘要，以及只能从当前 Attempt fork 的 BTW Conversation。
+2. **Attempts**：并发 Attempt 列表、单个 Backend Session 工作流、标准化 Backend Event、实时摘要，以及只能从当前 Attempt fork 的 BTW Conversation。
 3. **Metrics**：以时间为横轴的多 Metric 折线、最新值切换、Attempt 状态和点选详情。
 
 ## BTW 行为

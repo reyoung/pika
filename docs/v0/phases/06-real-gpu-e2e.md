@@ -16,7 +16,7 @@ Not started
 
 - Linux x86_64 NVIDIA GPU 主机。
 - 可用 CUDA、Driver、Python、PyTorch、Git、NCU。
-- Codex 与 Cursor ACP Backend 均已登录。
+- Codex App Server 与 Cursor ACP Backend 均已登录。
 - 测试仓库和远端分支允许手工 Sync push。
 - 选定一个规模适中、能在预算内产生 Accepted/Rejected 的 Kernel 问题。
 
@@ -34,7 +34,7 @@ Not started
 
 ### 6.1 环境证据
 
-- [ ] 保存 GPU 型号、Driver、CUDA、PyTorch、NCU、Git、Agent Backend 版本。
+- [ ] 保存 GPU 型号、Driver、CUDA、PyTorch、NCU、Git、Codex App Server 和 Cursor ACP 版本。
 - [ ] 保存 `pika serve` 有效配置的脱敏快照。
 - [ ] 验证 HTTP Token、Workspace lock 和 preflight。
 
@@ -48,7 +48,7 @@ Not started
 
 ### 6.3 并发优化
 
-- [ ] 至少两个 Iteration Slots，分别使用 Codex 和 Cursor。
+- [ ] 至少两个 Iteration Slots，分别使用 Codex App Server 和 Cursor ACP。
 - [ ] 至少运行 3 个 Attempts。
 - [ ] 至少产生一个 Accepted 和一个 Rejected。
 - [ ] 验证最近历史注入、Mailbox 和 BestAdvanced stale refresh。
@@ -109,7 +109,7 @@ artifacts/phase-6/
 - [ ] 所有命令保存 exit status 和可见 workload 输出。
 - [ ] Baseline、Accepted、Rejected 和 Final Best Metrics 可追溯到 SHA。
 - [ ] Agent 和 Pika 崩溃后均自动恢复。
-- [ ] Codex/Cursor 两个 Backend 都实际修改或分析过代码。
+- [ ] Codex App Server/Cursor ACP 两个 Backend 都实际修改或分析过代码。
 - [ ] `ncu-report-skill` 生成或解析了真实 NCU Artifact。
 - [ ] Sync 完整执行并有远端 SHA 证据。
 - [ ] Pika UI 的 Metrics Timeline 与 SQLite/Artifact 一致。

@@ -4,7 +4,7 @@ status: accepted
 
 # v1 以 Linux 前台 Elixir Release 交付
 
-Pika v1 正式运行在有本地 GPU 的 Linux x86_64 主机，以前台 Elixir Release 交付，不内置 daemon、Docker 或 GPU Worker。外部进程管理器负责常驻与拉起，Pika 在启动后恢复自身状态；Git、ACP Agent Backend、Python 和 GPU 环境由用户预装，Pika 只做诊断。macOS 支持 UI、目标对齐和开发，但不承诺 GPU 优化阶段。
+Pika v1 正式运行在有本地 GPU 的 Linux x86_64 主机，以前台 Elixir Release 交付，不内置 daemon、Docker 或 GPU Worker。外部进程管理器负责常驻与拉起，Pika 在启动后恢复自身状态；Git、Codex App Server、Cursor ACP、Python 和 GPU 环境由用户预装，Pika 只做诊断。macOS 支持 UI、目标对齐和开发，但不承诺 GPU 优化阶段。
 
 ## Consequences
 

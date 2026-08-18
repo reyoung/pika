@@ -6,7 +6,7 @@ Not started
 
 ## 依赖
 
-[Phase 0](./00-acp-mcp-spike.md) Exit Gate 全通过。
+[Phase 0](./00-agent-backend-protocol-spike.md) Exit Gate 全通过。
 
 ## 目标
 
@@ -31,7 +31,7 @@ Not started
 - [ ] 默认 `host=127.0.0.1`，默认端口由配置确定。
 - [ ] YAML 校验错误逐字段报告，不能静默使用猜测值。
 - [ ] 解析后写入 Workspace `config.json`，保存 SHA-256。
-- [ ] 恢复时比较不可变字段：Workspace、Managed Repo、listen address、ACP Backend command。
+- [ ] 恢复时比较不可变字段：Workspace、Managed Repo、listen address、Backend type/command/protocol config。
 - [ ] 允许未来修改的字段：Plan、max attempts、mainline validation、history N、Reference Catalog、停止条件。
 
 ### 1.2 Workspace 初始化
@@ -96,7 +96,7 @@ workspace/
 ### 1.7 Phoenix Shell 与诊断
 
 - [ ] 页面显示 Workspace、Repo mode、Campaign 状态、Best/Base SHA 占位与 preflight。
-- [ ] preflight 检查 Git、Python、GPU/Driver、Codex/Cursor Backend command。
+- [ ] preflight 检查 Git、Python、GPU/Driver、`codex app-server` 和 `cursor-agent acp`。
 - [ ] 失败只阻止相关阶段；Workspace/数据库仍可诊断。
 - [ ] 暂不实现最终 UI 细节。
 

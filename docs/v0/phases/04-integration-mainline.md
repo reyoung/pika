@@ -29,7 +29,7 @@ Not started
 - [ ] `ready_for_integration` 按 Attempt ordinal FIFO 排队。
 - [ ] 同时最多一个 Integration Agent。
 - [ ] `acquire_integration_lease(expected_best_sha)` 原子检查队首、Best 和现有 Lease。
-- [ ] Lease 绑定 Agent Session、Attempt、Elixir 进程和 Intent，不设 TTL。
+- [ ] Lease 绑定 Backend Session、Attempt、Elixir 进程和 Intent，不设 TTL。
 
 ### 4.2 陈旧 Base Refresh
 
@@ -61,7 +61,7 @@ Not started
 
 - [ ] 事件含 old/new SHA、cause、Attempt、Metric delta。
 - [ ] 写入所有活跃 Agent Mailbox，至少一次投递。
-- [ ] 不 cancel 当前 ACP Turn。
+- [ ] 不 interrupt 当前 Backend Turn。
 - [ ] `record_metrics`、`complete_attempt`、获取 Integration Lease 前强制检查 Base。
 - [ ] Agent 刷新/ack 操作幂等。
 

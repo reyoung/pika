@@ -6,7 +6,7 @@
 
 | Phase | 文档 | 核心结果 | 状态 |
 |---:|---|---|---|
-| 0 | [ACP + MCP 协议 Spike](./00-acp-mcp-spike.md) | Codex/Cursor 共用的 Elixir ACP Client | Not started |
+| 0 | [Agent Backend 协议 Spike](./00-agent-backend-protocol-spike.md) | Codex App Server + Cursor ACP 的统一 AgentBackend | Not started |
 | 1 | [Workspace 与持久状态](./01-workspace-persistence.md) | 可启动、可恢复的单 Campaign Server | Not started |
 | 2 | [Alignment、Spec 与 Baseline](./02-alignment-baseline.md) | 用户确认边界并建立可信 Baseline | Not started |
 | 3 | [并发 Attempt Loop](./03-attempt-loop.md) | 多 Agent 并行优化与 MCP 完成协议 | Not started |
@@ -24,9 +24,9 @@
 
 ## 全阶段规则
 
-- 不用 mock 替代 ACP、MCP、Git 或最终 GPU 关键路径；Fake 只用于确定性故障与并发测试。
+- 不用 mock 替代 Codex App Server、Cursor ACP、MCP、Git 或最终 GPU 关键路径；Fake 只用于确定性故障与并发测试。
 - 每个外部状态变更先持久化 Operation Intent。
-- Agent 自然语言、退出码和 ACP Turn 结束都不是领域完成信号；MCP 完成调用才是。
+- Agent 自然语言、退出码和 Backend Turn 结束都不是领域完成信号；MCP 完成调用才是。
 - 任何无法由 SQLite + Git + Artifact 唯一解释的恢复状态进入 Blocked。
 - 不提交凭证、Token、Agent 登录状态、Profiler 大文件或临时 worktree。
 - 不使用未固定版本的运行依赖或 `latest` 容器标签。

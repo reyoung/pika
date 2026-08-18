@@ -2,7 +2,7 @@
 
 ## 1. 边界
 
-Pika 架构参考不属于 Campaign Reference Catalog，也不会进入 Attempt worktree。Reference Catalog 只包含供 Kernel Agent 阅读的实现仓库；Skill Registry 则包含供 Agent Session 调用的外部 Skill。两者相互独立，且都不能进入候选 Patch 或 Campaign Best Branch。
+Pika 架构参考不属于 Campaign Reference Catalog，也不会进入 Attempt worktree。Reference Catalog 只包含供 Kernel Agent 阅读的实现仓库；Skill Registry 则包含供 Backend Session 调用的外部 Skill。两者相互独立，且都不能进入候选 Patch 或 Campaign Best Branch。
 
 ## 2. 内置 Reference Catalog
 
@@ -59,7 +59,7 @@ Skill 与 Ref 使用同一版本生命周期：Campaign 初始化时获取默认
 ## 6. 注入方式
 
 - Reference 项目以 Git submodule 形式出现在 `ref/<id>`。
-- Skill 保存在 Workspace 的 Pika-owned Skill 目录，通过 Agent Backend 的 Skill 发现机制或明确路径提供给 ACP Session。
-- Backend-specific 安装入口可以不同，但必须指向同一份固定 SHA 内容。
+- Skill 保存在 Workspace 的 Pika-owned Skill 目录，通过 Agent Backend 的 Skill 发现机制或明确路径提供给 Backend Session。
+- Codex App Server 使用 `skills/extraRoots/set`/`skills/list`，并在 `turn/start` 输入中附带明确的 `skill` item；Cursor ACP 使用其 Backend discovery 配置。Backend-specific 入口可以不同，但必须指向同一份固定 SHA 内容。
 - `ref/**`、Skill 目录及 Pika 产生的 `.gitmodules` 增量都是禁止交付区域。
 - Integration Agent 在正式配对测量前移除它们并恢复基础 `.gitmodules`，验证候选没有运行时依赖。

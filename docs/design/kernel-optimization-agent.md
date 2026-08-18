@@ -2,7 +2,7 @@
 
 ## 状态
 
-v1 设计已于 2026-08-18 冻结。尚未开始产品实现；`docs/design/prototype/` 仅为已确认的 UI 交互原型。
+v1 设计已于 2026-08-18 冻结，并由 ADR-0028 修订 Agent Backend 协议。尚未开始产品实现；`docs/design/prototype/` 仅为已确认的 UI 交互原型。
 
 ## 目标
 
@@ -51,7 +51,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 - Plan 是用户可配置的可选阶段，默认关闭。
 - 启用时，Plan Agent 调用 `submit_plan(markdown, summary)`；Pika 原子写入 `Artifact Workspace/campaigns/<campaign-id>/attempts/<attempt-id>/plan.md`，并在 SQLite 中保存相对路径和摘要。
-- 后续 Agent 通过 MCP Resource 或 ACP Prompt 的嵌入资源读取 `plan.md`。
+- 后续 Agent 通过 MCP Resource 或 Backend 支持的嵌入资源读取 `plan.md`。
 - `plan.md` 不位于 Git worktree，不能进入候选的 squash patch，也不能归并到 Campaign Best Branch。
 - 未启用 Plan 时，Iteration 开发 Agent 直接进入实现，不要求先生成结构化 Plan。
 
@@ -143,7 +143,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Sync 修改受保护 Harness 或 Campaign Spec 输入时进入 `AwaitingSpecConfirmation`；用户确认新 Spec Revision、重建 Baseline 和噪声估计后才能继续。用户拒绝时 Sync 失败且 Best 不变。
 - Sync 完成后必须更新 Best Metrics、写入独立 Sync Trail，再恢复创建新 Attempt。
 - Accepted Attempt、成功 Sync 或 Revert 每次推进 `pika/best` 都产生 `BestAdvanced` 事件。
-- `BestAdvanced` 通过 Pika MCP/Agent Mailbox 作为高优先级消息通知所有活跃 Iteration Agent，但不取消正在执行的 ACP Prompt Turn。
+- `BestAdvanced` 通过 Pika MCP/Agent Mailbox 作为高优先级消息通知所有活跃 Iteration Agent，但不 interrupt 正在执行的 Backend Turn。
 - Agent 在下一个 MCP 检查点更新基础版本；Pika 在正式 Benchmark、`complete_attempt` 和进入归并队列前检查 `base_sha`，陈旧时拒绝继续并要求 Agent 刷新。
 - Iteration Agent 可以 rebase 自己的临时 Attempt Branch 到新 `pika/best`，解决冲突并重新测试。Attempt Branch 可改写历史，但 `pika/best` 永远不能 rebase，只能通过 squash、merge 或 revert commit 前进。
 
@@ -170,15 +170,15 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 ## 已确认的 Agent 日志边界
 
-- 每个 ACP Agent Session 写入独立 JSONL Artifact，保存原始 ACP 更新、Prompt Turn 和工具状态。
+- 每个 Backend Session 写入独立 JSONL Artifact，保存 provider 原始消息、Backend Turn 和工具状态。
 - SQLite 只记录日志相对路径、最后序号、开始/结束时间、Session 状态与摘要，不保存逐 token chunk、thinking 或 terminal output。
-- Phoenix PubSub 实时广播 ACP 事件；页面刷新后按 JSONL 序号回放所需尾部，恢复 Prompt 也从尾部提取最近输出。
+- Phoenix PubSub 实时广播标准化 Backend Event；页面刷新后按 JSONL 序号回放所需尾部，恢复 Prompt 也从尾部提取最近输出。
 
 ## 已确认的恢复边界
 
 - Pika 的恢复正确性不依赖 Codex、Cursor 或其他 Agent 的会话 resume 能力。
 - Agent 异常结束或服务重启后，运行中的候选尝试标记为 `Interrupted`，原 worktree、提交和 Artifact 保留。
-- 系统通过新 Agent 会话注入任务定义、当前计划、工作区状态和最近输出，继续同一个候选尝试。
+- 系统通过新 Backend Session 注入任务定义、当前计划、工作区状态和最近输出，继续同一个候选尝试。
 - 服务启动后自动恢复正常的 Planning、Iteration、归并排队和主线复验工作，不等待用户点击继续。
 - 启动恢复必须检查未完成的 merge/revert 和实际 Git 状态；`Blocked` 不自动解除。
 - 无法确认 Campaign Best Branch 安全、Campaign Workspace 被外部修改或 Artifact 校验失败时，停止危险推进并通知用户。
@@ -189,10 +189,10 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Agent 通过 Pika MCP 读取 Campaign、历史、用户指导、Revert 事件与当前系统状态，并提交 Plan、Summary、Metrics、Commit、Merge 和最终状态。
 - Agent 的文本输出和传输层事件只用于实时展示与诊断，不作为结构化状态的权威来源。
 - 候选尝试只有成功调用 `complete_attempt` 后才算完成；Plan 只有成功调用对应的 MCP 提交操作后才算生成。
-- ACP Prompt Turn 正常结束但缺少当前角色必须完成的 MCP 操作时，Pika 保持同一 ACP Session，并发送 follow-up Prompt 要求 Agent 继续完成和提交缺失工作。
+- Backend Turn 正常结束但缺少当前角色必须完成的 MCP 操作时，Pika 保持同一 Backend Session，并发送 follow-up Prompt 要求 Agent 继续完成和提交缺失工作。
 - 缺失 MCP 提交不会仅凭 Agent 自然语言中的“完成”而自动补全。
 - 缺失必需 MCP 提交没有提醒次数、Agent 更换次数或时间预算；Pika 持续驱动 Agent，直到 MCP 提交成功、用户取消或调优任务因其他停止条件结束。
-- ACP Session 或进程失效时，自动恢复流程用新会话继续上述无限重试，不因此消耗新的优化 Iteration。
+- Backend Session 或进程失效时，自动恢复流程用新会话继续上述无限重试，不因此消耗新的优化 Iteration。
 - Pika 不从 Agent 的自然语言最终回答中猜测 Metrics、Commit 或完成状态。
 - 新 Plan/Iteration Prompt 默认注入最近 10 个终态 Attempt 的 Description、Summary、Outcome、Metric delta 和关键失败原因；N 可在 Server 启动配置中修改。
 - 未读 BestAdvanced、Revert 和用户指导不受 N 限制，必须全部注入；完整历史通过 `query_attempt_history` 查询。
@@ -200,23 +200,26 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 ## 已确认的 Pika MCP 传输与权限
 
 - Phoenix 只在 loopback 暴露 Streamable HTTP `/mcp`。
-- 每个 ACP Agent Session 获得独立、短期、角色受限的 MCP Token；SQLite 只保存 Token 哈希，服务重启后的新 Session 使用新 Token。
-- ACP 创建 Session 时把 MCP URL 与 Token 交给 Agent Backend。不能连接 HTTP MCP 的 Backend 不属于 v1，不实现 stdio proxy。
-- MCP Token 在服务端绑定 Campaign、Agent Session、Role 与可选 Attempt ID；Agent 不能通过工具参数切换身份。
+- 每个 Backend Session 获得独立、短期、角色受限的 MCP Token；SQLite 只保存 Token 哈希，服务重启后的新 Session 使用新 Token。
+- Agent Backend 在打开 Session 时配置 MCP URL 与 Token。Codex 通过 App Server 进程配置注入，Cursor 通过 ACP Session 配置注入；不能连接 HTTP MCP 的 Backend 不符合 conformance contract。
+- MCP Token 在服务端绑定 Campaign、Backend Session、Role 与可选 Attempt ID；Agent 不能通过工具参数切换身份。
 - Boundary、Plan、Iteration、Integration、Mainline、Sync 与 Side Conversation 使用不同工具集合。跨 Attempt 读取只能通过显式历史查询工具，所有写操作必须携带 idempotency key。
 - 必需完成调用为：Boundary 的 `submit_spec`/`submit_harness`，Plan 的 `submit_plan`，Iteration 的 `record_metrics`/`submit_attempt_summary`/`complete_attempt`，Integration 的 `complete_merge`，Mainline 的 `complete_validation` 与失败时的 `complete_revert`，Sync 的 `complete_sync`。Side Conversation 没有完成门禁。
 - Metrics 可以重复提交，后一次覆盖当前快照；缺少必需调用时继续采用无限 follow-up 规则。
 
-## 已确认的 Agent 传输与通信协议
+## 已确认的 Agent Backend 与通信协议
 
-- Pika 是中心 ACP Client，v1 固定使用 ACP v1，并通过能力协商使用可选功能。
-- v1 只支持能够作为 ACP v1 Server 启动的 Agent，不提供 stdout scraping fallback。
-- Cursor 使用其原生 ACP Server；Codex 使用 `@agentclientprotocol/codex-acp`。具体 Agent 配置是一条 ACP Server 启动命令，而不是包含领域逻辑的厂商专属 Adapter。
-- 每个活跃 Agent 会话使用独立 ACP 子进程，隔离崩溃、权限与配置影响。
-- ACP 负责会话、Prompt Turn、取消、权限请求和流式事件；Pika MCP 负责调优领域语义。
+- Pika 领域层只依赖 `Pika.AgentBackend` Behaviour，不依赖 Codex App Server 或 ACP wire types。
+- `Pika.AgentBackend` 固定提供 `start_link`、`open_session`、`start_turn`、`steer`、`interrupt`、`close_session` 和 `capabilities`。
+- 标准化 Backend Event 包括 `session_started`、`turn_started`、`message_delta`、`plan_updated`、`tool_started`、`tool_updated`、`tool_completed`、`command_output`、`file_changed`、`usage_updated`、`turn_completed`、`backend_error` 和 `process_exited`。
+- Codex 使用 `Pika.AgentBackend.CodexAppServer`：每个 Backend Session 启动独立 `codex app-server --listen stdio://`，执行 `initialize → initialized → thread/start → turn/start`，并把 `item/*`/`turn/*` 通知转换为标准事件。
+- Cursor 使用 `Pika.AgentBackend.CursorACP`：每个 Backend Session 启动独立 `cursor-agent acp`，执行 ACP `initialize`、`session/new`、`session/prompt`、`session/cancel` 和 `session/close`。
+- Codex 当次指导使用原生 `turn/steer`，不 interrupt 当前 Turn；Cursor 由 Backend adapter 通过 cancel + follow-up Prompt 模拟 `steer`。
+- Stop Now 调用统一 `AgentBackend.interrupt`；Codex 映射到 `turn/interrupt`，Cursor 映射到 `session/cancel`。
+- 每个活跃 Backend Session 使用独立子进程、MCP Token 和配置，隔离崩溃与权限影响。
 - 多 Agent 通信采用中心辐射模型。Agent 不直接连接其他 Agent，而是通过 Pika MCP 的 Agent Mailbox 查询 Agent、发送消息和读取消息。
-- Agent Mailbox 消息必须先持久化到 SQLite，只能在同一调优任务内路由。目标 Agent 忙碌时，在后续 MCP 检查点或 ACP Prompt Turn 获取消息。
-- ACP v2 稳定前不作为 v1 实现目标。
+- Agent Mailbox 消息必须先持久化到 SQLite，只能在同一调优任务内路由。目标 Agent 忙碌时，在后续 MCP 检查点或 Backend Turn 获取消息。
+- v0 内置 Codex App Server 与 Cursor ACP；新增 Backend 必须实现 `Pika.AgentBackend` conformance contract。
 
 ## 已确认的 Agent Profile
 
@@ -229,8 +232,8 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 ## 已确认的后端语言
 
 - Pika 服务后端使用 Elixir/OTP，而不是全 TypeScript 后端。
-- 每个 ACP Agent 连接、Campaign 状态机、归并队列和主线复验队列都应映射为受监督的独立进程。
-- ACP Client 通过内部 Behaviour 与具体 Elixir ACP 库隔离；采用哪个 0.x 库以及需要补齐哪些 ACP v1 能力，必须先通过 Codex/Cursor conformance spike 决定。
+- 每个 Backend Session、Campaign 状态机、归并队列和主线复验队列都应映射为受监督的独立进程。
+- Agent 协议通过 `Pika.AgentBackend` 隔离；Codex adapter 直接实现 App Server JSON-RPC，Cursor adapter 可使用经过 conformance 的 Elixir ACP 库或受控 fork。
 
 ## 已确认的部署与配置
 
@@ -240,37 +243,38 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - 用户配置使用 YAML；解析后的完整有效配置保存为 Workspace 内 `config.json`，用于恢复与审计。
 - Pika 始终以前台进程运行，不实现 daemonize；systemd、Supervisor、tmux 或其他外部进程管理器负责常驻和拉起。
 - 启动时检查 Git、Agent Backend、Python、GPU/Driver 与 Campaign 配置，但不自动安装或升级外部依赖。
-- Workspace、Managed Repo、监听地址和 ACP Backend 命令启动后不可变。
+- Workspace、Managed Repo、监听地址和 Backend type/command/protocol config 启动后不可变。
 - Plan、最大 Attempts、主线复验、历史 N、Reference Catalog 和停止条件可以在 UI 修改。
 - Iteration Slot 的模型与 reasoning effort 只影响下一次领取的 Attempt，不热切换正在运行的 Session。
 - 改变 Shapes、Metrics、Harness 或正确性要求必须产生 Spec Revision。
 
-## 已确认的 Web 与 ACP 实现栈
+## 已确认的 Web 与 Agent Backend 实现栈
 
 - Web 服务使用 Phoenix 和 LiveView；对话、状态与配置界面不维护独立 React SPA。
-- Phoenix PubSub 把 ACP 流式事件和持久化状态变更广播给 LiveView。
+- Phoenix PubSub 把标准化 Backend Event 和持久化状态变更广播给 LiveView。
 - Metrics 曲线使用 ECharts LiveView Hook；同时保留 JSON API 供脚本和未来客户端使用。
-- `ACPClient` 是 Pika 内部 Behaviour。实现前先使用现有 Elixir `agent_client_protocol` 包完成 Codex/Cursor conformance spike，覆盖 initialize、session/new、MCP forwarding、prompt/update、自动权限批准、cancel、close 和异常退出。
-- Spike 通过则固定依赖版本；存在缺口则 fork 或补齐 Behaviour 实现。Pika 不引入 Node sidecar，也不使用 `acpx` 作为运行时。
+- `Pika.AgentBackend` 是内部 Behaviour；Phase 0 对 Codex App Server 和 Cursor ACP 分别运行协议测试，并对两者运行统一事件/MCP/steer/interrupt conformance suite。
+- Codex adapter 在 conformance 时运行 `codex app-server generate-json-schema` 保存实际 CLI 版本 schema 证据；不引入 Codex SDK sidecar 或 `codex exec --json`。
+- Pika 不引入 Node sidecar，也不使用 `acpx` 作为运行时。
 
-## 已确认的 ACP 用户消息行为
+## 已确认的 Backend 用户消息行为
 
-- 当次指导先持久化，再向当前 ACP Session 发送 `session/cancel`；当前 Prompt Turn 返回 `cancelled` 后，在同一 Session 中用新的 `session/prompt` 继续。
-- ACP 取消超时后关闭对应子进程，并使用既有自动恢复流程创建新 Agent 会话继续同一候选尝试。
+- 当次指导先持久化，再调用当前 Backend Session 的 `steer`。Codex 原生追加到 in-flight Turn；Cursor adapter cancel 当前 Turn 后在同一 Session 发送 follow-up Prompt。
+- `steer` 失败统一返回 `steer_failed`；恢复流程关闭对应子进程并创建新 Backend Session 继续同一候选尝试。
 - 全局指导只影响之后创建或继续的 Iteration，不取消当前 Agent。
-- 旁路对话使用独立 ACP Session，不影响 Iteration Agent 的 Prompt Turn。
+- 旁路对话使用独立 Backend Session，不影响 Iteration Agent 的 Backend Turn。
 
 ## 已确认的权限边界
 
-- Pika v1 把本机 Agent 视为受信任进程，ACP 权限请求默认自动批准，运行方式默认为 YOLO。
+- Pika v1 把本机 Agent 视为受信任进程，Backend 权限请求默认自动批准，运行方式默认为 YOLO。
 - Pika 不承诺限制 Agent 对主机、网络、Git 或 GPU 的访问，也不作为恶意代码安全沙箱。
-- Agent 凭证从服务启动环境或 Agent Profile 引用的环境变量继承，不得写入 SQLite、Prompt、ACP UI 事件或应用日志。
+- Agent 凭证从服务启动环境或 Agent Profile 引用的环境变量继承，不得写入 SQLite、Prompt、Backend UI 事件或应用日志。
 - 受保护 Harness、临时 `ref/` 和接受规则仍在候选 Diff 与验证阶段强制检查。
 
 ## 已确认的归并租约
 
 - Integration Agent 在任何 Git 归并前调用 `acquire_integration_lease(expected_best_sha)`。
-- SQLite 事务同时检查当前 Best SHA、现有租约和 Agent Session 身份；成功后租约绑定 ACP Session 与受 Supervisor 监控的 Elixir 进程，不使用固定超时。
+- SQLite 事务同时检查当前 Best SHA、现有租约和 Backend Session 身份；成功后租约绑定 Backend Session 与受 Supervisor 监控的 Elixir 进程，不使用固定超时。
 - Agent 完成 Git 操作后调用 `complete_merge`。Pika 验证实际 HEAD、父提交、Diff、受保护 Harness、Metrics 和 commit trailers，再提交数据库状态并释放租约。
 - Agent 进程崩溃时不能直接释放租约并调度下一个 Merge。恢复流程必须先核对 Operation Intent、未完成 merge/revert 和实际 Git 状态，再启动恢复 Agent。
 
@@ -284,17 +288,17 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 ## 已确认的人工控制
 
 - `Pause`：停止创建新候选，已运行 Agent、归并和复验继续完成。
-- `Stop Now`：通过 ACP cancel 终止活动 Prompt Turn，停止归并和自动恢复，但保留 SQLite、Git worktree 与 Artifact。
+- `Stop Now`：通过 `AgentBackend.interrupt` 终止活动 Backend Turn，停止归并和自动恢复，但保留 SQLite、Git worktree 与 Artifact。
 - `Resume`：从持久状态恢复调优。
 - 删除 Campaign、worktree 或 Artifact 是独立显式操作，不能由 Pause 或 Stop 隐式触发。
 
 ## 已确认的对话界面
 
 - 目标对齐使用独立 Alignment Conversation，专门承载 Boundary Agent 的多轮访谈、输入 Artifact、Campaign Spec diff 和用户确认。
-- 每个运行中的 Attempt 提供独立 Attempt Conversation，展示对应 ACP Session 的文本、Plan、Tool Call、Diff、Terminal 和状态事件。
+- 每个运行中的 Attempt 提供独立 Attempt Conversation，展示对应 Backend Session 的文本、Plan、Tool Call、Diff、Terminal 和状态事件。
 - BTW Conversation 只能从某个正在运行的 Attempt Conversation 中 fork；它天然绑定该 Attempt，不提供无来源的“当前 Attempt”选择器。
 - BTW 使用同一 Composer 的三个显式模式：仅对话、注入该 Attempt、注入后续 Attempts。默认仅对话，Pika 不根据自然语言静默升级注入级别。
-- 注入该 Attempt 时使用 ACP cancel 后在同一 Session 发送新 Prompt；注入后续 Attempts 不取消当前 Agent。
+- 注入该 Attempt 时调用统一 Backend `steer`；注入后续 Attempts 不 interrupt 当前 Agent。
 - BTW Context 包含系统状态和父 Attempt 当前工作摘要。
 
 ## 已确认的 Metrics 界面
@@ -320,7 +324,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 ## 已确认的开源复用边界
 
-- ACP 使用通过 Codex/Cursor conformance spike 的 Elixir 库，并隔离在 `ACPClient` Behaviour 后。
+- Codex App Server adapter 直接实现官方 stdio JSON-RPC；Cursor ACP adapter 可使用通过 conformance spike 的 Elixir ACP 库。二者都隔离在 `Pika.AgentBackend` 后。
 - KernelAgent、Atrex Kernel Agent 和 Humanize/flowverse 不作为 Pika 状态机或持久化运行时依赖。
 - Pika 可以复用它们的 Benchmark、Profiler 解析、Prompt/Skill 和 conformance 思路；代码级复用必须单独检查 License，并封装在 adapter 内。
 - 参考 Kernel 仓库继续通过临时 `ref/` submodule 提供给 Agent，不成为构建或运行依赖。
@@ -329,7 +333,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 - 主路径为 `DraftingSpec → AwaitingConfirmation → BuildingBaseline → Optimizing → Draining → Completed`。
 - `Paused`、`Blocked`、`Stopped` 与 `AwaitingSpecConfirmation` 是可持久化恢复状态。
-- Pause 不取消在途工作；Stop Now 需要确认并取消 ACP Turn；Resume 可以恢复 Paused/Stopped，但不能自动解除 Blocked。
+- Pause 不取消在途工作；Stop Now 需要确认并 interrupt Backend Turn；Resume 可以恢复 Paused/Stopped，但不能自动解除 Blocked。
 - Sync 前确认 remote、branch 和待 Push commit；删除 Workspace 默认只提供 CLI，不放在 Web UI。
 
 ## 可交互 UI 原型

@@ -2,12 +2,12 @@
 
 ## 1. 传输与身份
 
-Phoenix 在 loopback 暴露 Streamable HTTP `/mcp`。每个 ACP Agent Session 获得独立短期 Bearer Token；服务端记录 Token 哈希，并把明文 Token 绑定到内存中的 Session identity：
+Phoenix 在 loopback 暴露 Streamable HTTP `/mcp`。每个 Backend Session 获得独立短期 Bearer Token；服务端记录 Token 哈希，并把明文 Token 绑定到内存中的 Session identity：
 
 ```json
 {
   "campaign_id": "...",
-  "agent_session_id": "...",
+  "backend_session_id": "...",
   "role": "iteration",
   "attempt_id": "...",
   "sync_run_id": null
@@ -15,6 +15,13 @@ Phoenix 在 loopback 暴露 Streamable HTTP `/mcp`。每个 ACP Agent Session �
 ```
 
 工具参数不接受 `campaign_id` 或任意 Session/Attempt 身份切换。跨 Attempt 读取只能经过明确历史工具。所有写工具必须包含调用方生成的 `idempotency_key`；响应由 `idempotency_records` 去重。
+
+Backend-specific 注入方式：
+
+- Codex App Server：每个独立进程通过 config override 设置 `mcp_servers.pika.url`、`mcp_servers.pika.bearer_token_env_var` 和 `mcp_servers.pika.required=true`，明文 Token 只放在该进程环境变量中。
+- Cursor ACP：在 `session/new` 时传入 Pika Streamable HTTP MCP 配置与该 Session Token。
+
+两种 Backend 看到相同的 Role-scoped 工具集合，Pika MCP 不暴露 provider-specific 工具。
 
 统一错误码：
 
@@ -43,7 +50,7 @@ Phoenix 在 loopback 暴露 Streamable HTTP `/mcp`。每个 ACP Agent Session �
 
 ### `list_agents`
 
-返回同一 Campaign 的 Agent Session ID、Role、Attempt、Backend、状态和最后活动时间。
+返回同一 Campaign 的 Backend Session ID、Role、Attempt、Backend、协议、状态和最后活动时间。
 
 ### `read_agent_messages`
 
@@ -100,7 +107,7 @@ Boundary 完成门禁要求两项都成功，且 UI 已出现可确认 Spec diff
 
 参数：`base_sha`、`candidate_sha`、worktree status、最新 commit。完成前要求全部 Metric、Summary、Patch 可生成、无 protected path 修改和 clean worktree。成功后 Attempt 进入 `ready_for_integration`。
 
-Prompt Turn 结束但缺少任一必需工具时，Pika 向同一 ACP Session 发送 follow-up；没有次数或时间预算。
+Backend Turn 结束但缺少任一必需工具时，Pika 向同一 Backend Session 发送 follow-up；没有次数或时间预算。
 
 ## 6. Integration Role
 
@@ -158,6 +165,6 @@ Prompt Turn 结束但缺少任一必需工具时，Pika 向同一 ACP Session �
 - 每个写工具重复相同 idempotency key 返回同响应，不产生重复 Domain Event。
 - 同 key 不同 body 返回 `idempotency_conflict`。
 - 错误 Role、Attempt 或 Campaign 身份返回拒绝且不泄露资源是否存在。
-- 服务重启后旧 Token 失效，新 Agent Session 能读取未读消息和恢复上下文。
+- 服务重启后旧 Token 失效，新 Backend Session 能读取未读消息和恢复上下文。
 - `record_metrics`、`complete_attempt` 和 Integration 在 BestAdvanced 后拒绝陈旧 Base。
-- MCP 工具异常不得导致 ACP Session 进程或 Phoenix Endpoint 崩溃。
+- MCP 工具异常不得导致 Backend Session 进程或 Phoenix Endpoint 崩溃。

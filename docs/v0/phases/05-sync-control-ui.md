@@ -58,7 +58,7 @@ Not started
 ### 5.5 Campaign 人工控制
 
 - [ ] Pause：关闭新 Attempt dispatch，不取消在途 Agent/Integration/Validation。
-- [ ] Stop Now：二次确认，ACP cancel 所有 Turn，停止归并和自动恢复，保留数据。
+- [ ] Stop Now：二次确认，调用 `AgentBackend.interrupt` 终止所有活跃 Turn，停止归并和自动恢复，保留数据。
 - [ ] Resume：恢复 Paused/Stopped 的 `resume_state`。
 - [ ] Blocked 只能用户解决原因后显式恢复。
 - [ ] 达到目标/max_attempts 进入 Draining；在途与 Validation/Revert 清空后 Completed。
@@ -76,7 +76,7 @@ Not started
 ### 5.7 Attempt / BTW UI
 
 - [ ] 并发 Attempt 列表、Slot、状态、Backend/模型。
-- [ ] 单 Attempt ACP 文本、Plan、Tool Call、Diff、Terminal、BestAdvanced。
+- [ ] 单 Attempt 标准化 Backend Event：文本、Plan、Tool Call、Diff、Terminal、BestAdvanced。
 - [ ] 实时 Summary、Metrics、Artifacts。
 - [ ] BTW 只能从当前 Attempt fork。
 - [ ] 模式：仅对话、注入父 Attempt、注入后续 Attempts；默认仅对话。

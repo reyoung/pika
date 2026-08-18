@@ -171,7 +171,9 @@ erDiagram
 
 ### `agent_sessions`
 
-包含 `id`、`campaign_id`、可选 `attempt_id`/`sync_run_id`、`role`、`slot_index`、`profile_json`、`backend`、`model`、`reasoning_effort`、`status`、`acp_session_id`、`process_pid`、`process_started_at`、`mcp_token_hash`、`log_artifact_id`、`required_operations_json`、`last_prompt_turn`、`last_event_seq`、`started_at`、`ended_at`。
+包含 `id`（即 Pika Backend Session ID）、`campaign_id`、可选 `attempt_id`/`sync_run_id`、`role`、`slot_index`、`profile_json`、`backend`、`backend_protocol`、`backend_version`、`provider_session_id`、`backend_capabilities_json`、`model`、`reasoning_effort`、`status`、`process_pid`、`process_started_at`、`mcp_token_hash`、`log_artifact_id`、`required_operations_json`、`last_turn_sequence`、`last_event_seq`、`started_at`、`ended_at`。
+
+`backend_protocol` v0 取 `codex_app_server` 或 `cursor_acp`；`provider_session_id` 保存 Codex thread ID 或 Cursor ACP session ID，仅用于当前进程内关联和诊断，恢复正确性不依赖 provider resume。Backend 原始消息写 JSONL，SQLite 只保存标准化游标和 Session identity。
 
 明文 MCP Token 不持久化。PID 只用于诊断和同进程监控，不能独立证明进程身份。
 
@@ -199,7 +201,7 @@ erDiagram
 
 ### `integration_leases`
 
-单例表，字段为 `singleton_key=1`、`campaign_id`、`agent_session_id`、`attempt_id`、`intent_id`、`expected_best_sha`、`acquired_at`。没有过期时间。只有验证/恢复事务可以删除。
+单例表，字段为 `singleton_key=1`、`campaign_id`、`backend_session_id`、`attempt_id`、`intent_id`、`expected_best_sha`、`acquired_at`。没有过期时间。只有验证/恢复事务可以删除。
 
 ### `domain_events`
 
@@ -207,7 +209,7 @@ erDiagram
 
 ### `idempotency_records`
 
-主键 `(agent_session_id, tool_name, idempotency_key)`，保存 `request_sha256`、`response_json`、`created_at`。同 key 同请求返回原响应；同 key 不同请求返回冲突，不重复执行。
+主键 `(backend_session_id, tool_name, idempotency_key)`，保存 `request_sha256`、`response_json`、`created_at`。同 key 同请求返回原响应；同 key 不同请求返回冲突，不重复执行。
 
 ## 7. 必要索引与约束
 

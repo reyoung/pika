@@ -33,7 +33,7 @@ stateDiagram-v2
     Blocked --> Draining: 用户解决并显式恢复
 ```
 
-`Paused` 不取消在途 Agent、Integration 或 Validation，只关闭新 Attempt dispatch。`Stopped` 会 cancel 活跃 ACP Prompt Turn，关闭自动恢复和归并，但保留全部状态。为正确 Resume，Campaign 表保存 `resume_state`。
+`Paused` 不取消在途 Agent、Integration 或 Validation，只关闭新 Attempt dispatch。`Stopped` 会调用 `AgentBackend.interrupt` 终止活跃 Backend Turn，关闭自动恢复和归并，但保留全部状态。为正确 Resume，Campaign 表保存 `resume_state`。
 
 Sync 不替换 Campaign 主状态，而设置 `dispatch_gate=sync`。这允许已有 Iteration 继续工作，同时禁止派生新 Attempt。UI 可以将其显示为 `Optimizing · Syncing`。
 
@@ -43,7 +43,7 @@ Sync 不替换 Campaign 主状态，而设置 `dispatch_gate=sync`。这允许�
 |---|---|---|
 | `queued` | 已占用 Attempt 序号，等待 Slot | `running`, `cancelled` |
 | `running` | Iteration Agent 正在工作 | `awaiting_report`, `interrupted`, `cancelled` |
-| `awaiting_report` | Prompt Turn 已结束但缺少必需 MCP 调用 | `running`, `interrupted`, `cancelled` |
+| `awaiting_report` | Backend Turn 已结束但缺少必需 MCP 调用 | `running`, `interrupted`, `cancelled` |
 | `ready_for_integration` | 代码、Summary 和正式 Metrics 已提交 | `refreshing`, `integrating`, `rejected` |
 | `refreshing` | Base 陈旧，Agent 正在 rebase/重测 | `ready_for_integration`, `rejected`, `interrupted` |
 | `integrating` | 持有 Integration Lease | `accepted`, `rejected`, `interrupted` |
@@ -52,7 +52,7 @@ Sync 不替换 Campaign 主状态，而设置 `dispatch_gate=sync`。这允许�
 | `rejected` | 正确性、性能、protected path 或测量门禁失败 | 终态 |
 | `cancelled` | 用户 Stop 或显式取消 | 终态，可保留 worktree |
 
-`awaiting_report` 没有自动超时和次数预算。Pika 在同一 ACP Session 无限 follow-up；进程失效则进入 `interrupted` 并用新 Session 继续。只有用户取消或其他 Campaign 停止条件可以结束该循环。
+`awaiting_report` 没有自动超时和次数预算。Pika 在同一 Backend Session 无限 follow-up；进程失效则进入 `interrupted` 并用新 Session 继续。只有用户取消或其他 Campaign 停止条件可以结束该循环。
 
 Attempt 创建时即消耗 `max_attempts`。Plan Session、恢复 Session、Integration、Validation、Revert 和 Sync 不消耗 Attempt 预算。
 
@@ -104,7 +104,7 @@ Push 成功而本地推进前崩溃时，恢复流程 fetch 远端并核对 Sync
 | SQLite 状态 | 外部事实 | 恢复动作 |
 |---|---|---|
 | Agent `running` | 对应 OS 进程不存在 | 标记 `interrupted`，保留 worktree，启动新 Session |
-| `awaiting_report` | ACP Session 存活 | 同 Session 发送 completion follow-up |
+| `awaiting_report` | Backend Session 存活 | 同 Session 发送 completion follow-up |
 | Integration Lease 存在 | Git 未变化、无 merge state | 恢复 Integration Agent，继续 Intent |
 | Integration Lease 存在 | HEAD 已含合法 trailer commit | 核验 Diff/Metrics 后幂等完成事务 |
 | Integration Lease 存在 | Git 处于 merge/revert 冲突 | 启动恢复 Agent解决，不释放 Lease |

@@ -14,7 +14,7 @@ Not started
 
 ## 本 Phase 交付
 
-- Alignment ACP Session 与 Boundary Role MCP。
+- Alignment Backend Session 与 Boundary Role MCP。
 - Campaign Spec draft/diff/确认与 Spec Revision。
 - Atrex 16 项 Reference UI，默认全选。
 - `ncu-report-skill` Skill Registry。
@@ -33,10 +33,10 @@ Not started
 
 ### 2.2 Alignment Conversation
 
-- [ ] 启动 Boundary Agent Profile 的 ACP Session。
+- [ ] 通过 `Pika.AgentBackend` 启动 Boundary Backend Session。
 - [ ] Prompt 注入 repo 状态、目标硬件、已知输入与必需 MCP 操作。
 - [ ] 支持上传/登记测试脚本、pickle dump、JSONL 等 Artifact。
-- [ ] Prompt Turn 缺少 `submit_spec`/`submit_harness` 时无限 follow-up。
+- [ ] Backend Turn 缺少 `submit_spec`/`submit_harness` 时无限 follow-up。
 - [ ] UI 展示对话、Artifact、Spec draft 和结构化缺失项。
 
 ### 2.3 Reference Registry

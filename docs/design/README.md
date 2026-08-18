@@ -2,7 +2,7 @@
 
 ## 状态
 
-v1 设计已于 2026-08-18 冻结。当前仓库没有产品实现；`prototype/` 是已确认的 UI 交互原型。
+v1 设计已于 2026-08-18 冻结，并由 ADR-0028 修订 Agent Backend 协议。当前仓库没有产品实现；`prototype/` 是已确认的 UI 交互原型。
 
 ## 阅读顺序
 
@@ -26,6 +26,6 @@ v1 设计已于 2026-08-18 冻结。当前仓库没有产品实现；`prototype/
 
 - 多租户、RBAC、计费与跨 Pika Server 调度。
 - Pika 自有 GPU Worker 或远程执行协议。
-- ACP v2、非 ACP Agent fallback 和 Agent 会话 resume 依赖。
+- Cursor ACP v2、未实现 `Pika.AgentBackend` contract 的 Agent，以及 provider resume 正确性依赖。
 - S3 Artifact、自动 Push、内置 daemon 与容器编排。
 - 默认 Plan 阶段、默认主线复验或默认 Plateau 停止。

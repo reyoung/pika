@@ -49,28 +49,28 @@ Pika 可注入 Attempt `ref/` 的 Kernel 实现仓库清单，初始集合来自
 _Avoid_: Git submodule 状态、运行时依赖、包管理清单
 
 **Skill Registry**：
-Pika 提供给 Agent Session 的外部 Skill 清单，与 `ref/` Kernel 仓库相互独立；Skill 不进入候选 Patch 或 Campaign Best Branch。
+Pika 提供给 Backend Session 的外部 Skill 清单，与 `ref/` Kernel 仓库相互独立；Skill 不进入候选 Patch 或 Campaign Best Branch。
 _Avoid_: Reference Catalog、Agent Backend、Pika MCP tools
 
-**Agent 会话（Agent Session）**：
-由 Pika 启动、为一个候选尝试执行规划或实现工作的外部编码 Agent 进程；其可用工具和 GPU 执行方式由 Agent 自身环境决定。
-_Avoid_: GPU Worker、执行节点、子 Agent
+**Backend Session**：
+由 Pika 启动并通过某个 Agent Backend 控制的独立编码会话；Codex 对应独立 App Server thread，Cursor 对应独立 ACP session。
+_Avoid_: GPU Worker、执行节点、统一 ACP Session
 
 **Agent Profile**：
 为一次 Agent 会话选择 Agent Backend、模型、reasoning effort、环境和权限行为的命名配置。
-_Avoid_: Benchmark Harness、Campaign Spec、Agent Session
+_Avoid_: Benchmark Harness、Campaign Spec、Backend Session
 
 **Agent Backend**：
-能够作为 ACP v1 Server 启动的编码 Agent 运行后端，例如 Cursor 原生 ACP Server 或 Codex ACP Adapter。
-_Avoid_: Agent Harness、Benchmark Harness、模型
+把 provider-specific 控制协议转换为 Pika 统一会话、Turn、steer、interrupt 与标准事件接口的适配器。
+_Avoid_: Agent Harness、Benchmark Harness、模型、ACP-only Client
 
 **Agent 邮箱（Agent Mailbox）**：
 Pika 为同一调优任务内的 Agent 持久化并按目标路由消息的通信通道；发送方和接收方不直接建立连接。
-_Avoid_: ACP Session、共享 Prompt、进程标准输入
+_Avoid_: Backend Session、共享 Prompt、进程标准输入
 
 **Pika MCP**：
 所有 Agent 读取调优状态、历史与用户指导，以及提交计划、Metrics、Git 结果和完成状态的强制语义接口。
-_Avoid_: Agent stdout、ACP 事件流、自然语言结果解析
+_Avoid_: Agent stdout、Backend 原始事件流、自然语言结果解析
 
 **Iteration 开发 Agent（Iteration Agent）**：
 在候选尝试的独立工作空间中规划、修改、提交、测试和报告结果，并在轮到该候选归并时操作 Git 的编码 Agent。
@@ -110,14 +110,14 @@ _Avoid_: Sync Trail、Agent Plan、Git reflog
 
 **Domain Event**：
 Pika 在状态事务中追加、用于恢复调度决策和构造 UI 时间线的领域事实；它不保存被覆盖的旧 Metric 快照。
-_Avoid_: ACP 流式事件、Agent JSONL、应用日志
+_Avoid_: Backend 流式事件、Agent JSONL、应用日志
 
 **归并队列（Integration Queue）**：
 将并发候选尝试按确定顺序逐个验证并归并到最佳已知版本的队列；同一时刻最多处理一个候选尝试。
 _Avoid_: Merge Agent、并行 Merge、提交队列
 
 **归并租约（Integration Lease）**：
-绑定一个 Integration Agent Session 与预期 Best SHA、授权其独占推进 Campaign Best Branch 的临时权利；进程失效不会在 Git 状态核对前直接释放。
+绑定一个 Integration Backend Session 与预期 Best SHA、授权其独占推进 Campaign Best Branch 的临时权利；进程失效不会在 Git 状态核对前直接释放。
 _Avoid_: 固定超时锁、Git lock 文件、Agent 自报状态
 
 **主线复验（Mainline Validation）**：
@@ -133,7 +133,7 @@ _Avoid_: Rebase 请求、回滚建议、失败日志
 _Avoid_: Paused、Stopped、Failed
 
 **中断（Interrupted）**：
-Agent 会话意外结束但候选尝试的工作空间与持久状态仍可继续使用的状态；恢复不要求重新使用原 Agent 会话。
+Backend Session 意外结束但候选尝试的工作空间与持久状态仍可继续使用的状态；恢复不要求重新使用原 Backend Session。
 _Avoid_: Failed、Blocked、Cancelled
 
 **Metric 快照（Metric Snapshot）**：
@@ -185,7 +185,7 @@ _Avoid_: 普通 By the way、指导
 _Avoid_: Attempt Conversation、BTW Conversation、Campaign Guidance
 
 **Attempt 对话（Attempt Conversation）**：
-用户查看某个正在运行的 Attempt 时看到的 Agent 原始工作会话，也是创建 BTW Conversation 的唯一入口。
+用户查看某个正在运行的 Attempt 时看到的 Backend Session 工作过程，也是创建 BTW Conversation 的唯一入口。
 _Avoid_: 目标对齐对话、Agent JSONL、汇总报告
 
 **BTW Conversation**：

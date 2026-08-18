@@ -3,7 +3,7 @@
 已确认的 Pika v1 交互原型，包含：
 
 - Alignment Conversation 与 Campaign Spec 确认
-- 并发 Attempt 列表与 ACP Agent 工作对话
+- 并发 Attempt 列表与标准化 Backend Session 工作对话
 - 从指定 Attempt fork 的 BTW Conversation
 - Metrics Timeline、Metric 切换、点选详情和 hover Summary
 

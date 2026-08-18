@@ -51,9 +51,9 @@ Not started
 ### 3.4 Plan 可选路径
 
 - [ ] 默认关闭。
-- [ ] 启用后先启动独立 Plan Agent Session。
+- [ ] 启用后先启动独立 Plan Backend Session。
 - [ ] `submit_plan(markdown, summary)` 原子写 `artifacts/plans/<attempt-id>/plan.md`。
-- [ ] 后续 Iteration Agent 通过 MCP Resource/ACP embedded resource 读取。
+- [ ] 后续 Iteration Agent 通过 MCP Resource 或 Backend embedded resource 读取。
 - [ ] Plan Session 和恢复 Session 不消耗 Attempt 预算。
 
 ### 3.5 Agent Mailbox 与 BTW
@@ -61,7 +61,7 @@ Not started
 - [ ] `list_agents`、`send_agent_message`、`read_agent_messages`、`ack_agent_messages`。
 - [ ] 消息先 SQLite 持久化，按 sequence 至少一次投递。
 - [ ] BTW 只能从指定运行中 Attempt fork。
-- [ ] 默认仅对话；“注入当前 Attempt”创建 Attempt Guidance 并 ACP cancel→新 Prompt。
+- [ ] 默认仅对话；“注入当前 Attempt”创建 Attempt Guidance 并调用 `AgentBackend.steer`。Codex 原生追加，Cursor cancel→新 Prompt。
 - [ ] “注入后续 Attempts”创建 Campaign Guidance，不取消当前 Agent。
 
 ### 3.6 Iteration MCP
@@ -81,9 +81,9 @@ Not started
 
 ### 3.8 Completion 与恢复
 
-- [ ] Prompt Turn 结束但缺少必需 MCP 操作时进入 awaiting_report。
-- [ ] 同一 ACP Session 无限 follow-up，无次数/时间预算。
-- [ ] Session/进程失效进入 interrupted，启动新 Session，注入 worktree、JSONL 尾部和缺失操作。
+- [ ] Backend Turn 结束但缺少必需 MCP 操作时进入 awaiting_report。
+- [ ] 同一 Backend Session 无限 follow-up，无次数/时间预算。
+- [ ] Session/进程失效进入 interrupted，启动新 Backend Session，注入 worktree、JSONL 尾部和缺失操作。
 - [ ] 恢复不增加 Attempt 序号或预算。
 - [ ] Stop Now 才能终止失控循环。
 

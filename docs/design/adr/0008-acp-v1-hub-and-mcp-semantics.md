@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0028
 ---
 
 # ACP v1 承载会话，Pika MCP 承载领域语义

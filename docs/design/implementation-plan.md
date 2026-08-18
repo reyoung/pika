@@ -4,24 +4,24 @@
 
 ## 1. 原则
 
-- 先验证 ACP/MCP 与崩溃边界，再实现完整优化循环。
+- 先验证 Agent Backend 协议、Pika MCP 与崩溃边界，再实现完整优化循环。
 - 每个阶段交付可运行、可恢复的纵向切片，不用 mock 掩盖关键外部协议。
 - Kernel 性能不是 Pika 自身单元测试的稳定前提；调度与 Git 测试使用确定性 Fake Harness，最终另设真实 GPU E2E。
 - 未通过阶段门禁不得把后续 UI 演示当作完成。
 
-## 2. Phase 0：协议 Spike
+## 2. Phase 0：Agent Backend 协议 Spike
 
-目标：证明 Elixir `ACPClient` Behaviour 可以驱动 Codex 与 Cursor。
+目标：证明 Elixir `Pika.AgentBackend` 可以分别通过 Codex 原生 App Server 和 Cursor ACP 驱动两个 Backend，并输出统一事件。
 
 交付：
 
-- `agent_client_protocol` 0.x adapter 或受控 fork。
-- Codex `@agentclientprotocol/codex-acp` 与 Cursor 原生 ACP 的启动 Profile。
-- initialize、session/new、prompt/update、permission auto-approve、cancel、close、进程异常退出。
-- ACP Session 注入本地 Streamable HTTP MCP 并实际调用一个角色化工具。
+- `Pika.AgentBackend` Behaviour 与统一 Backend Event。
+- `Pika.AgentBackend.CodexAppServer`：`codex app-server --listen stdio://`、thread/turn、steer、interrupt、skills 与 schema 证据。
+- `Pika.AgentBackend.CursorACP`：ACP initialize/session/prompt/cancel/close。
+- 两种 Backend Session 注入本地 Streamable HTTP MCP 并实际调用同一个角色化工具。
 - `ncu-report-skill` 固定 SHA 后对两个 Backend 可见的最小验证。
 
-门禁：两个 Backend 的同一 conformance suite 全通过；任何缺失 capability 有明确 adapter 行为，领域层不出现 Backend 条件分支。
+门禁：Codex/Cursor 各自协议测试与统一 conformance suite 全通过；任何缺失 capability 有明确 adapter 行为，领域层不出现 provider 分支。
 
 ## 3. Phase 1：Workspace、启动与持久状态
 
@@ -39,7 +39,7 @@
 
 交付：
 
-- Alignment Conversation ACP Session。
+- Alignment Conversation Backend Session。
 - Boundary Role MCP、Spec diff/确认 UI、Spec Revision。
 - Reference Catalog 16 项默认全选、Campaign 初始化时解析最新 HEAD 并固定 SHA。
 - Skill Registry 与 `ncu-report-skill` 固定 SHA。
@@ -95,7 +95,7 @@
 2. Baseline 正确性、Profiler 和噪声估算成功。
 3. 至少两个不同 Agent Backend 并行运行 Attempts。
 4. 至少一个 Accepted、一个 Rejected，并验证 Patch、Summary、Metrics 与 worktree 清理。
-5. `ncu-report-skill` 在 Agent Session 可读，并生成登记的 Profiler Artifact。
+5. `ncu-report-skill` 在两个 Backend Session 可读，并生成登记的 Profiler Artifact。
 6. 服务中途重启后自动恢复。
 7. 手工 Sync 完成 pull、验证、push、Metrics 更新和 Sync Trail。
 
@@ -114,7 +114,7 @@
 ### 集成测试
 
 - SQLite 事务 + PubSub outbox 顺序。
-- Fake ACP Server 的流式事件、权限、取消、漏报和崩溃。
+- Fake Agent Backend 的标准事件、权限、steer、interrupt、漏报和崩溃。
 - Git worktree、submodule 注入/移除、squash、rebase、revert 和冲突恢复。
 - Managed Repo advisory lock 与软链接替换检测。
 - HTTP Token 对 HTML、JSON、LiveView、SSE/WebSocket、MCP 的完整保护。
@@ -131,7 +131,7 @@
 只有同时满足以下条件才算 v1 完成：
 
 - 所有 accepted ADR 的核心契约有自动化测试。
-- Codex/Cursor ACP + HTTP MCP conformance 通过。
+- Codex App Server、Cursor ACP 与统一 HTTP MCP conformance 通过。
 - SQLite migration、备份/恢复和三源权威核对通过。
 - Git 并发、crash recovery、Mainline revert 和 Sync E2E 通过。
 - UI 与已确认原型一致，Metrics hover 包含 Summary。
@@ -142,6 +142,6 @@
 
 - 多租户、RBAC、计费和跨 Server 调度。
 - Pika GPU Worker、远程节点注册、心跳或 GPU RPC。
-- 非 ACP Agent、ACP v2、会话 resume 正确性依赖。
+- 未实现 `Pika.AgentBackend` contract 的 Agent、Cursor ACP v2、provider resume 正确性依赖。
 - S3 Artifact、自动 Push、内置 daemon、Kubernetes/Temporal。
 - 默认 Plan、默认 Mainline Validation 或默认 Plateau 停止。
