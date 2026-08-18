@@ -14,7 +14,8 @@ v1 设计已于 2026-08-18 冻结。当前仓库没有产品实现；`prototype/
 6. [Pika MCP API](./mcp-api.md)：角色化工具、身份、幂等和完成门禁。
 7. [实现与验收计划](./implementation-plan.md)：阶段、测试矩阵与 v1 完成定义。
 8. [Reference 与 Skill Registry](./reference-registry.md)：Atrex 16 项 Ref、UI 选择和 Campaign 版本冻结。
-9. [ADR](./adr/)：关键决策及被替代决策的历史。
+9. [逐阶段实现清单](../v0/phases/README.md)：Phase 0–6 的可执行任务、测试和 Exit Gate。
+10. [ADR](./adr/)：关键决策及被替代决策的历史。
 
 ## UI 原型
 

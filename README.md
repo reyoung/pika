@@ -31,6 +31,7 @@ Pika 是一个常驻的单租户 HTTP 服务，用多个 ACP Coding Agent 并行
 - [Pika MCP API](docs/design/mcp-api.md)
 - [Reference 与 Skill Registry](docs/design/reference-registry.md)
 - [实现与验收计划](docs/design/implementation-plan.md)
+- [逐阶段实现清单](docs/v0/phases/README.md)
 - [Architecture Decision Records](docs/design/adr/)
 
 ## Reference 与 Skill
