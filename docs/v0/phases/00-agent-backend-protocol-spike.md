@@ -207,6 +207,7 @@ mix run scripts/backend_smoke.exs -- \
 
 ## 实施结果
 
+- 实现 Commit：`40e71e1`（`feat: implement agent backend protocol spike`）。
 - Elixir `1.20.3` / Erlang OTP 29、Codex CLI `0.148.0-alpha.21`、Cursor Agent `2026.08.11-e8db854` 的真实双 Backend conformance 已通过。
 - Codex 使用原生 App Server 二进制，完整验证 `thread/start`、`turn/start`、原生 `turn/steer`、`turn/interrupt`、Skill input 与 required HTTP MCP。
 - Cursor 完整验证 ACP v1 `session/new`、`session/prompt`、`session/update`、`session/cancel + session/prompt` steer、interrupt、Skill additional directories 与 HTTP MCP。
