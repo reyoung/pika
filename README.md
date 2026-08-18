@@ -10,7 +10,7 @@ Pika 是一个常驻的单租户 HTTP 服务，用多个 Coding Agent 并行完�
 
 ## 当前状态
 
-**v1 设计已冻结；Agent Backend 协议由 ADR-0028 修订。产品实现尚未开始。**
+**v1 设计已冻结；Agent Backend 协议由 ADR-0028 修订。Phase 0 协议 Spike 已实现并通过真实双 Backend conformance。**
 
 - 后端：Elixir/OTP、Phoenix、LiveView、SQLite WAL
 - Agent 协议：Codex App Server 原生协议、Cursor ACP v1
@@ -51,6 +51,20 @@ npm run dev
 ```
 
 原型只用于设计评审，不是最终 Phoenix/LiveView 产品实现。
+
+## Phase 0 协议 Spike
+
+需要已登录的 Codex CLI 与 Cursor Agent，以及 Elixir/Erlang：
+
+```bash
+mix deps.get
+mix test
+mix run scripts/backend_smoke.exs -- \
+  --backend all \
+  --workspace /tmp/pika-backend-smoke
+```
+
+Smoke 会验证 Codex App Server、Cursor ACP、真实 HTTP MCP、Skill 可见性、steer、interrupt、子进程隔离与无 resume 恢复，并把脱敏证据写入 `artifacts/phase-0/`。
 
 ## v1 非目标
 

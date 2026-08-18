@@ -17,7 +17,7 @@
 
 - `Pika.AgentBackend` Behaviour 与统一 Backend Event。
 - `Pika.AgentBackend.CodexAppServer`：`codex app-server --listen stdio://`、thread/turn、steer、interrupt、skills 与 schema 证据。
-- `Pika.AgentBackend.CursorACP`：ACP initialize/session/prompt/cancel/close。
+- `Pika.AgentBackend.CursorACP`：ACP initialize/session/prompt/cancel；仅在 capability 广告时调用 session/close，否则使用独立进程 close fallback。
 - 两种 Backend Session 注入本地 Streamable HTTP MCP 并实际调用同一个角色化工具。
 - `ncu-report-skill` 固定 SHA 后对两个 Backend 可见的最小验证。
 

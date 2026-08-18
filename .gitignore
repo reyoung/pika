@@ -1,0 +1,12 @@
+/_build/
+/_deps/
+/deps/
+/.elixir_ls/
+/.pika/
+/cover/
+/erl_crash.dump
+*.ez
+/artifacts/phase-0/codex-schema/
+/artifacts/phase-0/manual/
+/artifacts/phase-0/codex-session_*
+/artifacts/phase-0/cursor-session_*

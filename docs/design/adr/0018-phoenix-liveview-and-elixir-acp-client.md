@@ -12,6 +12,6 @@ Pika 使用 Phoenix、LiveView 和 PubSub 承载对话、状态、配置及标�
 
 ## Consequences
 
-- Backend spike 必须分别覆盖 Codex thread/turn/steer/interrupt 与 Cursor ACP session/prompt/cancel/close，并覆盖统一 MCP、标准事件和异常退出。
+- Backend spike 必须分别覆盖 Codex thread/turn/steer/interrupt 与 Cursor ACP session/prompt/cancel/capability-aware close，并覆盖统一 MCP、标准事件和异常退出。
 - Phoenix PubSub 只负责实时分发，SQLite 仍是持久状态权威来源。
 - ECharts 是少量前端 JavaScript 的例外，不引入完整 SPA 状态管理。

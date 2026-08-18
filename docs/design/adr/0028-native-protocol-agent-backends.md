@@ -12,5 +12,6 @@ Codex 协议与 MCP 配置依据 [OpenAI App Server](https://learn.chatgpt.com/d
 
 - Codex 不再依赖 `@agentclientprotocol/codex-acp`、Codex SDK sidecar 或 `codex exec --json`。
 - Codex 当次指导使用原生 `turn/steer`，Cursor 通过 cancel + follow-up Prompt 模拟统一 `steer`。
+- Cursor 的 `session/close` 是可选 capability；未广告时 adapter 必须终止对应独立子进程并返回统一 close 结果。
 - 每个 Backend Session 保持独立子进程、MCP Token 和故障域；恢复创建新 Session，不依赖 provider resume。
 - 新 Agent 只有实现 `Pika.AgentBackend` conformance contract 才能进入 v0。

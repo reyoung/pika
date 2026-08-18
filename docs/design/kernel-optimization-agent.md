@@ -213,7 +213,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - `Pika.AgentBackend` 固定提供 `start_link`、`open_session`、`start_turn`、`steer`、`interrupt`、`close_session` 和 `capabilities`。
 - 标准化 Backend Event 包括 `session_started`、`turn_started`、`message_delta`、`plan_updated`、`tool_started`、`tool_updated`、`tool_completed`、`command_output`、`file_changed`、`usage_updated`、`turn_completed`、`backend_error` 和 `process_exited`。
 - Codex 使用 `Pika.AgentBackend.CodexAppServer`：每个 Backend Session 启动独立 `codex app-server --listen stdio://`，执行 `initialize → initialized → thread/start → turn/start`，并把 `item/*`/`turn/*` 通知转换为标准事件。
-- Cursor 使用 `Pika.AgentBackend.CursorACP`：每个 Backend Session 启动独立 `cursor-agent acp`，执行 ACP `initialize`、`session/new`、`session/prompt`、`session/cancel` 和 `session/close`。
+- Cursor 使用 `Pika.AgentBackend.CursorACP`：每个 Backend Session 启动独立 `cursor-agent acp`，执行 ACP `initialize`、`session/new`、`session/prompt` 和 `session/cancel`；`session/close` 仅在 capability 广告时调用，否则终止该 Session 的独立子进程。
 - Codex 当次指导使用原生 `turn/steer`，不 interrupt 当前 Turn；Cursor 由 Backend adapter 通过 cancel + follow-up Prompt 模拟 `steer`。
 - Stop Now 调用统一 `AgentBackend.interrupt`；Codex 映射到 `turn/interrupt`，Cursor 映射到 `session/cancel`。
 - 每个活跃 Backend Session 使用独立子进程、MCP Token 和配置，隔离崩溃与权限影响。

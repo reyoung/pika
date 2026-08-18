@@ -1,0 +1,16 @@
+{
+  "cli_version": "codex-cli 0.148.0-alpha.21",
+  "command": "codex app-server generate-json-schema --out <temporary-directory>",
+  "generated_at": "2026-08-18T12:21:02.699186Z",
+  "required_methods": {
+    "initialize": true,
+    "skills/extraRoots/set": true,
+    "skills/list": true,
+    "thread/start": true,
+    "turn/interrupt": true,
+    "turn/start": true,
+    "turn/steer": true
+  },
+  "schema_file": "codex_app_server_protocol.v2.schemas.json",
+  "schema_sha256": "3fe8c4b299934cca548df5ab382a15c9832a1e0c4755f516478d6820de6462de"
+}

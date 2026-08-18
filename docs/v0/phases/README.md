@@ -6,7 +6,7 @@
 
 | Phase | 文档 | 核心结果 | 状态 |
 |---:|---|---|---|
-| 0 | [Agent Backend 协议 Spike](./00-agent-backend-protocol-spike.md) | Codex App Server + Cursor ACP 的统一 AgentBackend | Not started |
+| 0 | [Agent Backend 协议 Spike](./00-agent-backend-protocol-spike.md) | Codex App Server + Cursor ACP 的统一 AgentBackend | Done |
 | 1 | [Workspace 与持久状态](./01-workspace-persistence.md) | 可启动、可恢复的单 Campaign Server | Not started |
 | 2 | [Alignment、Spec 与 Baseline](./02-alignment-baseline.md) | 用户确认边界并建立可信 Baseline | Not started |
 | 3 | [并发 Attempt Loop](./03-attempt-loop.md) | 多 Agent 并行优化与 MCP 完成协议 | Not started |
