@@ -12,7 +12,7 @@
 | 2 | [Alignment、Spec 与 Baseline](./02-alignment-baseline.md) | 用户确认边界并建立可信 Baseline | Done，持久化 E2E、真实 Codex Alignment 与 H20 Profiler parse passed |
 | 3 | [并发 Attempt Loop](./03-attempt-loop.md) | 多 Agent 并行优化与 MCP 完成协议 | Done |
 | 4 | [Integration Full Regression](./04-integration-full-regression.md) | 串行 Best、全量回归、Sampling Feedback | Done |
-| 5 | [Sync、控制与完整 UI](./05-sync-control-ui.md) | 可操作的完整本地产品 | Implementation done；browser acceptance pending |
+| 5 | [Sync、控制与完整 UI](./05-sync-control-ui.md) | 可操作的完整本地产品 | Done |
 | 6 | [真实 GPU E2E](./06-real-gpu-e2e.md) | 真实 NVIDIA Campaign 验收 | Not started |
 
 ## 使用方式

@@ -2,7 +2,7 @@
 
 ## 状态
 
-Implementation complete (2026-08-19); browser console acceptance pending
+Completed (2026-08-19)
 
 ## 依赖
 
@@ -108,7 +108,7 @@ Implementation complete (2026-08-19); browser console acceptance pending
 - [x] LiveView reconnect 后按 Domain Event/JSONL seq 恢复。
 - [x] BTW 三种模式作用域。
 - [x] Metrics hover 每个点均包含 Summary。
-- [ ] 浏览器没有未处理 Promise、console error 或错误 overlay。
+- [x] 浏览器没有未处理 Promise、console error 或错误 overlay。
 
 ## Exit Gate
 
@@ -123,7 +123,7 @@ Implementation complete (2026-08-19); browser console acceptance pending
 - `mix test test/pika/sync_control_test.exs`：`10 passed`；覆盖 Attempt/Integration/Sync Stop 和远端第三 SHA Blocked。
 - `mix test test/pika_web/control_live_test.exs test/pika_web/alignment_live_test.exs`：`10 passed`。
 - 全量回归 `123 passed, 1 excluded`；`mix assets.build` 通过。
-- 浏览器 acceptance 未勾选：本次会话没有可绑定的内置浏览器实例，无法核实 console 与 overlay；不得用其他浏览器表面伪造该项。
+- 内置浏览器连接真实 Phoenix Server，验证 Alignment、Control、Metrics/ECharts、Sync 与 Audit；warning/error console 为 `0`、错误 overlay 为 `0`，未发现 unhandled Promise/uncaught error。
 
 ## 非目标
 
