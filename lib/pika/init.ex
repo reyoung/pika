@@ -124,7 +124,7 @@ defmodule Pika.Init do
              inherit_backend(opts, :iteration_backend),
              :iteration_backend,
              "Iteration Agent backend (codex/cursor)",
-             alignment_backend,
+             backend_label(alignment_backend),
              &parse_backend/1
            ),
          {:ok, model} <- collect_model(opts, iteration_backend),

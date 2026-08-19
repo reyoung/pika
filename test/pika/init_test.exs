@@ -121,8 +121,10 @@ defmodule Pika.InitTest do
 
     assert output =~ "Repository mode (managed/owned)"
     assert output =~ "Workspace path"
-    assert output =~ "Alignment/Baseline Agent backend (codex/cursor)"
-    assert output =~ "Iteration Agent backend (codex/cursor)"
+    assert output =~ "Alignment/Baseline Agent backend (codex/cursor) [codex]:"
+    assert output =~ "Iteration Agent backend (codex/cursor) [cursor]:"
+    refute output =~ "[codex_app_server]"
+    refute output =~ "[cursor_acp]"
     assert output =~ "Available Iteration Agent models (codex)"
     assert output =~ "codex-test-model · Codex Test"
     assert output =~ "Concurrent Iteration Agents"
