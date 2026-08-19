@@ -93,14 +93,17 @@ defmodule Pika.Test.Stage0Fixtures do
     correctness_relative = "artifacts/baseline/correctness.json"
     profiler_relative = "artifacts/profiles/profiler.json"
     report_relative = "artifacts/profiles/report.ncu-rep"
+    parsed_relative = "artifacts/profiles/analysis/metrics.json"
     evidence_relative = "artifacts/profiles/afs-trail.log"
     samples = Path.join(workspace.root, samples_relative)
     correctness = Path.join(workspace.root, correctness_relative)
     profiler = Path.join(workspace.root, profiler_relative)
     report = Path.join(workspace.root, report_relative)
+    parsed = Path.join(workspace.root, parsed_relative)
     evidence = Path.join(workspace.root, evidence_relative)
     File.mkdir_p!(Path.dirname(samples))
     File.mkdir_p!(Path.dirname(profiler))
+    File.mkdir_p!(Path.dirname(parsed))
 
     records =
       for index <- 0..29 do
@@ -134,13 +137,23 @@ defmodule Pika.Test.Stage0Fixtures do
         "measured_sha" => sha,
         "case_id" => "target_case",
         "skill_sha" => skill_sha,
+        "schema_version" => 1,
+        "tool" => "NVIDIA Nsight Compute",
+        "command" => "ncu --set full --export artifacts/profiles/report",
+        "profile_directory" => "artifacts/profiles",
         "summary" => "fixture profiler",
-        "report_paths" => [report_relative],
+        "report_paths" => [report_relative, parsed_relative],
+        "parser" => %{
+          "skill" => "ncu-report-skill",
+          "command" => "python3 helpers/analyze_reports.py --run-dir artifacts/profiles",
+          "output_paths" => [parsed_relative]
+        },
         "remote_evidence_paths" => [evidence_relative]
       })
     )
 
     File.write!(report, "fixture ncu report\n")
+    File.write!(parsed, Jason.encode!(%{"kernel" => "fixture", "metrics" => %{}}))
 
     File.write!(
       evidence,
@@ -151,5 +164,9 @@ defmodule Pika.Test.Stage0Fixtures do
   end
 
   def baseline_dependency_paths,
-    do: ["artifacts/profiles/report.ncu-rep", "artifacts/profiles/afs-trail.log"]
+    do: [
+      "artifacts/profiles/report.ncu-rep",
+      "artifacts/profiles/analysis/metrics.json",
+      "artifacts/profiles/afs-trail.log"
+    ]
 end

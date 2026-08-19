@@ -74,6 +74,37 @@ defmodule Pika.ConfigWorkspaceTest do
     assert second.base_sha == first.base_sha
   end
 
+  test "resolves independent Prompt resources from YAML Config" do
+    workspace = Phase1Fixtures.workspace()
+    config_root = Phase1Fixtures.workspace()
+
+    for name <- ~w(alignment setup baseline) do
+      File.write!(Path.join(config_root, "#{name}.md.eex"), "#{name} <%= @value %>\n")
+    end
+
+    yaml =
+      Phase1Fixtures.default_config() <>
+        """
+        prompts:
+          alignment: alignment.md.eex
+          setup_merge: setup.md.eex
+          baseline: baseline.md.eex
+        """
+
+    path = Path.join(config_root, "pika.yaml")
+    File.write!(path, yaml)
+    assert {:ok, config} = Config.load(path, workspace: workspace)
+
+    assert config.prompts["alignment"] ==
+             Pika.Paths.canonical!(Path.join(config_root, "alignment.md.eex"))
+
+    assert config.prompts["setup_merge"] ==
+             Pika.Paths.canonical!(Path.join(config_root, "setup.md.eex"))
+
+    assert config.prompts["baseline"] ==
+             Pika.Paths.canonical!(Path.join(config_root, "baseline.md.eex"))
+  end
+
   test "rejects a non-empty directory that is not a Pika Workspace" do
     root = Phase1Fixtures.workspace()
     File.write!(Path.join(root, "foreign-file"), "do not touch")

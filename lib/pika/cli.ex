@@ -109,6 +109,17 @@ defmodule Pika.CLI do
       Application.put_env(:pika, :workspace_plan, plan)
       Application.put_env(:pika, :preflight, preflight)
 
+      if map_size(config.prompts) > 0 do
+        defaults = Application.fetch_env!(:pika, Pika.Stage0.PromptCatalog)
+
+        overrides =
+          Enum.reduce(config.prompts, defaults, fn {kind, path}, acc ->
+            Keyword.put(acc, String.to_existing_atom(kind), path)
+          end)
+
+        Application.put_env(:pika, Pika.Stage0.PromptCatalog, overrides)
+      end
+
       Application.put_env(:pika, Pika.Repo,
         database: Path.join(config.workspace, "pika.sqlite3"),
         pool_size: 1,

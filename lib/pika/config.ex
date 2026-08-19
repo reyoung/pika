@@ -3,10 +3,11 @@ defmodule Pika.Config do
 
   alias Pika.Paths
 
-  @root_fields ~w(server backend campaign)
+  @root_fields ~w(server backend campaign prompts)
   @server_fields ~w(host port)
   @backend_fields ~w(type command protocol_config)
   @campaign_fields ~w(plan max_attempts history_n reference_catalog stop_conditions)
+  @prompt_fields ~w(alignment setup_merge baseline)
   @backend_types ~w(codex_app_server cursor_acp)
 
   defstruct [
@@ -17,6 +18,7 @@ defmodule Pika.Config do
     :port,
     :backend,
     :campaign,
+    :prompts,
     :snapshot,
     :existing_snapshot
   ]
@@ -106,11 +108,13 @@ defmodule Pika.Config do
         unknown_fields(map(yaml["server"]), @server_fields, "server") ++
         unknown_fields(map(yaml["backend"]), @backend_fields, "backend") ++
         unknown_fields(map(yaml["campaign"]), @campaign_fields, "campaign") ++
+        unknown_fields(map(yaml["prompts"]), @prompt_fields, "prompts") ++
         section_errors(yaml)
 
     server = map(yaml["server"])
     backend = map(yaml["backend"])
     campaign = map(yaml["campaign"])
+    prompts = map(yaml["prompts"])
 
     host = Keyword.get(opts, :host) || server["host"] || "127.0.0.1"
     port = Keyword.get(opts, :port) || server["port"] || 8080
@@ -128,11 +132,14 @@ defmodule Pika.Config do
         validate_host(host) ++
         validate_port(port) ++
         validate_backend(type, command, protocol_config) ++
-        validate_campaign(plan, max_attempts, history_n, reference_catalog, stop_conditions)
+        validate_campaign(plan, max_attempts, history_n, reference_catalog, stop_conditions) ++
+        validate_prompts(prompts)
 
     with [] <- errors,
          {:ok, repo} <- resolve_repo(Keyword.get(opts, :repo), existing),
          {:ok, source_path} <- canonical_file(path) do
+      prompt_paths = resolve_prompt_paths(prompts, source_path)
+
       immutable = %{
         "workspace" => workspace,
         "repo_mode" => if(repo, do: "managed_repo", else: "owned_repo"),
@@ -142,7 +149,8 @@ defmodule Pika.Config do
           "type" => type,
           "command" => normalize_command(command),
           "protocol_config" => protocol_config
-        }
+        },
+        "prompts" => prompt_paths
       }
 
       mutable = %{
@@ -162,6 +170,7 @@ defmodule Pika.Config do
          port: port,
          backend: immutable["backend"],
          campaign: mutable,
+         prompts: prompt_paths,
          snapshot: %{
            "schema_version" => 1,
            "immutable" => immutable,
@@ -229,7 +238,8 @@ defmodule Pika.Config do
       "repo_mode" => immutable["repo_mode"],
       "managed_repo" => if(managed, do: Map.take(managed, ["canonical_path"]), else: nil),
       "listen" => immutable["listen"],
-      "backend" => immutable["backend"]
+      "backend" => immutable["backend"],
+      "prompts" => immutable["prompts"] || %{}
     }
   end
 
@@ -285,6 +295,25 @@ defmodule Pika.Config do
       stop_mode not in ["all_goals", "any_goal"],
       "campaign.stop_conditions.mode: must be all_goals or any_goal"
     )
+  end
+
+  defp validate_prompts(prompts) do
+    Enum.flat_map(prompts, fn {name, value} ->
+      if is_binary(value) and String.trim(value) != "",
+        do: [],
+        else: ["prompts.#{name}: must be a non-empty path string"]
+    end)
+  end
+
+  defp resolve_prompt_paths(prompts, source_path) do
+    Map.new(prompts, fn {kind, path} ->
+      resolved =
+        if Path.type(path) == :absolute,
+          do: Path.expand(path),
+          else: Path.expand(path, Path.dirname(source_path))
+
+      {kind, resolved}
+    end)
   end
 
   defp maybe_error(errors, false, _message), do: errors

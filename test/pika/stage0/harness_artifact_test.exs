@@ -1,16 +1,37 @@
 defmodule Pika.Stage0.HarnessArtifactTest do
   use ExUnit.Case, async: true
 
-  alias Pika.Stage0.{ArtifactStore, Harness}
+  alias Pika.Stage0.{ArtifactStore, Git, Harness}
   alias Pika.Test.Stage0Fixtures
 
-  test "computes a stable protected digest and detects content changes" do
+  test "protected digest detects additions, deletions, renames, and content changes" do
     root = Stage0Fixtures.temp_dir("pika-harness")
     attrs = Stage0Fixtures.create_harness(root)
     assert {:ok, harness} = Harness.validate(root, attrs)
     assert :ok = Harness.verify_digest(root, harness)
 
     File.write!(Path.join(root, "kernel/reference.py"), "changed\n")
+    assert {:error, :protected_digest_changed} = Harness.verify_digest(root, harness)
+
+    File.write!(Path.join(root, "kernel/reference.py"), "def reference(x): return x\n")
+    File.write!(Path.join(root, "kernel/new_guard.py"), "assert True\n")
+
+    assert {:ok, expanded} =
+             Harness.validate(root, %{
+               attrs
+               | "protected_paths" => attrs["protected_paths"] ++ ["kernel/new_guard.py"]
+             })
+
+    refute expanded.digest == harness.digest
+
+    File.rm!(Path.join(root, "kernel/test_correctness.py"))
+    assert {:error, :protected_digest_changed} = Harness.verify_digest(root, harness)
+
+    File.rename!(
+      Path.join(root, "kernel/bench.py"),
+      Path.join(root, "kernel/benchmark_renamed.py")
+    )
+
     assert {:error, :protected_digest_changed} = Harness.verify_digest(root, harness)
   end
 
@@ -27,6 +48,23 @@ defmodule Pika.Stage0.HarnessArtifactTest do
                benchmark_path: "link.py",
                protected_paths: []
              })
+  end
+
+  test "rejects a candidate commit that changes a protected Harness path" do
+    repo = Stage0Fixtures.git_repo()
+    attrs = Stage0Fixtures.create_harness(repo)
+    Git.run!(repo, ["add", "."])
+    Git.run!(repo, ["commit", "-m", "protected harness"])
+    base_sha = Git.run!(repo, ["rev-parse", "HEAD"])
+    assert {:ok, harness} = Harness.validate(repo, attrs)
+
+    File.write!(Path.join(repo, "kernel/bench.py"), "print('changed')\n")
+    Git.run!(repo, ["add", "kernel/bench.py"])
+    Git.run!(repo, ["commit", "-m", "candidate changes harness"])
+    candidate_sha = Git.run!(repo, ["rev-parse", "HEAD"])
+
+    assert {:error, {:protected_paths_changed, ["kernel/bench.py"]}} =
+             Harness.verify_candidate(repo, base_sha, candidate_sha, harness)
   end
 
   test "Artifact Store rejects absolute paths, escape and caller hash mismatch" do

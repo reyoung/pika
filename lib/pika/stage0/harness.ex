@@ -44,6 +44,24 @@ defmodule Pika.Stage0.Harness do
     end
   end
 
+  def verify_candidate(repo, base_sha, candidate_sha, harness) do
+    with {:ok, changed} <-
+           Pika.Stage0.Git.run(repo, [
+             "diff",
+             "--name-only",
+             "--no-renames",
+             "#{base_sha}..#{candidate_sha}"
+           ]) do
+      changed_paths = String.split(changed, "\n", trim: true)
+      protected = MapSet.new(harness.protected_paths)
+
+      case Enum.filter(changed_paths, &MapSet.member?(protected, &1)) do
+        [] -> :ok
+        paths -> {:error, {:protected_paths_changed, paths}}
+      end
+    end
+  end
+
   defp validate_files(root, paths) do
     Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->
       case safe_file(root, path) do

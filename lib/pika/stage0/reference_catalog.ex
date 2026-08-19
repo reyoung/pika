@@ -68,6 +68,72 @@ defmodule Pika.Stage0.ReferenceCatalog do
     end)
   end
 
+  def materialize_selected(setup_root, entries) do
+    resolved =
+      Enum.map(entries, fn
+        %{selected: false} = entry -> entry
+        entry -> materialize(setup_root, entry)
+      end)
+
+    if Enum.any?(resolved, &(&1.selected && &1.status == :error)),
+      do: {:error, resolved},
+      else: {:ok, resolved}
+  end
+
+  defp materialize(setup_root, entry) do
+    path = Path.join([setup_root, "ref", entry.id])
+
+    result =
+      if File.dir?(Path.join(path, ".git")) or File.regular?(Path.join(path, ".git")) do
+        checkout_pinned(path, entry.sha)
+      else
+        with {:ok, _} <-
+               Pika.Stage0.Git.run(setup_root, [
+                 "-c",
+                 "protocol.file.allow=always",
+                 "submodule",
+                 "add",
+                 "--depth",
+                 "1",
+                 "--force",
+                 entry.url,
+                 "ref/#{entry.id}"
+               ]),
+             :ok <- checkout_pinned(path, entry.sha) do
+          :ok
+        end
+      end
+
+    case result do
+      :ok ->
+        entry
+
+      {:error, reason} ->
+        %{entry | status: :error, description: entry.description <> " (#{inspect(reason)})"}
+    end
+  end
+
+  defp checkout_pinned(path, sha) do
+    with {:ok, actual} <- Pika.Stage0.Git.run(path, ["rev-parse", "HEAD"]),
+         :ok <- fetch_if_needed(path, actual, sha),
+         {:ok, _} <- Pika.Stage0.Git.run(path, ["checkout", "--detach", sha]),
+         {:ok, ^sha} <- Pika.Stage0.Git.run(path, ["rev-parse", "HEAD"]) do
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      {:ok, actual} -> {:error, {:reference_sha_mismatch, actual, sha}}
+    end
+  end
+
+  defp fetch_if_needed(_path, sha, sha), do: :ok
+
+  defp fetch_if_needed(path, _actual, sha) do
+    case Pika.Stage0.Git.run(path, ["fetch", "--depth", "1", "origin", sha]) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp resolve(entry) do
     case System.cmd("git", ["ls-remote", "--symref", entry.url, "HEAD"], stderr_to_stdout: true) do
       {output, 0} ->

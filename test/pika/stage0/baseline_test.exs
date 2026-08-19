@@ -42,7 +42,7 @@ defmodule Pika.Stage0.BaselineTest do
           "case_id" => "target_case",
           "metric_id" => "latency_us",
           "pair_index" => index,
-          "order" => "ab",
+          "order" => if(rem(index, 2) == 0, do: "ab", else: "ba"),
           "a" => 10.0,
           "b" => 10.0,
           "valid" => index < 23
@@ -50,6 +50,29 @@ defmodule Pika.Stage0.BaselineTest do
       end
 
     assert {:error, {:insufficient_valid_pairs, "target_case", "latency_us", 23}} =
+             Baseline.evaluate_records(records, spec, sha)
+  end
+
+  test "rejects Pair records that are not ordered alternately" do
+    spec = Stage0Fixtures.spec()
+    sha = String.duplicate("c", 40)
+
+    records =
+      for index <- 0..29 do
+        %{
+          "schema_version" => 1,
+          "measured_sha" => sha,
+          "case_id" => "target_case",
+          "metric_id" => "latency_us",
+          "pair_index" => index,
+          "order" => "ab",
+          "a" => 10.0,
+          "b" => 10.0,
+          "valid" => true
+        }
+      end
+
+    assert {:error, {:non_alternating_pair_orders, "target_case", "latency_us"}} =
              Baseline.evaluate_records(records, spec, sha)
   end
 end

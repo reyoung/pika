@@ -95,7 +95,7 @@ defmodule Pika.AgentBackend.CursorACP do
      %{
        profile: profile,
        event_sink: event_sink,
-       session_id: Id.new("session"),
+       session_id: Ecto.UUID.generate(),
        transport: nil,
        pending: %{},
        next_id: 1,

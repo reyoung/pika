@@ -14,7 +14,7 @@ defmodule Pika.Stage0.Spec do
         ~w(schema_version revision title target_hardware computation benchmark_cases metrics benchmark iteration_sampling stopping reference_ids),
       "properties" => %{
         "schema_version" => %{"type" => "integer", "const" => 1},
-        "revision" => %{"type" => "integer", "const" => 1},
+        "revision" => %{"type" => "integer", "minimum" => 1},
         "title" => string_schema(),
         "target_hardware" => string_schema(),
         "computation" => %{
@@ -185,7 +185,10 @@ defmodule Pika.Stage0.Spec do
 
     []
     |> add_error(spec["schema_version"] != 1, "schema_version must be 1")
-    |> add_error(spec["revision"] != 1, "Stage0 only supports revision 1")
+    |> add_error(
+      not (is_integer(spec["revision"]) and spec["revision"] >= 1),
+      "revision must be a positive integer"
+    )
     |> add_error(
       not Enum.any?(cases, &(&1["kind"] == "target")),
       "at least one target Benchmark Case is required"

@@ -134,6 +134,33 @@ defmodule Pika.Stage0.CampaignTest do
     assert Enum.any?(snapshot.artifacts, &(&1.relative_path == artifact.relative_path))
   end
 
+  test "cannot build Baseline before confirmation and returns to DraftingSpec on user changes", %{
+    workspace: workspace
+  } do
+    assert {:error, :spec_not_confirmable} = Campaign.confirm_spec()
+    harness_args = Stage0Fixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "reject-spec",
+               "spec" => Stage0Fixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "reject-harness")
+             )
+
+    assert Campaign.snapshot().status == :awaiting_confirmation
+    assert :ok = Campaign.request_changes("目标 Case 需要改成 n=2048")
+    snapshot = Campaign.snapshot()
+    assert snapshot.status == :drafting_spec
+    assert snapshot.required_operations == ["submit_harness", "submit_spec"]
+    refute snapshot.status == :building_baseline
+  end
+
   test "allows an attachment-only user message", %{workspace: workspace} do
     upload_source = Path.join(workspace.root, "shape.pkl")
     File.write!(upload_source, "fixture")

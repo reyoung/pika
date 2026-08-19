@@ -74,7 +74,7 @@ defmodule Pika.Persistence.Campaign do
     ])
     |> validate_inclusion(
       :status,
-      ~w(drafting_spec awaiting_confirmation building_baseline optimizing draining completed paused blocked stopped awaiting_spec_confirmation)
+      ~w(drafting_spec awaiting_confirmation building_baseline selecting_iteration_sample optimizing draining completed paused blocked stopped awaiting_spec_confirmation)
     )
     |> validate_inclusion(:workspace_mode, ~w(owned_repo managed_repo))
     |> validate_inclusion(:stop_mode, ~w(all_goals any_goal))

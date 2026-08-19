@@ -6,7 +6,7 @@ defmodule Pika.Phase0.Skill do
   def ensure_latest(path) do
     path = Path.expand(path)
     File.mkdir_p!(Path.dirname(path))
-    sha = remote_head!()
+    {branch, sha} = remote_head!()
 
     if File.dir?(Path.join(path, ".git")) do
       current = git!(path, ["rev-parse", "HEAD"])
@@ -28,13 +28,32 @@ defmodule Pika.Phase0.Skill do
       raise "ncu-report-skill checkout mismatch: expected #{sha}, got #{actual}"
     end
 
-    %{name: "ncu-report-skill", url: @url, path: path, sha: sha}
+    %{name: "ncu-report-skill", url: @url, path: path, branch: branch, sha: sha}
   end
 
   defp remote_head! do
-    case System.cmd("git", ["ls-remote", @url, "HEAD"], stderr_to_stdout: true) do
-      {output, 0} -> output |> String.split() |> hd()
-      {output, status} -> raise "git ls-remote failed (#{status}): #{output}"
+    case System.cmd("git", ["ls-remote", "--symref", @url, "HEAD"], stderr_to_stdout: true) do
+      {symref, 0} ->
+        branch =
+          case Regex.run(~r/ref: refs\/heads\/([^\s]+)\s+HEAD/, symref) do
+            [_, value] -> value
+            _ -> raise "ncu-report-skill default branch was not reported"
+          end
+
+        sha =
+          symref
+          |> String.split("\n")
+          |> Enum.find_value(fn line ->
+            case String.split(line) do
+              [value, "HEAD"] when byte_size(value) == 40 -> value
+              _ -> nil
+            end
+          end)
+
+        if sha, do: {branch, sha}, else: raise("ncu-report-skill HEAD was not reported")
+
+      {output, status} ->
+        raise "git ls-remote failed (#{status}): #{output}"
     end
   end
 

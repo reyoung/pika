@@ -52,7 +52,7 @@ defmodule Pika.Phase1ProcessRecoveryTest do
     assert {:ok, 302, second_headers, _body} = http_get(second.url)
     second_cookie = response_cookie(second_headers)
     assert {:ok, 200, _headers, html} = cookie_get(port_number, "/", second_cookie)
-    assert html =~ "Workspace persistence &amp; recovery"
+    assert html =~ "Alignment → GPU Baseline"
     assert html =~ campaign_id
 
     assert singleton_count(root) == 1

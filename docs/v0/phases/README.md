@@ -9,7 +9,7 @@
 | 0 | [Agent Backend 协议 Spike](./00-agent-backend-protocol-spike.md) | Codex App Server + Cursor ACP 的统一 AgentBackend | Done (`40e71e1`) |
 | Preview | [Stage0 Alignment → Baseline Demo](./00b-stage0-alignment-baseline-demo.md) | 内存态目标对齐、Spec/Harness 确认、真实 GPU Baseline 接口 | Done，H20 E2E passed |
 | 1 | [Workspace 与持久状态](./01-workspace-persistence.md) | 可启动、可恢复的单 Campaign Server | Not started |
-| 2 | [Alignment、Spec 与 Baseline](./02-alignment-baseline.md) | 用户确认边界并建立可信 Baseline | Not started |
+| 2 | [Alignment、Spec 与 Baseline](./02-alignment-baseline.md) | 用户确认边界并建立可信 Baseline | Done，持久化 E2E、真实 Codex Alignment 与 H20 Profiler parse passed |
 | 3 | [并发 Attempt Loop](./03-attempt-loop.md) | 多 Agent 并行优化与 MCP 完成协议 | Not started |
 | 4 | [Integration Full Regression](./04-integration-full-regression.md) | 串行 Best、全量回归、Sampling Feedback | Not started |
 | 5 | [Sync、控制与完整 UI](./05-sync-control-ui.md) | 可操作的完整本地产品 | Not started |

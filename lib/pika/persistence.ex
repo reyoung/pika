@@ -14,6 +14,7 @@ defmodule Pika.Persistence do
     compiler_options = Code.compiler_options()
 
     try do
+      upgrade_campaign_status_check()
       Code.compiler_options(ignore_module_conflict: true)
       Ecto.Migrator.run(Repo, migrations, :up, all: true)
       configure_connection()
@@ -24,6 +25,59 @@ defmodule Pika.Persistence do
       kind, reason -> {:error, {:migration_failed, {kind, reason}}}
     after
       Code.compiler_options(compiler_options)
+    end
+  end
+
+  defp upgrade_campaign_status_check do
+    case Repo.query!("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'campaigns'").rows do
+      [] ->
+        :ok
+
+      [[sql]] ->
+        if String.contains?(sql, "selecting_iteration_sample") do
+          :ok
+        else
+          replacement =
+            sql
+            |> String.replace(
+              ~r/CREATE TABLE\s+["`]?campaigns["`]?/i,
+              "CREATE TABLE campaigns_phase2"
+            )
+            |> String.replace(
+              "'building_baseline','optimizing'",
+              "'building_baseline','selecting_iteration_sample','optimizing'"
+            )
+
+          columns =
+            Repo.query!("PRAGMA table_info(campaigns)").rows
+            |> Enum.map(fn [_cid, name | _] -> ~s("#{name}") end)
+            |> Enum.join(", ")
+
+          Repo.query!("PRAGMA foreign_keys = OFF")
+
+          result =
+            Repo.transaction(fn ->
+              Repo.query!(replacement)
+
+              Repo.query!(
+                "INSERT INTO campaigns_phase2 (#{columns}) SELECT #{columns} FROM campaigns"
+              )
+
+              Repo.query!("DROP TABLE campaigns")
+              Repo.query!("ALTER TABLE campaigns_phase2 RENAME TO campaigns")
+
+              Repo.query!(
+                "CREATE UNIQUE INDEX campaigns_singleton_key_index ON campaigns(singleton_key)"
+              )
+            end)
+
+          Repo.query!("PRAGMA foreign_keys = ON")
+
+          case result do
+            {:ok, _} -> :ok
+            {:error, reason} -> raise "campaigns status upgrade failed: #{inspect(reason)}"
+          end
+        end
     end
   end
 

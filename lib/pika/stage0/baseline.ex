@@ -51,6 +51,9 @@ defmodule Pika.Stage0.Baseline do
       Enum.sort(indexes) != Enum.to_list(0..(expected_pairs - 1)) ->
         {:error, {:invalid_pair_indexes, case_id, metric_id}}
 
+      not alternating_orders?(records) ->
+        {:error, {:non_alternating_pair_orders, case_id, metric_id}}
+
       true ->
         valid =
           Enum.filter(
@@ -93,6 +96,14 @@ defmodule Pika.Stage0.Baseline do
     if valid?, do: :ok, else: {:error, :invalid_sample_record}
   end
 
+  defp alternating_orders?(records) do
+    records
+    |> Enum.sort_by(& &1["pair_index"])
+    |> Enum.map(& &1["order"])
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.all?(fn [left, right] -> left != right end)
+  end
+
   defp validate_correctness(path, spec, measured_sha) do
     with {:ok, body} <- File.read(path),
          {:ok, report} <- Jason.decode(body),
@@ -109,19 +120,7 @@ defmodule Pika.Stage0.Baseline do
 
   defp validate_profiler(path, spec, measured_sha, skill_sha) do
     target_ids = for case_ <- spec["benchmark_cases"], case_["kind"] == "target", do: case_["id"]
-
-    with {:ok, body} <- File.read(path),
-         {:ok, report} <- Jason.decode(body),
-         true <- report["measured_sha"] == measured_sha,
-         true <- report["case_id"] in target_ids,
-         true <- report["skill_sha"] == skill_sha,
-         true <- is_binary(report["summary"]) and report["summary"] != "",
-         paths when is_list(paths) and paths != [] <- report["report_paths"],
-         evidence when is_list(evidence) and evidence != [] <- report["remote_evidence_paths"] do
-      {:ok, report}
-    else
-      _ -> {:error, :invalid_profiler_manifest}
-    end
+    Pika.Phase2.Profiler.validate_manifest(path, target_ids, measured_sha, skill_sha)
   end
 
   defp read_jsonl(path) do

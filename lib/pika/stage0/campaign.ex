@@ -72,6 +72,8 @@ defmodule Pika.Stage0.Campaign do
       end
 
     state = %{
+      campaign_id: Keyword.get(opts, :campaign_id),
+      persistence: Keyword.get(opts, :persistence),
       status: :drafting_spec,
       workspace: workspace,
       backend_name: backend,
@@ -107,6 +109,7 @@ defmodule Pika.Stage0.Campaign do
       required: MapSet.new(~w(submit_spec submit_harness)),
       references: Keyword.get(opts, :references, ReferenceCatalog.entries()),
       resolve_references: Keyword.get(opts, :resolve_references, true),
+      materialize_references: Keyword.get(opts, :materialize_references, false),
       skill: Keyword.fetch!(opts, :skill),
       skill_roots: Keyword.get(opts, :skill_roots, []),
       best_sha: workspace.source_sha,
@@ -122,14 +125,20 @@ defmodule Pika.Stage0.Campaign do
       last_error: nil
     }
 
+    state = restore_durable_state(state, Keyword.get(opts, :durable_state))
+
     case PromptCatalog.validate() do
       :ok ->
         broadcast(state)
 
-        if state.backend_enabled do
-          {:ok, state, {:continue, :open_alignment_backend}}
+        if state.status == :resolving_references do
+          {:ok, state, {:continue, :resume_reference_resolution}}
         else
-          {:ok, state}
+          if state.backend_enabled and state.status != :optimizing do
+            {:ok, state, {:continue, :open_backend}}
+          else
+            {:ok, state}
+          end
         end
 
       {:error, reason} ->
@@ -138,8 +147,17 @@ defmodule Pika.Stage0.Campaign do
   end
 
   @impl true
-  def handle_continue(:open_alignment_backend, state) do
-    {:noreply, begin_open_session(state, :alignment, state.workspace.setup_worktree)}
+  def handle_continue(:open_backend, state) do
+    cwd =
+      if state.backend_phase == :baseline,
+        do: state.workspace.repo,
+        else: state.workspace.setup_worktree
+
+    {:noreply, begin_open_session(state, state.backend_phase, cwd)}
+  end
+
+  def handle_continue(:resume_reference_resolution, state) do
+    {:noreply, start_reference_resolution(state)}
   end
 
   @impl true
@@ -173,7 +191,7 @@ defmodule Pika.Stage0.Campaign do
       references =
         Enum.map(state.references, fn
           %{id: ^id} = entry ->
-            %{entry | selected: not entry.selected, status: :unresolved, sha: nil}
+            %{entry | selected: not entry.selected}
 
           entry ->
             entry
@@ -220,16 +238,7 @@ defmodule Pika.Stage0.Campaign do
           messages: state.messages ++ [message(:user, confirmation_input)]
       }
 
-      parent = self()
-      references = state.references
-      resolve? = state.resolve_references
-
-      Task.start(fn ->
-        result =
-          if resolve?, do: ReferenceCatalog.resolve_selected(references), else: {:ok, references}
-
-        send(parent, {:references_resolved, result})
-      end)
+      state = start_reference_resolution(state)
 
       broadcast(state)
       {:reply, :ok, state}
@@ -308,7 +317,17 @@ defmodule Pika.Stage0.Campaign do
             [message(:system, "Campaign Spec v1 已由用户确认；等待 Agent 完成 setup squash merge。")]
     }
 
-    state = dispatch_input(state, state.pending_confirmation_input)
+    state =
+      if state.backend_enabled and is_nil(state.backend) do
+        state
+        |> Map.update!(
+          :phase_kickoffs,
+          &Map.put(&1, :alignment, state.pending_confirmation_input)
+        )
+        |> begin_open_session(:alignment, state.workspace.setup_worktree)
+      else
+        dispatch_input(state, state.pending_confirmation_input)
+      end
 
     broadcast(state)
     {:noreply, state}
@@ -327,10 +346,20 @@ defmodule Pika.Stage0.Campaign do
   end
 
   def handle_info({:backend_opened, phase, {:ok, handle, session}}, state) do
+    mcp_tokens =
+      if state.backend_token_hash do
+        Map.update(state.mcp_tokens, state.backend_token_hash, nil, fn identity ->
+          %{identity | session_key: session.id}
+        end)
+      else
+        state.mcp_tokens
+      end
+
     state = %{
       state
       | backend: handle,
         backend_session: session,
+        mcp_tokens: mcp_tokens,
         backend_phase: phase,
         messages:
           state.messages ++
@@ -430,11 +459,11 @@ defmodule Pika.Stage0.Campaign do
         request_hash = :crypto.hash(:sha256, :erlang.term_to_binary({tool, args}))
         record_key = {token_hash, tool, key}
 
-        case Map.get(state.idempotency, record_key) do
-          %{request_hash: ^request_hash, response: response} ->
+        case lookup_idempotency(state, identity, tool, key, request_hash, record_key) do
+          {:replay, response} ->
             {:reply, response, state}
 
-          nil ->
+          :missing ->
             {response, next_state} = perform_write(tool, args, identity, state)
             entry = %{request_hash: request_hash, response: response}
 
@@ -443,10 +472,12 @@ defmodule Pika.Stage0.Campaign do
               | idempotency: Map.put(next_state.idempotency, record_key, entry)
             }
 
+            store_idempotency(next_state, identity, tool, key, request_hash, response)
+
             broadcast(next_state)
             {:reply, response, next_state}
 
-          _ ->
+          :conflict ->
             {:reply,
              mcp_error("idempotency_conflict", "same key was used with a different request"),
              state}
@@ -734,9 +765,15 @@ defmodule Pika.Stage0.Campaign do
          {:ok, manifest} <- Jason.decode(body),
          report_paths when is_list(report_paths) and report_paths != [] <-
            manifest["report_paths"],
+         %{"output_paths" => parser_paths} when is_list(parser_paths) and parser_paths != [] <-
+           manifest["parser"],
          evidence_paths when is_list(evidence_paths) and evidence_paths != [] <-
            manifest["remote_evidence_paths"],
-         true <- Enum.all?(report_paths ++ evidence_paths, &Map.has_key?(state.artifacts, &1)) do
+         true <-
+           Enum.all?(
+             report_paths ++ parser_paths ++ evidence_paths,
+             &Map.has_key?(state.artifacts, &1)
+           ) do
       :ok
     else
       _ -> {:error, :profiler_dependencies_not_registered}
@@ -809,6 +846,32 @@ defmodule Pika.Stage0.Campaign do
       {:error, reason} ->
         %{state | last_error: "#{phase} Agent Instructions 加载失败：#{inspect(reason)}"}
     end
+  end
+
+  defp start_reference_resolution(state) do
+    parent = self()
+    references = state.references
+    resolve? = state.resolve_references
+    materialize? = state.materialize_references
+    setup_worktree = state.workspace.setup_worktree
+
+    Task.start(fn ->
+      resolved =
+        if resolve?, do: ReferenceCatalog.resolve_selected(references), else: {:ok, references}
+
+      result =
+        case resolved do
+          {:ok, entries} when materialize? ->
+            ReferenceCatalog.materialize_selected(setup_worktree, entries)
+
+          value ->
+            value
+        end
+
+      send(parent, {:references_resolved, result})
+    end)
+
+    state
   end
 
   defp dispatch_input(%{backend: nil} = state, _input), do: state
@@ -1009,6 +1072,7 @@ defmodule Pika.Stage0.Campaign do
 
   defp public_snapshot(state) do
     %{
+      campaign_id: state.campaign_id,
       status: state.status,
       workspace: %{
         root: state.workspace.root,
@@ -1041,6 +1105,13 @@ defmodule Pika.Stage0.Campaign do
   end
 
   defp broadcast(state) do
+    if state.persistence do
+      case state.persistence.persist(state) do
+        :ok -> :ok
+        {:error, reason} -> raise "cannot persist Campaign state: #{inspect(reason)}"
+      end
+    end
+
     if Process.whereis(Pika.PubSub),
       do: Phoenix.PubSub.broadcast(Pika.PubSub, @topic, {:stage0_updated, public_snapshot(state)})
 
@@ -1276,6 +1347,71 @@ defmodule Pika.Stage0.Campaign do
 
   defp backend_module(:codex_app_server), do: Pika.AgentBackend.CodexAppServer
   defp backend_module(:cursor_acp), do: Pika.AgentBackend.CursorACP
+
+  defp lookup_idempotency(state, identity, tool, key, request_hash, record_key) do
+    case Map.get(state.idempotency, record_key) do
+      %{request_hash: ^request_hash, response: response} ->
+        {:replay, response}
+
+      nil ->
+        if state.persistence && function_exported?(state.persistence, :lookup_idempotency, 5) do
+          state.persistence.lookup_idempotency(
+            identity.session_key,
+            tool,
+            key,
+            request_hash,
+            state
+          )
+        else
+          :missing
+        end
+
+      _ ->
+        :conflict
+    end
+  end
+
+  defp store_idempotency(state, identity, tool, key, request_hash, response) do
+    if state.persistence && function_exported?(state.persistence, :store_idempotency, 6) do
+      case state.persistence.store_idempotency(
+             identity.session_key,
+             tool,
+             key,
+             request_hash,
+             response,
+             state
+           ) do
+        :ok -> :ok
+        {:error, reason} -> raise "cannot persist MCP idempotency record: #{inspect(reason)}"
+      end
+    end
+
+    :ok
+  end
+
+  defp restore_durable_state(state, durable) when is_map(durable) do
+    state
+    |> Map.merge(Map.take(durable, Map.keys(state)))
+    |> Map.merge(%{
+      backend: nil,
+      backend_session: nil,
+      backend_token_hash: nil,
+      closed_sessions: MapSet.new(),
+      active_turn_id: nil,
+      stream_message_id: nil,
+      activity_message_id: nil,
+      mcp_tokens: state.mcp_tokens,
+      idempotency: %{},
+      kickoff_dispatched: false,
+      persistence: state.persistence,
+      campaign_id: state.campaign_id,
+      workspace: state.workspace,
+      skill: state.skill,
+      references: state.references
+    })
+  end
+
+  defp restore_durable_state(state, _durable), do: state
 
   defp call_if_started(message, default) do
     case Process.whereis(__MODULE__) do

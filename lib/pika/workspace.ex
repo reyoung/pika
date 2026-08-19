@@ -71,13 +71,16 @@ defmodule Pika.Workspace do
     end
   end
 
-  def verify_identity(%__MODULE__{} = workspace) do
+  def verify_identity(%__MODULE__{} = workspace),
+    do: verify_identity(workspace, workspace.base_sha)
+
+  def verify_identity(%__MODULE__{} = workspace, expected_head) do
     with {:ok, current} <- current_identity(workspace.root, workspace.mode),
          :ok <- compare_identity(workspace.snapshot, current),
-         true <- current.base_sha == workspace.base_sha do
+         true <- current.base_sha == expected_head do
       :ok
     else
-      false -> {:error, {:git_head_changed, workspace.base_sha}}
+      false -> {:error, {:git_head_changed, expected_head}}
       {:error, _} = error -> error
     end
   end

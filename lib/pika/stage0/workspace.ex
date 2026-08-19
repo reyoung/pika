@@ -49,13 +49,19 @@ defmodule Pika.Stage0.Workspace do
          true <- parent == base_sha,
          {:ok, changed} <-
            Git.run(workspace.repo, ["diff", "--name-only", "#{base_sha}..#{best_sha}"]),
-         true <- String.trim(changed) != "" do
+         changed_paths <- String.split(changed, "\n", trim: true),
+         true <- changed_paths != [],
+         true <- Enum.all?(changed_paths, &deliverable_path?/1) do
       :ok
     else
       false -> {:error, :git_verification_failed}
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp deliverable_path?(".gitmodules"), do: false
+  defp deliverable_path?("ref/" <> _path), do: false
+  defp deliverable_path?(_path), do: true
 
   defp validate_source(repo) do
     with true <- File.dir?(repo) || {:error, {:repo_not_found, repo}},

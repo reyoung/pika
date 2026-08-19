@@ -4,7 +4,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
   use GenServer
   @behaviour Pika.AgentBackend
 
-  alias Pika.AgentBackend.{CodexExecutable, Error, Event, Id, JSONLPort, Profile, Session}
+  alias Pika.AgentBackend.{CodexExecutable, Error, Event, JSONLPort, Profile, Session}
 
   @protocol "codex-app-server-v2"
   @rpc_timeout 60_000
@@ -103,7 +103,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
   @impl true
   def init({profile, event_sink}) do
     profile = Profile.normalize(profile)
-    session_id = Id.new("session")
+    session_id = Ecto.UUID.generate()
 
     {:ok,
      %{

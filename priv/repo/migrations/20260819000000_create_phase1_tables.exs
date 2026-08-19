@@ -15,7 +15,7 @@ defmodule Pika.Repo.Migrations.CreatePhase1Tables do
         check: %{
           name: "campaigns_status",
           expr:
-            "status IN ('drafting_spec','awaiting_confirmation','building_baseline','optimizing','draining','completed','paused','blocked','stopped','awaiting_spec_confirmation')"
+            "status IN ('drafting_spec','awaiting_confirmation','building_baseline','selecting_iteration_sample','optimizing','draining','completed','paused','blocked','stopped','awaiting_spec_confirmation')"
         }
       )
       add(:resume_state, :string)

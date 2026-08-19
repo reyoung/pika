@@ -1,0 +1,18 @@
+{
+  "backend": "codex_app_server",
+  "backend_session_id": "7470251e-98e4-463d-9bfd-ee0373ee09d8",
+  "campaign_status": "awaiting_confirmation",
+  "cases": [
+    "target_case"
+  ],
+  "metrics": [
+    "latency_us"
+  ],
+  "protected_digest": "a875b9404ffc4596fd24224e4af7a54985862684a17fcb01fb97fbf2e3ba84ce",
+  "required_operations": [],
+  "source_repo_unchanged": true,
+  "spec_ready": true,
+  "spec_title": "Identity float16 H20 protocol smoke",
+  "status": "passed",
+  "workspace": "/var/folders/b6/0w06zks140bb0dpl9gt2gb4h0000gn/T/pika-stage0-20260819-034038-133"
+}

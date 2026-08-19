@@ -6,7 +6,7 @@ defmodule PikaWeb.AlignmentLive do
 
   @impl true
   def mount(_params, session, socket) do
-    if Pika.Stage0.Auth.authenticated_marker?(session["stage0_auth"]) do
+    if authenticated?(session) do
       mount_authenticated(socket)
     else
       {:ok, redirect(socket, to: "/")}
@@ -135,11 +135,12 @@ defmodule PikaWeb.AlignmentLive do
       <header class="topbar">
         <div class="brand">
           <div class="brand-mark">P</div>
-          <div><strong>Pika Stage0</strong><small>Alignment → GPU Baseline Preview</small></div>
+          <div><strong>{product_name()}</strong><small>{product_subtitle()}</small></div>
         </div>
         <div class="campaign-status">
           <.pill kind={status_kind(@snapshot.status)}>{status_label(@snapshot.status)}</.pill>
           <span class="muted"> · {@snapshot.backend}</span>
+          <span :if={@snapshot.campaign_id} class="muted"> · {@snapshot.campaign_id}</span>
         </div>
       </header>
 
@@ -453,7 +454,8 @@ defmodule PikaWeb.AlignmentLive do
   defp assign_result(socket, error), do: assign(socket, :flash_message, inspect(error))
 
   defp empty_snapshot do
-    %{
+    snapshot = %{
+      campaign_id: nil,
       status: :initializing,
       backend: :none,
       messages: [],
@@ -473,6 +475,51 @@ defmodule PikaWeb.AlignmentLive do
       last_error: "Stage0 Campaign 尚未启动。",
       workspace: %{root: System.tmp_dir!()}
     }
+
+    if Application.get_env(:pika, :runtime_mode, :stage0) == :serve and
+         Process.whereis(Pika.Runtime) do
+      runtime = Pika.Runtime.snapshot()
+
+      bootstrap_status =
+        if Process.whereis(Pika.Phase2.Bootstrap),
+          do: Pika.Phase2.Bootstrap.status(),
+          else: :starting
+
+      message =
+        case bootstrap_status do
+          {:error, reason} -> "Alignment Campaign 初始化失败：#{inspect(reason)}"
+          _ -> "Alignment Campaign 正在解析固定的 Reference 与 Skill 版本。"
+        end
+
+      %{
+        snapshot
+        | campaign_id: runtime.campaign.id,
+          workspace: %{root: runtime.workspace.root},
+          last_error: message
+      }
+    else
+      snapshot
+    end
+  end
+
+  defp authenticated?(session) do
+    if Application.get_env(:pika, :runtime_mode, :stage0) == :serve do
+      Pika.Auth.authenticated_marker?(session["pika_auth"])
+    else
+      Pika.Stage0.Auth.authenticated_marker?(session["stage0_auth"])
+    end
+  end
+
+  defp product_name do
+    if Application.get_env(:pika, :runtime_mode, :stage0) == :serve,
+      do: "Pika",
+      else: "Pika Stage0"
+  end
+
+  defp product_subtitle do
+    if Application.get_env(:pika, :runtime_mode, :stage0) == :serve,
+      do: "Alignment → GPU Baseline",
+      else: "Alignment → GPU Baseline Preview"
   end
 
   defp change_prompt("boundary"), do: "请修改目标边界："

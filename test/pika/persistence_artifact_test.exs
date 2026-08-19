@@ -59,6 +59,54 @@ defmodule Pika.PersistenceArtifactTest do
     end
   end
 
+  test "upgrades an existing Phase 1 Campaign status constraint without losing state", %{
+    campaign: campaign
+  } do
+    [[sql]] =
+      Repo.query!("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'campaigns'").rows
+
+    old_sql =
+      sql
+      |> String.replace(~r/CREATE TABLE\s+["`]?campaigns["`]?/i, "CREATE TABLE campaigns_old")
+      |> String.replace(",'selecting_iteration_sample'", "")
+
+    columns =
+      Repo.query!("PRAGMA table_info(campaigns)").rows
+      |> Enum.map(fn [_cid, name | _] -> ~s("#{name}") end)
+      |> Enum.join(", ")
+
+    Repo.query!("PRAGMA foreign_keys = OFF")
+
+    assert {:ok, _} =
+             Repo.transaction(fn ->
+               Repo.query!(old_sql)
+
+               Repo.query!(
+                 "INSERT INTO campaigns_old (#{columns}) SELECT #{columns} FROM campaigns"
+               )
+
+               Repo.query!("DROP TABLE campaigns")
+               Repo.query!("ALTER TABLE campaigns_old RENAME TO campaigns")
+
+               Repo.query!(
+                 "CREATE UNIQUE INDEX campaigns_singleton_key_index ON campaigns(singleton_key)"
+               )
+             end)
+
+    Repo.query!("PRAGMA foreign_keys = ON")
+
+    refute Repo.query!("SELECT sql FROM sqlite_master WHERE name = 'campaigns'").rows |> inspect() =~
+             "selecting_iteration_sample"
+
+    assert :ok = Persistence.migrate()
+    assert Repo.get!(Campaign, campaign.id).id == campaign.id
+
+    assert Repo.query!(
+             "UPDATE campaigns SET status = 'selecting_iteration_sample' WHERE id = ?",
+             [campaign.id]
+           ).num_rows == 1
+  end
+
   test "commits state and Domain Event together and broadcasts only after commit", %{
     campaign: campaign
   } do

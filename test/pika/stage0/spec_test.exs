@@ -98,4 +98,52 @@ defmodule Pika.Stage0.SpecTest do
 
     assert Spec.validate(spec).ready?
   end
+
+  test "preserves target, guard, and informational gates with explicit directions" do
+    spec = Stage0Fixtures.spec()
+    [target_case] = spec["benchmark_cases"]
+    [target_metric] = spec["metrics"]
+
+    cases = [
+      target_case,
+      %{target_case | "id" => "guard_case", "name" => "Guard case", "kind" => "guard"},
+      %{
+        target_case
+        | "id" => "info_case",
+          "name" => "Informational case",
+          "kind" => "informational"
+      }
+    ]
+
+    metrics = [
+      target_metric,
+      %{
+        target_metric
+        | "id" => "throughput",
+          "name" => "Throughput",
+          "unit" => "items/s",
+          "direction" => "maximize",
+          "role" => "guard"
+      },
+      %{
+        target_metric
+        | "id" => "workspace_bytes",
+          "name" => "Workspace",
+          "unit" => "bytes",
+          "role" => "informational"
+      }
+    ]
+
+    result = Spec.validate(%{spec | "benchmark_cases" => cases, "metrics" => metrics})
+    assert result.ready?
+
+    assert Enum.map(result.spec["benchmark_cases"], & &1["kind"]) ==
+             ~w(target guard informational)
+
+    assert Enum.map(result.spec["metrics"], &{&1["role"], &1["direction"]}) == [
+             {"target", "minimize"},
+             {"guard", "maximize"},
+             {"informational", "minimize"}
+           ]
+  end
 end

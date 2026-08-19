@@ -10,10 +10,13 @@ combination, download all raw outputs, correctness, profiler and remote cleanup 
 
 Use the injected ncu-report-skill for at least one target Case. On AFS record proxy status before and after,
 visible workload output, exact exit status, and cleanup. The profiler manifest must list registered
-report_paths and remote_evidence_paths plus measured_sha, case_id, skill_sha and summary. The correctness
-JSON must contain measured_sha and every case_id with passed=true. Copy final outputs to the Artifact
-Workspace, remove untracked profiler/harness files from the temporary Best worktree, verify git status is
-clean, then call submit_baseline.
+report_paths and remote_evidence_paths plus schema_version=1, measured_sha, case_id, skill_sha, tool,
+the exact collection command, profile_directory under artifacts/profiles/, and summary. It must also contain
+parser={skill: "ncu-report-skill", command: <exact parser command>, output_paths: [...]}; every parser output
+must be registered, non-empty, inside profile_directory, and at least one output must be valid JSON. The
+correctness JSON must contain measured_sha and every case_id with passed=true. Copy final outputs to the
+Artifact Workspace, remove untracked profiler/harness files from the temporary Best worktree, verify git
+status is clean, then call submit_baseline.
 
 After Pika accepts the full Baseline, select a useful initial Iteration Sample Set of at most
 <%= @max_initial_cases %> Cases. Include at least one Target Case and cover representative shape families,

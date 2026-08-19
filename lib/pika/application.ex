@@ -19,9 +19,10 @@ defmodule Pika.Application do
       {Pika.WorkspaceLock, plan},
       Pika.Repo,
       {Phoenix.PubSub, name: Pika.PubSub},
-      Pika.Runtime,
       {DynamicSupervisor, strategy: :one_for_one, name: Pika.AgentBackendSessionSupervisor},
       {DynamicSupervisor, strategy: :one_for_one, name: Pika.CampaignSupervisor},
+      Pika.Runtime,
+      Pika.Phase2.Bootstrap,
       PikaWeb.Endpoint
     ]
   end

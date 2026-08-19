@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "verified_at": "2026-08-19T03:39:01Z",
+  "status": "passed",
+  "afs": {
+    "session_id": "afslet-session-2426861820",
+    "image": "mirrors.tencent.com/josephyu/mk-dev-container:35c45e4-flashinfer-ncu2025.2.1",
+    "device": "h20=1",
+    "proxy_before_running": 0,
+    "proxy_after_running": 0,
+    "exact_exit_status": 0,
+    "cleanup_verified": true
+  },
+  "skill": {
+    "name": "ncu-report-skill",
+    "url": "https://github.com/mit-han-lab/ncu-report-skill.git",
+    "branch": "main",
+    "sha": "1cf238d6b41c79bd35041192506c4d45e765a3f1",
+    "helper": "helpers/analyze_reports.py",
+    "helper_sha256": "a47f2bb0b3ae415a510c1d4a1e68a5123ce846c1a7214f11b8c00c5e97532c9c",
+    "ncu_utils_sha256": "916d819d7d2a2e17dfada8f2e8085ff0820cd6cb0898712c6c2cda7bfe154487"
+  },
+  "input": {
+    "case_id": "trace_5493",
+    "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b",
+    "report": "artifacts/profiles/full_trace_5493.ncu-rep",
+    "sha256": "11330aa68ee4934b4640c1ebf059c5056923844936b063418ac0b504a420e82b"
+  },
+  "command": "python3 helpers/analyze_reports.py --run-dir <output>/run --report <input>/full_trace_5493.ncu-rep --tag trace_5493",
+  "result": {
+    "kernel": "verify_attention_warp_mma_bypass_attention_kernel",
+    "metric_count": 2179,
+    "metrics_all_sha256": "bff525d4b2ed4ceff128c9d27250e35aed1fbce1da7f841bbbd5e3efcd492ead",
+    "metrics_key_sha256": "39a3741c1e8c285e2308e1f602eb82d5a5fc90d020236029f2941e68c74b53ab",
+    "result_bundle_sha256": "a6ca21d74a9ba975c000e6a70e7f3a2c4332993dec37ecc157b003aa75a9ab9d"
+  }
+}

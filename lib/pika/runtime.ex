@@ -58,7 +58,9 @@ defmodule Pika.Runtime do
   end
 
   defp verify_git(workspace, current) do
-    case Workspace.verify_identity(workspace) do
+    expected_head = if current, do: current.best_sha, else: workspace.base_sha
+
+    case Workspace.verify_identity(workspace, expected_head) do
       :ok ->
         :ok
 

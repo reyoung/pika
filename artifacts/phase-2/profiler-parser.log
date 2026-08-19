@@ -1,0 +1,6 @@
+PARSER_WORKLOAD_VISIBLE_BEGIN
+[trace_5493] full_trace_5493.ncu-rep: 2179 metrics, kernel verify_attention_warp_mma_bypass_attention_kernel
+  -> metrics_all_trace_5493.json (2179 metrics)
+  -> metrics_key_trace_5493.{json,txt}
+PARSER_WORKLOAD_VISIBLE_END
+EXACT_EXIT_STATUS=0
