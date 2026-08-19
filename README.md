@@ -64,7 +64,7 @@ mix run scripts/backend_smoke.exs -- \
   --workspace /tmp/pika-backend-smoke
 ```
 
-Smoke 会验证 Codex App Server、Cursor ACP、真实 HTTP MCP、Skill 可见性、steer、interrupt、子进程隔离与无 resume 恢复，并把脱敏证据写入 `artifacts/backend-conformance/`。
+Smoke 会验证 Codex App Server、Cursor ACP、真实 HTTP MCP、Skill 可见性、steer、interrupt、子进程隔离与 provider resume 的安全降级，并把脱敏证据写入 `artifacts/backend-conformance/`。
 
 ## Alignment → Baseline Preview
 
@@ -90,9 +90,9 @@ Alignment、setup merge 和 Baseline Agent Instructions 是 `priv/prompts/alignm
 
 ## 初始化持久化 Workspace
 
-`pika init` 提供交互式向导，分别询问 Alignment/Baseline Agent 与 Iteration Agent 的 Backend，以及 Repo 模式、Workspace 路径、监听地址、Iteration Agent 模型与并发数、推理强度、最大 Attempt 数和可选 Git Sync。两个阶段可以独立选择 Codex 或 Cursor。初始化会生成 `pika.yaml`、可编辑的完整 Prompt 模板、固定 Workspace 布局与 Git `pika/best` 分支，但不会启动 Server：
+`pika init` 提供交互式向导，分别询问 Alignment/Baseline Agent 与 Iteration Agent 的 Backend、模型和推理强度，以及 Repo 模式、Workspace 路径、监听地址、Iteration Agent 并发数、最大 Attempt 数和可选 Git Sync。两个阶段可以独立选择 Codex 或 Cursor。初始化会生成 `pika.yaml`、可编辑的完整 Prompt 模板、固定 Workspace 布局与 Git `pika/best` 分支，但不会启动 Server：
 
-选择 Iteration Agent 模型时，向导会从当前已登录的 Codex App Server 或 Cursor CLI 动态读取模型列表，显示常用候选、provider 默认值和自定义 model id 入口。使用 `--model MODEL` 可直接进行非交互选择，`--yes` 则保留 provider 默认值。
+选择两个阶段的模型时，向导会分别从当前已登录的 Codex App Server 或 Cursor CLI 动态读取模型列表，显示常用候选、provider 默认值和自定义 model id 入口。使用 `--alignment-model` 与 `--iteration-model` 可直接进行非交互选择；兼容参数 `--model` 仍表示 Iteration Agent 模型，`--yes` 则保留 provider 默认值。
 
 ```bash
 pika init
@@ -104,9 +104,12 @@ pika init
 pika init /absolute/path/to/pika-workspace \
   --repo /absolute/path/to/clean/git/repo \
   --alignment-backend cursor \
+  --alignment-model cursor-model-id \
+  --alignment-effort high \
   --iteration-backend codex \
+  --iteration-model codex-model-id \
+  --iteration-effort high \
   --iteration-agents 2 \
-  --effort high \
   --no-sync \
   --yes
 ```

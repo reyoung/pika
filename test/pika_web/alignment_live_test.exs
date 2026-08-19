@@ -135,12 +135,165 @@ defmodule PikaWeb.AlignmentLiveTest do
     assert html =~ "Benchmark Cases"
     assert html =~ "测量与采样规则"
     assert html =~ "Reference Projects"
-    assert html =~ "全量 5 Pair · 异常升级 30 Pair"
+    assert html =~ "全量 5 Pair · 异常升级 等待用户指定"
 
     view |> element(~s(button[phx-value-target="metrics"])) |> render_click()
     html = render(view)
     assert html =~ "请重新检查并修改 Metrics"
     assert html =~ ~s(value="request_changes")
+  end
+
+  test "renders at most ten Benchmark Cases while preserving the full Spec count", %{
+    conn: conn,
+    token: token
+  } do
+    conn = conn |> get("/?token=#{token}") |> recycle()
+    {:ok, view, _html} = live(conn, "/")
+    [template] = AlignmentFixtures.spec()["benchmark_cases"]
+
+    cases =
+      for index <- 1..12 do
+        suffix = index |> Integer.to_string() |> String.pad_leading(2, "0")
+
+        %{
+          template
+          | "id" => "case_#{suffix}",
+            "name" => "Case #{suffix}",
+            "shape" => %{"n" => index * 128}
+        }
+      end
+
+    spec = %{AlignmentFixtures.spec() | "benchmark_cases" => cases}
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call("mcp-test", "submit_spec", %{
+               "idempotency_key" => "many-cases",
+               "spec" => spec
+             })
+
+    assert eventually(fn -> render(view) =~ "完整 Campaign Spec 共 12 个 Cases" end)
+    html = render(view)
+
+    assert length(Regex.scan(~r/class="case-row"/, html)) == 10
+    assert html =~ "12 Cases"
+    assert html =~ "Case 10"
+    refute html =~ "Case 11"
+    refute html =~ "Case 12"
+  end
+
+  test "confirmation button advances an awaiting Spec into Baseline", %{
+    conn: conn,
+    token: token,
+    workspace: workspace
+  } do
+    harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call("mcp-test", "submit_spec", %{
+               "idempotency_key" => "confirm-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               "mcp-test",
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "confirm-harness")
+             )
+
+    conn = conn |> get("/?token=#{token}") |> recycle()
+    {:ok, view, html} = live(conn, "/")
+    assert html =~ "AwaitingConfirmation"
+
+    view
+    |> element(~s(button[phx-click="confirm_spec"]))
+    |> render_click()
+
+    assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
+    assert render(view) =~ "BuildingBaseline"
+  end
+
+  test "shows Reference preparation progress next to the confirmation action", %{
+    conn: conn,
+    token: token
+  } do
+    conn = conn |> get("/?token=#{token}") |> recycle()
+    {:ok, view, _html} = live(conn, "/")
+
+    snapshot =
+      Campaign.snapshot()
+      |> Map.merge(%{
+        status: :resolving_references,
+        reference_progress: %{
+          id: "LeetCUDA",
+          completed: 8,
+          total: 16,
+          status: :materializing
+        }
+      })
+
+    send(view.pid, {:campaign_updated, snapshot})
+    assert eventually(fn -> render(view) =~ "8/16 已完成 · 当前 LeetCUDA" end)
+
+    html = render(view)
+    assert html =~ "正在准备 Reference 仓库"
+    assert html =~ "正在准备 References…"
+    assert html =~ ~s(phx-click="confirm_spec" disabled)
+  end
+
+  test "shows live Baseline validation progress without rendering every metric", %{
+    conn: conn,
+    token: token
+  } do
+    conn = conn |> get("/?token=#{token}") |> recycle()
+    {:ok, view, _html} = live(conn, "/")
+
+    metrics =
+      for case_index <- 1..12, metric_index <- 1..3 do
+        %{
+          case_id: "case_#{case_index}",
+          metric_id: "metric_#{metric_index}",
+          value: 10.0,
+          unit: "us",
+          noise_tolerance: 0.005,
+          valid_pair_count: 8_000,
+          pair_count: 10_000
+        }
+      end
+
+    snapshot =
+      Campaign.snapshot()
+      |> Map.merge(%{
+        status: :building_baseline,
+        baseline_progress: %{
+          phase: :reading_samples,
+          processed_records: 125_000_000,
+          total_records: 300_000_000,
+          processed_bytes: 28_000_000_000,
+          total_bytes: 66_555_280_000,
+          completed_groups: 12_500,
+          total_groups: 30_000,
+          case_id: "case_4167",
+          metric_id: "workspace_mib",
+          max_concurrency: 32,
+          records_per_second: 160_000.0,
+          eta_seconds: 1_093.75
+        },
+        baseline: %{metrics: metrics}
+      })
+
+    send(view.pid, {:campaign_updated, snapshot})
+    assert eventually(fn -> render(view) =~ "流式校验 Pair JSONL" end)
+
+    html = render(view)
+    assert html =~ "41.7%"
+    assert html =~ "125.0M / 300.0M Pair 记录"
+    assert html =~ "160.0K 条/秒"
+    assert html =~ "预计剩余 18分14秒"
+    assert html =~ "32 路并发"
+    assert html =~ "case_4167 / workspace_mib"
+    assert html =~ "另有 6 条 Metric 结果未展开"
+    assert length(Regex.scan(~r/<tr>/, html)) == 31
   end
 
   test "renders Backend execution as one collapsed gray activity row", %{

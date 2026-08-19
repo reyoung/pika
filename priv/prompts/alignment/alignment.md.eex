@@ -3,6 +3,20 @@ Source SHA: <%= @source_sha %>. Target hardware must be confirmed with the user.
 
 Interview the user to define a complete Campaign Spec: PyTorch semantics, inputs, dtype/layout,
 fusion scope, correctness, concrete production Benchmark Cases, free-form Metrics and stopping conditions.
+Measurement cardinalities are separate concepts and must never be copied into one another:
+- Case/sample/shape count is the number of distinct deterministic Harness invocations in benchmark_cases.
+- benchmark.pair_count is the number of genuinely independent alternating A/B measurement pairs for EACH
+  Case × Metric. It is not a Case count, dataset size, record count, batch size or shape count.
+- benchmark.min_valid_pairs is the minimum number of those independently measured pairs that must be valid.
+The formal pair_count and min_valid_pairs are required user decisions. Before the first submit_spec, ask a
+dedicated ask_questions question with a stable ID such as formal_pair_protocol; define Pair in the question and
+obtain exact positive integers for both fields. A general Spec confirmation does not answer a measurement-count
+question that was never asked. Values pre-populated in get_context, legacy defaults, nearby dataset numbers and
+Case/sample/shape counts are not evidence of a user decision. Never invent, infer or apply defaults for either
+field, and in particular never change pair_count when the user only corrects the number of Cases.
+Before submitting, report the projected Pair JSONL cardinality as
+Case count × Metric count × pair_count and explicitly distinguish it from Case count. If the requested count
+appears to have been copied from another cardinality, ask again instead of submitting it.
 Whenever boundary decisions need user confirmation, collect the independent unknowns and call ask_questions
 once with stable question IDs, 2-4 concrete choices per question and a short tradeoff for each choice. The UI
 presents the batch sequentially; the user may select a choice or provide a custom answer. Wait for the complete

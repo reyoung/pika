@@ -80,6 +80,12 @@ defmodule Pika.AlignmentPersistenceTest do
     assert :ok = Campaign.send_message("使用这个生产 Shape", [input_artifact])
     assert {:ok, composed} = Store.load(context.campaign.id)
 
+    assert [["blob"]] =
+             Repo.query!(
+               "SELECT typeof(state_blob) FROM campaign_runtime_snapshots WHERE campaign_id = ?",
+               [context.campaign.id]
+             ).rows
+
     assert %{role: :user, content: "使用这个生产 Shape", attachments: [^input_artifact]} =
              List.last(composed.messages)
 
@@ -97,12 +103,26 @@ defmodule Pika.AlignmentPersistenceTest do
                "spec" => AlignmentFixtures.spec()
              })
 
+    [[case_id_before]] =
+      Repo.query!(
+        "SELECT id FROM benchmark_cases WHERE spec_revision_id = (SELECT current_spec_revision_id FROM campaigns WHERE id = ?)",
+        [context.campaign.id]
+      ).rows
+
     assert {:ok, %{digest: digest}} =
              Campaign.mcp_call(
                @token,
                "submit_harness",
                Map.put(harness_args, "idempotency_key", "harness-1")
              )
+
+    [[case_id_after]] =
+      Repo.query!(
+        "SELECT id FROM benchmark_cases WHERE spec_revision_id = (SELECT current_spec_revision_id FROM campaigns WHERE id = ?)",
+        [context.campaign.id]
+      ).rows
+
+    assert case_id_after == case_id_before
 
     assert Campaign.snapshot().status == :awaiting_confirmation
     assert is_binary(digest)
@@ -143,7 +163,7 @@ defmodule Pika.AlignmentPersistenceTest do
       &register_artifact(&1, context.stage_workspace)
     )
 
-    assert {:ok, %{status: "selecting_iteration_sample"}} =
+    assert {:ok, %{status: "validating_baseline"}} =
              Campaign.mcp_call(@token, "submit_baseline", %{
                "idempotency_key" => "baseline-1",
                "measured_sha" => best_sha,
@@ -152,6 +172,8 @@ defmodule Pika.AlignmentPersistenceTest do
                "profiler_artifact" => profiler,
                "summary" => "persistent fixture baseline"
              })
+
+    assert eventually(fn -> Campaign.snapshot().status == :selecting_iteration_sample end)
 
     assert Repo.query!("SELECT status FROM campaigns WHERE id = ?", [context.campaign.id]).rows ==
              [
@@ -225,6 +247,138 @@ defmodule Pika.AlignmentPersistenceTest do
     assert Enum.map(series, & &1.spec_revision) == [1, 2]
     assert Enum.map(series, & &1.spec_revision_id) |> Enum.uniq() |> length() == 2
     assert Enum.all?(series, &(length(&1.points) == 1))
+  end
+
+  test "restores the provider session without replaying the original kickoff", context do
+    pid = start_campaign(context)
+    harness_args = AlignmentFixtures.create_harness(context.stage_workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "resume-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "resume-harness")
+             )
+
+    assert Campaign.snapshot().status == :awaiting_confirmation
+    GenServer.stop(pid)
+
+    {:ok, durable} = Store.load(context.campaign.id)
+    durable = Map.put(durable, :provider_session_id, "persisted-provider-session")
+
+    {:ok, _pid} =
+      Campaign.start_link(
+        workspace: context.stage_workspace,
+        campaign_id: context.campaign.id,
+        persistence: Store,
+        durable_state: durable,
+        backend: :codex_app_server,
+        backend_module: Pika.Test.AlignmentAgentBackend,
+        start_backend: true,
+        resolve_references: false,
+        references: context.references,
+        mcp_url: "http://127.0.0.1:1/mcp",
+        skill: context.skill
+      )
+
+    assert eventually(fn ->
+             Enum.any?(Campaign.snapshot().messages, fn message ->
+               message.role == :system and String.contains?(message.content, "Session 已恢复")
+             end)
+           end)
+
+    snapshot = Campaign.snapshot()
+    assert snapshot.status == :awaiting_confirmation
+    refute snapshot.agent_responding
+  end
+
+  test "revalidates legacy generic Metric errors when restoring", context do
+    pid = start_campaign(context)
+
+    invalid_spec =
+      AlignmentFixtures.spec()
+      |> put_in(["metrics", Access.at(0), "direction"], "sideways")
+
+    assert {:ok, %{ready: false}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "invalid-metric-spec",
+               "spec" => invalid_spec
+             })
+
+    assert {:ok, durable} = Store.load(context.campaign.id)
+    GenServer.stop(pid)
+
+    legacy = put_in(durable, [:spec_result, :errors], ["Metrics have invalid fields"])
+    _pid = start_campaign(context, legacy)
+    snapshot = Campaign.snapshot()
+
+    assert "metrics[0].direction: must be one of minimize, maximize" in snapshot.spec_errors
+    refute "Metrics have invalid fields" in snapshot.spec_errors
+  end
+
+  test "requires reconfirmation when legacy state changed the Harness after confirmation",
+       context do
+    pid = start_campaign(context)
+    harness_args = AlignmentFixtures.create_harness(context.stage_workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "legacy-confirmed-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "legacy-confirmed-harness")
+             )
+
+    assert :ok = Campaign.confirm_spec()
+    assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
+    assert {:ok, durable} = Store.load(context.campaign.id)
+    GenServer.stop(pid)
+
+    legacy = %{durable | status: :drafting_spec}
+    _pid = start_campaign(context, legacy)
+    snapshot = Campaign.snapshot()
+
+    assert snapshot.status == :awaiting_confirmation
+    assert snapshot.required_operations == []
+    assert snapshot.last_error =~ "请重新确认"
+  end
+
+  test "materializes definitions only after a draft Spec becomes valid", context do
+    _pid = start_campaign(context)
+
+    invalid_spec =
+      AlignmentFixtures.spec()
+      |> update_in(["benchmark"], &Map.delete(&1, "pair_count"))
+
+    assert {:ok, %{ready: false}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "incomplete-spec",
+               "spec" => invalid_spec
+             })
+
+    assert [[0, 0]] = definition_counts(context.campaign.id)
+
+    valid_spec =
+      put_in(invalid_spec, ["benchmark", "pair_count"], AlignmentFixtures.pair_count())
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "completed-spec",
+               "spec" => valid_spec
+             })
+
+    assert [[1, 1]] = definition_counts(context.campaign.id)
   end
 
   defp start_campaign(context, durable \\ nil) do
@@ -321,10 +475,24 @@ defmodule Pika.AlignmentPersistenceTest do
         best_revision_id, benchmark_case_id, metric_definition_id, measured_sha,
         value, baseline_value, improvement_ratio, mad, noise_tolerance,
         pair_count, valid_pair_count, source, measured_at
-      ) VALUES (?, ?, ?, ?, 9.0, 9.0, 0.0, 0.001, 0.005, 30, 30, 'baseline', ?)
+      ) VALUES (?, ?, ?, ?, 9.0, 9.0, 0.0, 0.001, 0.005, 7, 7, 'baseline', ?)
       """,
       [best_id, case_id, metric_id, sha, now]
     )
+  end
+
+  defp definition_counts(campaign_id) do
+    Repo.query!(
+      """
+      SELECT
+        (SELECT COUNT(*) FROM benchmark_cases
+         WHERE spec_revision_id = campaigns.current_spec_revision_id),
+        (SELECT COUNT(*) FROM metric_definitions
+         WHERE spec_revision_id = campaigns.current_spec_revision_id)
+      FROM campaigns WHERE id = ?
+      """,
+      [campaign_id]
+    ).rows
   end
 
   defp eventually(fun, attempts \\ 50)

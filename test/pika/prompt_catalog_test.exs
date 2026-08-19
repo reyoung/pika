@@ -22,6 +22,15 @@ defmodule Pika.PromptCatalogTest do
     assert alignment =~ "min/max ranges"
     assert alignment =~ "user-initiated Turn"
     assert alignment =~ "ask_questions"
+    assert alignment =~ "required user decisions"
+    assert alignment =~ "formal_pair_protocol"
+
+    assert alignment =~
+             "It is not a Case count, dataset size, record count, batch size or shape count"
+
+    assert alignment =~ "Case count × Metric count × pair_count"
+    assert alignment =~ "never change pair_count when the user only corrects the number of Cases"
+    assert alignment =~ "Never invent, infer or apply defaults for either"
     refute alignment =~ "call ask_question with"
 
     assert {:ok, setup} = PromptCatalog.render(:setup_merge, %{source_sha: "abc"})
@@ -40,6 +49,9 @@ defmodule Pika.PromptCatalogTest do
     assert baseline =~ "submit_iteration_sample"
     assert baseline =~ "exactly 8 alternating self-pairs"
     assert baseline =~ "at least 6 valid pairs"
+    assert baseline =~ "genuinely independent A/B execution"
+    assert baseline =~ "Never duplicate, relabel, interpolate or"
+    assert baseline =~ "do not manufacture a larger JSONL"
 
     benchmark = %{"pair_count" => 8, "min_valid_pairs" => 6}
 

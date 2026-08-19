@@ -43,6 +43,35 @@ defmodule Pika.ReferenceCatalogTest do
     assert Git.run!(Path.join(setup, "ref/local"), ["rev-parse", "HEAD"]) == sha
   end
 
+  test "reports materialization progress for each selected Reference" do
+    first_source = AlignmentFixtures.git_repo()
+    second_source = AlignmentFixtures.git_repo()
+    setup_source = AlignmentFixtures.git_repo()
+    setup = Path.join(AlignmentFixtures.temp_dir("pika-reference-progress"), "setup")
+    Git.run!(setup_source, ["worktree", "add", setup])
+    test_pid = self()
+
+    entries = [
+      frozen_entry("first", first_source, true),
+      entry("ignored", Path.join(first_source, "missing"), false),
+      frozen_entry("second", second_source, true)
+    ]
+
+    assert {:ok, _materialized} =
+             ReferenceCatalog.materialize_selected(setup, entries,
+               on_progress: &send(test_pid, {:progress, &1})
+             )
+
+    assert_receive {:progress, %{id: "first", completed: 0, total: 2, status: :materializing}}
+
+    assert_receive {:progress, %{id: "first", completed: 1, total: 2, status: :resolved}}
+
+    assert_receive {:progress, %{id: "second", completed: 1, total: 2, status: :materializing}}
+
+    assert_receive {:progress, %{id: "second", completed: 2, total: 2, status: :resolved}}
+    refute_receive {:progress, %{id: "ignored"}}
+  end
+
   defp entry(id, url, selected) do
     %{
       id: id,
@@ -52,6 +81,15 @@ defmodule Pika.ReferenceCatalogTest do
       status: :unresolved,
       sha: nil,
       branch: nil
+    }
+  end
+
+  defp frozen_entry(id, source, selected) do
+    %{
+      entry(id, source, selected)
+      | status: :resolved,
+        sha: Git.run!(source, ["rev-parse", "HEAD"]),
+        branch: Git.run!(source, ["branch", "--show-current"])
     }
   end
 end

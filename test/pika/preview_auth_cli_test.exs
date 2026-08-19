@@ -53,8 +53,16 @@ defmodule Pika.PreviewAuthCLITest do
                "/tmp/repo",
                "--alignment-backend",
                "cursor",
+               "--alignment-model",
+               "cursor-test",
+               "--alignment-effort",
+               "xhigh",
                "--iteration-backend",
                "codex",
+               "--iteration-model",
+               "codex-test",
+               "--iteration-effort",
+               "max",
                "--iteration-agents",
                "3",
                "--max-attempts",
@@ -65,7 +73,11 @@ defmodule Pika.PreviewAuthCLITest do
 
     assert opts[:workspace] == "/tmp/pika-workspace"
     assert opts[:alignment_backend] == "cursor"
+    assert opts[:alignment_model] == "cursor-test"
+    assert opts[:alignment_effort] == "xhigh"
     assert opts[:iteration_backend] == "codex"
+    assert opts[:iteration_model] == "codex-test"
+    assert opts[:iteration_effort] == "max"
     assert opts[:iteration_agents] == 3
     assert opts[:max_attempts] == 12
     assert opts[:yes]
@@ -75,6 +87,8 @@ defmodule Pika.PreviewAuthCLITest do
     assert {:error, _message} = CLI.parse_init(["--backend", "unknown"])
     assert {:error, _message} = CLI.parse_init(["--alignment-backend", "unknown"])
     assert {:error, _message} = CLI.parse_init(["--iteration-backend", "unknown"])
+    assert {:error, _message} = CLI.parse_init(["--alignment-effort", "infinite"])
+    assert {:error, _message} = CLI.parse_init(["--iteration-effort", "infinite"])
     assert {:ok, legacy} = CLI.parse_init(["--backend", "cursor", "--yes"])
     assert legacy[:backend] == "cursor"
     assert {:error, _message} = CLI.parse_init(["a", "b"])

@@ -5,11 +5,10 @@ defmodule Pika.Alignment.ArtifactStore do
     with {:ok, absolute} <- resolve(workspace_root, relative_path),
          {:ok, stat} <- File.stat(absolute),
          true <- stat.type == :regular,
-         {:ok, contents} <- File.read(absolute) do
-      sha256 = :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower)
-
-      expected_sha = attrs[:sha256] || attrs["sha256"]
-      expected_size = attrs[:size] || attrs["size"]
+         {:ok, sha256, hashed_size} <- hash_file(absolute),
+         true <- hashed_size == stat.size do
+      expected_sha = attr(attrs, :sha256)
+      expected_size = attr(attrs, :size)
 
       cond do
         expected_sha && expected_sha != sha256 ->
@@ -22,16 +21,38 @@ defmodule Pika.Alignment.ArtifactStore do
           {:ok,
            %{
              id: Pika.AgentBackend.Id.new("artifact"),
-             kind: attrs[:kind] || attrs["kind"] || "generic",
+             kind: attr(attrs, :kind, "generic"),
              relative_path: Path.relative_to(absolute, Path.expand(workspace_root)),
              sha256: sha256,
-             size: stat.size,
-             mime: attrs[:mime] || attrs["mime"] || MIME.from_path(absolute),
-             metadata: attrs[:metadata] || attrs["metadata"] || %{}
+             size: hashed_size,
+             mime: attr(attrs, :mime, MIME.from_path(absolute)),
+             metadata: attr(attrs, :metadata, %{})
            }}
       end
     else
       false -> {:error, :not_a_regular_file}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def verified(workspace_root, relative_path, sha256, size, attrs \\ %{})
+      when is_binary(sha256) and is_integer(size) do
+    with {:ok, absolute} <- resolve(workspace_root, relative_path),
+         {:ok, stat} <- File.stat(absolute),
+         true <- stat.type == :regular,
+         true <- stat.size == size do
+      {:ok,
+       %{
+         id: Pika.AgentBackend.Id.new("artifact"),
+         kind: attr(attrs, :kind, "generic"),
+         relative_path: Path.relative_to(absolute, Path.expand(workspace_root)),
+         sha256: sha256,
+         size: size,
+         mime: attr(attrs, :mime, MIME.from_path(absolute)),
+         metadata: attr(attrs, :metadata, %{})
+       }}
+    else
+      false -> {:error, :artifact_changed_during_validation}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -80,4 +101,24 @@ defmodule Pika.Alignment.ArtifactStore do
         end
     end
   end
+
+  defp hash_file(path) do
+    path
+    |> File.stream!([], 1_048_576)
+    |> Enum.reduce({:crypto.hash_init(:sha256), 0}, fn chunk, {context, size} ->
+      {:crypto.hash_update(context, chunk), size + byte_size(chunk)}
+    end)
+    |> then(fn {context, size} ->
+      sha256 = context |> :crypto.hash_final() |> Base.encode16(case: :lower)
+      {:ok, sha256, size}
+    end)
+  rescue
+    File.Error -> {:error, :artifact_unreadable}
+  end
+
+  defp attr(attrs, key, default \\ nil)
+  defp attr(attrs, key, default) when is_list(attrs), do: Keyword.get(attrs, key, default)
+
+  defp attr(attrs, key, default) when is_map(attrs),
+    do: Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key)) || default
 end

@@ -7,8 +7,8 @@ defmodule Pika.Test.OptimizationFixtures do
   def setup_campaign(opts \\ []) do
     max_attempts = Keyword.get(opts, :max_attempts, 3)
     plan_enabled = Keyword.get(opts, :plan_enabled, false)
-    pair_count = Keyword.get(opts, :pair_count, 30)
-    min_valid_pairs = Keyword.get(opts, :min_valid_pairs, div(pair_count * 4 + 4, 5))
+    pair_count = Keyword.get(opts, :pair_count, AlignmentFixtures.pair_count())
+    min_valid_pairs = Keyword.get(opts, :min_valid_pairs, AlignmentFixtures.min_valid_pairs())
     root = CampaignFixtures.workspace()
     config_path = CampaignFixtures.config_file(config(max_attempts, plan_enabled))
     {:ok, config} = Config.load(config_path, workspace: root)
@@ -69,7 +69,7 @@ defmodule Pika.Test.OptimizationFixtures do
 
   def write_iteration_artifacts(workspace_root, attempt_id, base_sha, candidate_sha, opts \\ []) do
     improvement = Keyword.get(opts, :improvement, 0.02)
-    pair_count = Keyword.get(opts, :pair_count, 30)
+    pair_count = Keyword.get(opts, :pair_count, AlignmentFixtures.pair_count())
     valid_count = Keyword.get(opts, :valid_count, pair_count)
     samples_relative = "artifacts/logs/#{attempt_id}/pairs.jsonl"
     correctness_relative = "artifacts/logs/#{attempt_id}/correctness.json"

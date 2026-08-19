@@ -1,6 +1,12 @@
 defmodule Pika.Test.AlignmentFixtures do
   alias Pika.Git
 
+  @fixture_pair_count 7
+  @fixture_min_valid_pairs 5
+
+  def pair_count, do: @fixture_pair_count
+  def min_valid_pairs, do: @fixture_min_valid_pairs
+
   def temp_dir(prefix) do
     suffix = :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)
     path = Path.join(System.tmp_dir!(), "#{prefix}-#{suffix}")
@@ -61,8 +67,8 @@ defmodule Pika.Test.AlignmentFixtures do
       "benchmark" => %{
         "harness_path" => "kernel/bench.py",
         "warmup" => 10,
-        "pair_count" => 30,
-        "min_valid_pairs" => 24,
+        "pair_count" => @fixture_pair_count,
+        "min_valid_pairs" => @fixture_min_valid_pairs,
         "retry_limit" => 1
       },
       "stopping" => %{"max_attempts" => 10, "metric_goals" => [], "mode" => "all_goals"},
@@ -88,7 +94,12 @@ defmodule Pika.Test.AlignmentFixtures do
     }
   end
 
-  def write_baseline_artifacts(workspace, sha, skill_sha, valid_count \\ 30) do
+  def write_baseline_artifacts(
+        workspace,
+        sha,
+        skill_sha,
+        valid_count \\ @fixture_pair_count
+      ) do
     samples_relative = "artifacts/baseline/samples.jsonl"
     correctness_relative = "artifacts/baseline/correctness.json"
     profiler_relative = "artifacts/profiles/profiler.json"
@@ -106,7 +117,7 @@ defmodule Pika.Test.AlignmentFixtures do
     File.mkdir_p!(Path.dirname(parsed))
 
     records =
-      for index <- 0..29 do
+      for index <- 0..(@fixture_pair_count - 1) do
         %{
           "schema_version" => 1,
           "measured_sha" => sha,
@@ -169,4 +180,25 @@ defmodule Pika.Test.AlignmentFixtures do
       "artifacts/profiles/analysis/metrics.json",
       "artifacts/profiles/afs-trail.log"
     ]
+
+  def write_baseline_manifest(workspace, sha, summary \\ "fixture baseline") do
+    relative_path = "artifacts/baseline/manifest.json"
+    absolute_path = Path.join(workspace.root, relative_path)
+    File.mkdir_p!(Path.dirname(absolute_path))
+
+    File.write!(
+      absolute_path,
+      Jason.encode!(%{
+        "schema_version" => 1,
+        "measured_sha" => sha,
+        "summary" => summary,
+        "samples_artifact" => "artifacts/baseline/samples.jsonl",
+        "correctness_artifact" => "artifacts/baseline/correctness.json",
+        "profiler_artifact" => "artifacts/profiles/profiler.json",
+        "profiler_dependencies" => baseline_dependency_paths()
+      })
+    )
+
+    relative_path
+  end
 end

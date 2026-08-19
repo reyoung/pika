@@ -43,8 +43,8 @@ defmodule PikaWeb.ControlLiveTest do
                    improvement_ratio: 0.02,
                    mad: 0.001,
                    noise_tolerance: 0.005,
-                   pair_count: 30,
-                   valid_pair_count: 30
+                   pair_count: 7,
+                   valid_pair_count: 7
                  }
                ],
                context.best_sha
@@ -173,5 +173,84 @@ defmodule PikaWeb.ControlLiveTest do
       |> post("/api/control/pause", Jason.encode!(%{}))
 
     assert json_response(replay, 200)["status"] == "paused"
+  end
+
+  test "coalesces Domain Event bursts and ignores duplicate event topics", %{
+    conn: conn,
+    marker: marker
+  } do
+    conn = init_test_session(conn, %{pika_auth: marker})
+
+    {:ok, view, _html} =
+      live_isolated(conn, PikaWeb.ControlLive, session: %{"pika_auth" => marker})
+
+    duplicate_topic_queries =
+      capture_repo_queries(view.pid, fn ->
+        Phoenix.PubSub.broadcast(
+          Pika.PubSub,
+          "pika:optimization:events",
+          {:integration_event, %{event_type: "attempt_running"}}
+        )
+
+        Process.sleep(80)
+      end)
+
+    assert duplicate_topic_queries == []
+
+    burst_queries =
+      capture_repo_queries(view.pid, fn ->
+        send(view.pid, {:domain_event, %{event_type: "one"}})
+        send(view.pid, {:domain_event, %{event_type: "two"}})
+        send(view.pid, {:domain_event, %{event_type: "three"}})
+        Process.sleep(100)
+        :sys.get_state(view.pid)
+      end)
+
+    assert Enum.count(burst_queries, &String.contains?(&1, "FROM domain_events")) == 1
+    refute Enum.any?(burst_queries, &String.contains?(&1, "benchmark_cases"))
+    refute Enum.any?(burst_queries, &String.contains?(&1, "FROM best_metrics"))
+
+    spec_refresh_queries =
+      capture_repo_queries(view.pid, fn ->
+        send(view.pid, {:domain_event, %{event_type: "sampling_advanced"}})
+        Process.sleep(100)
+        :sys.get_state(view.pid)
+      end)
+
+    assert Enum.count(
+             spec_refresh_queries,
+             &String.contains?(&1, "FROM sampling_revision_cases")
+           ) == 1
+  end
+
+  defp capture_repo_queries(query_pid, fun) do
+    ref = make_ref()
+    handler = {__MODULE__, ref}
+    owner = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:pika, :repo, :query],
+        fn _event, _measurements, metadata, {pid, caller, tag} ->
+          if self() == caller, do: send(pid, {tag, to_string(metadata.query)})
+        end,
+        {owner, query_pid, ref}
+      )
+
+    try do
+      fun.()
+      receive_queries(ref, [])
+    after
+      :telemetry.detach(handler)
+    end
+  end
+
+  defp receive_queries(ref, queries) do
+    receive do
+      {^ref, query} -> receive_queries(ref, [query | queries])
+    after
+      0 -> Enum.reverse(queries)
+    end
   end
 end

@@ -128,6 +128,7 @@ h2 { font-size: 20px; margin-bottom: 0; }
 .case-card, .metric-card, .artifact-card { border: 1px solid #2a3d47; border-radius: 11px; background: #0d1a20; padding: 12px; margin-top: 9px; }
 .case-card strong, .metric-card strong { display: block; }
 .case-card small, .metric-card small { color: #7f939e; }
+.case-list-note { margin: 10px 0 0; padding: 8px 10px; border: 1px solid #2e424a; border-radius: 8px; color: #82969f; background: #ffffff05; font-size: 11px; }
 .case-type { color: #b8f35a; font-size: 11px; text-transform: uppercase; }
 .metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 .spec-actions { display: flex; gap: 9px; padding: 18px 22px; position: sticky; bottom: 0; background: #0b151bf2; }
@@ -198,6 +199,11 @@ code { color: #8ee8ff; }
 .baseline-progress span { flex: 1; padding: 5px; border-radius: 6px; text-align: center; font-size: 8px; }
 .baseline-progress .done { color: #b8e178; background: #b8f35a10; }
 .baseline-progress .pending { color: #697a82; background: #ffffff05; }
+.baseline-validation-progress { display: grid; gap: 7px; margin: 10px 0 14px; padding: 11px; border: 1px solid #29404a; border-radius: 8px; background: #0b171c; }
+.baseline-validation-progress > div { display: flex; justify-content: space-between; gap: 12px; color: #c6d6dc; font-size: 12px; }
+.baseline-validation-progress progress { width: 100%; height: 8px; accent-color: #8fcf58; }
+.baseline-validation-progress small { color: #81959f; font-size: 10px; }
+.baseline-validation-progress code { overflow: hidden; color: #a9bbc2; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .reference-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 9px; align-items: center; padding: 8px; border-radius: 8px; background: #ffffff03; color: #a8b7be; font-size: 10px; }
 .reference-row strong, .reference-row small { display: block; }
 .reference-row small { margin-top: 2px; color: #687a82; }
@@ -207,7 +213,12 @@ code { color: #8ee8ff; }
 .spec-diff-panel > div { display: flex; justify-content: space-between; }
 .spec-diff-panel p { color: #778a93; font-size: 10px; }
 .spec-diff-panel pre { max-height: 260px; overflow: auto; color: #92afbb; font-size: 9px; white-space: pre-wrap; }
-.review-actions { display: flex; gap: 8px; padding: 13px 16px; border-top: 1px solid #21313a; background: #0b151bf5; }
+.review-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 13px 16px; border-top: 1px solid #21313a; background: #0b151bf5; }
+.review-action-status, .review-action-error { flex: 0 0 100%; box-sizing: border-box; padding: 9px 11px; border-radius: 8px; font-size: 10px; }
+.review-action-status { border: 1px solid #31566a; background: #102a381f; color: #91c9e8; }
+.review-action-status strong, .review-action-status span { display: block; }
+.review-action-status span { margin-top: 3px; color: #7899aa; }
+.review-action-error { border: 1px solid #624932; background: #3a21141f; color: #e5b67f; }
 .review-actions button:last-child { flex: 1; }
 
 @media (max-width: 980px) {

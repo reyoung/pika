@@ -15,7 +15,7 @@ defmodule Pika.MeasurementTest do
       base_sha: base_sha,
       candidate_sha: candidate_sha,
       case_ids: ["target_case"],
-      benchmark: %{"pair_count" => 30, "min_valid_pairs" => 24},
+      benchmark: %{"pair_count" => 7, "min_valid_pairs" => 5},
       metrics: [
         %{
           "id" => "latency_us",
@@ -37,8 +37,8 @@ defmodule Pika.MeasurementTest do
     %{root: root, samples: samples, correctness: correctness, context: context}
   end
 
-  test "recomputes the formal 30-pair result from raw alternating records", context do
-    write_pairs(context.samples, context.context, 30, fn index ->
+  test "recomputes the user-sized formal result from raw alternating records", context do
+    write_pairs(context.samples, context.context, 7, fn index ->
       baseline = 10.0 + index / 10_000
       {baseline, baseline * 0.98, true}
     end)
@@ -52,17 +52,17 @@ defmodule Pika.MeasurementTest do
 
     assert metric.case_id == "target_case"
     assert metric.metric_id == "latency_us"
-    assert metric.pair_count == 30
-    assert metric.valid_pair_count == 30
+    assert metric.pair_count == 7
+    assert metric.valid_pair_count == 7
     assert_in_delta metric.improvement_ratio, 0.02, 1.0e-12
     assert_in_delta metric.value / metric.baseline_value, 0.98, 1.0e-9
     assert metric.noise_tolerance >= 0.005
   end
 
   test "rejects the wrong pair count, non-alternating order, and failed correctness", context do
-    write_pairs(context.samples, context.context, 29, fn _index -> {10.0, 9.8, true} end)
+    write_pairs(context.samples, context.context, 6, fn _index -> {10.0, 9.8, true} end)
 
-    assert {:error, {:wrong_pair_count, "target_case", "latency_us", 29, 30}} =
+    assert {:error, {:wrong_pair_count, "target_case", "latency_us", 6, 7}} =
              Measurement.evaluate_iteration(
                context.samples,
                context.correctness,
@@ -72,7 +72,7 @@ defmodule Pika.MeasurementTest do
     write_pairs(
       context.samples,
       context.context,
-      30,
+      7,
       fn _index -> {10.0, 9.8, true} end,
       fn _index -> "bc" end
     )
@@ -100,12 +100,12 @@ defmodule Pika.MeasurementTest do
              )
   end
 
-  test "requires at least 24 valid pairs", context do
-    write_pairs(context.samples, context.context, 30, fn index ->
-      {10.0, 9.8, index < 23}
+  test "requires the user-specified minimum valid pairs", context do
+    write_pairs(context.samples, context.context, 7, fn index ->
+      {10.0, 9.8, index < 4}
     end)
 
-    assert {:error, {:insufficient_valid_pairs, "target_case", "latency_us", 23}} =
+    assert {:error, {:insufficient_valid_pairs, "target_case", "latency_us", 4}} =
              Measurement.evaluate_iteration(
                context.samples,
                context.correctness,
@@ -113,7 +113,7 @@ defmodule Pika.MeasurementTest do
              )
   end
 
-  test "uses the Campaign formal pair protocol instead of a global 30-pair constant", context do
+  test "uses the Campaign formal pair protocol without a global pair constant", context do
     configured = %{
       context.context
       | benchmark: %{"pair_count" => 8, "min_valid_pairs" => 6}
@@ -130,14 +130,14 @@ defmodule Pika.MeasurementTest do
              Measurement.evaluate_iteration(context.samples, context.correctness, configured)
   end
 
-  test "integration escalates an invalid screen to one independent 30-pair result", context do
+  test "integration escalates an invalid screen to the user-sized formal result", context do
     full = Path.join(context.root, "full.jsonl")
 
     write_pairs(context.samples, context.context, 5, fn index ->
       {10.0, 9.8, index < 3}
     end)
 
-    write_pairs(full, context.context, 30, fn _index -> {10.0, 9.8, true} end)
+    write_pairs(full, context.context, 7, fn _index -> {10.0, 9.8, true} end)
 
     assert {:ok, result} =
              Measurement.evaluate_integration(
@@ -151,7 +151,7 @@ defmodule Pika.MeasurementTest do
     assert result.escalated == [{"target_case", "latency_us"}]
     assert result.regressions == []
 
-    assert [%{source: "integration_full", pair_count: 30, valid_pair_count: 30}] =
+    assert [%{source: "integration_full", pair_count: 7, valid_pair_count: 7}] =
              result.metrics
   end
 
@@ -188,7 +188,7 @@ defmodule Pika.MeasurementTest do
     }
 
     write_pairs(context.samples, informational, 5, fn _index -> {10.0, 10.2, true} end)
-    write_pairs(full, informational, 30, fn _index -> {10.0, 10.2, true} end)
+    write_pairs(full, informational, 7, fn _index -> {10.0, 10.2, true} end)
 
     assert {:ok, result} =
              Measurement.evaluate_integration(

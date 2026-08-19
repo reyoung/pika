@@ -5,7 +5,7 @@ defmodule Pika.Config do
 
   @root_fields ~w(server backend campaign prompts sync)
   @server_fields ~w(host port)
-  @backend_fields ~w(type command protocol_config)
+  @backend_fields ~w(type command model reasoning_effort protocol_config)
   @campaign_fields ~w(plan max_attempts history_n iteration_agents reference_catalog stop_conditions)
   @prompt_fields ~w(alignment setup_merge baseline plan iteration integration sync)
   @sync_fields ~w(remote branch)
@@ -125,6 +125,8 @@ defmodule Pika.Config do
     port = Keyword.get(opts, :port) || server["port"] || 8080
     type = backend["type"] || "codex_app_server"
     command = backend["command"] || default_command(type)
+    model = backend["model"]
+    reasoning_effort = backend["reasoning_effort"]
     protocol_config = backend["protocol_config"] || %{}
     plan = Map.get(campaign, "plan", false)
     max_attempts = Map.get(campaign, "max_attempts")
@@ -137,7 +139,7 @@ defmodule Pika.Config do
       errors ++
         validate_host(host) ++
         validate_port(port) ++
-        validate_backend(type, command, protocol_config) ++
+        validate_backend(type, command, model, reasoning_effort, protocol_config) ++
         validate_campaign(
           plan,
           max_attempts,
@@ -154,16 +156,21 @@ defmodule Pika.Config do
          {:ok, source_path} <- canonical_file(path) do
       prompt_paths = resolve_prompt_paths(prompts, source_path)
 
+      backend_config =
+        %{
+          "type" => type,
+          "command" => normalize_command(command),
+          "protocol_config" => protocol_config
+        }
+        |> put_optional("model", model)
+        |> put_optional("reasoning_effort", reasoning_effort)
+
       immutable = %{
         "workspace" => workspace,
         "repo_mode" => if(repo, do: "managed_repo", else: "owned_repo"),
         "managed_repo" => if(repo, do: %{"canonical_path" => repo}, else: nil),
         "listen" => %{"host" => host, "port" => port},
-        "backend" => %{
-          "type" => type,
-          "command" => normalize_command(command),
-          "protocol_config" => protocol_config
-        },
+        "backend" => backend_config,
         "prompts" => prompt_paths
       }
 
@@ -249,13 +256,14 @@ defmodule Pika.Config do
 
   defp immutable_comparison(immutable) do
     managed = immutable["managed_repo"]
+    backend = Map.take(immutable["backend"] || %{}, ~w(type command protocol_config))
 
     %{
       "workspace" => immutable["workspace"],
       "repo_mode" => immutable["repo_mode"],
       "managed_repo" => if(managed, do: Map.take(managed, ["canonical_path"]), else: nil),
       "listen" => immutable["listen"],
-      "backend" => immutable["backend"],
+      "backend" => backend,
       "prompts" => immutable["prompts"] || %{}
     }
   end
@@ -279,7 +287,7 @@ defmodule Pika.Config do
   defp validate_port(port) when is_integer(port) and port in 1..65_535, do: []
   defp validate_port(_), do: ["server.port: must be an integer from 1 through 65535"]
 
-  defp validate_backend(type, command, protocol_config) do
+  defp validate_backend(type, command, model, reasoning_effort, protocol_config) do
     []
     |> maybe_error(
       type not in @backend_types,
@@ -289,6 +297,8 @@ defmodule Pika.Config do
       not valid_command?(command),
       "backend.command: must be a command string or a non-empty list of strings"
     )
+    |> Kernel.++(validate_optional_string(model, "backend.model"))
+    |> Kernel.++(validate_effort(reasoning_effort, "backend"))
     |> maybe_error(not is_map(protocol_config), "backend.protocol_config: must be a mapping")
   end
 
@@ -431,6 +441,9 @@ defmodule Pika.Config do
 
   defp maybe_error(errors, false, _message), do: errors
   defp maybe_error(errors, true, message), do: errors ++ [message]
+
+  defp put_optional(map, _key, nil), do: map
+  defp put_optional(map, key, value), do: Map.put(map, key, value)
 
   defp valid_command?(command) when is_binary(command), do: String.trim(command) != ""
 

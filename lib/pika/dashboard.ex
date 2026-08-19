@@ -3,10 +3,15 @@ defmodule Pika.Dashboard do
 
   alias Pika.{AttemptStore, Control, Repo, SyncCoordinator}
 
-  def snapshot(campaign_id \\ current_campaign_id()) do
+  def snapshot(campaign_id \\ current_campaign_id(), opts \\ []) do
     attempts = AttemptStore.attempts(campaign_id, limit: 1_000) |> Enum.sort_by(& &1.ordinal)
     sessions = AttemptStore.sessions(campaign_id)
     revisions = spec_revisions(campaign_id)
+
+    spec =
+      Keyword.get_lazy(opts, :spec, fn ->
+        optional(&AttemptStore.campaign_spec_overview/1, campaign_id)
+      end)
 
     attempts =
       Enum.map(attempts, fn attempt ->
@@ -19,8 +24,6 @@ defmodule Pika.Dashboard do
         })
       end)
 
-    context = optional(&AttemptStore.campaign_context/1, campaign_id)
-
     %{
       control: Control.snapshot(campaign_id),
       attempts: attempts,
@@ -28,7 +31,7 @@ defmodule Pika.Dashboard do
       metrics: metric_points(attempts),
       events: AttemptStore.events(campaign_id, 0, 2_000),
       sync: sync_snapshot(),
-      spec: context && public_spec(context)
+      spec: spec
     }
   end
 
@@ -76,17 +79,6 @@ defmodule Pika.Dashboard do
       end)
     end)
     |> Enum.sort_by(&{&1.measured_at, &1.ordinal, &1.case_id, &1.metric_id})
-  end
-
-  defp public_spec(context) do
-    %{
-      revision: context.spec_revision.revision,
-      cases: context.cases,
-      metrics: context.metrics,
-      sampling_revision: context.sampling_revision,
-      sampled_case_ids: context.sampled_case_ids,
-      protected_paths: context.protected_paths
-    }
   end
 
   defp spec_revisions(campaign_id) do

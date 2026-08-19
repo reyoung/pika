@@ -66,7 +66,7 @@ Backend-specific 注入方式：
 
 ### `register_artifact`
 
-参数：`kind`、Workspace 相对路径、SHA-256、大小、MIME、metadata。Pika 校验路径、文件存在性和哈希后登记。
+参数：`kind`、Workspace 相对路径、SHA-256、大小、MIME、metadata。Pika 使用有界内存流式校验路径、文件存在性和哈希后登记。Baseline 使用下面的单 Manifest 流程，不需要逐个调用本工具。
 
 ## 3. Boundary Role
 
@@ -84,7 +84,9 @@ Backend-specific 注入方式：
 
 ### `submit_baseline`
 
-Boundary Agent 在已核验的 Best SHA 上完成正确性、每个 Case/Metric 的 Campaign Spec 正式 Pair 数（默认 30）交替自配对、以及至少一个 Target Case 的 Profiler 后，提交 raw Pair JSONL、正确性报告、Profiler manifest 和 Summary 的 Artifact 引用。Pika 读取原始文件并重新计算 Baseline 中位数、Pair delta、MAD、有效 Pair 数和 `max(0.5%, 3×1.4826×MAD)`；不接受 Agent 预计算值作为权威结果。有效 Pair 少于 Spec 的 `min_valid_pairs`（默认 24）时只允许整组重跑一次。
+Boundary Agent 在已核验的 Best SHA 上完成正确性、每个 Case/Metric 按用户在 Campaign Spec 中指定的正式 Pair 数交替自配对、以及至少一个 Target Case 的 Profiler 后，把所有输出写入本地 Artifact Workspace，并创建一个小型 JSON Manifest。Manifest 包含 `schema_version`、`measured_sha`、`summary`、`samples_artifact`、`correctness_artifact`、`profiler_artifact` 和完整的 `profiler_dependencies` 相对路径列表。`submit_baseline` 的首选参数只有 `idempotency_key` 与 `manifest_artifact`；原始数据不经过 MCP。旧的逐项 Artifact 引用参数暂时兼容。
+
+Pair JSONL 按 Spec 的 Case 顺序、Metric 顺序和递增 `pair_index` 分组写入。Pika 立即返回 `validating_baseline`，随后在 Campaign GenServer 之外以有界内存单次扫描原始文件：同一遍扫描完成 SHA-256、字节数、Pair 完整性以及 Baseline 中位数、Pair delta、MAD、有效 Pair 数和 `max(0.5%, 3×1.4826×MAD)` 的计算。其余 Manifest 文件由 Pika 在后台流式登记。校验期间 `get_context` 与 UI 快照保持可用并报告记录/分组进度。Agent 收到 accepted 响应后不应重复提交，等待 Pika 主动通知最终结果。不接受 Agent 预计算值作为权威结果。有效 Pair 少于用户指定的 `min_valid_pairs` 时只允许整组重跑一次。
 
 ### `submit_iteration_sample`
 

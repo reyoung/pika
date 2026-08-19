@@ -29,9 +29,11 @@ defmodule Pika.InitTest do
                    host: "127.0.0.1",
                    port: 18_081,
                    alignment_backend: "cursor",
+                   alignment_model: "alignment-test-model",
+                   alignment_effort: "max",
                    iteration_backend: "codex",
-                   model: "iteration-test-model",
-                   effort: "xhigh",
+                   iteration_model: "iteration-test-model",
+                   iteration_effort: "xhigh",
                    iteration_agents: 2,
                    max_attempts: 7,
                    sync_remote: "origin",
@@ -56,6 +58,8 @@ defmodule Pika.InitTest do
              Config.load(Path.join(workspace, "pika.yaml"), workspace: workspace, repo: repo)
 
     assert config.backend["type"] == "cursor_acp"
+    assert config.backend["model"] == "alignment-test-model"
+    assert config.backend["reasoning_effort"] == "max"
     assert config.campaign["max_attempts"] == 7
 
     assert Enum.map(config.campaign["iteration_agents"], & &1["name"]) ==
@@ -88,8 +92,10 @@ defmodule Pika.InitTest do
         "",
         "",
         "18082",
-        "cursor",
-        "codex",
+        "2",
+        "2",
+        "xhigh",
+        "1",
         "2",
         "high",
         "2",
@@ -103,15 +109,26 @@ defmodule Pika.InitTest do
       capture_io(input, fn ->
         assert {:ok, result} =
                  Init.run(
-                   model_catalog: fn "codex_app_server" ->
-                     {:ok,
-                      [
-                        %{
-                          id: "codex-test-model",
-                          label: "Codex Test",
-                          description: "Deterministic fixture model"
-                        }
-                      ]}
+                   model_catalog: fn
+                     "cursor_acp" ->
+                       {:ok,
+                        [
+                          %{
+                            id: "cursor-test-model",
+                            label: "Cursor Test",
+                            description: "Deterministic Cursor fixture model"
+                          }
+                        ]}
+
+                     "codex_app_server" ->
+                       {:ok,
+                        [
+                          %{
+                            id: "codex-test-model",
+                            label: "Codex Test",
+                            description: "Deterministic Codex fixture model"
+                          }
+                        ]}
                    end
                  )
 
@@ -121,10 +138,14 @@ defmodule Pika.InitTest do
 
     assert output =~ "Repository mode (managed/owned)"
     assert output =~ "Workspace path"
-    assert output =~ "Alignment/Baseline Agent backend (codex/cursor) [codex]:"
-    assert output =~ "Iteration Agent backend (codex/cursor) [cursor]:"
+    assert output =~ "Alignment/Baseline Agent backend type:"
+    assert output =~ "Select Alignment/Baseline Agent backend [1]:"
+    assert output =~ "Iteration Agent backend type:"
+    assert output =~ "Select Iteration Agent backend [2]:"
     refute output =~ "[codex_app_server]"
     refute output =~ "[cursor_acp]"
+    assert output =~ "Available Alignment/Baseline Agent models (cursor)"
+    assert output =~ "cursor-test-model · Cursor Test"
     assert output =~ "Available Iteration Agent models (codex)"
     assert output =~ "codex-test-model · Codex Test"
     assert output =~ "Concurrent Iteration Agents"
@@ -135,6 +156,8 @@ defmodule Pika.InitTest do
 
     assert config.port == 18_082
     assert config.backend["type"] == "cursor_acp"
+    assert config.backend["model"] == "cursor-test-model"
+    assert config.backend["reasoning_effort"] == "xhigh"
     assert Enum.all?(config.campaign["iteration_agents"], &(&1["backend"] == "codex_app_server"))
     assert Enum.all?(config.campaign["iteration_agents"], &(&1["model"] == "codex-test-model"))
     assert length(config.campaign["iteration_agents"]) == 2

@@ -167,11 +167,12 @@ defmodule Pika.Test.SyncAgentBackend do
     samples_path = Path.join(root, samples_relative)
     correctness_path = Path.join(root, correctness_relative)
     File.mkdir_p!(Path.dirname(samples_path))
+    pair_count = context.campaign.spec["benchmark"]["pair_count"]
 
     records =
       for benchmark_case <- context.campaign.cases,
           metric <- context.campaign.metrics,
-          index <- 0..29 do
+          index <- 0..(pair_count - 1) do
         baseline = 10.0 + index / 10_000
 
         %{

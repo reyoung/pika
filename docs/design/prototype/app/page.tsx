@@ -131,7 +131,7 @@ function AttemptsView() {
           <div className="message agent-message">
             <div className="message-label"><span className="agent-glyph codex">C</span> Codex · high <span>11:53</span></div>
             <p>第一次实现通过正确性，但 BLOCK_N=128 时 occupancy 从 50% 降到 37.5%。我保留 TMA，缩小 stage buffer 后重新测量。</p>
-            <div className="terminal-block"><div><span>benchmark_pair.py</span><b>运行中</b></div><pre>{`case decode_b1_s2048   baseline 38.12 μs\n                          candidate 37.64 μs\npair 18 / 30             median +1.23%`}</pre><div className="progress"><i style={{ width: "60%" }} /></div></div>
+            <div className="terminal-block"><div><span>benchmark_pair.py</span><b>运行中</b></div><pre>{`case decode_b1_s2048   baseline 38.12 μs\n                          candidate 37.64 μs\npair 6 / 8               median +1.23%`}</pre><div className="progress"><i style={{ width: "75%" }} /></div></div>
           </div>
           <div className="message event-message"><span className="pulse" />BestAdvanced 收到：Attempt #11 已合入 <code>2ae80df</code>。正式提交前必须刷新基础版本。</div>
           <div className="message agent-message"><div className="message-label"><span className="agent-glyph codex">C</span> Codex · high <span>11:58</span></div><p>收到。我会先完成当前测量，然后 rebase 到 <code>2ae80df</code>，重跑正确性和正式配对测量。</p></div>
@@ -154,7 +154,7 @@ function AttemptsView() {
 
       <aside className="attempt-inspector panel">
         <p className="eyebrow">Attempt state</p><h2>实时摘要</h2>
-        <div className="inspector-metric"><span>Latency</span><strong>37.64 μs</strong><b>+1.23%</b></div><div className="inspector-metric"><span>Correctness</span><strong>通过</strong><b className="neutral">7 / 7</b></div><div className="inspector-metric"><span>Pair samples</span><strong>18 / 30</strong><b className="neutral">MAD 0.31%</b></div>
+        <div className="inspector-metric"><span>Latency</span><strong>37.64 μs</strong><b>+1.23%</b></div><div className="inspector-metric"><span>Correctness</span><strong>通过</strong><b className="neutral">7 / 7</b></div><div className="inspector-metric"><span>Pair samples</span><strong>6 / 8</strong><b className="neutral">MAD 0.31%</b></div>
         <div className="divider" />
         <div className="inspector-section"><span>当前假设</span><p>TMA 双缓冲能隐藏 KV load latency；缩小 stage buffer 避免 occupancy 退化。</p></div>
         <div className="inspector-section"><span>未读事件</span><div className="event-card"><i />BestAdvanced<small>新 Best 2ae80df · 待刷新</small></div></div>

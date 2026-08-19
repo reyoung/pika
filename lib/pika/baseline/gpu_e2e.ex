@@ -4,6 +4,8 @@ defmodule Pika.Baseline.GPUE2E do
   alias Pika.Alignment.{Campaign, Workspace}
 
   def run(source_repo, opts \\ []) do
+    pair_count = Keyword.fetch!(opts, :pair_count)
+    min_valid_pairs = Keyword.fetch!(opts, :min_valid_pairs)
     if pid = Process.whereis(Campaign), do: GenServer.stop(pid)
     {:ok, workspace} = Workspace.prepare(source_repo, workspace: Keyword.get(opts, :workspace))
 
@@ -28,7 +30,12 @@ defmodule Pika.Baseline.GPUE2E do
         )
 
       wait!(fn -> Campaign.snapshot().backend_session_id != nil end, 120_000, :backend_start)
-      :ok = Campaign.send_message(alignment_requirements(workspace.source_sha))
+
+      :ok =
+        Campaign.send_message(
+          alignment_requirements(workspace.source_sha, pair_count, min_valid_pairs)
+        )
+
       wait!(fn -> Campaign.snapshot().status == :awaiting_confirmation end, 900_000, :alignment)
       :ok = Campaign.confirm_spec()
       wait!(fn -> Campaign.snapshot().status == :optimizing end, 10_800_000, :gpu_baseline)
@@ -77,7 +84,7 @@ defmodule Pika.Baseline.GPUE2E do
     error -> {:error, Exception.format(:error, error, __STACKTRACE__)}
   end
 
-  defp alignment_requirements(source_sha) do
+  defp alignment_requirements(source_sha, pair_count, min_valid_pairs) do
     """
     Use committed source SHA #{source_sha}; uncommitted source-repo files are intentionally absent.
     This is the real Alignment H20 acceptance for the existing WeLM v4.5 80A3 verify-attention mega-kernel.
@@ -86,7 +93,8 @@ defmodule Pika.Baseline.GPUE2E do
     pika_alignment/. Build a normalized Harness around the committed verify fixture/benchmark for exactly three
     representative target trace cases: indices 5493, 1104 and 179. Target hardware is H20/sm_90a.
     The only performance Metric is latency_us (us, minimize, target, 1% threshold). Correctness uses the repo's
-    established BF16 tolerance rtol=atol=3e-2. Use warmup=10, pair_count=30, min_valid_pairs=24, retry_limit=1.
+    established BF16 tolerance rtol=atol=3e-2. The user-selected measurement protocol is warmup=10,
+    pair_count=#{pair_count}, min_valid_pairs=#{min_valid_pairs}, retry_limit=1.
     Stop after max_attempts=10 with mode all_goals. Do not use or copy files absent from this committed clone.
     Submit Campaign Spec v1 and Harness through MCP; do not confirm on the user's behalf and do not push.
     """

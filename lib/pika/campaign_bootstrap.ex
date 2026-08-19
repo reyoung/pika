@@ -72,7 +72,10 @@ defmodule Pika.CampaignBootstrap do
       campaign_id: campaign.id,
       persistence: Store,
       durable_state: durable,
+      resume_session_id: resume_session_id(durable, campaign.id, backend_name),
       backend: backend_name,
+      model: backend["model"],
+      reasoning_effort: backend["reasoning_effort"] || :high,
       backend_profile: %{
         command: command,
         args: args,
@@ -101,6 +104,14 @@ defmodule Pika.CampaignBootstrap do
 
   defp revision(%{spec_result: %{spec: %{"revision" => value}}}) when is_integer(value), do: value
   defp revision(_durable), do: 1
+
+  defp resume_session_id(durable, campaign_id, backend) when is_map(durable) do
+    if Map.has_key?(durable, :provider_session_id),
+      do: durable.provider_session_id,
+      else: Store.latest_provider_session(campaign_id, backend)
+  end
+
+  defp resume_session_id(_durable, _campaign_id, _backend), do: nil
 
   defp backend_command("codex_app_server", [command, "app-server", "--listen", "stdio://"]),
     do: {command, []}

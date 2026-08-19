@@ -82,11 +82,54 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
     assert get_in(thread_start, ["payload", "params", "developerInstructions"]) ==
              "Pika system instructions"
 
+    assert get_in(thread_start, ["payload", "params", "ephemeral"]) == false
+
     first_turn = Enum.find(records, &(get_in(&1, ["payload", "method"]) == "turn/start"))
 
     assert get_in(first_turn, ["payload", "params", "input"]) == [
              %{"type" => "text", "text" => "complete"}
            ]
+  end
+
+  test "resumes a persisted Codex thread instead of starting a new one" do
+    profile = %{
+      backend: :codex_app_server,
+      command: System.find_executable("mix"),
+      args: ["run", "--no-compile", "--no-start", fake_provider(), "--"],
+      env: %{"PIKA_FAKE_PROTOCOL" => "codex"},
+      artifact_dir: temp_dir("codex-resume")
+    }
+
+    {:ok, backend} =
+      AgentBackend.start_link(Pika.AgentBackend.CodexAppServer, profile, self())
+
+    assert {:ok, session} =
+             AgentBackend.open_session(
+               backend,
+               File.cwd!(),
+               "fake-model",
+               :low,
+               %{
+                 url: "http://127.0.0.1:1/mcp",
+                 token: "resume-secret",
+                 resume_session_id: "persisted-codex-thread"
+               },
+               [],
+               "Pika resumed instructions"
+             )
+
+    assert session.backend_session_id == "persisted-codex-thread"
+    assert session.resumed
+    assert session.resume_error == nil
+
+    methods =
+      for %{"direction" => "out", "payload" => %{"method" => method}} <-
+            JSONLWriter.replay(session.jsonl_path),
+          do: method
+
+    assert "thread/resume" in methods
+    refute "thread/start" in methods
+    assert :ok = AgentBackend.close_session(backend)
   end
 
   defp assert_event(type) do

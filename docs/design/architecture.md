@@ -99,7 +99,7 @@ close_session(session)
 capabilities(session)
 ```
 
-Codex adapter 通过 `initialize → initialized → thread/start → turn/start` 驱动 App Server，将 `item/*`、`turn/*` 通知转换为标准事件。Cursor adapter 驱动 ACP `initialize → session/new → session/prompt`，把 `session/update` 转换为同一事件集合。标准事件只表达会话、Turn、消息、Plan、工具、命令、文件、usage、完成与错误，不携带 provider wire struct。
+Codex adapter 通过 `initialize → initialized → thread/start|thread/resume → turn/start` 驱动 App Server，将 `item/*`、`turn/*` 通知转换为标准事件。Cursor adapter 驱动 ACP `initialize → session/new|session/load → session/prompt`，把 `session/update` 转换为同一事件集合。标准事件只表达会话、Turn、消息、Plan、工具、命令、文件、usage、完成与错误，不携带 provider wire struct。
 
 Codex 每个 Session 通过进程级 config override 注入 Pika MCP URL、Bearer Token 环境变量和 `required=true`，并用 `skills/extraRoots/set`/`skills/list` 加载 Skill。Cursor 则通过 ACP Session 配置注入 MCP 与 Skill roots。
 

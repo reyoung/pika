@@ -21,17 +21,21 @@ defmodule Pika.AgentBackend.CodexAppServer do
          {:ok, _} <- rpc(server, "initialize", initialize_params()),
          :ok <- notify(server, "initialized", %{}),
          :ok <- configure_skills(server, cwd, skill_roots),
-         {:ok, response} <-
-           rpc(
+         {:ok, response, resumed, resume_error} <-
+           open_thread(
              server,
-             "thread/start",
-             thread_start_params(cwd, model, reasoning_effort, instructions)
+             Map.get(mcp, :resume_session_id),
+             cwd,
+             model,
+             reasoning_effort,
+             instructions
            ),
          {:ok, backend_session_id} <- fetch_id(response, ["thread", "id"]),
          {:ok, session} <-
            GenServer.call(
              server,
-             {:establish_session, backend_session_id, cwd, model, reasoning_effort, skill_roots}
+             {:establish_session, backend_session_id, cwd, model, reasoning_effort, skill_roots,
+              resumed, resume_error}
            ) do
       {:ok, session}
     end
@@ -176,7 +180,11 @@ defmodule Pika.AgentBackend.CodexAppServer do
     {:reply, result, state}
   end
 
-  def handle_call({:establish_session, backend_id, cwd, model, effort, skill_roots}, _from, state) do
+  def handle_call(
+        {:establish_session, backend_id, cwd, model, effort, skill_roots, resumed, resume_error},
+        _from,
+        state
+      ) do
     session = %Session{
       id: state.session_id,
       backend: :codex_app_server,
@@ -185,7 +193,9 @@ defmodule Pika.AgentBackend.CodexAppServer do
       cwd: cwd,
       model: model,
       reasoning_effort: effort,
-      jsonl_path: state.jsonl_path
+      jsonl_path: state.jsonl_path,
+      resumed: resumed,
+      resume_error: resume_error
     }
 
     state = %{
@@ -219,6 +229,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
        http_mcp: true,
        system_instructions: :developer_instructions,
        skill_roots: true,
+       provider_resume: :thread_resume,
        provider_resume_required: false
      }, state}
   end
@@ -453,6 +464,31 @@ defmodule Pika.AgentBackend.CodexAppServer do
     end
   end
 
+  defp open_thread(server, resume_session_id, cwd, model, effort, instructions)
+       when is_binary(resume_session_id) and resume_session_id != "" do
+    case rpc(
+           server,
+           "thread/resume",
+           thread_resume_params(resume_session_id, cwd, model, effort, instructions)
+         ) do
+      {:ok, response} ->
+        {:ok, response, true, nil}
+
+      {:error, resume_error} ->
+        with {:ok, response} <-
+               rpc(server, "thread/start", thread_start_params(cwd, model, effort, instructions)) do
+          {:ok, response, false, resume_error}
+        end
+    end
+  end
+
+  defp open_thread(server, _resume_session_id, cwd, model, effort, instructions) do
+    with {:ok, response} <-
+           rpc(server, "thread/start", thread_start_params(cwd, model, effort, instructions)) do
+      {:ok, response, false, nil}
+    end
+  end
+
   defp thread_start_params(cwd, model, reasoning_effort, instructions) do
     compact(%{
       "cwd" => cwd,
@@ -460,7 +496,19 @@ defmodule Pika.AgentBackend.CodexAppServer do
       "developerInstructions" => instructions,
       "approvalPolicy" => "never",
       "sandbox" => "danger-full-access",
-      "ephemeral" => true,
+      "ephemeral" => false,
+      "config" => compact(%{"model_reasoning_effort" => normalize_effort(reasoning_effort)})
+    })
+  end
+
+  defp thread_resume_params(thread_id, cwd, model, reasoning_effort, instructions) do
+    compact(%{
+      "threadId" => thread_id,
+      "cwd" => cwd,
+      "model" => model,
+      "developerInstructions" => instructions,
+      "approvalPolicy" => "never",
+      "sandbox" => "danger-full-access",
       "config" => compact(%{"model_reasoning_effort" => normalize_effort(reasoning_effort)})
     })
   end

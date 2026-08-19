@@ -236,7 +236,7 @@ defmodule Pika.AttemptCoordinator do
   end
 
   defp dispatch_available(state) do
-    case Store.campaign_context(state.campaign_id) do
+    case Store.dispatch_state(state.campaign_id) do
       {:ok, %{status: "optimizing", dispatch_gate: gate}} when gate in [nil, ""] ->
         Enum.reduce(0..(length(state.profiles) - 1), state, &dispatch_slot/2)
 

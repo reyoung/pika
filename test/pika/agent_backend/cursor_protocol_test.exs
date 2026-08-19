@@ -144,6 +144,48 @@ defmodule Pika.AgentBackend.CursorProtocolTest do
     assert "session/close" in methods
   end
 
+  test "loads a persisted ACP session when the provider advertises loadSession" do
+    workspace = git_workspace("cursor-resume-workspace")
+
+    profile = %{
+      backend: :cursor_acp,
+      command: System.find_executable("mix"),
+      args: ["run", "--no-compile", "--no-start", fake_provider(), "--"],
+      env: %{"PIKA_FAKE_PROTOCOL" => "cursor"},
+      artifact_dir: temp_dir("cursor-resume")
+    }
+
+    {:ok, backend} = AgentBackend.start_link(Pika.AgentBackend.CursorACP, profile, self())
+
+    assert {:ok, session} =
+             AgentBackend.open_session(
+               backend,
+               workspace,
+               nil,
+               :low,
+               %{
+                 url: "http://127.0.0.1:1/mcp",
+                 token: "resume-secret",
+                 resume_session_id: "persisted-cursor-session"
+               },
+               [],
+               "Pika resumed instructions"
+             )
+
+    assert session.backend_session_id == "persisted-cursor-session"
+    assert session.resumed
+    assert session.resume_error == nil
+
+    methods =
+      for %{"direction" => "out", "payload" => %{"method" => method}} <-
+            JSONLWriter.replay(session.jsonl_path),
+          do: method
+
+    assert "session/load" in methods
+    refute "session/new" in methods
+    assert :ok = AgentBackend.close_session(backend)
+  end
+
   defp assert_event(type) do
     receive do
       {:pika_backend_event, %{type: ^type} = event} -> event

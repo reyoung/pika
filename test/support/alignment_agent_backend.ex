@@ -3,7 +3,7 @@ defmodule Pika.Test.AlignmentAgentBackend do
 
   alias Pika.AgentBackend.{Event, Id, Session}
   alias Pika.Git
-  alias Pika.Alignment.{ArtifactStore, Campaign}
+  alias Pika.Alignment.Campaign
   alias Pika.Test.AlignmentFixtures
 
   def start_link(_profile, sink),
@@ -13,15 +13,18 @@ defmodule Pika.Test.AlignmentAgentBackend do
       end)
 
   def open_session(server, cwd, model, effort, mcp, _skill_roots, instructions) do
+    resume_session_id = Map.get(mcp, :resume_session_id)
+
     session = %Session{
       id: Id.new("session"),
       backend: :alignment_fake,
       backend_protocol: "alignment-fake-v1",
-      backend_session_id: Id.new("provider"),
+      backend_session_id: resume_session_id || Id.new("provider"),
       cwd: cwd,
       model: model,
       reasoning_effort: effort,
-      jsonl_path: "/dev/null"
+      jsonl_path: "/dev/null",
+      resumed: is_binary(resume_session_id)
     }
 
     Agent.update(
@@ -116,42 +119,45 @@ defmodule Pika.Test.AlignmentAgentBackend do
   defp baseline(state) do
     snapshot = Campaign.snapshot()
 
+    cond do
+      snapshot.status == :selecting_iteration_sample ->
+        submit_iteration_sample(state)
+
+      snapshot.baseline_progress ->
+        :ok
+
+      true ->
+        submit_baseline_artifacts(state, snapshot)
+    end
+  end
+
+  defp submit_baseline_artifacts(state, snapshot) do
     workspace = %{
       root: snapshot.workspace.root,
       artifacts: Path.join(snapshot.workspace.root, "artifacts")
     }
 
-    [samples, correctness, profiler] =
-      AlignmentFixtures.write_baseline_artifacts(workspace, snapshot.best_sha, snapshot.skill.sha)
-
-    Enum.each(
-      [samples, correctness, profiler] ++ AlignmentFixtures.baseline_dependency_paths(),
-      fn relative ->
-        {:ok, artifact} = ArtifactStore.register(workspace.root, relative)
-
-        {:ok, _} =
-          Campaign.mcp_call(state.mcp.token, "register_artifact", %{
-            "idempotency_key" => "fake-artifact-#{relative}",
-            "kind" => "baseline",
-            "relative_path" => relative,
-            "sha256" => artifact.sha256,
-            "size" => artifact.size,
-            "mime" => artifact.mime,
-            "metadata" => %{}
-          })
-      end
+    AlignmentFixtures.write_baseline_artifacts(
+      workspace,
+      snapshot.best_sha,
+      snapshot.skill.sha
     )
+
+    manifest =
+      AlignmentFixtures.write_baseline_manifest(
+        workspace,
+        snapshot.best_sha,
+        "fake end-to-end baseline"
+      )
 
     {:ok, _} =
       Campaign.mcp_call(state.mcp.token, "submit_baseline", %{
         "idempotency_key" => "fake-baseline",
-        "measured_sha" => snapshot.best_sha,
-        "samples_artifact" => samples,
-        "correctness_artifact" => correctness,
-        "profiler_artifact" => profiler,
-        "summary" => "fake end-to-end baseline"
+        "manifest_artifact" => manifest
       })
+  end
 
+  defp submit_iteration_sample(state) do
     {:ok, _} =
       Campaign.mcp_call(state.mcp.token, "submit_iteration_sample", %{
         "idempotency_key" => "fake-sampling",

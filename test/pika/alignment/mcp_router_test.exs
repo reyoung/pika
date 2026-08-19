@@ -65,6 +65,11 @@ defmodule Pika.Alignment.MCP.RouterTest do
 
     refute Enum.any?(tools, &(&1["name"] == "ask_question"))
 
+    baseline_tool = Enum.find(tools, &(&1["name"] == "submit_baseline"))
+    baseline_schema = baseline_tool["inputSchema"]
+    assert baseline_schema["required"] == ["idempotency_key"]
+    assert %{"required" => ["manifest_artifact"]} in baseline_schema["oneOf"]
+
     questions_tool = Enum.find(tools, &(&1["name"] == "ask_questions"))
     questions_schema = get_in(questions_tool, ["inputSchema", "properties", "questions"])
     assert questions_schema["minItems"] == 1

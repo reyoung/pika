@@ -53,7 +53,7 @@ Stage0 Demo 是 Phase 0 Backend 之上的一次性内存纵切，不是 Phase 1 
 }
 ```
 
-每个 Campaign Spec Case/Metric 组合必须恰好出现 `pair_index=0..pair_count-1`。Pika 只使用 finite、positive 且 `valid=true` 的 Pair；少于 `min_valid_pairs` 时要求一次整组重跑，第二次仍不足则保留 `BuildingBaseline` 和错误。默认协议为 30 / 24。
+每个 Campaign Spec Case/Metric 组合必须恰好出现 `pair_index=0..pair_count-1`。Pika 只使用 finite、positive 且 `valid=true` 的 Pair；少于 `min_valid_pairs` 时要求一次整组重跑，第二次仍不足则保留 `BuildingBaseline` 和错误。`pair_count` 与 `min_valid_pairs` 均由用户在 Alignment 中指定，没有全局默认值。
 
 ## 已完成验证
 
@@ -64,6 +64,8 @@ Stage0 Demo 是 Phase 0 Backend 之上的一次性内存纵切，不是 Phase 1 
 - dirty repo 的 committed-HEAD re-clone 已验证：未提交文件不会进入 Workspace；在无外部并发变化的集成测试中，源 repo 原始 SHA/status 前后完全一致。
 
 ## 真实 H20 结果
+
+以下是一次历史运行的证据；该次运行的用户输入显式选择了 `pair_count=30` 和 `min_valid_pairs=24`，这些数字不是 Pika 默认值。
 
 - [x] 从 `/Users/yuyang/projs/welm_v45_80a3_attention` 的 committed SHA `fc55f8f` 建立独立 clone；16 条当时未提交状态未进入验收，临时 clone 删除 `origin`。
 - [x] Codex 完成真实 Alignment、16 项 Reference SHA snapshot、Spec/Harness 确认与 Agent-owned setup squash；临时 Best 为 `2d21882`。

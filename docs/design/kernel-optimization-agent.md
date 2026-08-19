@@ -99,7 +99,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - 排队期间最佳已知版本发生变化的候选，必须由编码 Agent 在最新版本上重放、解决冲突并重新运行正确性与 Metrics 测试。只有相对最新版本仍满足接受条件时才能归并。
 - 已接受尝试由编码 Agent 自动 squash merge 到本次服务唯一的 Campaign Best Branch；源仓库启动时的原分支不被 Iteration 修改。
 - Integration 串行取得 Lease 后，必须在任何 Git mutation 前完成归并前全量回归；失败候选直接拒绝，不会短暂进入 Campaign Best Branch。
-- 初始 Baseline 对 Full Case Set 完成 Campaign Spec 声明的正式 Pair 数（默认 30）；Baseline Agent 自动选择最多十个 Case 形成首个 Sampling Revision。
+- 初始 Baseline 对 Full Case Set 完成用户在 Campaign Spec 中声明的正式 Pair 数；Baseline Agent 自动选择最多十个 Case 形成首个 Sampling Revision。
 - 日常 Attempt 只要求其启动 Sampling Revision 的正式 Metrics；Sampling Advanced 通知活动 Agent，但不强迫已运行 Attempt 返工。
 - Integration 对全量 Case/Metric 做 5 Pair 筛查；中位数回退超过当前 Best noise tolerance 或样本无效的组合按 Campaign Spec 的正式 Pair 数独立重跑。
 - 任一 Case/Metric 经正式 Pair 测量确认回退都拒绝候选，包括 Iteration 阶段的 Informational 项。
@@ -114,10 +114,10 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - 线上频率权重只用于综合评分、候选排序和 UI，不能用高频 Case 的收益抵消保护 Case 的退化。
 - 观察 Case 在 Iteration 阶段只记录和展示；归并前全量回归仍执行 universal no-regression gate。
 - 正式性能判定必须在 warmup 后交错执行 `baseline → candidate` 的多轮配对测量，使用配对比值的中位数和 MAD 自动估算每个 Metric 的噪声容忍值。
-- Baseline 和 Iteration 正式测量默认 warmup 10 次并执行 30 个 Pair，次序交替为 `baseline → candidate` 与 `candidate → baseline`。
+- Baseline 和 Iteration 正式测量在 warmup 后执行用户指定数量的 Pair，次序交替为 `baseline → candidate` 与 `candidate → baseline`。
 - 归并前全量回归先执行 5 Pair，至少 4 Pair 有效；回退超过既有 noise tolerance 或样本无效时，按 Campaign Spec 独立重跑完整正式 Pair 数并达到 `min_valid_pairs`。
 - 使用改善比例的中位数作为结果，`noise_tolerance = max(0.5%, 3 × 1.4826 × MAD)`。
-- 只有非有限值、进程失败或 GPU 错误会使 Pair 无效；普通统计离群点不裁剪。有效 Pair 少于 Campaign Spec 的 `min_valid_pairs`（默认 24）时整组重跑，再次不足则拒绝该 Attempt。
+- 只有非有限值、进程失败或 GPU 错误会使 Pair 无效；普通统计离群点不裁剪。有效 Pair 少于用户在 Campaign Spec 中指定的 `min_valid_pairs` 时整组重跑，再次不足则拒绝该 Attempt。
 - 至少一个目标指标的改善必须大于 `max(1%, noise_tolerance)`；保护指标在各自 `noise_tolerance` 内的波动不视为退化；正确性不容忍失败。
 - Iteration Agent 可以自由运行临时 Benchmark，但提交接受判断时必须使用正式配对测量 Harness。
 
@@ -175,7 +175,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 - Pika 的恢复正确性不依赖 Codex、Cursor 或其他 Agent 的会话 resume 能力。
 - Agent 异常结束或服务重启后，运行中的候选尝试标记为 `Interrupted`，原 worktree、提交和 Artifact 保留。
-- 系统通过新 Backend Session 注入任务定义、当前计划、工作区状态和最近输出，继续同一个候选尝试。
+- 系统优先恢复原 Provider Session；恢复不可用或失败时，通过新 Backend Session 注入任务定义、当前计划、工作区状态和最近输出，继续同一个候选尝试。
 - 服务启动后自动恢复正常的 Planning、Iteration 和归并前全量回归工作，不等待用户点击继续。
 - 启动恢复必须检查未完成的 Full Regression、merge 和实际 Git 状态；`Blocked` 不自动解除。
 - 无法确认 Campaign Best Branch 安全、Campaign Workspace 被外部修改或 Artifact 校验失败时，停止危险推进并通知用户。
@@ -189,7 +189,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Backend Turn 正常结束但缺少当前角色必须完成的 MCP 操作时，Pika 保持同一 Backend Session，并发送 follow-up Prompt 要求 Agent 继续完成和提交缺失工作。
 - 缺失 MCP 提交不会仅凭 Agent 自然语言中的“完成”而自动补全。
 - 缺失必需 MCP 提交没有提醒次数、Agent 更换次数或时间预算；Pika 持续驱动 Agent，直到 MCP 提交成功、用户取消或调优任务因其他停止条件结束。
-- Backend Session 或进程失效时，自动恢复流程用新会话继续上述无限重试，不因此消耗新的优化 Iteration。
+- Backend Session 或进程失效时，自动恢复流程优先 resume/load，失败时用新会话继续上述无限重试，不因此消耗新的优化 Iteration。
 - Pika 不从 Agent 的自然语言最终回答中猜测 Metrics、Commit 或完成状态。
 - 新 Plan/Iteration Prompt 默认注入最近 10 个终态 Attempt 的 Description、Summary、Outcome、Metric delta 和关键失败原因；N 可在 Server 启动配置中修改。
 - 未读 BestAdvanced、Sampling Advanced 和用户指导不受 N 限制，必须全部注入；完整历史通过 `query_attempt_history` 查询。
@@ -209,8 +209,8 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Pika 领域层只依赖 `Pika.AgentBackend` Behaviour，不依赖 Codex App Server 或 ACP wire types。
 - `Pika.AgentBackend` 固定提供 `start_link`、`open_session`、`start_turn`、`steer`、`interrupt`、`close_session` 和 `capabilities`。
 - 标准化 Backend Event 包括 `session_started`、`turn_started`、`message_delta`、`plan_updated`、`tool_started`、`tool_updated`、`tool_completed`、`command_output`、`file_changed`、`usage_updated`、`turn_completed`、`backend_error` 和 `process_exited`。
-- Codex 使用 `Pika.AgentBackend.CodexAppServer`：每个 Backend Session 启动独立 `codex app-server --listen stdio://`，执行 `initialize → initialized → thread/start → turn/start`，通过 `thread/start.developerInstructions` 注入 Agent Instructions，并把 `item/*`/`turn/*` 通知转换为标准事件。
-- Cursor 使用 `Pika.AgentBackend.CursorACP`：每个 Backend Session 启动独立 `cursor-agent acp`，执行 ACP `initialize`、`session/new`、`session/prompt` 和 `session/cancel`；由于 ACP 没有 system-instruction 字段，adapter 在临时 Workspace 安装 Git-excluded、always-on 的 `.cursor/rules` 系统规则，并在 Session 关闭时清理。`session/close` 仅在 capability 广告时调用，否则终止该 Session 的独立子进程。
+- Codex 使用 `Pika.AgentBackend.CodexAppServer`：每个 Backend Session 启动独立 `codex app-server --listen stdio://`，执行 `initialize → initialized → thread/start|thread/resume → turn/start`，通过 developer instructions 注入 Agent Instructions，并把 `item/*`/`turn/*` 通知转换为标准事件。
+- Cursor 使用 `Pika.AgentBackend.CursorACP`：每个 Backend Session 启动独立 `cursor-agent acp`，执行 ACP `initialize`、`session/new|session/load`、`session/prompt` 和 `session/cancel`；由于 ACP 没有 system-instruction 字段，adapter 在临时 Workspace 安装 Git-excluded、always-on 的 `.cursor/rules` 系统规则，并在 Session 关闭时清理。`session/load` 和 `session/close` 都按 capability 广告调用，否则分别降级为新 Session 或进程级 close。
 - Codex 当次指导使用原生 `turn/steer`，不 interrupt 当前 Turn；Cursor 由 Backend adapter 通过 cancel + follow-up Prompt 模拟 `steer`。
 - Stop Now 调用统一 `AgentBackend.interrupt`；Codex 映射到 `turn/interrupt`，Cursor 映射到 `session/cancel`。
 - 每个活跃 Backend Session 使用独立子进程、MCP Token 和配置，隔离崩溃与权限影响。

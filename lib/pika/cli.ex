@@ -49,7 +49,11 @@ defmodule Pika.CLI do
           port: :integer,
           backend: :string,
           alignment_backend: :string,
+          alignment_model: :string,
+          alignment_effort: :string,
           iteration_backend: :string,
+          iteration_model: :string,
+          iteration_effort: :string,
           model: :string,
           effort: :string,
           iteration_agents: :integer,
@@ -99,6 +103,16 @@ defmodule Pika.CLI do
       |> maybe_cli_error(
         not is_nil(opts[:effort]) and opts[:effort] not in ~w(low medium high xhigh max ultra),
         "invalid --effort"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:alignment_effort]) and
+          opts[:alignment_effort] not in ~w(low medium high xhigh max ultra),
+        "invalid --alignment-effort"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:iteration_effort]) and
+          opts[:iteration_effort] not in ~w(low medium high xhigh max ultra),
+        "invalid --iteration-effort"
       )
       |> maybe_cli_error(
         not is_nil(opts[:port]) and opts[:port] not in 1..65_535,
@@ -249,7 +263,8 @@ defmodule Pika.CLI do
         journal_mode: :wal,
         synchronous: :full,
         foreign_keys: :on,
-        busy_timeout: 5_000
+        busy_timeout: 5_000,
+        log: false
       )
 
       :ok
@@ -435,10 +450,14 @@ defmodule Pika.CLI do
       --host IP                Listen host (default 127.0.0.1)
       --port PORT              Listen port (default 8080)
       --alignment-backend B    Alignment/Baseline backend: codex|cursor
+      --alignment-model MODEL  Alignment/Baseline model (default: provider default)
+      --alignment-effort E     Alignment/Baseline reasoning effort (default high)
       --iteration-backend B    Iteration Agent backend: codex|cursor
+      --iteration-model MODEL  Iteration Agent model (default: provider default)
+      --iteration-effort E     Iteration Agent reasoning effort (default high)
       --backend codex|cursor   Set both backends (compatibility shorthand)
-      --model MODEL            Iteration model (interactive mode lists provider models)
-      --effort EFFORT          low|medium|high|xhigh|max|ultra (default high)
+      --model MODEL            Compatibility alias for --iteration-model
+      --effort EFFORT          Compatibility alias for --iteration-effort
       --iteration-agents N     Concurrent Iteration Agents (default 1)
       --max-attempts N         Campaign attempt limit (default unlimited)
       --sync-remote NAME       Configure a Git sync remote

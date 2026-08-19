@@ -7,17 +7,32 @@ Each Pair JSONL line must contain schema_version=1, measured_sha, case_id, metri
 order=ab|ba, numeric a/b, valid and error. Produce exactly <%= @pair_count %> alternating self-pairs
 with at least <%= @min_valid_pairs %> valid pairs for every Full Case Set × Metric
 combination, download all raw outputs, correctness, profiler and remote cleanup evidence into
-<%= @artifacts %>, and register them. Do not add or change Metrics after Spec confirmation.
+<%= @artifacts %>. Do not add or change Metrics after Spec confirmation.
+Every pair_index must represent a genuinely independent A/B execution. Never duplicate, relabel, interpolate or
+expand one measured value into multiple Pair records to satisfy pair_count. If the available raw measurements are
+fewer than the confirmed protocol requires, rerun the Harness. If pair_count appears to be a Case/sample/shape
+count, or satisfying it would require synthetic duplication, stop and ask the user to revise the Campaign Spec;
+do not manufacture a larger JSONL merely because validation reports wrong_pair_count.
+Write the Pair JSONL in canonical Campaign Spec order: benchmark_cases order first, then metrics order,
+with pair_index increasing from 0 through <%= @pair_count - 1 %> inside each contiguous Case/Metric group.
+Pika validates this file as a bounded-memory stream and rejects interleaved or reordered groups.
 
 Use the injected ncu-report-skill for at least one target Case. On AFS record proxy status before and after,
-visible workload output, exact exit status, and cleanup. The profiler manifest must list registered
+visible workload output, exact exit status, and cleanup. The profiler manifest must list local
 report_paths and remote_evidence_paths plus schema_version=1, measured_sha, case_id, skill_sha, tool,
 the exact collection command, profile_directory under artifacts/profiles/, and summary. It must also contain
 parser={skill: "ncu-report-skill", command: <exact parser command>, output_paths: [...]}; every parser output
-must be registered, non-empty, inside profile_directory, and at least one output must be valid JSON. The
+must be non-empty, inside profile_directory, listed in profiler_dependencies, and at least one output must be valid JSON. The
 correctness JSON must contain measured_sha and every case_id with passed=true. Copy final outputs to the
-Artifact Workspace, remove untracked profiler/harness files from the temporary Best worktree, verify git
-status is clean, then call submit_baseline.
+Artifact Workspace, remove untracked profiler/harness files from the temporary Best worktree, and verify git
+status is clean. Then write one JSON manifest under artifacts/baseline/ with schema_version=1, measured_sha,
+summary, samples_artifact, correctness_artifact, profiler_artifact and profiler_dependencies. Every Artifact
+value must be a Workspace-relative path under artifacts/; profiler_dependencies must contain every report,
+parser output and remote evidence path referenced by the profiler manifest. Do not call register_artifact for
+these Baseline files. Call submit_baseline once with only idempotency_key and manifest_artifact. Pika accepts
+the local manifest quickly, streams and hashes the samples in one background pass, and registers the local
+files itself. After receiving status=validating_baseline, do not resubmit. Wait for Pika to report the final
+validation result before selecting the Iteration Sample.
 
 After Pika accepts the full Baseline, select a useful initial Iteration Sample Set of at most
 <%= @max_initial_cases %> Cases. Include at least one Target Case and cover representative shape families,

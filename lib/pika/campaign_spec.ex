@@ -131,18 +131,16 @@ defmodule Pika.CampaignSpec do
 
   defp defaults(spec) do
     metrics =
-      Enum.map(list(spec["metrics"]), fn metric ->
-        Map.put_new(metric, "min_improvement_ratio", 0.01)
+      Enum.map(list(spec["metrics"]), fn
+        metric when is_map(metric) -> Map.put_new(metric, "min_improvement_ratio", 0.01)
+        metric -> metric
       end)
 
     supplied_benchmark = map(spec["benchmark"])
-    pair_count = Map.get(supplied_benchmark, "pair_count", 30)
 
     benchmark =
       %{
         "warmup" => 10,
-        "pair_count" => pair_count,
-        "min_valid_pairs" => default_min_valid_pairs(pair_count),
         "retry_limit" => 1
       }
       |> Map.merge(supplied_benchmark)
@@ -171,6 +169,9 @@ defmodule Pika.CampaignSpec do
       {"benchmark_cases", nonempty_list?(spec["benchmark_cases"])},
       {"metrics", nonempty_list?(spec["metrics"])},
       {"benchmark.harness_path", present?(get_in(spec, ["benchmark", "harness_path"]))},
+      {"benchmark.pair_count", positive_integer?(get_in(spec, ["benchmark", "pair_count"]))},
+      {"benchmark.min_valid_pairs",
+       positive_integer?(get_in(spec, ["benchmark", "min_valid_pairs"]))},
       {"iteration_sampling.max_initial_cases",
        get_in(spec, ["iteration_sampling", "max_initial_cases"]) == 10},
       {"reference_ids", nonempty_list?(spec["reference_ids"])},
@@ -197,17 +198,17 @@ defmodule Pika.CampaignSpec do
       "at least one target Benchmark Case is required"
     )
     |> add_error(
-      not Enum.any?(metrics, &(&1["role"] == "target")),
+      not Enum.any?(metrics, &(is_map(&1) and &1["role"] == "target")),
       "at least one target Metric is required"
     )
     |> add_error(not unique_ids?(cases), "Benchmark Case ids must be unique stable slugs")
-    |> add_error(not unique_ids?(metrics), "Metric ids must be unique stable slugs")
     |> add_error(Enum.any?(cases, &(not valid_case?(&1))), "Benchmark Cases have invalid fields")
     |> add_error(
       Enum.any?(cases, &range_shape?(&1["shape"])),
       "Benchmark Case shapes must be concrete; split min/max ranges into stable Case IDs"
     )
-    |> add_error(Enum.any?(metrics, &(not valid_metric?(&1))), "Metrics have invalid fields")
+    |> Kernel.++(metric_errors(metrics))
+    |> Kernel.++(duplicate_metric_id_errors(metrics))
     |> add_error(benchmark["warmup"] != 10, "benchmark warmup must equal 10")
     |> add_error(
       not positive_integer?(benchmark["pair_count"]),
@@ -270,16 +271,61 @@ defmodule Pika.CampaignSpec do
   defp nullable_positive_integer?(nil), do: true
   defp nullable_positive_integer?(value), do: positive_integer?(value)
 
-  defp default_min_valid_pairs(pair_count) when is_integer(pair_count) and pair_count > 0,
-    do: div(pair_count * 4 + 4, 5)
+  defp metric_errors(metrics) do
+    metrics
+    |> Enum.with_index()
+    |> Enum.flat_map(fn
+      {metric, index} when is_map(metric) ->
+        prefix = "metrics[#{index}]"
 
-  defp default_min_valid_pairs(_pair_count), do: 24
+        [
+          {"#{prefix}.id: must be a stable slug matching [a-z][a-z0-9_-]*", slug?(metric["id"])},
+          {"#{prefix}.name: must be a non-empty string", present?(metric["name"])},
+          {"#{prefix}.unit: must be a non-empty string", present?(metric["unit"])},
+          {"#{prefix}.direction: must be one of #{Enum.join(@directions, ", ")}",
+           metric["direction"] in @directions},
+          {"#{prefix}.role: must be one of #{Enum.join(@metric_roles, ", ")}",
+           metric["role"] in @metric_roles},
+          {"#{prefix}.min_improvement_ratio: must be a number greater than or equal to 0.01",
+           number?(metric["min_improvement_ratio"]) and
+             metric["min_improvement_ratio"] >= 0.01}
+        ]
+        |> for_failed_checks()
 
-  defp valid_metric?(metric) do
-    slug?(metric["id"]) and present?(metric["name"]) and present?(metric["unit"]) and
-      metric["direction"] in @directions and metric["role"] in @metric_roles and
-      number?(metric["min_improvement_ratio"]) and metric["min_improvement_ratio"] >= 0.01
+      {_metric, index} ->
+        ["metrics[#{index}]: must be an object"]
+    end)
   end
+
+  defp duplicate_metric_id_errors(metrics) do
+    metrics
+    |> Enum.with_index()
+    |> Enum.reduce({%{}, []}, fn
+      {metric, index}, {seen, errors} when is_map(metric) ->
+        id = metric["id"]
+
+        if slug?(id) do
+          case Map.fetch(seen, id) do
+            {:ok, first_index} ->
+              {seen,
+               errors ++
+                 ["metrics[#{index}].id: duplicates metrics[#{first_index}].id #{inspect(id)}"]}
+
+            :error ->
+              {Map.put(seen, id, index), errors}
+          end
+        else
+          {seen, errors}
+        end
+
+      {_metric, _index}, acc ->
+        acc
+    end)
+    |> elem(1)
+  end
+
+  defp for_failed_checks(checks),
+    do: for({message, false} <- checks, do: message)
 
   defp unique_ids?(items) do
     ids = Enum.map(items, & &1["id"])

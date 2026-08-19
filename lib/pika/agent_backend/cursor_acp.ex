@@ -28,14 +28,21 @@ defmodule Pika.AgentBackend.CursorACP do
            :ok <- GenServer.call(server, {:start_transport, mcp}, @rpc_timeout),
            {:ok, initialize_response} <- rpc(server, "initialize", initialize_params()),
            :ok <- GenServer.call(server, {:provider_capabilities, initialize_response}),
-           {:ok, response} <-
-             rpc(server, "session/new", session_new_params(cwd, mcp, skill_roots)),
-           {:ok, backend_session_id} <- fetch_id(response, "sessionId"),
+           {:ok, backend_session_id, resumed, resume_error} <-
+             open_cursor_session(
+               server,
+               initialize_response,
+               Map.get(mcp, :resume_session_id),
+               cwd,
+               mcp,
+               skill_roots
+             ),
            :ok <- maybe_select_model(server, backend_session_id, model),
            {:ok, session} <-
              GenServer.call(
                server,
-               {:establish_session, backend_session_id, cwd, model, reasoning_effort, skill_roots}
+               {:establish_session, backend_session_id, cwd, model, reasoning_effort, skill_roots,
+                resumed, resume_error}
              ) do
         {:ok, session}
       end
@@ -110,6 +117,7 @@ defmodule Pika.AgentBackend.CursorACP do
        wire_close: false,
        jsonl_path: nil,
        instruction_rule: nil,
+       loading_session: false,
        closed: false
      }}
   end
@@ -177,7 +185,11 @@ defmodule Pika.AgentBackend.CursorACP do
     {:reply, :ok, %{state | provider_capabilities: capabilities, wire_close: wire_close}}
   end
 
-  def handle_call({:establish_session, backend_id, cwd, model, effort, skill_roots}, _from, state) do
+  def handle_call(
+        {:establish_session, backend_id, cwd, model, effort, skill_roots, resumed, resume_error},
+        _from,
+        state
+      ) do
     session = %Session{
       id: state.session_id,
       backend: :cursor_acp,
@@ -186,7 +198,9 @@ defmodule Pika.AgentBackend.CursorACP do
       cwd: cwd,
       model: model,
       reasoning_effort: effort,
-      jsonl_path: state.jsonl_path
+      jsonl_path: state.jsonl_path,
+      resumed: resumed,
+      resume_error: resume_error
     }
 
     state = %{
@@ -251,6 +265,11 @@ defmodule Pika.AgentBackend.CursorACP do
        http_mcp: get_in(state.provider_capabilities, ["mcpCapabilities", "http"]) == true,
        system_instructions: :project_rule,
        skill_roots: :additional_directories,
+       provider_resume:
+         if(state.provider_capabilities["loadSession"] == true,
+           do: :session_load,
+           else: false
+         ),
        provider_resume_required: false
      }, state}
   end
@@ -274,6 +293,9 @@ defmodule Pika.AgentBackend.CursorACP do
   def handle_call(:process_os_pid, _from, state),
     do: {:reply, JSONLPort.os_pid(state.transport), state}
 
+  def handle_call({:loading_session, loading?}, _from, state),
+    do: {:reply, :ok, %{state | loading_session: loading?}}
+
   @impl true
   def handle_info(
         {:backend_wire, transport, %{"id" => id, "method" => method} = request},
@@ -293,7 +315,11 @@ defmodule Pika.AgentBackend.CursorACP do
         {:backend_wire, transport, %{"method" => "session/update", "params" => params}},
         %{transport: transport} = state
       ) do
-    {:noreply, map_session_update(params["update"] || %{}, state)}
+    if state.loading_session do
+      {:noreply, state}
+    else
+      {:noreply, map_session_update(params["update"] || %{}, state)}
+    end
   end
 
   def handle_info({:backend_wire, transport, _message}, %{transport: transport} = state),
@@ -619,6 +645,54 @@ defmodule Pika.AgentBackend.CursorACP do
         }
       ]
     }
+  end
+
+  defp open_cursor_session(server, initialize_response, resume_session_id, cwd, mcp, skill_roots)
+       when is_binary(resume_session_id) and resume_session_id != "" do
+    if get_in(initialize_response, ["agentCapabilities", "loadSession"]) == true do
+      :ok = GenServer.call(server, {:loading_session, true})
+
+      resume_result =
+        rpc(
+          server,
+          "session/load",
+          session_load_params(resume_session_id, cwd, mcp, skill_roots)
+        )
+
+      :ok = GenServer.call(server, {:loading_session, false})
+
+      case resume_result do
+        {:ok, _response} ->
+          {:ok, resume_session_id, true, nil}
+
+        {:error, resume_error} ->
+          open_new_cursor_session(server, cwd, mcp, skill_roots, resume_error)
+      end
+    else
+      open_new_cursor_session(server, cwd, mcp, skill_roots, :session_load_unsupported)
+    end
+  end
+
+  defp open_cursor_session(
+         server,
+         _initialize_response,
+         _resume_session_id,
+         cwd,
+         mcp,
+         skill_roots
+       ),
+       do: open_new_cursor_session(server, cwd, mcp, skill_roots, nil)
+
+  defp open_new_cursor_session(server, cwd, mcp, skill_roots, resume_error) do
+    with {:ok, response} <- rpc(server, "session/new", session_new_params(cwd, mcp, skill_roots)),
+         {:ok, backend_session_id} <- fetch_id(response, "sessionId") do
+      {:ok, backend_session_id, false, resume_error}
+    end
+  end
+
+  defp session_load_params(session_id, cwd, mcp, skill_roots) do
+    session_new_params(cwd, mcp, skill_roots)
+    |> Map.put("sessionId", session_id)
   end
 
   defp maybe_select_model(_server, _session_id, nil), do: :ok

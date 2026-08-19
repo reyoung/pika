@@ -178,7 +178,7 @@ erDiagram
 | `improvement_ratio` | REAL | 统一为正值更好 |
 | `mad` | REAL | Pair ratio MAD |
 | `noise_tolerance` | REAL | `max(0.005, 3*1.4826*MAD)` |
-| `pair_count`, `valid_pair_count` | INTEGER | Spec 声明的正式数量 / 达到 `min_valid_pairs`；默认 30 / 24 |
+| `pair_count`, `valid_pair_count` | INTEGER | 用户在 Spec 中声明的正式数量 / 实际有效数量；必须达到用户声明的 `min_valid_pairs` |
 | `source` | TEXT | `iteration`, `integration_screen`, `integration_full` |
 | `measured_at` | INTEGER | |
 
@@ -190,7 +190,7 @@ erDiagram
 
 包含 `id`（即 Pika Backend Session ID）、`campaign_id`、可选 `attempt_id`/`sync_run_id`、`role`、`slot_index`、`profile_json`、`backend`、`backend_protocol`、`backend_version`、`provider_session_id`、`backend_capabilities_json`、`model`、`reasoning_effort`、`status`、`process_pid`、`process_started_at`、`mcp_token_hash`、`log_artifact_id`、`required_operations_json`、`last_turn_sequence`、`last_event_seq`、`started_at`、`ended_at`。
 
-`backend_protocol` v0 取 `codex_app_server` 或 `cursor_acp`；`provider_session_id` 保存 Codex thread ID 或 Cursor ACP session ID，仅用于当前进程内关联和诊断，恢复正确性不依赖 provider resume。Backend 原始消息写 JSONL，SQLite 只保存标准化游标和 Session identity。
+`backend_protocol` v0 取 `codex_app_server` 或 `cursor_acp`；`provider_session_id` 保存 Codex thread ID 或 Cursor ACP session ID，并作为服务重启后的原生 resume/load 提示。恢复失败时仍由 Pika 持久化上下文重建，因此正确性不依赖 provider resume。Backend 原始消息写 JSONL，SQLite 只保存标准化游标和 Session identity。
 
 明文 MCP Token 不持久化。PID 只用于诊断和同进程监控，不能独立证明进程身份。
 

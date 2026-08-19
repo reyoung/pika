@@ -9,7 +9,9 @@ defmodule Pika.AgentBackend.Session do
     :cwd,
     :model,
     :reasoning_effort,
-    :jsonl_path
+    :jsonl_path,
+    resumed: false,
+    resume_error: nil
   ]
 
   @type t :: %__MODULE__{
@@ -20,6 +22,8 @@ defmodule Pika.AgentBackend.Session do
           cwd: Path.t(),
           model: String.t() | nil,
           reasoning_effort: atom() | String.t() | nil,
-          jsonl_path: Path.t()
+          jsonl_path: Path.t(),
+          resumed: boolean(),
+          resume_error: term() | nil
         }
 end

@@ -237,11 +237,12 @@ defmodule Pika.Test.IntegrationAgentBackend do
     maybe_crash(server, state, :during_screening)
 
     full? = regression?
+    pair_count = context.spec["benchmark"]["pair_count"]
 
     if full? and
-         not reusable_jsonl?(full_path, context, [{"guard_case", "latency_us"}], 30) do
+         not reusable_jsonl?(full_path, context, [{"guard_case", "latency_us"}], pair_count) do
       full =
-        for index <- 0..29,
+        for index <- 0..(pair_count - 1),
             do: pair(context, "guard_case", "latency_us", index, -0.02)
 
       track_measurement(state, :escalation)

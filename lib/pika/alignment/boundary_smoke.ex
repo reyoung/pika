@@ -5,6 +5,8 @@ defmodule Pika.Alignment.BoundarySmoke do
   alias Pika.Alignment.{Campaign, Workspace}
 
   def run(backend, opts \\ []) when backend in [:codex_app_server, :cursor_acp] do
+    pair_count = Keyword.fetch!(opts, :pair_count)
+    min_valid_pairs = Keyword.fetch!(opts, :min_valid_pairs)
     if pid = Process.whereis(Campaign), do: GenServer.stop(pid)
     source = create_source_repo()
     {:ok, workspace} = Workspace.prepare(source)
@@ -30,7 +32,7 @@ defmodule Pika.Alignment.BoundarySmoke do
         )
 
       assert_eventually!(fn -> Campaign.snapshot().backend_session_id != nil end, 90_000)
-      :ok = Campaign.send_message(smoke_requirements())
+      :ok = Campaign.send_message(smoke_requirements(pair_count, min_valid_pairs))
       assert_eventually!(fn -> Campaign.snapshot().status == :awaiting_confirmation end, 240_000)
       snapshot = Campaign.snapshot()
 
@@ -82,14 +84,15 @@ defmodule Pika.Alignment.BoundarySmoke do
     repo
   end
 
-  defp smoke_requirements do
+  defp smoke_requirements(pair_count, min_valid_pairs) do
     """
     This is a deterministic protocol smoke. Do not ask more questions. Target H20/sm_90a.
     Define a single identity PyTorch kernel: float16 contiguous input/output [1024], no extra fusion,
     rtol=atol=0.001. Create kernel/reference.py, kernel/test_correctness.py and kernel/bench.py.
     The only Benchmark Case is target_case (n=1024, target, frequency 1.0).
     The only Metric is latency_us (us, minimize, target, 1% threshold).
-    Harness contract is warmup=10, pair_count=30, min_valid_pairs=24, retry_limit=1.
+    The user-selected Harness contract is warmup=10, pair_count=#{pair_count},
+    min_valid_pairs=#{min_valid_pairs}, retry_limit=1.
     Stop after max_attempts=10 with mode all_goals. Submit the full Campaign Spec v1 and Harness via MCP.
     Do not run GPU, do not confirm for the user, do not commit, and do not push.
     """

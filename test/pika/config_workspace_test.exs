@@ -15,6 +15,46 @@ defmodule Pika.ConfigWorkspaceTest do
     assert config.campaign["history_n"] == 7
   end
 
+  test "loads the Alignment/Baseline Agent model and reasoning effort" do
+    workspace = CampaignFixtures.workspace()
+
+    config_path =
+      CampaignFixtures.config_file("""
+      backend:
+        type: cursor_acp
+        model: cursor-test-model
+        reasoning_effort: xhigh
+      """)
+
+    assert {:ok, config} = Config.load(config_path, workspace: workspace)
+    assert config.backend["type"] == "cursor_acp"
+    assert config.backend["model"] == "cursor-test-model"
+    assert config.backend["reasoning_effort"] == "xhigh"
+  end
+
+  test "allows Alignment/Baseline model and effort changes when recovering a Workspace" do
+    workspace = CampaignFixtures.workspace()
+
+    with_profile = fn model, effort ->
+      String.replace(
+        CampaignFixtures.default_config(),
+        "  type: codex_app_server\n",
+        "  type: codex_app_server\n  model: #{model}\n  reasoning_effort: #{effort}\n"
+      )
+    end
+
+    config_path = CampaignFixtures.config_file(with_profile.("first-model", "high"))
+    assert {:ok, config} = Config.load(config_path, workspace: workspace)
+    assert {:ok, plan} = Workspace.plan(config)
+    assert {:ok, _workspace} = Workspace.activate(plan)
+
+    File.write!(config_path, with_profile.("second-model", "xhigh"))
+
+    assert {:ok, recovered} = Config.load(config_path, workspace: workspace)
+    assert recovered.backend["model"] == "second-model"
+    assert recovered.backend["reasoning_effort"] == "xhigh"
+  end
+
   test "reports all field validation failures without guessing values" do
     yaml = """
     server:
@@ -23,6 +63,8 @@ defmodule Pika.ConfigWorkspaceTest do
     backend:
       type: mystery
       command: []
+      model: ""
+      reasoning_effort: infinite
     campaign:
       plan: yes
       max_attempts: -2
@@ -43,6 +85,8 @@ defmodule Pika.ConfigWorkspaceTest do
     assert Enum.any?(errors, &String.contains?(&1, "server.port"))
     assert Enum.any?(errors, &String.contains?(&1, "backend.type"))
     assert Enum.any?(errors, &String.contains?(&1, "backend.command"))
+    assert Enum.any?(errors, &String.contains?(&1, "backend.model"))
+    assert Enum.any?(errors, &String.contains?(&1, "backend.reasoning_effort"))
     assert Enum.any?(errors, &String.contains?(&1, "campaign.plan"))
     assert Enum.any?(errors, &String.contains?(&1, "campaign.max_attempts"))
     assert Enum.any?(errors, &String.contains?(&1, "campaign.history_n"))

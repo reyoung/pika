@@ -68,16 +68,32 @@ defmodule Pika.ReferenceCatalog do
     end)
   end
 
-  def materialize_selected(setup_root, entries) do
-    resolved =
-      Enum.map(entries, fn
-        %{selected: false} = entry -> entry
-        entry -> materialize(setup_root, entry)
+  def materialize_selected(setup_root, entries, opts \\ []) do
+    on_progress = Keyword.get(opts, :on_progress, fn _progress -> :ok end)
+    total = Enum.count(entries, & &1.selected)
+
+    {resolved, _completed} =
+      Enum.map_reduce(entries, 0, fn
+        %{selected: false} = entry, completed ->
+          {entry, completed}
+
+        entry, completed ->
+          notify_progress(on_progress, entry.id, completed, total, :materializing)
+          materialized = materialize(setup_root, entry)
+          completed = completed + 1
+          notify_progress(on_progress, entry.id, completed, total, materialized.status)
+          {materialized, completed}
       end)
 
     if Enum.any?(resolved, &(&1.selected && &1.status == :error)),
       do: {:error, resolved},
       else: {:ok, resolved}
+  end
+
+  defp notify_progress(callback, id, completed, total, status) do
+    callback.(%{id: id, completed: completed, total: total, status: status})
+  rescue
+    _error -> :ok
   end
 
   defp materialize(setup_root, entry) do

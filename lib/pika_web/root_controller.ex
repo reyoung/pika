@@ -6,9 +6,10 @@ defmodule PikaWeb.RootController do
       if Application.get_env(:pika, :runtime_mode, :preview) == :serve do
         campaign = Pika.Persistence.current_campaign()
 
-        if campaign && campaign.status in ~w(optimizing draining completed paused blocked stopped),
-          do: PikaWeb.ControlLive,
-          else: PikaWeb.AlignmentLive
+        if campaign &&
+             campaign.status in ~w(optimizing draining completed paused blocked stopped),
+           do: PikaWeb.ControlLive,
+           else: PikaWeb.AlignmentLive
       else
         PikaWeb.AlignmentLive
       end

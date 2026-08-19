@@ -1,6 +1,8 @@
 defmodule PikaWeb.AlignmentLive do
   use PikaWeb, :live_view
 
+  @benchmark_case_display_limit 10
+
   alias Pika.Alignment.{ArtifactStore, Campaign}
   alias PikaWeb.Markdown
 
@@ -81,7 +83,15 @@ defmodule PikaWeb.AlignmentLive do
   end
 
   def handle_event("confirm_spec", _params, socket) do
-    {:noreply, assign_result(socket, Campaign.confirm_spec())}
+    result = Campaign.confirm_spec()
+
+    socket =
+      case result do
+        :ok -> assign(socket, :snapshot, Campaign.snapshot())
+        _error -> socket
+      end
+
+    {:noreply, assign_result(socket, result)}
   end
 
   def handle_event("toggle_diff", _params, socket) do
@@ -401,7 +411,7 @@ defmodule PikaWeb.AlignmentLive do
                   <span>{shape_source_label(shape_source(@snapshot), length(cases(@snapshot)))}</span>
                 </div>
                 <div class="case-list">
-                  <article :for={case_ <- cases(@snapshot)} class="case-row">
+                  <article :for={case_ <- visible_cases(@snapshot)} class="case-row">
                     <div class="case-heading">
                       <div>
                         <span class={"role-badge role-#{case_["kind"]}"}>{role_label(case_["kind"])}</span>
@@ -426,6 +436,9 @@ defmodule PikaWeb.AlignmentLive do
                     </p>
                   </article>
                 </div>
+                <p :if={hidden_case_count(@snapshot) > 0} class="case-list-note">
+                  为保持界面流畅，仅显示前 {benchmark_case_display_limit()} 个；完整 Campaign Spec 共 {length(cases(@snapshot))} 个 Cases。
+                </p>
                 <p :if={cases(@snapshot) == []} class="empty-copy">等待 Agent 提交具体、可执行的 Cases。</p>
               </div>
             </details>
@@ -439,9 +452,9 @@ defmodule PikaWeb.AlignmentLive do
               <div class="review-content">
                 <button :if={spec_editable?(@snapshot)} class="text-action" phx-click="prepare_change" phx-value-target="measurement">要求 Agent 修改</button>
                 <div class="measurement-flow">
-                  <div><span>1</span><strong>全量 Baseline</strong><small>全部 Cases × Metrics · {nested(@snapshot.spec, ~w(benchmark pair_count))} Pair</small></div>
-                  <div><span>2</span><strong>Iteration Sample</strong><small>初始最多 10 Cases · {nested(@snapshot.spec, ~w(benchmark pair_count))} Pair</small></div>
-                  <div><span>3</span><strong>归并前全量回归</strong><small>全量 5 Pair · 异常升级 {nested(@snapshot.spec, ~w(benchmark pair_count))} Pair</small></div>
+                  <div><span>1</span><strong>全量 Baseline</strong><small>全部 Cases × Metrics · {formal_pair_label(@snapshot.spec)}</small></div>
+                  <div><span>2</span><strong>Iteration Sample</strong><small>初始最多 10 Cases · {formal_pair_label(@snapshot.spec)}</small></div>
+                  <div><span>3</span><strong>归并前全量回归</strong><small>全量 5 Pair · 异常升级 {formal_pair_label(@snapshot.spec)}</small></div>
                 </div>
                 <dl class="measurement-grid">
                   <div><dt>Harness</dt><dd>{nested(@snapshot.spec, ~w(benchmark harness_path))}</dd></div>
@@ -456,10 +469,31 @@ defmodule PikaWeb.AlignmentLive do
                   <span class={progress_class(@snapshot.status == :selecting_iteration_sample)}>Agent 选择采样</span>
                   <span class={progress_class(@snapshot.status == :optimizing)}>Optimizing</span>
                 </div>
+                <div :if={@snapshot.baseline_progress} class="baseline-validation-progress">
+                  <div>
+                    <strong>{baseline_phase_label(@snapshot.baseline_progress.phase)}</strong>
+                    <span>{format_percent_number(baseline_progress_percent(@snapshot.baseline_progress))}</span>
+                  </div>
+                  <progress max="100" value={baseline_progress_percent(@snapshot.baseline_progress)}>
+                    {format_percent_number(baseline_progress_percent(@snapshot.baseline_progress))}
+                  </progress>
+                  <small>
+                    {format_count(@snapshot.baseline_progress.processed_records)} / {format_count(@snapshot.baseline_progress.total_records)} Pair 记录
+                    · {@snapshot.baseline_progress.completed_groups} / {@snapshot.baseline_progress.total_groups} Case/Metric 组
+                  </small>
+                  <small :if={Map.get(@snapshot.baseline_progress, :records_per_second)}>
+                    {format_rate(Map.get(@snapshot.baseline_progress, :records_per_second))}
+                    · 预计剩余 {format_duration(Map.get(@snapshot.baseline_progress, :eta_seconds))}
+                    · {Map.get(@snapshot.baseline_progress, :max_concurrency, 1)} 路并发
+                  </small>
+                  <code :if={@snapshot.baseline_progress.case_id}>
+                    {@snapshot.baseline_progress.case_id} / {@snapshot.baseline_progress.metric_id}
+                  </code>
+                </div>
                 <table :if={@snapshot.baseline} class="baseline-table">
                   <thead><tr><th>Case / Metric</th><th>Value</th><th>Noise</th><th>Pairs</th></tr></thead>
                   <tbody>
-                    <tr :for={metric <- @snapshot.baseline.metrics}>
+                    <tr :for={metric <- visible_baseline_metrics(@snapshot.baseline.metrics)}>
                       <td>{metric.case_id} / {metric.metric_id}</td>
                       <td>{format_number(metric.value)} {metric.unit}</td>
                       <td>{format_percent(metric.noise_tolerance)}</td>
@@ -467,6 +501,9 @@ defmodule PikaWeb.AlignmentLive do
                     </tr>
                   </tbody>
                 </table>
+                <p :if={@snapshot.baseline && hidden_baseline_metric_count(@snapshot.baseline.metrics) > 0} class="case-list-note">
+                  为保持界面流畅，仅显示前 {benchmark_case_display_limit()} 个 Cases 的 Baseline；另有 {hidden_baseline_metric_count(@snapshot.baseline.metrics)} 条 Metric 结果未展开。
+                </p>
                 <p :if={@snapshot.baseline_error} class="missing">{@snapshot.baseline_error}</p>
               </div>
             </details>
@@ -502,14 +539,27 @@ defmodule PikaWeb.AlignmentLive do
           </div>
 
           <div class="review-actions">
+            <div :if={@snapshot.status == :resolving_references} class="review-action-status">
+              <strong>正在准备 Reference 仓库</strong>
+              <span>{reference_progress_label(@snapshot)}</span>
+            </div>
+            <div :if={confirmation_blocker(@snapshot)} class="review-action-error">
+              {confirmation_blocker(@snapshot)}
+            </div>
+            <div
+              :if={@snapshot.status == :awaiting_confirmation && @snapshot.last_error}
+              class="review-action-error"
+            >
+              {@snapshot.last_error}
+            </div>
             <button class="secondary" phx-click="toggle_diff" disabled={is_nil(@snapshot.spec_diff)}>
               {if @show_diff, do: "收起 Spec diff", else: "查看 Spec diff"}
             </button>
             <button
               class="primary"
               phx-click="confirm_spec"
-              disabled={@snapshot.status != :awaiting_confirmation}
-            >确认并建立 Baseline</button>
+              disabled={not confirmable?(@snapshot)}
+            >{confirmation_button_label(@snapshot)}</button>
           </div>
         </aside>
       </div>
@@ -540,10 +590,12 @@ defmodule PikaWeb.AlignmentLive do
       missing: [],
       spec_errors: [],
       references: [],
+      reference_progress: nil,
       harness: nil,
       baseline: nil,
       baseline_retry_count: 0,
       baseline_error: nil,
+      baseline_progress: nil,
       iteration_sampling: nil,
       sampling_revisions: [],
       best_sha: nil,
@@ -607,6 +659,14 @@ defmodule PikaWeb.AlignmentLive do
 
   defp spec_title(spec), do: spec["title"] || "定义 Kernel 优化边界"
   defp nested(map, keys), do: get_in(map, keys) || "待确认"
+
+  defp formal_pair_label(spec) do
+    case get_in(spec, ["benchmark", "pair_count"]) do
+      count when is_integer(count) and count > 0 -> "#{count} Pair"
+      _ -> "等待用户指定"
+    end
+  end
+
   defp message_label(:user), do: "你"
   defp message_label(:agent), do: "Boundary Agent"
   defp message_label(_), do: "Pika"
@@ -630,6 +690,43 @@ defmodule PikaWeb.AlignmentLive do
     do: :erlang.float_to_binary(value * 100.0, decimals: 2) <> "%"
 
   defp format_percent(_), do: "—"
+
+  defp format_percent_number(value) when is_number(value),
+    do: :erlang.float_to_binary(value * 1.0, decimals: 1) <> "%"
+
+  defp format_percent_number(_), do: "—"
+
+  defp format_count(value) when is_integer(value) and value >= 1_000_000_000,
+    do: :erlang.float_to_binary(value / 1_000_000_000, decimals: 2) <> "B"
+
+  defp format_count(value) when is_integer(value) and value >= 1_000_000,
+    do: :erlang.float_to_binary(value / 1_000_000, decimals: 1) <> "M"
+
+  defp format_count(value) when is_integer(value) and value >= 1_000,
+    do: :erlang.float_to_binary(value / 1_000, decimals: 1) <> "K"
+
+  defp format_count(value) when is_integer(value), do: Integer.to_string(value)
+  defp format_count(_), do: "—"
+
+  defp format_rate(value) when is_number(value) and value >= 0,
+    do: "#{format_count(round(value))} 条/秒"
+
+  defp format_rate(_), do: "—"
+
+  defp format_duration(value) when is_number(value) and value >= 0 do
+    seconds = round(value)
+    hours = div(seconds, 3_600)
+    minutes = div(rem(seconds, 3_600), 60)
+    seconds = rem(seconds, 60)
+
+    cond do
+      hours > 0 -> "#{hours}小时#{minutes}分"
+      minutes > 0 -> "#{minutes}分#{seconds}秒"
+      true -> "#{seconds}秒"
+    end
+  end
+
+  defp format_duration(_), do: "—"
 
   defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_048_576,
     do: "#{Float.round(bytes / 1_048_576, 1)} MB"
@@ -685,6 +782,44 @@ defmodule PikaWeb.AlignmentLive do
 
   defp metrics(snapshot), do: List.wrap(snapshot.spec["metrics"])
   defp cases(snapshot), do: List.wrap(snapshot.spec["benchmark_cases"])
+  defp benchmark_case_display_limit, do: @benchmark_case_display_limit
+  defp visible_cases(snapshot), do: Enum.take(cases(snapshot), @benchmark_case_display_limit)
+
+  defp hidden_case_count(snapshot),
+    do: max(length(cases(snapshot)) - @benchmark_case_display_limit, 0)
+
+  defp visible_baseline_metrics(metrics) do
+    visible_case_ids =
+      metrics
+      |> Enum.map(& &1.case_id)
+      |> Enum.uniq()
+      |> Enum.take(@benchmark_case_display_limit)
+      |> MapSet.new()
+
+    Enum.filter(metrics, &MapSet.member?(visible_case_ids, &1.case_id))
+  end
+
+  defp hidden_baseline_metric_count(metrics),
+    do: max(length(metrics) - length(visible_baseline_metrics(metrics)), 0)
+
+  defp baseline_progress_percent(%{phase: phase})
+       when phase in [:validating_correctness, :validating_profiler, :completed],
+       do: 100.0
+
+  defp baseline_progress_percent(%{processed_records: processed, total_records: total})
+       when is_integer(processed) and is_integer(total) and total > 0,
+       do: min(processed / total * 100.0, 100.0)
+
+  defp baseline_progress_percent(_progress), do: 0.0
+
+  defp baseline_phase_label(:queued), do: "准备校验 Baseline"
+  defp baseline_phase_label(:registering_artifacts), do: "登记本地 Artifact Manifest"
+  defp baseline_phase_label(:reading_samples), do: "流式校验 Pair JSONL"
+  defp baseline_phase_label(:validating_correctness), do: "校验 Correctness"
+  defp baseline_phase_label(:validating_profiler), do: "校验 Profiler"
+  defp baseline_phase_label(:completed), do: "Baseline 校验完成"
+  defp baseline_phase_label(_phase), do: "校验 Baseline"
+
   defp shape_source(snapshot), do: get_in(snapshot.spec, ["benchmark", "shape_source"])
 
   defp case_count_label(snapshot) do
@@ -783,6 +918,41 @@ defmodule PikaWeb.AlignmentLive do
 
   defp selected_reference_count(snapshot), do: Enum.count(snapshot.references, & &1.selected)
   defp spec_editable?(snapshot), do: snapshot.status in [:drafting_spec, :awaiting_confirmation]
+
+  defp confirmable?(snapshot),
+    do:
+      snapshot.status == :awaiting_confirmation and snapshot.spec_ready and
+        not is_nil(snapshot.harness)
+
+  defp confirmation_button_label(%{status: :resolving_references}),
+    do: "正在准备 References…"
+
+  defp confirmation_button_label(%{status: status})
+       when status in [:building_baseline, :selecting_iteration_sample, :optimizing],
+       do: "已确认，正在建立 Baseline"
+
+  defp confirmation_button_label(_snapshot), do: "确认并建立 Baseline"
+
+  defp confirmation_blocker(%{status: :awaiting_confirmation, spec_ready: false}),
+    do: "Campaign Spec 尚未通过校验，修正右侧未完成项后才能确认。"
+
+  defp confirmation_blocker(%{status: :awaiting_confirmation, harness: nil}),
+    do: "Benchmark Harness 尚未就绪，暂时不能建立 Baseline。"
+
+  defp confirmation_blocker(_snapshot), do: nil
+
+  defp reference_progress_label(%{
+         reference_progress: %{id: id, completed: completed, total: total}
+       })
+       when is_binary(id),
+       do: "#{completed}/#{total} 已完成 · 当前 #{id}"
+
+  defp reference_progress_label(%{
+         reference_progress: %{completed: completed, total: total}
+       }),
+       do: "#{completed}/#{total} 已完成"
+
+  defp reference_progress_label(_snapshot), do: "正在恢复准备进度"
 
   defp reference_status(%{status: :resolved, sha: sha}) when is_binary(sha),
     do: String.slice(sha, 0, 8)

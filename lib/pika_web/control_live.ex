@@ -2,6 +2,8 @@ defmodule PikaWeb.ControlLive do
   use PikaWeb, :live_view
 
   @tabs ~w(attempts metrics sync audit)
+  @refresh_debounce_ms 50
+  @spec_refresh_events ~w(best_advanced sampling_advanced spec_revision_advanced)
 
   @impl true
   def mount(params, session, socket) do
@@ -11,8 +13,6 @@ defmodule PikaWeb.ControlLive do
 
       if connected?(socket) do
         Phoenix.PubSub.subscribe(Pika.PubSub, Pika.Persistence.topic(campaign_id))
-        Phoenix.PubSub.subscribe(Pika.PubSub, "pika:optimization:events")
-        Phoenix.PubSub.subscribe(Pika.PubSub, "pika:sync:events")
       end
 
       snapshot = Pika.Dashboard.snapshot(campaign_id)
@@ -36,6 +36,8 @@ defmodule PikaWeb.ControlLive do
        |> assign(:sync_preview, nil)
        |> assign(:stop_armed, false)
        |> assign(:flash_message, nil)
+       |> assign(:refresh_timer, nil)
+       |> assign(:refresh_spec, false)
        |> assign(:action_keys, action_keys())}
     else
       {:ok, redirect(socket, to: "/")}
@@ -43,9 +45,17 @@ defmodule PikaWeb.ControlLive do
   end
 
   @impl true
-  def handle_info({:domain_event, _event}, socket), do: {:noreply, refresh(socket)}
-  def handle_info({:integration_event, _event}, socket), do: {:noreply, refresh(socket)}
-  def handle_info({:sync_event, _event}, socket), do: {:noreply, refresh(socket)}
+  def handle_info({:domain_event, event}, socket),
+    do: {:noreply, schedule_refresh(socket, spec_refresh_event?(event))}
+
+  def handle_info(:refresh_snapshot, socket) do
+    refresh_spec = socket.assigns.refresh_spec
+
+    {:noreply,
+     socket
+     |> assign(refresh_timer: nil, refresh_spec: false)
+     |> refresh(refresh_spec)}
+  end
 
   @impl true
   def handle_event("select_tab", %{"tab" => tab}, socket) when tab in @tabs,
@@ -393,11 +403,41 @@ defmodule PikaWeb.ControlLive do
     """
   end
 
-  defp refresh(socket) do
-    snapshot = Pika.Dashboard.snapshot(socket.assigns.campaign_id)
+  defp refresh(socket, refresh_spec \\ false) do
+    refresh_spec = refresh_spec or socket.assigns.refresh_spec
+    if socket.assigns.refresh_timer, do: Process.cancel_timer(socket.assigns.refresh_timer)
+
+    snapshot_opts = if refresh_spec, do: [], else: [spec: socket.assigns.snapshot.spec]
+    snapshot = Pika.Dashboard.snapshot(socket.assigns.campaign_id, snapshot_opts)
     selected = selected_attempt_id(snapshot, socket.assigns.selected_attempt_id)
-    assign(socket, snapshot: snapshot, selected_attempt_id: selected)
+
+    assign(socket,
+      snapshot: snapshot,
+      selected_attempt_id: selected,
+      refresh_timer: nil,
+      refresh_spec: false
+    )
   end
+
+  defp schedule_refresh(socket, refresh_spec) do
+    socket = assign(socket, :refresh_spec, socket.assigns.refresh_spec or refresh_spec)
+
+    if socket.assigns.refresh_timer do
+      socket
+    else
+      assign(
+        socket,
+        :refresh_timer,
+        Process.send_after(self(), :refresh_snapshot, @refresh_debounce_ms)
+      )
+    end
+  end
+
+  defp spec_refresh_event?(event) when is_map(event) do
+    (Map.get(event, :event_type) || Map.get(event, "event_type")) in @spec_refresh_events
+  end
+
+  defp spec_refresh_event?(_event), do: false
 
   defp control(socket, action, fun), do: control_result(socket, action, fun)
 

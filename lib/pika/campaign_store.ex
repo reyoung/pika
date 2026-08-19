@@ -6,7 +6,7 @@ defmodule Pika.CampaignStore do
   @durable_fields ~w(
     status messages artifacts spec_result spec_diff harness references skill best_sha setup_sha
     baseline baseline_retry_count baseline_error sampling_revisions iteration_sampling workflow_kickoffs
-    pending_confirmation_input last_error backend_workflow required
+    pending_confirmation_input last_error backend_workflow required provider_session_id
   )a
 
   def load(campaign_id) do
@@ -14,8 +14,19 @@ defmodule Pika.CampaignStore do
            "SELECT state_blob FROM campaign_runtime_snapshots WHERE campaign_id = ?",
            [campaign_id]
          ).rows do
-      [[blob]] -> {:ok, :erlang.binary_to_term(blob, [:safe])}
+      [[blob]] -> decode_snapshot(blob)
       [] -> :none
+    end
+  rescue
+    error -> {:error, {:runtime_snapshot_load_failed, Exception.message(error)}}
+  end
+
+  def decode_snapshot(blob) when is_binary(blob) do
+    preload_snapshot_atoms()
+
+    case :erlang.binary_to_term(blob, [:safe]) do
+      durable when is_map(durable) -> {:ok, durable}
+      _other -> {:error, {:runtime_snapshot_load_failed, "snapshot root must be a map"}}
     end
   rescue
     error -> {:error, {:runtime_snapshot_load_failed, Exception.message(error)}}
@@ -48,7 +59,7 @@ defmodule Pika.CampaignStore do
         ON CONFLICT(campaign_id) DO UPDATE SET state_blob = excluded.state_blob,
           updated_at = excluded.updated_at
         """,
-        [campaign_id, blob, now]
+        [campaign_id, {:blob, blob}, now]
       )
     end)
     |> case do
@@ -68,6 +79,22 @@ defmodule Pika.CampaignStore do
 
       {table, count}
     end
+  end
+
+  def latest_provider_session(campaign_id, backend) do
+    case Repo.query!(
+           """
+           SELECT provider_session_id FROM agent_sessions
+           WHERE campaign_id = ? AND backend = ? AND provider_session_id IS NOT NULL
+           ORDER BY started_at DESC LIMIT 1
+           """,
+           [campaign_id, to_string(backend)]
+         ).rows do
+      [[provider_session_id]] -> provider_session_id
+      [] -> nil
+    end
+  rescue
+    _error -> nil
   end
 
   def lookup_idempotency(session_id, tool, key, request_hash, _state) do
@@ -121,13 +148,16 @@ defmodule Pika.CampaignStore do
     spec = state.spec_result.spec
     revision = spec["revision"] || 1
 
-    id =
+    {id, definitions_changed?} =
       case Repo.query!(
-             "SELECT id FROM spec_revisions WHERE campaign_id = ? AND revision = ?",
+             "SELECT id, spec_json FROM spec_revisions WHERE campaign_id = ? AND revision = ?",
              [campaign_id, revision]
            ).rows do
-        [[id]] -> id
-        [] -> Ecto.UUID.generate()
+        [[id, persisted_spec_json]] ->
+          {id, definitions_changed?(persisted_spec_json, spec)}
+
+        [] ->
+          {Ecto.UUID.generate(), true}
       end
 
     status = spec_status(state.status)
@@ -176,8 +206,37 @@ defmodule Pika.CampaignStore do
       ]
     )
 
-    persist_case_metric_definitions!(id, spec)
+    if state.spec_result.ready? and
+         (definitions_changed? or not definitions_materialized?(id)) do
+      persist_case_metric_definitions!(id, spec)
+    end
+
     id
+  end
+
+  defp definitions_changed?(persisted_spec_json, spec) do
+    case Jason.decode(persisted_spec_json) do
+      {:ok, persisted_spec} ->
+        Map.take(persisted_spec, ["benchmark_cases", "metrics"]) !=
+          Map.take(spec, ["benchmark_cases", "metrics"])
+
+      _error ->
+        true
+    end
+  end
+
+  defp definitions_materialized?(spec_revision_id) do
+    [[case_count, metric_count]] =
+      Repo.query!(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM benchmark_cases WHERE spec_revision_id = ?),
+          (SELECT COUNT(*) FROM metric_definitions WHERE spec_revision_id = ?)
+        """,
+        [spec_revision_id, spec_revision_id]
+      ).rows
+
+    case_count > 0 and metric_count > 0
   end
 
   defp persist_case_metric_definitions!(spec_revision_id, spec) do
@@ -240,55 +299,64 @@ defmodule Pika.CampaignStore do
   defp persist_baseline!(_campaign_id, _spec_revision_id, %{baseline: nil}, _now), do: :ok
 
   defp persist_baseline!(campaign_id, spec_revision_id, state, now) do
-    best_revision_id =
-      case Repo.query!(
-             "SELECT id FROM best_revisions WHERE campaign_id = ? AND sha = ? AND spec_revision_id = ?",
-             [campaign_id, state.best_sha, spec_revision_id]
-           ).rows do
-        [[id]] ->
-          id
+    case Repo.query!(
+           "SELECT id FROM best_revisions WHERE campaign_id = ? AND sha = ? AND spec_revision_id = ?",
+           [campaign_id, state.best_sha, spec_revision_id]
+         ).rows do
+      [[_id]] ->
+        # A Baseline revision and all of its metrics are inserted in the same
+        # transaction. Once the revision exists, later Campaign snapshots must
+        # not replay thousands of immutable metric upserts.
+        :ok
 
-        [] ->
-          [[sequence]] =
-            Repo.query!(
-              "SELECT COALESCE(MAX(sequence), 0) + 1 FROM best_revisions WHERE campaign_id = ?",
-              [campaign_id]
-            ).rows
-
-          id = Ecto.UUID.generate()
-
+      [] ->
+        [[sequence]] =
           Repo.query!(
-            """
-            INSERT INTO best_revisions(
-              id, campaign_id, sequence, sha, cause, spec_revision_id, summary, inserted_at
-            ) VALUES (?, ?, ?, ?, 'baseline', ?, ?, ?)
-            """,
-            [
-              id,
-              campaign_id,
-              sequence,
-              state.best_sha,
-              spec_revision_id,
-              state.baseline.summary || "Baseline",
-              now
-            ]
-          )
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM best_revisions WHERE campaign_id = ?",
+            [campaign_id]
+          ).rows
 
-          id
-      end
+        best_revision_id = Ecto.UUID.generate()
+
+        Repo.query!(
+          """
+          INSERT INTO best_revisions(
+            id, campaign_id, sequence, sha, cause, spec_revision_id, summary, inserted_at
+          ) VALUES (?, ?, ?, ?, 'baseline', ?, ?, ?)
+          """,
+          [
+            best_revision_id,
+            campaign_id,
+            sequence,
+            state.best_sha,
+            spec_revision_id,
+            state.baseline.summary || "Baseline",
+            now
+          ]
+        )
+
+        persist_baseline_metrics!(best_revision_id, spec_revision_id, state, now)
+    end
+  end
+
+  defp persist_baseline_metrics!(best_revision_id, spec_revision_id, state, now) do
+    case_ids =
+      Repo.query!(
+        "SELECT name, id FROM benchmark_cases WHERE spec_revision_id = ?",
+        [spec_revision_id]
+      ).rows
+      |> Map.new(fn [name, id] -> {name, id} end)
+
+    metric_ids =
+      Repo.query!(
+        "SELECT name, id FROM metric_definitions WHERE spec_revision_id = ?",
+        [spec_revision_id]
+      ).rows
+      |> Map.new(fn [name, id] -> {name, id} end)
 
     Enum.each(state.baseline.metrics, fn metric ->
-      [[case_id]] =
-        Repo.query!(
-          "SELECT id FROM benchmark_cases WHERE spec_revision_id = ? AND name = ?",
-          [spec_revision_id, metric.case_id]
-        ).rows
-
-      [[metric_id]] =
-        Repo.query!(
-          "SELECT id FROM metric_definitions WHERE spec_revision_id = ? AND name = ?",
-          [spec_revision_id, metric.metric_id]
-        ).rows
+      case_id = Map.fetch!(case_ids, metric.case_id)
+      metric_id = Map.fetch!(metric_ids, metric.metric_id)
 
       Repo.query!(
         """
@@ -485,6 +553,18 @@ defmodule Pika.CampaignStore do
   defp decode_response(response_json) do
     %{"encoding" => "erlang-term-v1", "data" => data} = Jason.decode!(response_json)
     data |> Base.decode64!() |> :erlang.binary_to_term([:safe])
+  end
+
+  defp preload_snapshot_atoms do
+    _ = Application.load(:pika)
+
+    modules =
+      case :application.get_key(:pika, :modules) do
+        {:ok, modules} -> modules
+        _other -> []
+      end
+
+    Enum.each(modules ++ [DateTime, MapSet], &Code.ensure_loaded/1)
   end
 
   defp hex(value), do: Base.encode16(value, case: :lower)

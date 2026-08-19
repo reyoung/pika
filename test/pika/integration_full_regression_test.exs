@@ -80,8 +80,8 @@ defmodule Pika.IntegrationFullRegressionTest do
 
     guard_metric = Enum.find(rejected_receipt.metrics, &(&1["case_id"] == "guard_case"))
     assert guard_metric["source"] == "integration_full"
-    assert guard_metric["pair_count"] == 30
-    assert guard_metric["valid_pair_count"] == 30
+    assert guard_metric["pair_count"] == 7
+    assert guard_metric["valid_pair_count"] == 7
 
     [[sampling_sequence]] =
       Repo.query!(
@@ -292,7 +292,7 @@ defmodule Pika.IntegrationFullRegressionTest do
     assert blocked_events == 1
   end
 
-  test "recovers during 30-pair escalation and rejects before mutating Best" do
+  test "recovers during the user-sized escalation and rejects before mutating Best" do
     context = ready_attempts(1) |> OptimizationFixtures.add_guard_case()
     {:ok, crash_counter} = Agent.start_link(fn -> 0 end)
     {:ok, measurement_counter} = Agent.start_link(fn -> %{} end)

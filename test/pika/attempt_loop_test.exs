@@ -56,7 +56,7 @@ defmodule Pika.AttemptLoopTest do
       assert attempt.correctness_artifact_id
       assert attempt.summary =~ "two percent improvement"
 
-      assert [%{pair_count: 30, valid_pair_count: 30, source: "iteration"}] =
+      assert [%{pair_count: 7, valid_pair_count: 7, source: "iteration"}] =
                AttemptStore.metrics_for_attempt(attempt.id)
 
       assert [_ | _] =
@@ -96,6 +96,25 @@ defmodule Pika.AttemptLoopTest do
              AttemptStore.metrics_for_attempt(start.attempt_id)
 
     assert AttemptCoordinator.snapshot(coordinator).last_error == nil
+  end
+
+  test "UI Spec overview reuses the snapshot and dispatch checks stay lightweight" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+
+    {{:ok, overview}, overview_queries} =
+      capture_repo_queries(fn -> AttemptStore.campaign_spec_overview(context.campaign.id) end)
+
+    assert overview.cases == context.spec["benchmark_cases"]
+    assert overview.metrics == context.spec["metrics"]
+
+    refute Enum.any?(overview_queries, &direct_definition_scan?(&1, "benchmark_cases"))
+    refute Enum.any?(overview_queries, &direct_definition_scan?(&1, "metric_definitions"))
+
+    {{:ok, %{status: "optimizing", dispatch_gate: nil}}, dispatch_queries} =
+      capture_repo_queries(fn -> AttemptStore.dispatch_state(context.campaign.id) end)
+
+    assert length(dispatch_queries) == 1
+    refute Enum.any?(dispatch_queries, &String.contains?(&1, "benchmark_cases"))
   end
 
   test "multiple completed Backend turns with missing MCP work follow up in the same Session" do
@@ -589,6 +608,42 @@ defmodule Pika.AttemptLoopTest do
     names = Enum.map(tools["result"]["tools"], & &1["name"])
     assert "record_metrics" in names
     refute "submit_plan" in names
+  end
+
+  defp capture_repo_queries(fun) do
+    ref = make_ref()
+    handler = {__MODULE__, ref}
+    owner = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:pika, :repo, :query],
+        fn _event, _measurements, metadata, {pid, tag} ->
+          send(pid, {tag, to_string(metadata.query)})
+        end,
+        {owner, ref}
+      )
+
+    try do
+      result = fun.()
+      {result, receive_queries(ref, [])}
+    after
+      :telemetry.detach(handler)
+    end
+  end
+
+  defp receive_queries(ref, queries) do
+    receive do
+      {^ref, query} -> receive_queries(ref, [query | queries])
+    after
+      0 -> Enum.reverse(queries)
+    end
+  end
+
+  defp direct_definition_scan?(query, table) do
+    normalized = String.replace(query, ~r/\s+/, " ")
+    String.contains?(normalized, "FROM #{table} WHERE")
   end
 
   defp mcp_rpc(token, id, method, params) do

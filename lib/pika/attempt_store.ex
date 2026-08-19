@@ -28,6 +28,38 @@ defmodule Pika.AttemptStore do
     error -> {:error, {:campaign_context_failed, Exception.message(error)}}
   end
 
+  def campaign_spec_overview(campaign_id) do
+    with {:ok, campaign} <- campaign(campaign_id),
+         {:ok, spec} <- current_spec(campaign.current_spec_revision_id),
+         {:ok, sampling} <- current_sampling(campaign_id, spec.id) do
+      spec_snapshot = Jason.decode!(spec.spec_json)
+
+      {:ok,
+       %{
+         revision: spec.revision,
+         cases: List.wrap(spec_snapshot["benchmark_cases"]),
+         metrics: List.wrap(spec_snapshot["metrics"]),
+         sampling_revision: sampling,
+         sampled_case_ids: sampled_case_ids(sampling.id),
+         protected_paths: Jason.decode!(spec.protected_paths_json)
+       }}
+    end
+  rescue
+    error -> {:error, {:campaign_spec_overview_failed, Exception.message(error)}}
+  end
+
+  def dispatch_state(campaign_id) do
+    case Repo.query!(
+           "SELECT status, dispatch_gate FROM campaigns WHERE id = ?",
+           [campaign_id]
+         ).rows do
+      [[status, dispatch_gate]] -> {:ok, %{status: status, dispatch_gate: dispatch_gate}}
+      [] -> {:error, :campaign_not_found}
+    end
+  rescue
+    error -> {:error, {:dispatch_state_failed, Exception.message(error)}}
+  end
+
   def create_attempt(campaign_id, slot_index) do
     id = Ecto.UUID.generate()
     now = now_us()

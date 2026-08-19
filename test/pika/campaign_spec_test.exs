@@ -4,7 +4,7 @@ defmodule Pika.CampaignSpecTest do
   alias Pika.CampaignSpec, as: Spec
   alias Pika.Test.AlignmentFixtures
 
-  test "accepts a complete Campaign Spec v1 and applies measurement defaults" do
+  test "accepts a complete Campaign Spec v1 and applies non-sampling defaults" do
     result =
       AlignmentFixtures.spec()
       |> Map.update!("metrics", &[Map.delete(hd(&1), "min_improvement_ratio")])
@@ -17,21 +17,34 @@ defmodule Pika.CampaignSpecTest do
     assert result.spec["iteration_sampling"] == %{"max_initial_cases" => 10}
   end
 
-  test "accepts a Campaign-specific formal pair count and derives an 80% validity floor" do
+  test "accepts an arbitrary user-specified formal pair count and validity floor" do
     result =
       AlignmentFixtures.spec()
-      |> put_in(["benchmark", "pair_count"], 101)
-      |> update_in(["benchmark"], &Map.delete(&1, "min_valid_pairs"))
+      |> put_in(["benchmark", "pair_count"], 1_000_003)
+      |> put_in(["benchmark", "min_valid_pairs"], 900_001)
       |> Spec.validate()
 
     assert result.ready?
-    assert result.spec["benchmark"]["pair_count"] == 101
-    assert result.spec["benchmark"]["min_valid_pairs"] == 81
+    assert result.spec["benchmark"]["pair_count"] == 1_000_003
+    assert result.spec["benchmark"]["min_valid_pairs"] == 900_001
 
     pair_schema =
       get_in(Spec.json_schema(), ["properties", "benchmark", "properties", "pair_count"])
 
     assert pair_schema == %{"type" => "integer", "minimum" => 1}
+  end
+
+  test "does not invent a formal pair count or validity floor" do
+    result =
+      AlignmentFixtures.spec()
+      |> update_in(["benchmark"], &Map.drop(&1, ~w(pair_count min_valid_pairs)))
+      |> Spec.validate()
+
+    refute result.ready?
+    assert "benchmark.pair_count" in result.missing
+    assert "benchmark.min_valid_pairs" in result.missing
+    refute Map.has_key?(result.spec["benchmark"], "pair_count")
+    refute Map.has_key?(result.spec["benchmark"], "min_valid_pairs")
   end
 
   test "rejects invalid Campaign-specific pair thresholds" do
@@ -61,7 +74,35 @@ defmodule Pika.CampaignSpecTest do
     result = Spec.validate(bad)
     refute result.ready?
     assert "at least one target Metric is required" in result.errors
-    assert "Metric ids must be unique stable slugs" in result.errors
+
+    assert "metrics[1].id: duplicates metrics[0].id \"latency_us\"" in result.errors
+  end
+
+  test "reports every invalid Metric field with its exact array path" do
+    spec = AlignmentFixtures.spec()
+
+    invalid_metric = %{
+      "id" => "Bad Metric ID",
+      "name" => "",
+      "unit" => 42,
+      "direction" => "sideways",
+      "role" => "optional",
+      "min_improvement_ratio" => 0.001
+    }
+
+    result = Spec.validate(%{spec | "metrics" => [invalid_metric, "not-an-object"]})
+
+    refute result.ready?
+    assert "metrics[0].id: must be a stable slug matching [a-z][a-z0-9_-]*" in result.errors
+    assert "metrics[0].name: must be a non-empty string" in result.errors
+    assert "metrics[0].unit: must be a non-empty string" in result.errors
+    assert "metrics[0].direction: must be one of minimize, maximize" in result.errors
+    assert "metrics[0].role: must be one of target, guard, informational" in result.errors
+
+    assert "metrics[0].min_improvement_ratio: must be a number greater than or equal to 0.01" in result.errors
+
+    assert "metrics[1]: must be an object" in result.errors
+    refute "Metrics have invalid fields" in result.errors
   end
 
   test "reports deterministic nested paths for Spec diff" do

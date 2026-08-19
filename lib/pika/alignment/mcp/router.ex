@@ -163,16 +163,26 @@ defmodule Pika.Alignment.MCP.Router do
       ),
       tool(
         "submit_baseline",
-        "Submit raw self-paired Baseline, correctness and profiler Artifacts for Pika recomputation.",
+        "Submit one local Baseline manifest Artifact. Legacy individual Artifact references remain accepted.",
         %{
           "idempotency_key" => string(),
+          "manifest_artifact" => string(),
           "measured_sha" => string(),
           "samples_artifact" => string(),
           "correctness_artifact" => string(),
           "profiler_artifact" => string(),
           "summary" => string()
         },
-        ~w(idempotency_key measured_sha samples_artifact correctness_artifact profiler_artifact summary)
+        ~w(idempotency_key),
+        %{
+          "oneOf" => [
+            %{"required" => ["manifest_artifact"]},
+            %{
+              "required" =>
+                ~w(measured_sha samples_artifact correctness_artifact profiler_artifact summary)
+            }
+          ]
+        }
       ),
       tool(
         "submit_iteration_sample",
@@ -203,16 +213,20 @@ defmodule Pika.Alignment.MCP.Router do
     ]
   end
 
-  defp tool(name, description, properties, required \\ []) do
+  defp tool(name, description, properties, required \\ [], schema_extensions \\ %{}) do
     %{
       "name" => name,
       "description" => description,
-      "inputSchema" => %{
-        "type" => "object",
-        "properties" => properties,
-        "required" => required,
-        "additionalProperties" => false
-      }
+      "inputSchema" =>
+        Map.merge(
+          %{
+            "type" => "object",
+            "properties" => properties,
+            "required" => required,
+            "additionalProperties" => false
+          },
+          schema_extensions
+        )
     }
   end
 

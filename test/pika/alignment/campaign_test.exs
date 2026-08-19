@@ -1,3 +1,18 @@
+defmodule Pika.Test.CampaignPersistenceProbe do
+  def set_owner(owner), do: :persistent_term.put({__MODULE__, :owner}, owner)
+  def clear_owner, do: :persistent_term.erase({__MODULE__, :owner})
+
+  def persist(state) do
+    send(:persistent_term.get({__MODULE__, :owner}), {
+      :campaign_persisted,
+      state.agent_responding,
+      length(state.messages)
+    })
+
+    :ok
+  end
+end
+
 defmodule Pika.Alignment.CampaignTest do
   use ExUnit.Case, async: false
 
@@ -66,6 +81,31 @@ defmodule Pika.Alignment.CampaignTest do
     assert :ok = Campaign.confirm_spec()
     assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
 
+    confirmed = Campaign.snapshot()
+
+    assert {:error, "invalid_state",
+            "submit_spec is only allowed before the Campaign Spec is confirmed",
+            %{}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "late-spec",
+               "spec" => put_in(AlignmentFixtures.spec(), ["title"], "late replacement")
+             })
+
+    assert {:error, "invalid_state",
+            "submit_harness is only allowed before the Campaign Spec is confirmed",
+            %{}} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "late-harness")
+             )
+
+    after_late_submissions = Campaign.snapshot()
+    assert after_late_submissions.status == :building_baseline
+    assert after_late_submissions.required_operations == ["complete_setup_merge"]
+    assert after_late_submissions.spec == confirmed.spec
+    assert after_late_submissions.harness.digest == confirmed.harness.digest
+
     {setup_sha, best_sha} = merge_setup(workspace)
 
     assert {:ok, %{best_sha: ^best_sha}} =
@@ -76,28 +116,27 @@ defmodule Pika.Alignment.CampaignTest do
                "best_sha" => best_sha
              })
 
-    [samples, correctness, profiler] =
-      AlignmentFixtures.write_baseline_artifacts(workspace, best_sha, skill.sha)
+    AlignmentFixtures.write_baseline_artifacts(workspace, best_sha, skill.sha)
+    manifest = AlignmentFixtures.write_baseline_manifest(workspace, best_sha)
 
-    Enum.each(
-      [samples, correctness, profiler] ++ AlignmentFixtures.baseline_dependency_paths(),
-      &register_artifact(&1, workspace)
-    )
-
-    assert {:ok, %{status: "selecting_iteration_sample", metrics: [metric]}} =
+    assert {:ok, %{status: "validating_baseline", total_records: 7}} =
              Campaign.mcp_call(@token, "submit_baseline", %{
                "idempotency_key" => "baseline-1",
-               "measured_sha" => best_sha,
-               "samples_artifact" => samples,
-               "correctness_artifact" => correctness,
-               "profiler_artifact" => profiler,
-               "summary" => "fixture baseline"
+               "manifest_artifact" => manifest
              })
 
-    assert metric.valid_pair_count == 30
+    assert eventually(fn -> Campaign.snapshot().status == :selecting_iteration_sample end)
+    [metric] = Campaign.snapshot().baseline.metrics
+    assert metric.valid_pair_count == AlignmentFixtures.pair_count()
     snapshot = Campaign.snapshot()
     assert snapshot.status == :selecting_iteration_sample
     assert snapshot.required_operations == ["submit_iteration_sample"]
+    assert Enum.any?(snapshot.artifacts, &(&1.relative_path == manifest))
+
+    assert Enum.any?(
+             snapshot.artifacts,
+             &(&1.relative_path == "artifacts/baseline/samples.jsonl")
+           )
 
     assert {:ok, %{status: "optimizing", sampling_revision: 1}} =
              Campaign.mcp_call(@token, "submit_iteration_sample", %{
@@ -160,6 +199,48 @@ defmodule Pika.Alignment.CampaignTest do
     assert snapshot.status == :drafting_spec
     assert snapshot.required_operations == ["submit_harness", "submit_spec"]
     refute snapshot.status == :building_baseline
+  end
+
+  test "completes a required setup merge from a confirmed legacy DraftingSpec", %{
+    workspace: workspace
+  } do
+    harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "legacy-merge-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "legacy-merge-harness")
+             )
+
+    assert :ok = Campaign.confirm_spec()
+    assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
+
+    :sys.replace_state(Campaign, &%{&1 | status: :drafting_spec})
+    drifted = Campaign.snapshot()
+    assert drifted.status == :drafting_spec
+    assert drifted.required_operations == ["complete_setup_merge"]
+
+    {setup_sha, best_sha} = merge_setup(workspace)
+
+    assert {:ok, %{best_sha: ^best_sha}} =
+             Campaign.mcp_call(@token, "complete_setup_merge", %{
+               "idempotency_key" => "legacy-merge-complete",
+               "base_sha" => workspace.source_sha,
+               "setup_sha" => setup_sha,
+               "best_sha" => best_sha
+             })
+
+    reconciled = Campaign.snapshot()
+    assert reconciled.status == :building_baseline
+    assert reconciled.best_sha == best_sha
+    assert reconciled.required_operations == ["submit_baseline"]
   end
 
   test "allows an attachment-only user message", %{workspace: workspace} do
@@ -307,6 +388,59 @@ defmodule Pika.Alignment.CampaignTest do
     assert Campaign.snapshot().active_turn_id == nil
   end
 
+  test "persists once at the Turn boundary instead of once per streamed token", %{
+    workspace: workspace,
+    skill: skill
+  } do
+    GenServer.stop(Process.whereis(Campaign))
+    Pika.Test.CampaignPersistenceProbe.set_owner(self())
+    on_exit(&Pika.Test.CampaignPersistenceProbe.clear_owner/0)
+
+    {:ok, pid} =
+      Campaign.start_link(
+        workspace: workspace,
+        persistence: Pika.Test.CampaignPersistenceProbe,
+        backend: :codex_app_server,
+        start_backend: false,
+        resolve_references: false,
+        mcp_url: "http://127.0.0.1:1/mcp",
+        skill: skill
+      )
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    assert_receive {:campaign_persisted, false, _initial_messages}
+
+    send(
+      pid,
+      {:pika_backend_event,
+       Pika.AgentBackend.Event.new(:turn_started, :fake, "stream-session", %{
+         turn_id: "stream-turn"
+       })}
+    )
+
+    Enum.each(1..100, fn _index ->
+      send(
+        pid,
+        {:pika_backend_event,
+         Pika.AgentBackend.Event.new(:message_delta, :fake, "stream-session", %{
+           turn_id: "stream-turn",
+           data: %{delta: "token "}
+         })}
+      )
+    end)
+
+    send(
+      pid,
+      {:pika_backend_event,
+       Pika.AgentBackend.Event.new(:turn_completed, :fake, "stream-session", %{
+         turn_id: "stream-turn"
+       })}
+    )
+
+    assert_receive {:campaign_persisted, false, _messages}, 1_000
+    refute_receive {:campaign_persisted, _, _}, 50
+  end
+
   test "a cancelled predecessor cannot interrupt or clear a newer steered Turn" do
     pid = Process.whereis(Campaign)
     session_id = "steer-race-session"
@@ -445,7 +579,7 @@ defmodule Pika.Alignment.CampaignTest do
       })
 
     [samples, correctness, profiler] =
-      AlignmentFixtures.write_baseline_artifacts(workspace, best_sha, skill.sha, 23)
+      AlignmentFixtures.write_baseline_artifacts(workspace, best_sha, skill.sha, 4)
 
     Enum.each(
       [samples, correctness, profiler] ++ AlignmentFixtures.baseline_dependency_paths(),
@@ -460,19 +594,27 @@ defmodule Pika.Alignment.CampaignTest do
       "summary" => "insufficient"
     }
 
+    first_request = Map.put(base_request, "idempotency_key", "b1")
+    second_request = Map.put(base_request, "idempotency_key", "b2")
+
+    assert {:ok, %{status: "validating_baseline"}} =
+             Campaign.mcp_call(@token, "submit_baseline", first_request)
+
+    assert eventually(fn ->
+             snapshot = Campaign.snapshot()
+             snapshot.baseline_retry_count == 1 and is_nil(snapshot.baseline_progress)
+           end)
+
     assert {:error, "missing_required_data", _, %{retry: 1}} =
-             Campaign.mcp_call(
-               @token,
-               "submit_baseline",
-               Map.put(base_request, "idempotency_key", "b1")
-             )
+             Campaign.mcp_call(@token, "submit_baseline", first_request)
+
+    assert {:ok, %{status: "validating_baseline"}} =
+             Campaign.mcp_call(@token, "submit_baseline", second_request)
+
+    assert eventually(fn -> is_nil(Campaign.snapshot().baseline_progress) end)
 
     assert {:error, "blocked", _, _} =
-             Campaign.mcp_call(
-               @token,
-               "submit_baseline",
-               Map.put(base_request, "idempotency_key", "b2")
-             )
+             Campaign.mcp_call(@token, "submit_baseline", second_request)
 
     assert Campaign.snapshot().status == :building_baseline
     assert Campaign.snapshot().baseline_retry_count == 1

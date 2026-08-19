@@ -34,6 +34,13 @@ defmodule Pika.Test.FakeJSONLProvider do
     state
   end
 
+  defp handle_codex(%{"id" => id, "method" => "thread/resume", "params" => params}, state) do
+    thread_id = params["threadId"]
+    respond(id, %{"thread" => %{"id" => thread_id, "turns" => []}})
+    notify("thread/started", %{"thread" => %{"id" => thread_id}})
+    state
+  end
+
   defp handle_codex(%{"id" => id, "method" => "turn/start", "params" => params}, state) do
     turn_id = "fake-turn-#{id}"
     respond(id, %{"turn" => %{"id" => turn_id, "status" => "inProgress", "items" => []}})
@@ -72,6 +79,7 @@ defmodule Pika.Test.FakeJSONLProvider do
     respond(id, %{
       "protocolVersion" => 1,
       "agentCapabilities" => %{
+        "loadSession" => true,
         "mcpCapabilities" => %{"http" => true, "sse" => true},
         "sessionCapabilities" => close
       },
@@ -83,6 +91,11 @@ defmodule Pika.Test.FakeJSONLProvider do
 
   defp handle_cursor(%{"id" => id, "method" => "session/new"}, state) do
     respond(id, %{"sessionId" => "fake-cursor-session"})
+    state
+  end
+
+  defp handle_cursor(%{"id" => id, "method" => "session/load"}, state) do
+    respond(id, %{})
     state
   end
 

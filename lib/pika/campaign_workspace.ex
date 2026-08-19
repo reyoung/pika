@@ -71,7 +71,7 @@ defmodule Pika.CampaignWorkspace do
   defp ensure_setup_worktree(repo, setup, branch, best_sha) do
     cond do
       File.dir?(setup) ->
-        verify_setup_worktree(setup, branch)
+        verify_setup_worktree(repo, setup, branch, best_sha)
 
       branch_exists?(repo, branch) ->
         case Git.run(repo, ["worktree", "add", setup, branch]) do
@@ -89,16 +89,36 @@ defmodule Pika.CampaignWorkspace do
     end
   end
 
-  defp verify_setup_worktree(setup, branch) do
+  defp verify_setup_worktree(repo, setup, branch, persisted_best_sha) do
     with {:ok, "true"} <- Git.run(setup, ["rev-parse", "--is-inside-work-tree"]),
-         {:ok, actual} <- Git.run(setup, ["branch", "--show-current"]),
-         true <- actual == branch do
-      :ok
+         {:ok, actual_branch} <- Git.run(setup, ["branch", "--show-current"]) do
+      case actual_branch do
+        ^branch -> :ok
+        "" -> verify_detached_setup_checkpoint(repo, setup, persisted_best_sha)
+        actual -> {:error, {:setup_branch_mismatch, actual, branch}}
+      end
     else
-      false -> {:error, {:setup_branch_mismatch, branch}}
       {:ok, actual} -> {:error, {:setup_branch_mismatch, actual, branch}}
       {:error, reason} -> {:error, {:invalid_setup_worktree, reason}}
     end
+  end
+
+  defp verify_detached_setup_checkpoint(repo, setup, persisted_best_sha) do
+    with {:ok, setup_sha} <- Git.run(setup, ["rev-parse", "HEAD"]),
+         {:ok, actual_best_sha} <- Git.run(repo, ["rev-parse", "pika/best"]),
+         true <- setup_sha == actual_best_sha,
+         true <-
+           actual_best_sha == persisted_best_sha or
+             commit_parent?(repo, actual_best_sha, persisted_best_sha) do
+      :ok
+    else
+      false -> {:error, {:setup_detached_checkpoint_mismatch, persisted_best_sha}}
+      {:error, reason} -> {:error, {:invalid_setup_worktree, reason}}
+    end
+  end
+
+  defp commit_parent?(repo, commit, expected_parent) do
+    match?({:ok, ^expected_parent}, Git.run(repo, ["rev-parse", "#{commit}^"]))
   end
 
   defp branch_exists?(repo, branch) do

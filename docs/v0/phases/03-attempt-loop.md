@@ -78,7 +78,7 @@ Completed (2026-08-19)
 ### 3.7 正式配对测量
 
 - [x] Iteration Agent 可自由跑临时 Benchmark。
-- [x] 正式提交必须运行 Campaign Harness，并满足 Campaign Spec 声明的交替 Pair 数（默认 30）。
+- [x] 正式提交必须运行 Campaign Harness，并满足用户在 Campaign Spec 中声明的交替 Pair 数。
 - [x] 保存 raw value、baseline value、improvement、MAD、noise tolerance 和 valid count。
 - [x] Pika 重算公式，不信任 Agent 计算结果。
 

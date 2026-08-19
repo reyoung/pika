@@ -38,15 +38,23 @@ defmodule Pika.Init do
     agents =
       1..settings.iteration_agents
       |> Enum.map_join("\n", fn index ->
-        model = if settings.model, do: "\n      model: #{yaml_string(settings.model)}", else: ""
+        model =
+          if settings.iteration_model,
+            do: "\n      model: #{yaml_string(settings.iteration_model)}",
+            else: ""
 
         """
             - name: #{yaml_string("#{backend_label(settings.iteration_backend)}-#{index}")}
               backend: #{settings.iteration_backend}#{model}
-              reasoning_effort: #{settings.effort}
+              reasoning_effort: #{settings.iteration_effort}
         """
         |> String.trim_trailing()
       end)
+
+    alignment_model =
+      if settings.alignment_model,
+        do: "\n  model: #{yaml_string(settings.alignment_model)}",
+        else: ""
 
     sync =
       case settings.sync do
@@ -76,7 +84,8 @@ defmodule Pika.Init do
 
     # Alignment and Baseline Boundary Agent backend.
     backend:
-      type: #{settings.alignment_backend}
+      type: #{settings.alignment_backend}#{alignment_model}
+      reasoning_effort: #{settings.alignment_effort}
       protocol_config: {}
 
     prompts:
@@ -112,24 +121,53 @@ defmodule Pika.Init do
          {:ok, host} <- choose(opts, :host, "Listen host", "127.0.0.1", &parse_host/1),
          {:ok, port} <- choose(opts, :port, "Listen port", 8080, &parse_port/1),
          {:ok, alignment_backend} <-
-           choose(
+           collect_backend(
              inherit_backend(opts, :alignment_backend),
              :alignment_backend,
-             "Alignment/Baseline Agent backend (codex/cursor)",
-             "codex",
-             &parse_backend/1
+             "Alignment/Baseline Agent",
+             "codex"
+           ),
+         {:ok, alignment_model, model_cache} <-
+           collect_model(
+             opts,
+             :alignment_model,
+             alignment_backend,
+             "Alignment/Baseline Agent",
+             %{}
+           ),
+         {:ok, alignment_effort} <-
+           choose(
+             opts,
+             :alignment_effort,
+             "Alignment/Baseline Agent reasoning effort",
+             "high",
+             &parse_effort/1
            ),
          {:ok, iteration_backend} <-
-           choose(
+           collect_backend(
              inherit_backend(opts, :iteration_backend),
              :iteration_backend,
-             "Iteration Agent backend (codex/cursor)",
-             backend_label(alignment_backend),
-             &parse_backend/1
+             "Iteration Agent",
+             backend_label(alignment_backend)
            ),
-         {:ok, model} <- collect_model(opts, iteration_backend),
-         {:ok, effort} <-
-           choose(opts, :effort, "Reasoning effort", "high", &parse_effort/1),
+         iteration_opts <- inherit_option(opts, :iteration_model, :model),
+         {:ok, iteration_model, _model_cache} <-
+           collect_model(
+             iteration_opts,
+             :iteration_model,
+             iteration_backend,
+             "Iteration Agent",
+             model_cache
+           ),
+         effort_opts <- inherit_option(opts, :iteration_effort, :effort),
+         {:ok, iteration_effort} <-
+           choose(
+             effort_opts,
+             :iteration_effort,
+             "Iteration Agent reasoning effort",
+             "high",
+             &parse_effort/1
+           ),
          {:ok, iteration_agents} <-
            choose(
              opts,
@@ -156,9 +194,11 @@ defmodule Pika.Init do
          host: host,
          port: port,
          alignment_backend: alignment_backend,
+         alignment_model: alignment_model,
+         alignment_effort: alignment_effort,
          iteration_backend: iteration_backend,
-         model: model,
-         effort: effort,
+         iteration_model: iteration_model,
+         iteration_effort: iteration_effort,
          iteration_agents: iteration_agents,
          max_attempts: max_attempts,
          sync: sync
@@ -239,15 +279,62 @@ defmodule Pika.Init do
     end
   end
 
-  defp collect_model(opts, backend) do
+  defp collect_backend(opts, key, agent, default) do
     cond do
-      Keyword.has_key?(opts, :model) ->
-        parse_optional_string(opts[:model])
+      Keyword.has_key?(opts, key) -> parse_backend(opts[key])
+      opts[:yes] -> parse_backend(default)
+      true -> ask_backend(agent, default)
+    end
+  end
+
+  defp ask_backend(agent, default) do
+    default_index = if backend_label(default) == "cursor", do: "2", else: "1"
+
+    IO.puts("\n#{agent} backend type:")
+    IO.puts("  1) Codex · Codex App Server")
+    IO.puts("  2) Cursor · Agent Client Protocol")
+
+    value =
+      case IO.gets("Select #{agent} backend [#{default_index}]: ") do
+        nil -> default_index
+        input -> input |> String.trim() |> use_default(default_index)
+      end
+
+    case String.downcase(value) do
+      choice when choice in ["1", "codex", "codex_app_server"] ->
+        {:ok, "codex_app_server"}
+
+      choice when choice in ["2", "cursor", "cursor_acp"] ->
+        {:ok, "cursor_acp"}
+
+      _ ->
+        IO.puts(:stderr, "Invalid value: choose 1 for Codex or 2 for Cursor")
+        ask_backend(agent, default)
+    end
+  end
+
+  defp collect_model(opts, key, backend, agent, cache) do
+    cond do
+      Keyword.has_key?(opts, key) ->
+        with {:ok, model} <- parse_optional_string(opts[key]), do: {:ok, model, cache}
 
       opts[:yes] ->
-        {:ok, nil}
+        {:ok, nil, cache}
 
       true ->
+        with {:ok, models, cache} <- load_models(opts, backend, cache),
+             {:ok, model} <- ask_model(agent, backend, models) do
+          {:ok, model, cache}
+        end
+    end
+  end
+
+  defp load_models(opts, backend, cache) do
+    case Map.fetch(cache, backend) do
+      {:ok, models} ->
+        {:ok, models, cache}
+
+      :error ->
         catalog = Keyword.get(opts, :model_catalog, &ModelCatalog.list/1)
         IO.puts("Loading available #{backend_label(backend)} models…")
 
@@ -261,15 +348,15 @@ defmodule Pika.Init do
               []
           end
 
-        ask_model(backend, models)
+        {:ok, models, Map.put(cache, backend, models)}
     end
   end
 
-  defp ask_model(backend, models) do
+  defp ask_model(agent, backend, models) do
     shown = Enum.take(models, @model_display_limit)
     custom_index = length(shown) + 2
 
-    IO.puts("\nAvailable Iteration Agent models (#{backend_label(backend)}):")
+    IO.puts("\nAvailable #{agent} models (#{backend_label(backend)}):")
     IO.puts("  1) Provider default (recommended)")
 
     Enum.with_index(shown, 2)
@@ -308,7 +395,7 @@ defmodule Pika.Init do
 
       _ ->
         IO.puts(:stderr, "Invalid value: choose a listed number")
-        ask_model(backend, models)
+        ask_model(agent, backend, models)
     end
   end
 
@@ -336,6 +423,12 @@ defmodule Pika.Init do
     if Keyword.has_key?(opts, key) or not Keyword.has_key?(opts, :backend),
       do: opts,
       else: Keyword.put(opts, key, opts[:backend])
+  end
+
+  defp inherit_option(opts, key, legacy_key) do
+    if Keyword.has_key?(opts, key) or not Keyword.has_key?(opts, legacy_key),
+      do: opts,
+      else: Keyword.put(opts, key, opts[legacy_key])
   end
 
   defp ask_valid(label, default, parser) do
@@ -645,7 +738,7 @@ defmodule Pika.Init do
 
   defp parse_boolean(_value), do: {:error, "expected yes or no"}
 
-  defp backend_label("cursor_acp"), do: "cursor"
+  defp backend_label(backend) when backend in ["cursor", "cursor_acp"], do: "cursor"
   defp backend_label(_backend), do: "codex"
 
   defp yaml_string(value), do: Jason.encode!(value)

@@ -6,7 +6,7 @@ defmodule Pika.Alignment.Campaign do
   alias Pika.AgentBackend
 
   alias Pika.{Baseline, Harness, PromptCatalog, ReferenceCatalog, Sampling}
-  alias Pika.Alignment.{ArtifactStore, Workspace}
+  alias Pika.Alignment.{ArtifactStore, BaselineManifest, Workspace}
   alias Pika.CampaignSpec, as: Spec
 
   @topic "alignment:campaign"
@@ -84,6 +84,7 @@ defmodule Pika.Alignment.Campaign do
       backend_enabled: Keyword.get(opts, :start_backend, true),
       backend: nil,
       backend_session: nil,
+      provider_session_id: Keyword.get(opts, :resume_session_id),
       backend_token_hash: nil,
       closed_sessions: MapSet.new(),
       backend_workflow: :alignment,
@@ -110,6 +111,7 @@ defmodule Pika.Alignment.Campaign do
       harness: nil,
       required: MapSet.new(~w(submit_spec submit_harness)),
       references: Keyword.get(opts, :references, ReferenceCatalog.entries()),
+      reference_progress: nil,
       resolve_references: Keyword.get(opts, :resolve_references, true),
       materialize_references: Keyword.get(opts, :materialize_references, false),
       skill: Keyword.fetch!(opts, :skill),
@@ -119,10 +121,13 @@ defmodule Pika.Alignment.Campaign do
       baseline: nil,
       baseline_retry_count: 0,
       baseline_error: nil,
+      baseline_submission: nil,
+      baseline_progress: nil,
       sampling_revisions: [],
       iteration_sampling: nil,
       workflow_kickoffs: %{},
       kickoff_dispatched: false,
+      recovery_pending: is_map(Keyword.get(opts, :durable_state)),
       pending_confirmation_input: nil,
       last_error: nil
     }
@@ -310,6 +315,16 @@ defmodule Pika.Alignment.Campaign do
   end
 
   @impl true
+  def handle_info({:reference_materialization_progress, progress}, state) do
+    if state.status == :resolving_references do
+      state = %{state | reference_progress: progress}
+      broadcast(state, persist: false)
+      {:noreply, state}
+    else
+      {:noreply, state}
+    end
+  end
+
   def handle_info({:references_resolved, {:ok, references}}, state) do
     selected = Enum.filter(references, & &1.selected)
 
@@ -327,6 +342,7 @@ defmodule Pika.Alignment.Campaign do
     state = %{
       state
       | references: references,
+        reference_progress: nil,
         spec_result: spec_result,
         status: :building_baseline,
         required: MapSet.new(["complete_setup_merge"]),
@@ -355,8 +371,9 @@ defmodule Pika.Alignment.Campaign do
     state = %{
       state
       | references: references,
+        reference_progress: nil,
         status: :awaiting_confirmation,
-        last_error: "一个或多个默认 Reference 无法解析；未进入 Baseline。"
+        last_error: reference_failure_message(references)
     }
 
     broadcast(state)
@@ -377,14 +394,20 @@ defmodule Pika.Alignment.Campaign do
       state
       | backend: handle,
         backend_session: session,
+        provider_session_id: session.backend_session_id,
         mcp_tokens: mcp_tokens,
         backend_workflow: workflow,
         messages:
           state.messages ++
-            [message(:system, "#{workflow} Backend Session 已启动：#{session.backend_protocol}")]
+            [message(:system, backend_session_message(workflow, session))]
     }
 
-    state = maybe_dispatch_workflow_kickoff(state)
+    state =
+      if state.recovery_pending,
+        do: maybe_dispatch_recovery(state, session),
+        else: maybe_dispatch_workflow_kickoff(state)
+
+    state = %{state | recovery_pending: false}
     broadcast(state)
     {:noreply, state}
   end
@@ -423,25 +446,87 @@ defmodule Pika.Alignment.Campaign do
         apply_backend_event(state, event)
       end
 
-    broadcast(state)
+    broadcast(state, persist: persist_backend_event?(event))
     {:noreply, state}
   end
 
   def handle_info({:completion_followup, _completed_turn_id}, state) do
     if state.backend && is_nil(state.active_turn_id) &&
          not MapSet.equal?(state.required, MapSet.new()) && state.status != :optimizing do
-      missing = state.required |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
+      if state.baseline_submission do
+        {:noreply, state}
+      else
+        missing = state.required |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
 
-      state =
-        dispatch_input(
-          state,
-          "Pika completion gate is still open. Complete these required MCP operations before ending: #{missing}."
-        )
+        state =
+          dispatch_input(
+            state,
+            "Pika completion gate is still open. Complete these required MCP operations before ending: #{missing}."
+          )
 
-      {:noreply, state}
+        {:noreply, state}
+      end
     else
       {:noreply, state}
     end
+  end
+
+  def handle_info(
+        {:baseline_progress, submission_id, progress},
+        %{baseline_submission: %{id: submission_id}} = state
+      ) do
+    state = %{state | baseline_progress: Map.merge(state.baseline_progress || %{}, progress)}
+    broadcast(state, persist: false)
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:baseline_finished, submission_id, result},
+        %{baseline_submission: %{id: submission_id} = submission} = state
+      ) do
+    Process.demonitor(submission.monitor_ref, [:flush])
+    {response, state} = finish_baseline_submission(result, submission.args, state)
+    entry = %{request_hash: submission.request_hash, response: response}
+
+    state = %{
+      state
+      | baseline_submission: nil,
+        baseline_progress: nil,
+        idempotency: Map.put(state.idempotency, submission.record_key, entry)
+    }
+
+    store_idempotency(
+      state,
+      submission.identity,
+      "submit_baseline",
+      submission.key,
+      submission.request_hash,
+      response
+    )
+
+    state = notify_baseline_result(state, response)
+    broadcast(state)
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:DOWN, monitor_ref, :process, _pid, reason},
+        %{baseline_submission: %{monitor_ref: monitor_ref} = submission} = state
+      ) do
+    message = "Baseline 后台校验异常退出：#{inspect(reason)}。可以重新调用 submit_baseline。"
+
+    state = %{
+      state
+      | baseline_submission: nil,
+        baseline_progress: nil,
+        baseline_error: inspect({:validation_worker_exited, reason}),
+        idempotency: Map.delete(state.idempotency, submission.record_key),
+        messages: state.messages ++ [message(:system, message)]
+    }
+
+    state = dispatch_input(state, message)
+    broadcast(state)
+    {:noreply, state}
   end
 
   def handle_info(
@@ -465,14 +550,15 @@ defmodule Pika.Alignment.Campaign do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %{backend: backend}) when not is_nil(backend) do
-    AgentBackend.close_session(backend)
+  def terminate(_reason, state) do
+    if state.baseline_submission && Process.alive?(state.baseline_submission.pid),
+      do: Process.exit(state.baseline_submission.pid, :shutdown)
+
+    if state.backend, do: AgentBackend.close_session(state.backend)
     :ok
   catch
     :exit, _reason -> :ok
   end
-
-  def terminate(_reason, _state), do: :ok
 
   defp execute_mcp("get_context", _args, identity, _token_hash, _from, state) do
     result = %{
@@ -520,6 +606,19 @@ defmodule Pika.Alignment.Campaign do
     end
   end
 
+  defp execute_mcp("submit_baseline" = tool, args, identity, token_hash, _from, state) do
+    case normalize_baseline_args(state, args) do
+      {:ok, normalized_args} ->
+        execute_baseline_mcp(tool, normalized_args, identity, token_hash, state)
+
+      {:error, reason} ->
+        {:reply,
+         mcp_error("missing_required_data", "Baseline manifest validation failed", %{
+           reason: reason
+         }), state}
+    end
+  end
+
   defp execute_mcp(tool, args, identity, token_hash, _from, state) when tool in @write_tools do
     key = args["idempotency_key"]
 
@@ -560,6 +659,63 @@ defmodule Pika.Alignment.Campaign do
   defp execute_mcp(tool, _args, _identity, _token_hash, _from, state),
     do: {:reply, mcp_error("forbidden_role", "tool is unavailable: #{tool}"), state}
 
+  defp execute_baseline_mcp(tool, args, identity, token_hash, state) do
+    key = args["idempotency_key"]
+
+    if not is_binary(key) or key == "" do
+      {:reply, mcp_error("missing_required_data", "idempotency_key is required"), state}
+    else
+      hash_args = Map.drop(args, ["__baseline_manifest"])
+      request_hash = :crypto.hash(:sha256, :erlang.term_to_binary({tool, hash_args}))
+      record_key = {token_hash, tool, key}
+
+      case lookup_idempotency(state, identity, tool, key, request_hash, record_key) do
+        {:replay, response} ->
+          {:reply, response, state}
+
+        :missing ->
+          case start_baseline_submission(
+                 args,
+                 identity,
+                 key,
+                 request_hash,
+                 record_key,
+                 state
+               ) do
+            {:started, response, next_state} ->
+              entry = %{request_hash: request_hash, response: response}
+
+              next_state = %{
+                next_state
+                | idempotency: Map.put(next_state.idempotency, record_key, entry)
+              }
+
+              broadcast(next_state, persist: false)
+              {:reply, response, next_state}
+
+            {:reply, response, next_state} ->
+              entry = %{request_hash: request_hash, response: response}
+
+              next_state = %{
+                next_state
+                | idempotency: Map.put(next_state.idempotency, record_key, entry)
+              }
+
+              store_idempotency(next_state, identity, tool, key, request_hash, response)
+              broadcast(next_state)
+              {:reply, response, next_state}
+
+            {:transient_error, response} ->
+              {:reply, response, state}
+          end
+
+        :conflict ->
+          {:reply,
+           mcp_error("idempotency_conflict", "same key was used with a different request"), state}
+      end
+    end
+  end
+
   defp perform_write("register_artifact", args, _identity, state) do
     attrs = %{
       kind: args["kind"],
@@ -582,7 +738,8 @@ defmodule Pika.Alignment.Campaign do
     end
   end
 
-  defp perform_write("submit_spec", args, %{workflow: :alignment}, state) do
+  defp perform_write("submit_spec", args, %{workflow: :alignment}, state)
+       when state.status in [:drafting_spec, :awaiting_confirmation] do
     selected_ids = for reference <- state.references, reference.selected, do: reference.id
     spec = args["spec"] |> map() |> Map.put("reference_ids", selected_ids)
     result = Spec.validate(spec)
@@ -608,9 +765,14 @@ defmodule Pika.Alignment.Campaign do
   end
 
   defp perform_write("submit_spec", _args, _identity, state),
-    do: {mcp_error("invalid_state", "submit_spec is only allowed during alignment"), state}
+    do:
+      {mcp_error(
+         "invalid_state",
+         "submit_spec is only allowed before the Campaign Spec is confirmed"
+       ), state}
 
-  defp perform_write("submit_harness", args, %{workflow: :alignment}, state) do
+  defp perform_write("submit_harness", args, %{workflow: :alignment}, state)
+       when state.status in [:drafting_spec, :awaiting_confirmation] do
     case Harness.validate(state.workspace.setup_worktree, args) do
       {:ok, harness} ->
         state =
@@ -626,11 +788,16 @@ defmodule Pika.Alignment.Campaign do
   end
 
   defp perform_write("submit_harness", _args, _identity, state),
-    do: {mcp_error("invalid_state", "submit_harness is only allowed during alignment"), state}
+    do:
+      {mcp_error(
+         "invalid_state",
+         "submit_harness is only allowed before the Campaign Spec is confirmed"
+       ), state}
 
   defp perform_write("complete_setup_merge", args, %{workflow: :alignment}, state) do
-    if state.status == :building_baseline and
-         MapSet.member?(state.required, "complete_setup_merge") do
+    if setup_merge_required?(state) do
+      state = %{state | status: :building_baseline, last_error: nil}
+
       case Workspace.verify_setup_merge(
              state.workspace,
              args["base_sha"],
@@ -653,6 +820,7 @@ defmodule Pika.Alignment.Campaign do
                   required: MapSet.new(["submit_baseline"]),
                   backend: nil,
                   backend_session: nil,
+                  provider_session_id: nil,
                   backend_token_hash: nil,
                   closed_sessions:
                     if(old_session_id,
@@ -695,72 +863,19 @@ defmodule Pika.Alignment.Campaign do
            state}
       end
     else
-      {mcp_error("invalid_state", "complete_setup_merge is not currently required"), state}
+      {mcp_error(
+         "invalid_state",
+         "complete_setup_merge is unavailable for the current Campaign state",
+         %{
+           status: state.status,
+           required_operations: state.required |> MapSet.to_list() |> Enum.sort()
+         }
+       ), state}
     end
   end
 
   defp perform_write("complete_setup_merge", _args, _identity, state),
     do: {mcp_error("forbidden_role", "complete_setup_merge requires alignment session"), state}
-
-  defp perform_write("submit_baseline", args, %{workflow: :baseline}, state) do
-    with true <- state.status == :building_baseline,
-         true <- args["measured_sha"] == state.best_sha,
-         true <- Pika.Git.clean?(state.workspace.repo),
-         {:ok, samples} <- registered_path(state, args["samples_artifact"]),
-         {:ok, correctness} <- registered_path(state, args["correctness_artifact"]),
-         {:ok, profiler} <- registered_path(state, args["profiler_artifact"]),
-         :ok <- validate_profiler_dependencies(state, profiler),
-         {:ok, result} <-
-           Baseline.evaluate(
-             samples,
-             correctness,
-             profiler,
-             state.spec_result.spec,
-             state.best_sha,
-             state.skill.sha
-           ) do
-      state = %{
-        state
-        | status: :selecting_iteration_sample,
-          baseline: Map.put(result, :summary, args["summary"]),
-          baseline_error: nil,
-          required: MapSet.new(["submit_iteration_sample"]),
-          messages:
-            state.messages ++
-              [
-                message(
-                  :system,
-                  "全量 Baseline 已通过；等待 Agent 从 #{length(state.spec_result.spec["benchmark_cases"])} 个 Cases 中选择初始 Iteration Sample。"
-                )
-              ]
-      }
-
-      {{:ok,
-        %{
-          status: "selecting_iteration_sample",
-          metrics: result.metrics,
-          profiler: result.profiler,
-          max_initial_cases:
-            get_in(state.spec_result.spec, ["iteration_sampling", "max_initial_cases"])
-        }}, state}
-    else
-      {:error, {:insufficient_valid_pairs, _, _, _} = reason} ->
-        baseline_retry(reason, state)
-
-      {:error, reason} ->
-        {mcp_error("missing_required_data", "Baseline validation failed", %{reason: reason}),
-         %{state | baseline_error: inspect(reason)}}
-
-      false ->
-        {mcp_error(
-           "invalid_state",
-           "Baseline state, SHA, or temporary Best cleanliness is invalid"
-         ), state}
-    end
-  end
-
-  defp perform_write("submit_baseline", _args, _identity, state),
-    do: {mcp_error("forbidden_role", "submit_baseline requires baseline session"), state}
 
   defp perform_write("submit_iteration_sample", args, %{workflow: :baseline}, state) do
     if state.status == :selecting_iteration_sample and
@@ -804,9 +919,343 @@ defmodule Pika.Alignment.Campaign do
   defp perform_write("submit_iteration_sample", _args, _identity, state),
     do: {mcp_error("forbidden_role", "submit_iteration_sample requires baseline session"), state}
 
+  defp setup_merge_required?(state) do
+    MapSet.member?(state.required, "complete_setup_merge") and
+      (state.status == :building_baseline or confirmed_legacy_draft?(state))
+  end
+
+  defp confirmed_legacy_draft?(state) do
+    state.status == :drafting_spec and is_binary(state.pending_confirmation_input) and
+      state.spec_result.ready? and not is_nil(state.harness)
+  end
+
+  defp start_baseline_submission(
+         _args,
+         _identity,
+         _key,
+         _request_hash,
+         _record_key,
+         %{baseline_submission: submission}
+       )
+       when not is_nil(submission) do
+    {:transient_error,
+     mcp_error(
+       "baseline_validation_in_progress",
+       "a Baseline submission is already being validated",
+       %{submission_id: submission.id}
+     )}
+  end
+
+  defp start_baseline_submission(
+         args,
+         %{workflow: :baseline} = identity,
+         key,
+         request_hash,
+         record_key,
+         state
+       ) do
+    with true <- state.status == :building_baseline,
+         true <- MapSet.member?(state.required, "submit_baseline"),
+         true <- args["measured_sha"] == state.best_sha,
+         true <- Pika.Git.clean?(state.workspace.repo),
+         {:ok, inputs} <- baseline_inputs(state, args),
+         :ok <-
+           validate_profiler_dependencies(
+             state,
+             inputs.profiler,
+             inputs.profiler_dependencies
+           ) do
+      submission_id = Pika.AgentBackend.Id.new("baseline")
+      parent = self()
+      spec = state.spec_result.spec
+      best_sha = state.best_sha
+      skill_sha = state.skill.sha
+      workspace_root = state.workspace.root
+
+      {:ok, task_pid} =
+        Task.start(fn ->
+          if inputs.manifest do
+            send(parent, {
+              :baseline_progress,
+              submission_id,
+              %{phase: :registering_artifacts}
+            })
+          end
+
+          result =
+            with {:ok, artifacts} <- register_manifest_artifacts(workspace_root, inputs),
+                 {:ok, baseline} <-
+                   Baseline.evaluate(
+                     inputs.samples,
+                     inputs.correctness,
+                     inputs.profiler,
+                     spec,
+                     best_sha,
+                     skill_sha,
+                     expected_samples: inputs.expected_samples,
+                     on_progress: fn progress ->
+                       send(parent, {:baseline_progress, submission_id, progress})
+                     end
+                   ),
+                 {:ok, sample_artifacts} <-
+                   verified_sample_artifacts(workspace_root, inputs, baseline) do
+              {:ok, %{baseline: baseline, artifacts: artifacts ++ sample_artifacts}}
+            end
+
+          send(parent, {:baseline_finished, submission_id, result})
+        end)
+
+      monitor_ref = Process.monitor(task_pid)
+      total_groups = length(spec["benchmark_cases"]) * length(spec["metrics"])
+      pair_count = get_in(spec, ["benchmark", "pair_count"])
+
+      progress = %{
+        phase: :queued,
+        processed_records: 0,
+        total_records: total_groups * pair_count,
+        processed_bytes: 0,
+        total_bytes: inputs.samples_size,
+        completed_groups: 0,
+        total_groups: total_groups,
+        case_id: nil,
+        metric_id: nil,
+        started_at: DateTime.utc_now()
+      }
+
+      submission = %{
+        id: submission_id,
+        pid: task_pid,
+        monitor_ref: monitor_ref,
+        args: args,
+        identity: identity,
+        key: key,
+        request_hash: request_hash,
+        record_key: record_key
+      }
+
+      response =
+        {:ok,
+         %{
+           status: "validating_baseline",
+           submission_id: submission_id,
+           total_records: progress.total_records,
+           total_groups: total_groups,
+           next_action: "wait for Pika to finish validation; do not resubmit"
+         }}
+
+      state = %{
+        state
+        | baseline_submission: submission,
+          baseline_progress: progress,
+          baseline_error: nil,
+          messages:
+            state.messages ++
+              [
+                message(
+                  :system,
+                  "已接收全量 Baseline，正在后台流式校验 #{progress.total_records} 条 Pair 记录；页面和 MCP 状态查询保持可用。"
+                )
+              ]
+      }
+
+      {:started, response, state}
+    else
+      {:error, reason} ->
+        {:reply,
+         mcp_error("missing_required_data", "Baseline validation could not start", %{
+           reason: reason
+         }), %{state | baseline_error: inspect(reason)}}
+
+      false ->
+        {:reply,
+         mcp_error(
+           "invalid_state",
+           "Baseline state, SHA, required operation, or temporary Best cleanliness is invalid"
+         ), state}
+    end
+  end
+
+  defp start_baseline_submission(_args, _identity, _key, _request_hash, _record_key, state) do
+    {:reply, mcp_error("forbidden_role", "submit_baseline requires baseline session"), state}
+  end
+
+  defp finish_baseline_submission(
+         {:ok, %{baseline: result, artifacts: artifacts}},
+         args,
+         state
+       ) do
+    state = register_user_artifacts(state, artifacts)
+
+    state = %{
+      state
+      | status: :selecting_iteration_sample,
+        baseline: Map.put(result, :summary, args["summary"]),
+        baseline_error: nil,
+        required: MapSet.new(["submit_iteration_sample"]),
+        messages:
+          state.messages ++
+            [
+              message(
+                :system,
+                "全量 Baseline 已通过；等待 Agent 从 #{length(state.spec_result.spec["benchmark_cases"])} 个 Cases 中选择初始 Iteration Sample。"
+              )
+            ]
+    }
+
+    {{:ok,
+      %{
+        status: "selecting_iteration_sample",
+        metric_count: length(result.metrics),
+        profiler: result.profiler,
+        max_initial_cases:
+          get_in(state.spec_result.spec, ["iteration_sampling", "max_initial_cases"])
+      }}, state}
+  end
+
+  defp finish_baseline_submission(
+         {:error, {:insufficient_valid_pairs, _, _, _} = reason},
+         _args,
+         state
+       ),
+       do: baseline_retry(reason, state)
+
+  defp finish_baseline_submission({:error, reason}, _args, state) do
+    {mcp_error("missing_required_data", "Baseline validation failed", %{reason: reason}),
+     %{state | baseline_error: inspect(reason)}}
+  end
+
+  defp normalize_baseline_args(state, %{"manifest_artifact" => relative_path} = args)
+       when is_binary(relative_path) and relative_path != "" do
+    with {:ok, manifest} <- BaselineManifest.load(state.workspace.root, relative_path) do
+      {:ok,
+       args
+       |> Map.merge(%{
+         "measured_sha" => manifest.measured_sha,
+         "summary" => manifest.summary,
+         "samples_artifact" => manifest.samples_artifact,
+         "correctness_artifact" => manifest.correctness_artifact,
+         "profiler_artifact" => manifest.profiler_artifact,
+         "__manifest_sha256" => manifest.manifest_artifact.sha256,
+         "__baseline_manifest" => manifest
+       })}
+    end
+  end
+
+  defp normalize_baseline_args(_state, args), do: {:ok, args}
+
+  defp baseline_inputs(state, %{"__baseline_manifest" => manifest}) do
+    with {:ok, samples} <- ArtifactStore.resolve(state.workspace.root, manifest.samples_artifact),
+         {:ok, correctness} <-
+           ArtifactStore.resolve(state.workspace.root, manifest.correctness_artifact),
+         {:ok, profiler} <-
+           ArtifactStore.resolve(state.workspace.root, manifest.profiler_artifact),
+         {:ok, stat} <- File.stat(samples),
+         true <- stat.type == :regular do
+      {:ok,
+       %{
+         manifest: manifest,
+         samples: samples,
+         samples_relative: manifest.samples_artifact,
+         samples_size: stat.size,
+         correctness: correctness,
+         profiler: profiler,
+         profiler_dependencies: manifest.profiler_dependencies,
+         expected_samples: nil
+       }}
+    else
+      false -> {:error, :baseline_samples_not_regular}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp baseline_inputs(state, args) do
+    with {:ok, samples} <- registered_path(state, args["samples_artifact"]),
+         {:ok, correctness} <- registered_path(state, args["correctness_artifact"]),
+         {:ok, profiler} <- registered_path(state, args["profiler_artifact"]),
+         %{size: size} = sample_artifact <- Map.get(state.artifacts, args["samples_artifact"]) do
+      {:ok,
+       %{
+         manifest: nil,
+         samples: samples,
+         samples_relative: args["samples_artifact"],
+         samples_size: size,
+         correctness: correctness,
+         profiler: profiler,
+         profiler_dependencies: [],
+         expected_samples: sample_artifact
+       }}
+    else
+      nil -> {:error, {:artifact_not_registered, args["samples_artifact"]}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp register_manifest_artifacts(_workspace_root, %{manifest: nil}), do: {:ok, []}
+
+  defp register_manifest_artifacts(workspace_root, inputs) do
+    references =
+      [
+        {inputs.manifest.correctness_artifact, "baseline_correctness"},
+        {inputs.manifest.profiler_artifact, "baseline_profiler"}
+      ] ++
+        Enum.map(inputs.manifest.profiler_dependencies, &{&1, "baseline_profiler_dependency"})
+
+    Enum.reduce_while(
+      references,
+      {:ok, [inputs.manifest.manifest_artifact]},
+      fn {relative_path, kind}, {:ok, artifacts} ->
+        case ArtifactStore.register(workspace_root, relative_path, kind: kind) do
+          {:ok, artifact} ->
+            {:cont, {:ok, [artifact | artifacts]}}
+
+          {:error, reason} ->
+            {:halt, {:error, {:artifact_registration_failed, relative_path, reason}}}
+        end
+      end
+    )
+    |> case do
+      {:ok, artifacts} -> {:ok, Enum.reverse(artifacts)}
+      error -> error
+    end
+  end
+
+  defp verified_sample_artifacts(_workspace_root, %{manifest: nil}, _baseline), do: {:ok, []}
+
+  defp verified_sample_artifacts(workspace_root, inputs, baseline) do
+    sample = baseline.samples_artifact
+
+    case ArtifactStore.verified(
+           workspace_root,
+           inputs.samples_relative,
+           sample.sha256,
+           sample.size,
+           kind: "baseline_samples",
+           mime: "application/x-ndjson"
+         ) do
+      {:ok, artifact} -> {:ok, [artifact]}
+      {:error, reason} -> {:error, {:sample_artifact_registration_failed, reason}}
+    end
+  end
+
+  defp notify_baseline_result(%{status: :selecting_iteration_sample} = state, _response) do
+    dispatch_input(
+      state,
+      "Pika finished validating the full Baseline successfully. Call get_context, then submit_iteration_sample."
+    )
+  end
+
+  defp notify_baseline_result(state, response) do
+    dispatch_input(
+      state,
+      "Pika finished validating the Baseline with this result: #{inspect(response, limit: 8)}. Call get_context, correct the artifacts if needed, and retry submit_baseline."
+    )
+  end
+
   defp baseline_retry(reason, %{baseline_retry_count: 0} = state) do
     min_valid_pairs =
-      get_in(state.spec_result.spec, ["benchmark", "min_valid_pairs"]) || 24
+      state.spec_result.spec
+      |> Map.fetch!("benchmark")
+      |> Map.fetch!("min_valid_pairs")
 
     state = %{
       state
@@ -837,7 +1286,13 @@ defmodule Pika.Alignment.Campaign do
     end
   end
 
-  defp validate_profiler_dependencies(state, profiler_path) do
+  defp validate_profiler_dependencies(state, profiler_path, additional_paths) do
+    available_paths =
+      state.artifacts
+      |> Map.keys()
+      |> Kernel.++(additional_paths)
+      |> MapSet.new()
+
     with {:ok, body} <- File.read(profiler_path),
          {:ok, manifest} <- Jason.decode(body),
          report_paths when is_list(report_paths) and report_paths != [] <-
@@ -849,7 +1304,7 @@ defmodule Pika.Alignment.Campaign do
          true <-
            Enum.all?(
              report_paths ++ parser_paths ++ evidence_paths,
-             &Map.has_key?(state.artifacts, &1)
+             &MapSet.member?(available_paths, &1)
            ) do
       :ok
     else
@@ -897,7 +1352,12 @@ defmodule Pika.Alignment.Campaign do
 
         model = state.model
         effort = state.reasoning_effort
-        mcp = %{url: state.mcp_url, token: token}
+
+        mcp = %{
+          url: state.mcp_url,
+          token: token,
+          resume_session_id: state.provider_session_id
+        }
 
         Task.start(fn ->
           result =
@@ -931,6 +1391,12 @@ defmodule Pika.Alignment.Campaign do
     resolve? = state.resolve_references
     materialize? = state.materialize_references
     setup_worktree = state.workspace.setup_worktree
+    total = Enum.count(references, & &1.selected)
+
+    state = %{
+      state
+      | reference_progress: %{id: nil, completed: 0, total: total, status: :starting}
+    }
 
     Task.start(fn ->
       resolved =
@@ -939,7 +1405,11 @@ defmodule Pika.Alignment.Campaign do
       result =
         case resolved do
           {:ok, entries} when materialize? ->
-            ReferenceCatalog.materialize_selected(setup_worktree, entries)
+            ReferenceCatalog.materialize_selected(setup_worktree, entries,
+              on_progress: fn progress ->
+                send(parent, {:reference_materialization_progress, progress})
+              end
+            )
 
           value ->
             value
@@ -949,6 +1419,18 @@ defmodule Pika.Alignment.Campaign do
     end)
 
     state
+  end
+
+  defp reference_failure_message(references) do
+    failed_ids =
+      for reference <- references,
+          reference.selected and reference.status == :error,
+          do: reference.id
+
+    case failed_ids do
+      [] -> "Reference 准备失败；未进入 Baseline。"
+      ids -> "Reference 准备失败：#{Enum.join(ids, ", ")}。未进入 Baseline，可重试确认。"
+    end
   end
 
   defp dispatch_input(%{backend: nil} = state, _input), do: state
@@ -1091,9 +1573,10 @@ defmodule Pika.Alignment.Campaign do
           ),
         active_turn_id: nil,
         agent_responding: false,
+        recovery_pending: true,
         stream_message_id: nil,
         activity_message_id: nil,
-        messages: state.messages ++ [message(:system, "Backend 进程退出；将使用新 Session 重建上下文。")]
+        messages: state.messages ++ [message(:system, "Backend 进程退出；将尝试恢复原 Session。")]
     }
   end
 
@@ -1125,12 +1608,14 @@ defmodule Pika.Alignment.Campaign do
   defp instruction_assigns(state, :setup_merge), do: %{source_sha: state.workspace.source_sha}
 
   defp instruction_assigns(state, :baseline) do
+    benchmark = Map.fetch!(state.spec_result.spec, "benchmark")
+
     %{
       best_sha: state.best_sha,
       repo: state.workspace.repo,
       artifacts: state.workspace.artifacts,
-      pair_count: get_in(state.spec_result.spec, ["benchmark", "pair_count"]) || 30,
-      min_valid_pairs: get_in(state.spec_result.spec, ["benchmark", "min_valid_pairs"]) || 24,
+      pair_count: Map.fetch!(benchmark, "pair_count"),
+      min_valid_pairs: Map.fetch!(benchmark, "min_valid_pairs"),
       max_initial_cases:
         get_in(state.spec_result.spec, ["iteration_sampling", "max_initial_cases"]) || 10
     }
@@ -1197,19 +1682,21 @@ defmodule Pika.Alignment.Campaign do
       harness: state.harness,
       required_operations: state.required |> MapSet.to_list() |> Enum.sort(),
       references: state.references,
+      reference_progress: state.reference_progress,
       skill: Map.drop(state.skill, [:path]),
       best_sha: state.best_sha,
       baseline: state.baseline,
       baseline_retry_count: state.baseline_retry_count,
       baseline_error: state.baseline_error,
+      baseline_progress: state.baseline_progress,
       iteration_sampling: state.iteration_sampling,
       sampling_revisions: state.sampling_revisions,
       last_error: state.last_error
     }
   end
 
-  defp broadcast(state) do
-    if state.persistence do
+  defp broadcast(state, opts \\ []) do
+    if state.persistence && Keyword.get(opts, :persist, true) do
       case state.persistence.persist(state) do
         :ok -> :ok
         {:error, reason} -> raise "cannot persist Campaign state: #{inspect(reason)}"
@@ -1667,15 +2154,82 @@ defmodule Pika.Alignment.Campaign do
       mcp_tokens: state.mcp_tokens,
       idempotency: %{},
       kickoff_dispatched: false,
+      recovery_pending: true,
       persistence: state.persistence,
       campaign_id: state.campaign_id,
       workspace: state.workspace,
       skill: state.skill,
       references: state.references
     })
+    |> refresh_spec_validation()
+    |> repair_post_confirmation_draft()
   end
 
   defp restore_durable_state(state, _durable), do: state
+
+  defp refresh_spec_validation(%{spec_result: %{spec: spec}} = state) when is_map(spec),
+    do: %{state | spec_result: Spec.validate(spec)}
+
+  defp refresh_spec_validation(state), do: state
+
+  defp repair_post_confirmation_draft(
+         %{
+           status: :drafting_spec,
+           required: required,
+           pending_confirmation_input: confirmation,
+           spec_result: %{ready?: true},
+           harness: harness
+         } = state
+       )
+       when is_binary(confirmation) and not is_nil(harness) do
+    if MapSet.member?(required, "complete_setup_merge") do
+      %{
+        state
+        | status: :awaiting_confirmation,
+          required: MapSet.new(),
+          pending_confirmation_input: nil,
+          last_error: "检测到确认后 Spec 或 Harness 曾被修改；请重新确认后再建立 Baseline。"
+      }
+    else
+      state
+    end
+  end
+
+  defp repair_post_confirmation_draft(state), do: state
+
+  defp persist_backend_event?(%{type: type}),
+    do: type in [:turn_completed, :backend_error, :process_exited]
+
+  defp maybe_dispatch_recovery(state, session) do
+    if state.status != :awaiting_confirmation and
+         not MapSet.equal?(state.required, MapSet.new()) do
+      resume_status =
+        if session.resumed,
+          do: "the provider session was resumed",
+          else: "a replacement provider session was created"
+
+      required = state.required |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
+
+      state
+      |> dispatch_input(
+        "Pika restarted and #{resume_status}. Call get_context now, continue from the persisted Campaign state, and do not repeat completed operations. Current status: #{state.status}. Required MCP operations: #{required}."
+      )
+      |> Map.put(:kickoff_dispatched, true)
+    else
+      state
+    end
+  end
+
+  defp backend_session_message(workflow, %{resumed: true} = session),
+    do: "#{workflow} Backend Session 已恢复：#{session.backend_protocol}"
+
+  defp backend_session_message(workflow, %{resume_error: resume_error} = session)
+       when not is_nil(resume_error),
+       do:
+         "#{workflow} 原 Backend Session 无法恢复，已创建新 Session：#{session.backend_protocol}（#{summarize_event(resume_error)}）"
+
+  defp backend_session_message(workflow, session),
+    do: "#{workflow} Backend Session 已启动：#{session.backend_protocol}"
 
   defp call_if_started(message, default, timeout \\ 120_000) do
     case Process.whereis(__MODULE__) do
