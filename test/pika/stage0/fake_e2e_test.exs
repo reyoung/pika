@@ -34,8 +34,28 @@ defmodule Pika.Stage0.FakeE2ETest do
 
     on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
 
+    assert eventually(fn -> not is_nil(Campaign.snapshot().backend_session_id) end)
+    assert Campaign.snapshot().status == :drafting_spec
+    assert Campaign.snapshot().active_turn_id == nil
+    refute Enum.any?(Campaign.snapshot().messages, &(&1.role == :agent))
+
+    reference_id = Campaign.snapshot().references |> List.first() |> Map.fetch!(:id)
+    assert :ok = Campaign.toggle_reference(reference_id)
+    assert :ok = Campaign.toggle_reference(reference_id)
+    Process.sleep(20)
+    assert Campaign.snapshot().active_turn_id == nil
+    refute Enum.any?(Campaign.snapshot().messages, &(&1.role == :agent))
+
+    assert :ok =
+             Campaign.send_message("请帮我定义并优化这个 Kernel；先和我对齐计算边界、Shapes 与 Metrics。")
+
     assert eventually(fn -> Campaign.snapshot().status == :awaiting_confirmation end)
     assert :ok = Campaign.confirm_spec()
+
+    assert Enum.any?(Campaign.snapshot().messages, fn message ->
+             message.role == :user and message.content == "确认 Campaign Spec v1，并建立 Baseline。"
+           end)
+
     assert eventually(fn -> Campaign.snapshot().status == :optimizing end, 250)
     snapshot = Campaign.snapshot()
     assert snapshot.baseline.summary == "fake end-to-end baseline"

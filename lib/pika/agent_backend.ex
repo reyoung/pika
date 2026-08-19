@@ -20,7 +20,9 @@ defmodule Pika.AgentBackend do
 
   The first argument after `start_link/2` is the backend process reference. The receiver is
   implicit in the design-document pseudocode and explicit here so multiple sessions of the same
-  provider can run concurrently without global registration.
+  provider can run concurrently without global registration. `open_session/7` installs Pika's
+  system-level instructions; `start_turn/2` carries only the user- or user-action-authored input
+  that owns the Session kick-off.
   """
 
   alias Pika.AgentBackend.{Error, Handle}
@@ -36,7 +38,8 @@ defmodule Pika.AgentBackend do
               String.t() | nil,
               atom() | String.t() | nil,
               map(),
-              [Path.t()]
+              [Path.t()],
+              String.t()
             ) ::
               {:ok, Pika.AgentBackend.Session.t()} | {:error, Error.t()}
   @callback start_turn(backend(), String.t() | [map()]) :: {:ok, String.t()} | {:error, Error.t()}
@@ -66,8 +69,16 @@ defmodule Pika.AgentBackend do
     end
   end
 
-  def open_session(%Handle{module: module, pid: pid}, cwd, model, effort, mcp, skill_roots),
-    do: module.open_session(pid, cwd, model, effort, mcp, skill_roots)
+  def open_session(
+        %Handle{module: module, pid: pid},
+        cwd,
+        model,
+        effort,
+        mcp,
+        skill_roots,
+        instructions
+      ),
+      do: module.open_session(pid, cwd, model, effort, mcp, skill_roots, instructions)
 
   def start_turn(%Handle{module: module, pid: pid}, input), do: module.start_turn(pid, input)
   def steer(%Handle{module: module, pid: pid}, input), do: module.steer(pid, input)

@@ -116,6 +116,9 @@ defmodule Pika.Stage0.Campaign do
       baseline_error: nil,
       sampling_revisions: [],
       iteration_sampling: nil,
+      phase_kickoffs: %{},
+      kickoff_dispatched: false,
+      pending_confirmation_input: nil,
       last_error: nil
     }
 
@@ -156,7 +159,10 @@ defmodule Pika.Stage0.Campaign do
     else
       state = register_user_artifacts(state, artifacts)
       state = %{state | messages: state.messages ++ [message(:user, body, artifacts)]}
-      state = dispatch_input(state, user_input(body, artifacts))
+      input = user_input(body, artifacts)
+      state = record_phase_kickoff(state, input)
+      state = dispatch_input(state, input)
+      state = mark_kickoff_dispatched(state)
       broadcast(state)
       {:reply, :ok, state}
     end
@@ -185,10 +191,14 @@ defmodule Pika.Stage0.Campaign do
       }
 
       state =
-        dispatch_input(
-          state,
-          "Reference selection changed to #{Enum.join(selected_ids, ", ")}. Update and resubmit the Campaign Spec with submit_spec before asking for confirmation."
-        )
+        if Map.has_key?(state.phase_kickoffs, :alignment) do
+          dispatch_input(
+            state,
+            "Reference selection changed to #{Enum.join(selected_ids, ", ")}. Update and resubmit the Campaign Spec with submit_spec before asking for confirmation."
+          )
+        else
+          state
+        end
 
       broadcast(state)
       {:reply, :ok, state}
@@ -199,7 +209,17 @@ defmodule Pika.Stage0.Campaign do
 
   def handle_call(:confirm_spec, _from, state) do
     if state.status == :awaiting_confirmation and state.spec_result.ready? and state.harness do
-      state = %{state | status: :resolving_references, last_error: nil}
+      confirmation_input = "确认 Campaign Spec v1，并建立 Baseline。"
+
+      state = %{
+        state
+        | status: :resolving_references,
+          last_error: nil,
+          pending_confirmation_input: confirmation_input,
+          phase_kickoffs: Map.put(state.phase_kickoffs, :baseline, confirmation_input),
+          messages: state.messages ++ [message(:user, confirmation_input)]
+      }
+
       parent = self()
       references = state.references
       resolve? = state.resolve_references
@@ -288,7 +308,7 @@ defmodule Pika.Stage0.Campaign do
             [message(:system, "Campaign Spec v1 已由用户确认；等待 Agent 完成 setup squash merge。")]
     }
 
-    state = dispatch_prompt(state, :setup_merge)
+    state = dispatch_input(state, state.pending_confirmation_input)
 
     broadcast(state)
     {:noreply, state}
@@ -317,8 +337,7 @@ defmodule Pika.Stage0.Campaign do
             [message(:system, "#{phase} Backend Session 已启动：#{session.backend_protocol}")]
     }
 
-    prompt_kind = if phase == :alignment, do: :alignment, else: :baseline
-    state = dispatch_prompt(state, prompt_kind)
+    state = maybe_dispatch_phase_kickoff(state)
     broadcast(state)
     {:noreply, state}
   end
@@ -733,42 +752,63 @@ defmodule Pika.Stage0.Campaign do
   end
 
   defp begin_open_session(state, phase, cwd) do
-    token = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
-    token_hash = token_hash(token)
-    identity = %{phase: phase, role: :boundary, session_key: Pika.AgentBackend.Id.new("stage0")}
-
-    state = %{
-      state
-      | mcp_tokens: Map.put(state.mcp_tokens, token_hash, identity),
-        backend_token_hash: token_hash,
-        backend_phase: phase
-    }
-
-    parent = self()
-    module = state.backend_module
-
-    profile =
-      state.backend_profile
-      |> Map.put_new(:backend, state.backend_name)
-      |> Map.put(:artifact_dir, Path.join(state.workspace.artifacts, "logs"))
-
     skill_roots = [state.skill.path | state.skill_roots] |> Enum.uniq()
-    model = state.model
-    effort = state.reasoning_effort
-    mcp = %{url: state.mcp_url, token: token}
 
-    Task.start(fn ->
-      result =
-        with {:ok, handle} <- AgentBackend.start_link(module, profile, parent),
-             {:ok, session} <-
-               AgentBackend.open_session(handle, cwd, model, effort, mcp, skill_roots) do
-          {:ok, handle, session}
-        end
+    case session_instructions(state, phase, skill_roots) do
+      {:ok, instructions} ->
+        token = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
+        token_hash = token_hash(token)
 
-      send(parent, {:backend_opened, phase, result})
-    end)
+        identity = %{
+          phase: phase,
+          role: :boundary,
+          session_key: Pika.AgentBackend.Id.new("stage0")
+        }
 
-    state
+        state = %{
+          state
+          | mcp_tokens: Map.put(state.mcp_tokens, token_hash, identity),
+            backend_token_hash: token_hash,
+            backend_phase: phase,
+            kickoff_dispatched: false
+        }
+
+        parent = self()
+        module = state.backend_module
+
+        profile =
+          state.backend_profile
+          |> Map.put_new(:backend, state.backend_name)
+          |> Map.put(:artifact_dir, Path.join(state.workspace.artifacts, "logs"))
+
+        model = state.model
+        effort = state.reasoning_effort
+        mcp = %{url: state.mcp_url, token: token}
+
+        Task.start(fn ->
+          result =
+            with {:ok, handle} <- AgentBackend.start_link(module, profile, parent),
+                 {:ok, session} <-
+                   AgentBackend.open_session(
+                     handle,
+                     cwd,
+                     model,
+                     effort,
+                     mcp,
+                     skill_roots,
+                     instructions
+                   ) do
+              {:ok, handle, session}
+            end
+
+          send(parent, {:backend_opened, phase, result})
+        end)
+
+        state
+
+      {:error, reason} ->
+        %{state | last_error: "#{phase} Agent Instructions 加载失败：#{inspect(reason)}"}
+    end
   end
 
   defp dispatch_input(%{backend: nil} = state, _input), do: state
@@ -899,29 +939,32 @@ defmodule Pika.Stage0.Campaign do
 
   defp apply_backend_event(state, _event), do: state
 
-  defp dispatch_prompt(state, kind) do
-    case PromptCatalog.render(kind, prompt_assigns(state, kind)) do
-      {:ok, prompt} ->
-        dispatch_input(state, prompt)
-
-      {:error, reason} ->
-        %{state | last_error: "#{kind} Prompt 资源加载失败：#{inspect(reason)}"}
+  defp session_instructions(state, :alignment, skill_roots) do
+    with {:ok, alignment} <-
+           PromptCatalog.render(:alignment, instruction_assigns(state, :alignment)),
+         {:ok, setup_merge} <-
+           PromptCatalog.render(:setup_merge, instruction_assigns(state, :setup_merge)) do
+      {:ok, append_skill_instructions(alignment <> "\n\n" <> setup_merge, skill_roots)}
     end
   end
 
-  defp prompt_assigns(state, :alignment) do
-    selected = for ref <- state.references, ref.selected, do: "#{ref.id}: #{ref.description}"
+  defp session_instructions(state, :baseline, skill_roots) do
+    with {:ok, baseline} <-
+           PromptCatalog.render(:baseline, instruction_assigns(state, :baseline)) do
+      {:ok, append_skill_instructions(baseline, skill_roots)}
+    end
+  end
 
+  defp instruction_assigns(state, :alignment) do
     %{
       setup_worktree: state.workspace.setup_worktree,
-      source_sha: state.workspace.source_sha,
-      selected_references: Enum.join(selected, "\n")
+      source_sha: state.workspace.source_sha
     }
   end
 
-  defp prompt_assigns(state, :setup_merge), do: %{source_sha: state.workspace.source_sha}
+  defp instruction_assigns(state, :setup_merge), do: %{source_sha: state.workspace.source_sha}
 
-  defp prompt_assigns(state, :baseline) do
+  defp instruction_assigns(state, :baseline) do
     %{
       best_sha: state.best_sha,
       repo: state.workspace.repo,
@@ -929,6 +972,39 @@ defmodule Pika.Stage0.Campaign do
       max_initial_cases:
         get_in(state.spec_result.spec, ["iteration_sampling", "max_initial_cases"]) || 10
     }
+  end
+
+  defp append_skill_instructions(instructions, skill_roots) do
+    paths = Enum.map_join(skill_roots, "\n", &"- #{Path.join(&1, "SKILL.md")}")
+
+    instructions <>
+      "\n\nPika-provided skills are system context. Read each required SKILL.md before acting:\n" <>
+      paths
+  end
+
+  defp record_phase_kickoff(state, input) do
+    if Map.has_key?(state.phase_kickoffs, state.backend_phase) do
+      state
+    else
+      %{state | phase_kickoffs: Map.put(state.phase_kickoffs, state.backend_phase, input)}
+    end
+  end
+
+  defp mark_kickoff_dispatched(%{backend: nil} = state), do: state
+  defp mark_kickoff_dispatched(state), do: %{state | kickoff_dispatched: true}
+
+  defp maybe_dispatch_phase_kickoff(%{kickoff_dispatched: true} = state), do: state
+
+  defp maybe_dispatch_phase_kickoff(state) do
+    case Map.get(state.phase_kickoffs, state.backend_phase) do
+      nil ->
+        state
+
+      input ->
+        state
+        |> dispatch_input(input)
+        |> Map.put(:kickoff_dispatched, true)
+    end
   end
 
   defp public_snapshot(state) do

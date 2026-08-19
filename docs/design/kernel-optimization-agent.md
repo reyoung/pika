@@ -209,8 +209,8 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Pika 领域层只依赖 `Pika.AgentBackend` Behaviour，不依赖 Codex App Server 或 ACP wire types。
 - `Pika.AgentBackend` 固定提供 `start_link`、`open_session`、`start_turn`、`steer`、`interrupt`、`close_session` 和 `capabilities`。
 - 标准化 Backend Event 包括 `session_started`、`turn_started`、`message_delta`、`plan_updated`、`tool_started`、`tool_updated`、`tool_completed`、`command_output`、`file_changed`、`usage_updated`、`turn_completed`、`backend_error` 和 `process_exited`。
-- Codex 使用 `Pika.AgentBackend.CodexAppServer`：每个 Backend Session 启动独立 `codex app-server --listen stdio://`，执行 `initialize → initialized → thread/start → turn/start`，并把 `item/*`/`turn/*` 通知转换为标准事件。
-- Cursor 使用 `Pika.AgentBackend.CursorACP`：每个 Backend Session 启动独立 `cursor-agent acp`，执行 ACP `initialize`、`session/new`、`session/prompt` 和 `session/cancel`；`session/close` 仅在 capability 广告时调用，否则终止该 Session 的独立子进程。
+- Codex 使用 `Pika.AgentBackend.CodexAppServer`：每个 Backend Session 启动独立 `codex app-server --listen stdio://`，执行 `initialize → initialized → thread/start → turn/start`，通过 `thread/start.developerInstructions` 注入 Agent Instructions，并把 `item/*`/`turn/*` 通知转换为标准事件。
+- Cursor 使用 `Pika.AgentBackend.CursorACP`：每个 Backend Session 启动独立 `cursor-agent acp`，执行 ACP `initialize`、`session/new`、`session/prompt` 和 `session/cancel`；由于 ACP 没有 system-instruction 字段，adapter 在临时 Workspace 安装 Git-excluded、always-on 的 `.cursor/rules` 系统规则，并在 Session 关闭时清理。`session/close` 仅在 capability 广告时调用，否则终止该 Session 的独立子进程。
 - Codex 当次指导使用原生 `turn/steer`，不 interrupt 当前 Turn；Cursor 由 Backend adapter 通过 cancel + follow-up Prompt 模拟 `steer`。
 - Stop Now 调用统一 `AgentBackend.interrupt`；Codex 映射到 `turn/interrupt`，Cursor 映射到 `session/cancel`。
 - 每个活跃 Backend Session 使用独立子进程、MCP Token 和配置，隔离崩溃与权限影响。
@@ -256,6 +256,8 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 ## 已确认的 Backend 用户消息行为
 
+- Pika 在打开 Backend Session 时只注入 Agent Instructions，不自动创建首个 Turn。Campaign 首轮必须由用户消息 Kick-off，且 Backend 收到的首条用户输入保持用户原文与附件元数据，不前置 Pika 模板。
+- 用户点击“确认并建立 Baseline”属于显式用户动作，可驱动 setup merge，并在新的 Baseline Session 中作为已授权 Kick-off 重放；Pika 不能用系统生成的 Baseline Prompt 冒充用户动作。
 - 当次指导先持久化，再调用当前 Backend Session 的 `steer`。Codex 原生追加到 in-flight Turn；Cursor adapter cancel 当前 Turn 后在同一 Session 发送 follow-up Prompt。
 - `steer` 失败统一返回 `steer_failed`；恢复流程关闭对应子进程并创建新 Backend Session 继续同一候选尝试。
 - 全局指导只影响之后创建或继续的 Iteration，不取消当前 Agent。
@@ -310,8 +312,9 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - 线上 Shape 与输入分布在 Alignment Conversation 中由 Boundary Agent 和用户共同确认，不要求预先固定一种导入格式。
 - Boundary Agent 可以生成面向实际环境的测试/采集脚本，也可以读取用户提供的 pickle dump 或 JSONL 文件。
 - 采集或导入结果进入 Campaign Spec 草稿，只有用户明确确认后才成为 Benchmark Cases。
-- Alignment、setup merge 与 Baseline Prompt 分别是 Config 可覆盖的独立 EEx 资源；资源缺失或无法编译时必须在启动 Backend Turn 前失败。
-- Alignment Prompt 建议但不强制 latency、memory、TFLOPS、bandwidth 或 throughput 等常见 Metrics；Metric ID、名称和单位保持自由。
+- Alignment、setup merge 与 Baseline Agent Instructions 分别是 Config 可覆盖的独立 EEx 资源；资源缺失或无法编译时必须在打开 Backend Session 前失败。
+- Agent Instructions 只作为 provider 的系统级上下文注入，不能作为首条用户 Prompt 或自动 Kick-off。Campaign 的首个 Backend Turn 必须保留用户首条消息原文；用户确认 Spec 的显式动作负责推进 setup merge 与 Baseline。
+- Alignment Instructions 建议但不强制 latency、memory、TFLOPS、bandwidth 或 throughput 等常见 Metrics；Metric ID、名称和单位保持自由。
 - 用户消息与附件作为同一个领域动作提交；附件只向 Agent 注入相对路径、MIME、大小与哈希，不自动把文件内容展开进 Prompt。
 
 ## 已确认的 Profiler 策略

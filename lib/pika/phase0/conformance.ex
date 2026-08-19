@@ -73,7 +73,8 @@ defmodule Pika.Phase0.Conformance do
         nil,
         :low,
         %{url: mcp_url, token: registration.token},
-        [skill.path]
+        [skill.path],
+        phase0_instructions(skill.path)
       )
 
     idempotency_key = "#{backend}-phase-0"
@@ -222,7 +223,8 @@ defmodule Pika.Phase0.Conformance do
         nil,
         :low,
         %{url: mcp_url, token: crash_registration.token},
-        [skill_path]
+        [skill_path],
+        phase0_instructions(skill_path)
       )
 
     survivor_os_pid = survivor.module.process_os_pid(survivor.pid)
@@ -260,7 +262,8 @@ defmodule Pika.Phase0.Conformance do
         nil,
         :low,
         %{url: mcp_url, token: recovery_registration.token},
-        [skill_path]
+        [skill_path],
+        phase0_instructions(skill_path)
       )
 
     if recovery_session.backend_session_id == crashed_session.backend_session_id do
@@ -278,6 +281,10 @@ defmodule Pika.Phase0.Conformance do
       recovery_backend_session_id: recovery_session.backend_session_id,
       provider_resume_used: false
     }
+  end
+
+  defp phase0_instructions(skill_path) do
+    "Pika Phase 0 conformance session. Read #{Path.join(skill_path, "SKILL.md")} before acting."
   end
 
   defp wait_turn(collector, turn_id, timeout) do

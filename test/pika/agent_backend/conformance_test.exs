@@ -9,7 +9,17 @@ defmodule Pika.AgentBackend.ConformanceTest do
     {:ok, backend} =
       AgentBackend.start_link(Pika.Test.FakeAgentBackend, %{backend: :fake}, self())
 
-    assert {:ok, session} = AgentBackend.open_session(backend, File.cwd!(), "fake", :low, %{}, [])
+    assert {:ok, session} =
+             AgentBackend.open_session(
+               backend,
+               File.cwd!(),
+               "fake",
+               :low,
+               %{},
+               [],
+               "Pika conformance system instructions"
+             )
+
     assert session.backend_protocol == "fake-v1"
     assert {:ok, turn_id} = AgentBackend.start_turn(backend, "hello")
     assert is_binary(turn_id)

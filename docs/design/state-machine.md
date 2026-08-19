@@ -36,6 +36,8 @@ stateDiagram-v2
     Blocked --> Draining: 用户解决并显式恢复
 ```
 
+`DraftingSpec` 只表示 Campaign 正在等待或形成 Spec 草稿，不等于 Backend Turn 已启动。Pika 可以提前打开并注入 Agent Instructions，但首个 Turn 必须等待用户消息完成 Campaign Kick-off；`AwaitingConfirmation → BuildingBaseline` 的用户确认动作同时授权 setup merge 与后续 Baseline Session。
+
 `Paused` 不取消在途 Agent 或 Integration，只关闭新 Attempt dispatch。`Stopped` 会调用 `AgentBackend.interrupt` 终止活跃 Backend Turn，关闭自动恢复和归并，但保留全部状态。为正确 Resume，Campaign 表保存 `resume_state`。
 
 Sync 不替换 Campaign 主状态，而设置 `dispatch_gate=sync`。这允许已有 Iteration 继续工作，同时禁止派生新 Attempt。UI 可以将其显示为 `Optimizing · Syncing`。

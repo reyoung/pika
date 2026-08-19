@@ -15,12 +15,12 @@ defmodule Pika.Stage0.PromptCatalogTest do
     assert {:ok, alignment} =
              PromptCatalog.render(:alignment, %{
                setup_worktree: "/tmp/setup",
-               source_sha: "abc",
-               selected_references: "cutlass: NVIDIA CUTLASS"
+               source_sha: "abc"
              })
 
     assert alignment =~ "latency"
     assert alignment =~ "min/max ranges"
+    assert alignment =~ "user-initiated Turn"
 
     assert {:ok, setup} = PromptCatalog.render(:setup_merge, %{source_sha: "abc"})
     assert setup =~ "complete_setup_merge"

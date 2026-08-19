@@ -7,6 +7,7 @@ defmodule Pika.AgentBackend.CursorProtocolTest do
   test "maps ACP prompt/update, cancel-follow-up steer, interrupt and process close fallback" do
     artifact_dir = temp_dir("cursor-artifacts")
     skill_dir = fake_skill()
+    workspace = git_workspace("cursor-workspace")
 
     profile = %{
       backend: :cursor_acp,
@@ -21,14 +22,25 @@ defmodule Pika.AgentBackend.CursorProtocolTest do
     assert {:ok, session} =
              AgentBackend.open_session(
                backend,
-               File.cwd!(),
+               workspace,
                nil,
                :low,
                %{url: "http://127.0.0.1:1/mcp", token: "cursor-unit-secret"},
-               [skill_dir]
+               [skill_dir],
+               "Pika system instructions"
              )
 
     assert_receive {:pika_backend_event, %{type: :session_started}}
+
+    [rule_path] = Path.wildcard(Path.join(workspace, ".cursor/rules/pika-system-*.mdc"))
+    assert File.read!(rule_path) =~ "alwaysApply: true"
+    assert File.read!(rule_path) =~ "Pika system instructions"
+    assert {"", 0} = System.cmd("git", ["-C", workspace, "status", "--porcelain"])
+
+    refute Enum.any?(
+             JSONLWriter.replay(session.jsonl_path),
+             &(get_in(&1, ["payload", "method"]) == "session/prompt")
+           )
 
     assert %{close: :process_fallback, simulated_steer: :cancel_then_prompt} =
              AgentBackend.capabilities(backend)
@@ -59,6 +71,20 @@ defmodule Pika.AgentBackend.CursorProtocolTest do
 
     assert :ok = AgentBackend.close_session(backend)
     assert %{data: %{wire_close_fallback: nil}} = assert_event(:process_exited)
+    refute File.exists?(rule_path)
+    assert {"", 0} = System.cmd("git", ["-C", workspace, "status", "--porcelain"])
+
+    {exclude_path, 0} =
+      System.cmd("git", ["-C", workspace, "rev-parse", "--git-path", "info/exclude"])
+
+    exclude_path =
+      exclude_path
+      |> String.trim()
+      |> then(fn path ->
+        if Path.type(path) == :absolute, do: path, else: Path.expand(path, workspace)
+      end)
+
+    refute File.read!(exclude_path) =~ "pika-system-"
 
     records = JSONLWriter.replay(session.jsonl_path)
 
@@ -71,12 +97,21 @@ defmodule Pika.AgentBackend.CursorProtocolTest do
     assert "session/cancel" in methods
     refute "session/close" in methods
 
+    first_prompt =
+      Enum.find(records, &(get_in(&1, ["payload", "method"]) == "session/prompt"))
+
+    assert get_in(first_prompt, ["payload", "params", "prompt"]) == [
+             %{"type" => "text", "text" => "complete"}
+           ]
+
     contents = File.read!(session.jsonl_path)
     assert contents =~ "[REDACTED]"
     refute contents =~ "cursor-unit-secret"
   end
 
   test "uses ACP session/close only when the provider advertises it" do
+    workspace = git_workspace("cursor-close-workspace")
+
     profile = %{
       backend: :cursor_acp,
       command: System.find_executable("mix"),
@@ -90,11 +125,12 @@ defmodule Pika.AgentBackend.CursorProtocolTest do
     assert {:ok, session} =
              AgentBackend.open_session(
                backend,
-               File.cwd!(),
+               workspace,
                nil,
                nil,
                %{url: "http://127.0.0.1:1/mcp", token: "secret"},
-               []
+               [],
+               "Pika close-test system instructions"
              )
 
     assert %{close: :protocol} = AgentBackend.capabilities(backend)
@@ -122,6 +158,12 @@ defmodule Pika.AgentBackend.CursorProtocolTest do
   defp fake_skill do
     dir = temp_dir("cursor-skill")
     File.write!(Path.join(dir, "SKILL.md"), "---\nname: fake-skill\ndescription: test\n---\n")
+    dir
+  end
+
+  defp git_workspace(prefix) do
+    dir = temp_dir(prefix)
+    {_, 0} = System.cmd("git", ["-C", dir, "init", "-q"])
     dir
   end
 

@@ -196,6 +196,14 @@ _Avoid_: 普通 By the way、指导
 优化开始前由用户与 Boundary Agent 共同形成和确认 Campaign Spec 的独立对话。
 _Avoid_: Attempt Conversation、BTW Conversation、Campaign Guidance
 
+**Campaign Kick-off**：
+用户通过首条消息或明确确认动作授权 Pika 开始或推进 Campaign 的领域动作；Pika 的系统指令、Session 创建和恢复都不构成 Kick-off。
+_Avoid_: 自动 Prompt、Session 启动、系统消息
+
+**Agent 系统指令（Agent Instructions）**：
+Pika 注入 Backend Session、用于约束角色、权限与完成门禁的系统级上下文；它不属于用户消息，也不能触发或冒充 Campaign Kick-off。
+_Avoid_: 用户 Prompt、Campaign Kick-off、自动用户消息
+
 **Attempt 对话（Attempt Conversation）**：
 用户查看某个正在运行的 Attempt 时看到的 Backend Session 工作过程，也是创建 BTW Conversation 的唯一入口。
 _Avoid_: 目标对齐对话、Agent JSONL、汇总报告

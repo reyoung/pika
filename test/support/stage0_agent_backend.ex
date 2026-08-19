@@ -6,9 +6,12 @@ defmodule Pika.Test.Stage0AgentBackend do
   alias Pika.Test.Stage0Fixtures
 
   def start_link(_profile, sink),
-    do: Agent.start_link(fn -> %{sink: sink, session: nil, cwd: nil, mcp: nil, turn: nil} end)
+    do:
+      Agent.start_link(fn ->
+        %{sink: sink, session: nil, cwd: nil, mcp: nil, instructions: nil, turn: nil}
+      end)
 
-  def open_session(server, cwd, model, effort, mcp, _skill_roots) do
+  def open_session(server, cwd, model, effort, mcp, _skill_roots, instructions) do
     session = %Session{
       id: Id.new("session"),
       backend: :stage0_fake,
@@ -20,7 +23,11 @@ defmodule Pika.Test.Stage0AgentBackend do
       jsonl_path: "/dev/null"
     }
 
-    Agent.update(server, &%{&1 | session: session, cwd: cwd, mcp: mcp})
+    Agent.update(
+      server,
+      &%{&1 | session: session, cwd: cwd, mcp: mcp, instructions: instructions}
+    )
+
     emit(server, :session_started)
     {:ok, session}
   end
@@ -59,9 +66,9 @@ defmodule Pika.Test.Stage0AgentBackend do
 
   defp run(input, state) do
     cond do
-      String.contains?(input, "You are the Boundary Agent") -> alignment(state)
-      String.contains?(input, "user confirmed Campaign Spec") -> setup_merge(state)
-      String.contains?(input, "Baseline Boundary Agent") -> baseline(state)
+      String.contains?(state.instructions, "Baseline Boundary Agent") -> baseline(state)
+      String.contains?(input, "确认 Campaign Spec v1") -> setup_merge(state)
+      String.contains?(state.instructions, "You are the Boundary Agent") -> alignment(state)
       true -> :ok
     end
   end

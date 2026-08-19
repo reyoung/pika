@@ -13,7 +13,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
   def start_link(profile, event_sink), do: GenServer.start_link(__MODULE__, {profile, event_sink})
 
   @impl true
-  def open_session(server, cwd, model, reasoning_effort, mcp, skill_roots) do
+  def open_session(server, cwd, model, reasoning_effort, mcp, skill_roots, instructions) do
     cwd = Path.expand(cwd)
     skill_roots = Enum.map(skill_roots, &Path.expand/1)
 
@@ -22,7 +22,11 @@ defmodule Pika.AgentBackend.CodexAppServer do
          :ok <- notify(server, "initialized", %{}),
          :ok <- configure_skills(server, cwd, skill_roots),
          {:ok, response} <-
-           rpc(server, "thread/start", thread_start_params(cwd, model, reasoning_effort)),
+           rpc(
+             server,
+             "thread/start",
+             thread_start_params(cwd, model, reasoning_effort, instructions)
+           ),
          {:ok, backend_session_id} <- fetch_id(response, ["thread", "id"]),
          {:ok, session} <-
            GenServer.call(
@@ -36,7 +40,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
   @impl true
   def start_turn(server, input) do
     with {:ok, state} <- GenServer.call(server, :turn_context),
-         items <- normalize_input(input, state.skill_roots),
+         items <- normalize_input(input),
          params <-
            compact(%{
              "threadId" => state.backend_session_id,
@@ -59,7 +63,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
          params <- %{
            "threadId" => state.backend_session_id,
            "expectedTurnId" => state.active_turn_id,
-           "input" => normalize_input(input, [])
+           "input" => normalize_input(input)
          },
          {:ok, response} <- rpc(server, "turn/steer", params),
          {:ok, turn_id} <- fetch_id(response, ["turnId"]) do
@@ -213,6 +217,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
        interrupt: true,
        close: :process,
        http_mcp: true,
+       system_instructions: :developer_instructions,
        skill_roots: true,
        provider_resume_required: false
      }, state}
@@ -448,10 +453,11 @@ defmodule Pika.AgentBackend.CodexAppServer do
     end
   end
 
-  defp thread_start_params(cwd, model, reasoning_effort) do
+  defp thread_start_params(cwd, model, reasoning_effort, instructions) do
     compact(%{
       "cwd" => cwd,
       "model" => model,
+      "developerInstructions" => instructions,
       "approvalPolicy" => "never",
       "sandbox" => "danger-full-access",
       "ephemeral" => true,
@@ -459,33 +465,8 @@ defmodule Pika.AgentBackend.CodexAppServer do
     })
   end
 
-  defp normalize_input(input, skill_roots) do
-    text_items =
-      case input do
-        text when is_binary(text) -> [%{"type" => "text", "text" => text}]
-        items when is_list(items) -> items
-      end
-
-    skill_items =
-      Enum.map(skill_roots, fn path ->
-        %{"type" => "skill", "name" => skill_name(path), "path" => Path.join(path, "SKILL.md")}
-      end)
-
-    text_items ++ skill_items
-  end
-
-  defp skill_name(path) do
-    case File.read(Path.join(path, "SKILL.md")) do
-      {:ok, contents} ->
-        case Regex.run(~r/^name:\s*(.+)$/m, contents) do
-          [_, name] -> String.trim(name)
-          _ -> Path.basename(path)
-        end
-
-      _ ->
-        Path.basename(path)
-    end
-  end
+  defp normalize_input(text) when is_binary(text), do: [%{"type" => "text", "text" => text}]
+  defp normalize_input(items) when is_list(items), do: items
 
   defp codex_mcp_args(mcp) do
     url = Map.fetch!(mcp, :url)

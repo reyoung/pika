@@ -14,22 +14,39 @@ defmodule Pika.AgentBackend.CursorACP do
   def start_link(profile, event_sink), do: GenServer.start_link(__MODULE__, {profile, event_sink})
 
   @impl true
-  def open_session(server, cwd, model, reasoning_effort, mcp, skill_roots) do
+  def open_session(server, cwd, model, reasoning_effort, mcp, skill_roots, instructions) do
     cwd = Path.expand(cwd)
     skill_roots = Enum.map(skill_roots, &Path.expand/1)
 
-    with :ok <- GenServer.call(server, {:start_transport, mcp}, @rpc_timeout),
-         {:ok, initialize_response} <- rpc(server, "initialize", initialize_params()),
-         :ok <- GenServer.call(server, {:provider_capabilities, initialize_response}),
-         {:ok, response} <- rpc(server, "session/new", session_new_params(cwd, mcp, skill_roots)),
-         {:ok, backend_session_id} <- fetch_id(response, "sessionId"),
-         :ok <- maybe_select_model(server, backend_session_id, model),
-         {:ok, session} <-
-           GenServer.call(
-             server,
-             {:establish_session, backend_session_id, cwd, model, reasoning_effort, skill_roots}
-           ) do
-      {:ok, session}
+    result =
+      with :ok <-
+             GenServer.call(
+               server,
+               {:install_system_instructions, cwd, instructions},
+               @rpc_timeout
+             ),
+           :ok <- GenServer.call(server, {:start_transport, mcp}, @rpc_timeout),
+           {:ok, initialize_response} <- rpc(server, "initialize", initialize_params()),
+           :ok <- GenServer.call(server, {:provider_capabilities, initialize_response}),
+           {:ok, response} <-
+             rpc(server, "session/new", session_new_params(cwd, mcp, skill_roots)),
+           {:ok, backend_session_id} <- fetch_id(response, "sessionId"),
+           :ok <- maybe_select_model(server, backend_session_id, model),
+           {:ok, session} <-
+             GenServer.call(
+               server,
+               {:establish_session, backend_session_id, cwd, model, reasoning_effort, skill_roots}
+             ) do
+        {:ok, session}
+      end
+
+    case result do
+      {:ok, _session} = ok ->
+        ok
+
+      error ->
+        GenServer.call(server, :remove_system_instructions, @rpc_timeout)
+        error
     end
   end
 
@@ -92,8 +109,29 @@ defmodule Pika.AgentBackend.CursorACP do
        provider_capabilities: %{},
        wire_close: false,
        jsonl_path: nil,
+       instruction_rule: nil,
        closed: false
      }}
+  end
+
+  @impl true
+  def handle_call({:install_system_instructions, cwd, instructions}, _from, state) do
+    case install_instruction_rule(cwd, state.session_id, instructions) do
+      {:ok, rule} ->
+        {:reply, :ok, %{state | instruction_rule: rule}}
+
+      {:error, reason} ->
+        {:reply,
+         rpc_error(
+           :system_instructions_failed,
+           "could not install Cursor system instructions",
+           reason
+         ), state}
+    end
+  end
+
+  def handle_call(:remove_system_instructions, _from, state) do
+    {:reply, :ok, cleanup_instruction_rule(state)}
   end
 
   @impl true
@@ -211,6 +249,7 @@ defmodule Pika.AgentBackend.CursorACP do
        interrupt: true,
        close: if(state.wire_close, do: :protocol, else: :process_fallback),
        http_mcp: get_in(state.provider_capabilities, ["mcpCapabilities", "http"]) == true,
+       system_instructions: :project_rule,
        skill_roots: :additional_directories,
        provider_resume_required: false
      }, state}
@@ -284,12 +323,16 @@ defmodule Pika.AgentBackend.CursorACP do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %{transport: transport}) when is_pid(transport) do
+  def terminate(_reason, %{transport: transport} = state) when is_pid(transport) do
     if Process.alive?(transport), do: JSONLPort.close(transport)
+    cleanup_instruction_rule(state)
     :ok
   end
 
-  def terminate(_reason, _state), do: :ok
+  def terminate(_reason, state) do
+    cleanup_instruction_rule(state)
+    :ok
+  end
 
   defp rpc(server, method, params),
     do: GenServer.call(server, {:rpc, method, params}, @rpc_timeout)
@@ -320,7 +363,7 @@ defmodule Pika.AgentBackend.CursorACP do
 
   defp send_prompt(state, input) do
     turn_id = Id.new("turn")
-    prompt = normalize_prompt(input, state.skill_roots)
+    prompt = normalize_prompt(input)
 
     {_id, state} =
       next_request(
@@ -452,7 +495,8 @@ defmodule Pika.AgentBackend.CursorACP do
 
   defp map_session_update(_update, state), do: state
 
-  defp close_transport(%{transport: nil} = state, _fallback_reason), do: {:reply, :ok, state}
+  defp close_transport(%{transport: nil} = state, _fallback_reason),
+    do: {:reply, :ok, cleanup_instruction_rule(state)}
 
   defp close_transport(state, fallback_reason) do
     :ok = JSONLPort.close(state.transport)
@@ -461,7 +505,95 @@ defmodule Pika.AgentBackend.CursorACP do
       data: %{status: :closed, expected: true, wire_close_fallback: fallback_reason}
     )
 
-    {:reply, :ok, %{state | transport: nil, closed: true}}
+    {:reply, :ok,
+     state
+     |> Map.merge(%{transport: nil, closed: true})
+     |> cleanup_instruction_rule()}
+  end
+
+  defp install_instruction_rule(cwd, session_id, instructions)
+       when is_binary(instructions) and instructions != "" do
+    relative_path = ".cursor/rules/pika-system-#{session_id}.mdc"
+    path = Path.join(cwd, relative_path)
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- ensure_missing(path),
+         :ok <- File.write(path, cursor_rule(instructions)),
+         {:ok, exclude} <- install_git_exclude(cwd, relative_path, session_id) do
+      {:ok, %{path: path, exclude: exclude}}
+    else
+      {:error, reason} ->
+        File.rm(path)
+        {:error, reason}
+    end
+  end
+
+  defp install_instruction_rule(_cwd, _session_id, instructions),
+    do: {:error, {:invalid_system_instructions, instructions}}
+
+  defp install_git_exclude(cwd, relative_path, session_id) do
+    case System.cmd("git", ["-C", cwd, "rev-parse", "--git-path", "info/exclude"],
+           stderr_to_stdout: true
+         ) do
+      {raw_path, 0} ->
+        exclude_path = raw_path |> String.trim() |> expand_from(cwd)
+        marker = "# pika-system-#{session_id}\n/#{relative_path}\n"
+
+        with :ok <- File.mkdir_p(Path.dirname(exclude_path)),
+             {:ok, existing} <- read_or_empty(exclude_path),
+             :ok <- File.write(exclude_path, append_block(existing, marker)) do
+          {:ok, %{path: exclude_path, marker: marker}}
+        end
+
+      {_output, _status} ->
+        {:ok, nil}
+    end
+  end
+
+  defp cleanup_instruction_rule(%{instruction_rule: nil} = state), do: state
+
+  defp cleanup_instruction_rule(%{instruction_rule: rule} = state) do
+    File.rm(rule.path)
+
+    case rule.exclude do
+      %{path: exclude_path, marker: marker} ->
+        with {:ok, contents} <- File.read(exclude_path) do
+          File.write(exclude_path, String.replace(contents, marker, "", global: false))
+        end
+
+      nil ->
+        :ok
+    end
+
+    %{state | instruction_rule: nil}
+  end
+
+  defp cursor_rule(instructions) do
+    "---\ndescription: Pika Backend Session system instructions\nalwaysApply: true\n---\n\n" <>
+      instructions <> "\n"
+  end
+
+  defp ensure_missing(path) do
+    if File.exists?(path), do: {:error, :instruction_rule_exists}, else: :ok
+  end
+
+  defp read_or_empty(path) do
+    case File.read(path) do
+      {:ok, contents} -> {:ok, contents}
+      {:error, :enoent} -> {:ok, ""}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp append_block("", block), do: block
+
+  defp append_block(existing, block) when is_binary(existing) do
+    separator = if String.ends_with?(existing, "\n"), do: "", else: "\n"
+    existing <> separator <> block
+  end
+
+  defp expand_from(path, cwd) do
+    if Path.type(path) == :absolute, do: path, else: Path.expand(path, cwd)
   end
 
   defp initialize_params do
@@ -502,25 +634,8 @@ defmodule Pika.AgentBackend.CursorACP do
     end
   end
 
-  defp normalize_prompt(input, skill_roots) do
-    blocks =
-      case input do
-        text when is_binary(text) -> [%{"type" => "text", "text" => text}]
-        items when is_list(items) -> items
-      end
-
-    case skill_roots do
-      [] ->
-        blocks
-
-      roots ->
-        instruction =
-          "Injected Pika skills (read SKILL.md before acting):\n" <>
-            Enum.map_join(roots, "\n", &"- #{Path.join(&1, "SKILL.md")}")
-
-        [%{"type" => "text", "text" => instruction} | blocks]
-    end
-  end
+  defp normalize_prompt(text) when is_binary(text), do: [%{"type" => "text", "text" => text}]
+  defp normalize_prompt(items) when is_list(items), do: items
 
   defp response_result(%{"result" => result}), do: {:ok, result}
 

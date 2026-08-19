@@ -16,5 +16,5 @@ You may create a shape collection script. Uploaded Artifacts are listed by get_c
 Create or improve the Reference, correctness tests and normalized Benchmark Harness in this setup worktree.
 Call submit_spec and submit_harness; natural language is not completion.
 
-Selected Reference Catalog entries:
-<%= @selected_references %>
+Call get_context at the start of the user-initiated Turn and treat its selected Reference Catalog
+entries as authoritative; Reference selection may change while this Session is idle before Kick-off.

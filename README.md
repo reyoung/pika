@@ -82,11 +82,11 @@ Stage0 Demo 使用 Phase 0 Backend 打通内存态目标对齐、Campaign Spec/H
 --skill-root PATH
 ```
 
-Alignment、setup merge 和 Baseline Prompt 是 `priv/prompts/stage0/*.md.eex` 独立资源；`config :pika, Pika.Stage0.PromptCatalog` 可以分别改为绝对路径。配置缺失或模板无法编译时，服务在启动 Backend Turn 前失败。
+Alignment、setup merge 和 Baseline Agent Instructions 是 `priv/prompts/stage0/*.md.eex` 独立资源；`config :pika, Pika.Stage0.PromptCatalog` 可以分别改为绝对路径。它们作为 Backend 系统级上下文注入，不占用首条用户 Prompt，也不自动 Kick-off；Campaign 由用户首条消息启动，用户确认 Spec 的动作继续驱动 setup merge 与 Baseline。配置缺失或模板无法编译时，服务在打开 Backend Session 前失败。
 
 确定性全流程、两个真实 Backend 的 Boundary MCP smoke 及实现边界见 [Stage0 Demo 文档](docs/v0/phases/00b-stage0-alignment-baseline-demo.md)。
 
-原始 Full Baseline H20 E2E 已在 WeLM v4.5 80A3 verify-attention 的固定 committed SHA 上通过：3 个 trace case、90/90 有效 Pair、3/3 correctness，以及 full/source NCU report。脱敏后的结构化结果位于 `artifacts/stage0-demo/welm-h20-gpu-e2e.json`；该历史证据早于 `submit_iteration_sample` 门禁，新的 Sampling 状态由单元/Fake Backend E2E 覆盖，完整 H20 流程需后续重新生成证据。
+原始 Full Baseline H20 E2E 已在 WeLM v4.5 80A3 verify-attention 的固定 committed SHA 上通过：3 个 trace case、90/90 有效 Pair、3/3 correctness，以及 full/source NCU report。脱敏后的结构化结果位于 `artifacts/stage0-demo/welm-h20-gpu-e2e.json`；该历史证据早于 `submit_iteration_sample` 门禁和用户拥有 Campaign Kick-off 的新语义，新的 Sampling/Kick-off 状态由协议测试与 Fake Backend E2E 覆盖，完整 H20 流程需后续重新生成证据。
 
 ## Phase 1 持久化 Server
 

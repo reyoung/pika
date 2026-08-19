@@ -6,7 +6,7 @@ defmodule Pika.Test.FakeAgentBackend do
   def start_link(_profile, sink),
     do: Agent.start_link(fn -> %{sink: sink, session: nil, turn: nil} end)
 
-  def open_session(server, cwd, model, effort, _mcp, _skill_roots) do
+  def open_session(server, cwd, model, effort, _mcp, _skill_roots, _instructions) do
     session = %Session{
       id: Id.new("session"),
       backend: :fake,

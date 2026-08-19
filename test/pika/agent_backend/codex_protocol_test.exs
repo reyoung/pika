@@ -26,11 +26,17 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
                "fake-model",
                :low,
                %{url: "http://127.0.0.1:1/mcp", token: "unit-test-secret"},
-               [skill_dir]
+               [skill_dir],
+               "Pika system instructions"
              )
 
     assert session.backend_session_id == "fake-thread"
     assert_receive {:pika_backend_event, %{type: :session_started}}
+
+    refute Enum.any?(
+             JSONLWriter.replay(session.jsonl_path),
+             &(get_in(&1, ["payload", "method"]) == "turn/start")
+           )
 
     assert {:ok, first_turn} = AgentBackend.start_turn(backend, "complete")
     assert is_binary(first_turn)
@@ -69,6 +75,18 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
     assert "turn/start" in methods
     assert "turn/steer" in methods
     assert "turn/interrupt" in methods
+
+    thread_start =
+      Enum.find(records, &(get_in(&1, ["payload", "method"]) == "thread/start"))
+
+    assert get_in(thread_start, ["payload", "params", "developerInstructions"]) ==
+             "Pika system instructions"
+
+    first_turn = Enum.find(records, &(get_in(&1, ["payload", "method"]) == "turn/start"))
+
+    assert get_in(first_turn, ["payload", "params", "input"]) == [
+             %{"type" => "text", "text" => "complete"}
+           ]
   end
 
   defp assert_event(type) do
