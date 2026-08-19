@@ -1,0 +1,98 @@
+defmodule Pika.Stage0.ReferenceCatalog do
+  @moduledoc false
+
+  @entries [
+    {"cutlass", "https://github.com/NVIDIA/cutlass.git", "NVIDIA CUTLASS"},
+    {"cutex", "https://github.com/deciding/cutex.git", "CUDA Template Extensions"},
+    {"cuLA", "https://github.com/inclusionAI/cuLA.git", "CUDA Linear Algebra"},
+    {"flash-attention", "https://github.com/Dao-AILab/flash-attention.git", "Flash Attention"},
+    {"flashinfer", "https://github.com/flashinfer-ai/flashinfer.git",
+     "LLM Serving Kernel Library"},
+    {"FlyDSL", "https://github.com/ROCm/FlyDSL.git", "ROCm FlyDSL"},
+    {"triton", "https://github.com/triton-lang/triton.git", "Triton"},
+    {"DeepGEMM", "https://github.com/deepseek-ai/DeepGEMM.git", "DeepGEMM"},
+    {"LeetCUDA", "https://github.com/xlite-dev/LeetCUDA.git", "CUDA Learning"},
+    {"FlashMLA", "https://github.com/deepseek-ai/FlashMLA.git", "FlashMLA"},
+    {"composable_kernel", "https://github.com/ROCm/composable_kernel.git", "Composable Kernel"},
+    {"cute-gemm", "https://github.com/reed-lau/cute-gemm.git", "CuTe GEMM Examples"},
+    {"hpc-ops", "https://github.com/Tencent/hpc-ops.git", "Tencent HPC Ops"},
+    {"aiter", "https://github.com/ROCm/aiter.git", "ROCm AIter"},
+    {"quack", "https://github.com/Dao-AILab/quack.git", "Dao-AILab Quack"},
+    {"tilelang", "https://github.com/tile-ai/tilelang.git", "TileLang"}
+  ]
+
+  def entries do
+    Enum.map(@entries, fn {id, url, description} ->
+      %{
+        id: id,
+        url: url,
+        description: description,
+        selected: true,
+        status: :unresolved,
+        sha: nil,
+        branch: nil
+      }
+    end)
+  end
+
+  def resolve_selected(entries) do
+    results =
+      Task.async_stream(
+        entries,
+        fn
+          %{selected: false} = entry -> entry
+          entry -> resolve(entry)
+        end,
+        ordered: true,
+        max_concurrency: 8,
+        timeout: 60_000,
+        on_timeout: :kill_task
+      )
+      |> Enum.to_list()
+
+    entries
+    |> Enum.zip(results)
+    |> Enum.map(fn
+      {_original, {:ok, entry}} ->
+        entry
+
+      {original, {:exit, _reason}} ->
+        %{original | status: :error, description: original.description <> " (resolution timeout)"}
+    end)
+    |> then(fn resolved ->
+      if Enum.any?(resolved, &(&1.selected && &1.status == :error)) do
+        {:error, resolved}
+      else
+        {:ok, resolved}
+      end
+    end)
+  end
+
+  defp resolve(entry) do
+    case System.cmd("git", ["ls-remote", "--symref", entry.url, "HEAD"], stderr_to_stdout: true) do
+      {output, 0} ->
+        branch =
+          case Regex.run(~r/ref: refs\/heads\/([^\s]+)\s+HEAD/, output) do
+            [_, value] -> value
+            _ -> nil
+          end
+
+        sha =
+          output
+          |> String.split("\n")
+          |> Enum.find_value(fn line ->
+            case String.split(line) do
+              [value, "HEAD"] when byte_size(value) == 40 -> value
+              _ -> nil
+            end
+          end)
+
+        if sha,
+          do: %{entry | status: :resolved, sha: sha, branch: branch},
+          else: %{entry | status: :error}
+
+      {_output, _status} ->
+        %{entry | status: :error}
+    end
+  end
+end

@@ -1,0 +1,4 @@
+The user confirmed Campaign Spec revision 1. In the temporary clone only, commit the setup worktree,
+then squash merge pika/setup/1 into pika/best without modifying the source repo.
+The squash commit parent must be <%= @source_sha %>. Call complete_setup_merge with exact SHAs.
+Do not push any remote. Do not merge temporary Reference repositories or Skill content.

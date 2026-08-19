@@ -7,7 +7,10 @@ defmodule Pika.Application do
   def start(_type, _args) do
     children = [
       Pika.MCP.ProbeState,
-      {DynamicSupervisor, strategy: :one_for_one, name: Pika.AgentBackendSessionSupervisor}
+      {Phoenix.PubSub, name: Pika.PubSub},
+      {DynamicSupervisor, strategy: :one_for_one, name: Pika.AgentBackendSessionSupervisor},
+      {DynamicSupervisor, strategy: :one_for_one, name: Pika.Stage0.CampaignSupervisor},
+      PikaWeb.Endpoint
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Pika.Supervisor)

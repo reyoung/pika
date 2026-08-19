@@ -27,13 +27,19 @@ defmodule Pika.MixProject do
   defp deps do
     [
       {:bandit, "~> 1.8"},
+      {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
       {:jason, "~> 1.4"},
-      {:phoenix, "~> 1.8"}
+      {:lazy_html, ">= 0.1.0", only: :test},
+      {:mdex, "~> 0.13"},
+      {:phoenix, "~> 1.8"},
+      {:phoenix_html, "~> 4.2"},
+      {:phoenix_live_view, "~> 1.1"}
     ]
   end
 
   defp aliases do
     [
+      "assets.build": ["esbuild default"],
       check: ["format --check-formatted", "compile --warnings-as-errors", "test"]
     ]
   end

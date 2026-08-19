@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0029
 ---
 
 # 主线复验固定版本并异步撤销

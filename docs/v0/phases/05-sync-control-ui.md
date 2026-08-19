@@ -6,7 +6,7 @@ Not started
 
 ## 依赖
 
-[Phase 4](./04-integration-mainline.md) Exit Gate 全通过。
+[Phase 4](./04-integration-full-regression.md) Exit Gate 全通过。
 
 ## 目标
 
@@ -57,11 +57,11 @@ Not started
 
 ### 5.5 Campaign 人工控制
 
-- [ ] Pause：关闭新 Attempt dispatch，不取消在途 Agent/Integration/Validation。
+- [ ] Pause：关闭新 Attempt dispatch，不取消在途 Agent/Integration。
 - [ ] Stop Now：二次确认，调用 `AgentBackend.interrupt` 终止所有活跃 Turn，停止归并和自动恢复，保留数据。
 - [ ] Resume：恢复 Paused/Stopped 的 `resume_state`。
 - [ ] Blocked 只能用户解决原因后显式恢复。
-- [ ] 达到目标/max_attempts 进入 Draining；在途与 Validation/Revert 清空后 Completed。
+- [ ] 达到目标/max_attempts 进入 Draining；在途 Attempt/Integration 清空后 Completed。
 - [ ] 删除 Workspace 仅 CLI，不放 Web UI。
 
 ### 5.6 Alignment UI
@@ -70,7 +70,9 @@ Not started
 
 - [ ] 独立对话时间线。
 - [ ] Artifact 卡片和 Shape 脚本/pickle/JSONL 输入。
-- [ ] Campaign Spec 侧栏、Cases、Metrics、Ref 16 项默认全选。
+- [ ] Alignment 右侧使用目标边界、Metrics、Benchmark Cases、测量与采样规则、Reference Projects 五段折叠验收单；Ref 16 项默认全选。
+- [ ] Composer Enter 发送、Shift+Enter 换行、IME 安全，成功清空/失败保留，附件随消息提交。
+- [ ] Cases 显示 Full Case Set 数量、当前 Sampling Revision、Iteration Sample/Full Regression Only 标签与选择理由。
 - [ ] Spec diff 和明确确认按钮。
 
 ### 5.7 Attempt / BTW UI
@@ -87,7 +89,7 @@ Not started
 - [ ] Metric/Case/Spec Revision 筛选；Revision 分段。
 - [ ] hover 显示 Attempt、状态、时间、原始值、相对改善、Summary。
 - [ ] 点选后显示 Patch、Profiler、Agent JSONL 和 Outcome。
-- [ ] Mainline 校正覆盖对应点，不展示旧结构化快照。
+- [ ] Integration Screening/Full 结果覆盖对应点并补齐未采样 Case；展示 `iteration`/`integration_screen`/`integration_full` 来源。
 - [ ] ECharts 采用稳定静态模块注册，避免运行时 dynamic import 缓存失败。
 
 ### 5.9 JSON API 与审计
@@ -102,7 +104,7 @@ Not started
 - [ ] Sync success、merge conflict、push reject、protected Harness change。
 - [ ] remote push 后、本地 Best 前 kill -9。
 - [ ] Pause 不取消在途工作；Stop 确实取消。
-- [ ] Draining 不创建新 Attempt，Validation/Revert 清空后 Completed。
+- [ ] Draining 不创建新 Attempt，Attempt/Integration 清空后 Completed。
 - [ ] LiveView reconnect 后按 Domain Event/JSONL seq 恢复。
 - [ ] BTW 三种模式作用域。
 - [ ] Metrics hover 每个点均包含 Summary。

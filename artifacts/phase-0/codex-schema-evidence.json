@@ -1,7 +1,7 @@
 {
   "cli_version": "codex-cli 0.148.0-alpha.21",
   "command": "codex app-server generate-json-schema --out <temporary-directory>",
-  "generated_at": "2026-08-18T12:21:02.699186Z",
+  "generated_at": "2026-08-18T14:32:28.792938Z",
   "required_methods": {
     "initialize": true,
     "skills/extraRoots/set": true,

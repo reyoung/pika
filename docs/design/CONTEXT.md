@@ -93,7 +93,7 @@ _Avoid_: main、HEAD、最新版本
 _Avoid_: Target Branch、main、用户原分支
 
 **Best Advanced**：
-Campaign Best Branch 因 Accepted Attempt、Sync 或 Revert 产生新版本的持久化事实；所有活跃 Iteration Agent 都必须获知并刷新自己的基础版本。
+Campaign Best Branch 因 Accepted Attempt 或 Sync 产生新版本的持久化事实；所有活跃 Iteration Agent 都必须获知并刷新自己的基础版本。
 _Avoid_: Git hook、聊天通知、Metric 更新
 
 **Sync**：
@@ -120,13 +120,9 @@ _Avoid_: Merge Agent、并行 Merge、提交队列
 绑定一个 Integration Backend Session 与预期 Best SHA、授权其独占推进 Campaign Best Branch 的临时权利；进程失效不会在 Git 状态核对前直接释放。
 _Avoid_: 固定超时锁、Git lock 文件、Agent 自报状态
 
-**主线复验（Mainline Validation）**：
-可选的、发生在候选尝试已经归并到 Campaign Best Branch 之后的串行正确性与性能复测；它不阻塞后续归并，并以最新结果修正已记录 Metrics，但默认不运行。
-_Avoid_: 验收门禁、Iteration Benchmark、合入前测试
-
-**待撤销事件（Revert Required）**：
-主线复验失败后产生、要求从 Campaign Best Branch 撤销指定已接受尝试的事实；所有正在运行和之后启动的 Agent 都必须获知它。
-_Avoid_: Rebase 请求、回滚建议、失败日志
+**归并前全量回归（Pre-Merge Full Regression）**：
+候选尝试进入 Campaign Best Branch 前，对全量 Case 集执行的串行正确性与性能门禁；只有全部 Case 均未确认回退的候选才允许归并。
+_Avoid_: Iteration Benchmark、合入后复验、自由 Benchmark
 
 **阻塞（Blocked）**：
 系统无法安全恢复 Campaign Best Branch 时的调优任务状态；已有候选可以保存工作，但任何新归并都被禁止。
@@ -137,7 +133,7 @@ Backend Session 意外结束但候选尝试的工作空间与持久状态仍可�
 _Avoid_: Failed、Blocked、Cancelled
 
 **Metric 快照（Metric Snapshot）**：
-某个版本当前最新的一组结构化性能测量；主线复验产生修正时替换旧值，而不保留多套结构化观测。
+某个版本当前最新的一组结构化性能测量；Integration Full Regression 产生更完整结果时替换 Iteration 快照，而不保留多套结构化观测。
 _Avoid_: Metric Observation、测量历史、曲线点集合
 
 **噪声容忍值（Noise Tolerance）**：
@@ -148,6 +144,22 @@ _Avoid_: 1% 接受阈值、正确性容差、用户拍脑袋阈值
 由 shape、dtype、layout、输入分布和可选线上频率权重共同定义的一组可重复性能输入；每个 Case 上的 Metric 独立参与判定。
 _Avoid_: Shape、测试样例、一次测量
 
+**全量 Case 集（Full Case Set）**：
+当前 Spec Revision 已确认的全部 Benchmark Cases；初始 Baseline 和归并前全量回归都覆盖这个集合。
+_Avoid_: 迭代采样集、线上 Dump 原始记录、一次 Attempt 的自由测试列表
+
+**迭代采样集（Iteration Sample Set）**：
+从全量 Case 集中选择、供日常候选尝试正式测量的较小集合；初始集合由 Baseline Agent 选择，已确认回退的代表 Case 会在后续版本中加入。
+_Avoid_: 全量 Case 集、Agent 临时 Benchmark、随机抽样结果
+
+**采样版本（Sampling Revision）**：
+同一 Spec Revision 内某一时刻生效的迭代采样集快照；初始版本最多十个 Case，回退反馈只能新增成员，直到新 Spec Revision 才能重置。
+_Avoid_: Spec Revision、Attempt 序号、Metric Snapshot
+
+**采样推进（Sampling Advanced）**：
+归并前全量回归把已确认回退的代表 Case 加入迭代采样集后产生的持久化事实；活动 Agent 会获知它，但已运行 Attempt 不被强迫改用新版本。
+_Avoid_: Best Advanced、用户 Guidance、Spec Revision
+
 **目标 Case（Target Case）**：
 至少需要有一个 Metric 取得真实改善的 Benchmark Case。
 _Avoid_: 高频 Shape、性能目标
@@ -157,12 +169,12 @@ _Avoid_: 高频 Shape、性能目标
 _Avoid_: 回归测试、次要 Shape
 
 **观察 Case（Informational Case）**：
-只记录和展示 Metrics、不参与候选接受判断的 Benchmark Case。
-_Avoid_: Target Case、Guard Case
+日常 Iteration 阶段只记录和展示 Metrics、不用于证明收益的 Benchmark Case；归并前全量回归中仍必须不回退。
+_Avoid_: Target Case、永远不参与门禁的 Case
 
 **配对测量（Paired Measurement）**：
 交错执行当前最佳版本和候选版本，并基于同轮测量比值判断改善与噪声的正式性能比较。
-_Avoid_: Baseline 单次测量、Agent 临时 Benchmark、主线复验
+_Avoid_: Baseline 单次测量、Agent 临时 Benchmark、非配对 Screening
 
 **Artifact Workspace**：
 保存 Patch、Prompt、Agent 输出、日志与 Profiler 文件等文件型产物的本地目录树；结构化状态只通过相对路径引用其中的文件。

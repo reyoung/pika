@@ -28,11 +28,9 @@ flowchart LR
     Coordinator --> Repo[Repo Manager]
     Coordinator --> Slots[Iteration Slot Supervisor]
     Coordinator --> Integration[Integration Coordinator]
-    Coordinator --> Validation[Mainline Validation Coordinator]
     Coordinator --> Sync[Sync Coordinator]
     Slots --> Sessions[AgentBackend Sessions]
     Integration --> Sessions
-    Validation --> Sessions
     Sync --> Sessions
     Sessions -->|native JSON-RPC stdio| Codex[Codex App Server]
     Sessions -->|ACP v1 stdio| Cursor[Cursor ACP Server]
@@ -59,7 +57,6 @@ Pika.Application
 │   ├── Pika.AgentBackendSessionSupervisor # DynamicSupervisor
 │   ├── Pika.IterationSlotSupervisor  # 固定显式 Slots
 │   ├── Pika.IntegrationCoordinator   # FIFO + Integration Lease
-│   ├── Pika.ValidationCoordinator    # 单并发、默认关闭
 │   └── Pika.SyncCoordinator          # 人工触发
 └── Pika.Telemetry
 ```
@@ -111,13 +108,9 @@ Codex 每个 Session 通过进程级 config override 注入 Pika MCP URL、Beare
 - FIFO 串行处理准备归并的 Attempt。
 - 原子签发绑定 Backend Session 与进程的 Integration Lease。
 - 检查陈旧 Base，要求 Agent刷新并重新进行正式配对测量。
-- 在 `complete_merge` 后联合核验 SQLite Intent、Git 与 Metrics。
-
-### ValidationCoordinator
-
-- 默认关闭；启用后逐个固定到对应 squash SHA 复验。
-- 不阻塞正常 Integration 队列。
-- 失败时发布 RevertRequired，并由 Mainline Agent 在最新 Best 上创建 revert commit。
+- 在 Git mutation 前校验全量正确性、5 Pair Screening、异常 30 Pair 和 Full Regression Receipt。
+- 回退候选拒绝并推进 Sampling Revision；通过候选才允许创建 Intent 和调用 `complete_merge`。
+- 在 `complete_merge` 后联合核验 Receipt、SQLite Intent、Git 与全量 Metrics。
 
 ### SyncCoordinator
 

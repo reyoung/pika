@@ -38,7 +38,20 @@ defmodule Pika.AgentBackend.JSONLWriter do
 
   def redact(map) when is_map(map), do: redact_map(map)
   def redact(list) when is_list(list), do: Enum.map(list, &redact/1)
+  def redact(value) when is_binary(value), do: redact_string(value)
   def redact(value), do: value
+
+  def scrub_file(path) do
+    records = replay(path)
+    temporary = path <> ".scrubbed"
+
+    File.open!(temporary, [:write, :binary], fn io ->
+      Enum.each(records, fn record -> IO.binwrite(io, Jason.encode!(redact(record)) <> "\n") end)
+    end)
+
+    File.rename!(temporary, path)
+    :ok
+  end
 
   defp redact_map(map) do
     Map.new(map, fn {key, value} ->
@@ -51,4 +64,20 @@ defmodule Pika.AgentBackend.JSONLWriter do
       end
     end)
   end
+
+  defp redact_string(value) do
+    value
+    |> redact_replace(~r{\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@}i, "\\1[REDACTED]@")
+    |> redact_replace(~r/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/i, "\\1[REDACTED]")
+    |> redact_replace(
+      ~r/\b([A-Z][A-Z0-9_]*(?:TOKEN|PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY))\s*=\s*([^\s"']+)/,
+      "\\1=[REDACTED]"
+    )
+    |> redact_replace(
+      ~r/-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----/s,
+      "[REDACTED PRIVATE KEY]"
+    )
+  end
+
+  defp redact_replace(value, regex, replacement), do: Regex.replace(regex, value, replacement)
 end

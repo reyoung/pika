@@ -1,6 +1,8 @@
 # Pika UI 可交互原型
 
-> 状态：已确认。2026-08-18 用户认可目标对齐、Attempt/BTW 和 Metrics 三个视图的当前交互。
+> 状态：已确认，并于 2026-08-19 增加 Full Case Set、Iteration Sample Set 和归并前全量回归表达。
+
+目标对齐视图已有 Phoenix/LiveView 的 Stage0 内存 Preview 实现；Attempt/BTW 与 Metrics Timeline 仍只有本目录中的交互原型。Stage0 Preview 不改变 Phase 1/2 的 SQLite 与恢复门禁。
 
 ## 目的
 
@@ -8,7 +10,7 @@
 
 ## 视图
 
-1. **目标对齐**：独立 Alignment Conversation、Shape 采集 Artifact、Campaign Spec 草稿和显式确认入口。
+1. **目标对齐**：独立 Alignment Conversation 与五段验收单；右侧依次展示目标边界、Metrics、具体 Cases、测量/采样规则和 Reference Projects。
 2. **Attempts**：并发 Attempt 列表、单个 Backend Session 工作流、标准化 Backend Event、实时摘要，以及只能从当前 Attempt fork 的 BTW Conversation。
 3. **Metrics**：以时间为横轴的多 Metric 折线、最新值切换、Attempt 状态和点选详情。
 
@@ -19,6 +21,18 @@ BTW Drawer 继承父 Attempt 当前摘要。Composer 默认只在 BTW 中对话�
 ## Shape 输入
 
 Alignment Conversation 展示了由 Boundary Agent 生成采集脚本的路径。实际产品也允许用户提供 pickle dump 或 JSONL；输入格式由对齐过程决定，最终结果必须进入待确认的 Campaign Spec。
+
+## Benchmark 覆盖表达
+
+- Cases 区分 `ITERATION SAMPLE` 与 `FULL REGRESSION ONLY`，并显示 Full/Sample 数量、Sampling Revision 和选择理由。
+- 初始 Baseline 覆盖 Full Case Set 的全部 Case/Metric 30 Pair；Baseline Agent 自动选择最多十个初始 Iteration Cases。
+- Attempt 视图固定显示其启动 Sampling Revision。Sampling Advanced 到达时提示活动 Agent，但不改变该 Attempt 的门禁快照。
+- Metrics Timeline 的点标明 `iteration`、`integration_screen` 或 `integration_full`；Integration 结果覆盖同 Attempt 的旧快照并补齐未采样 Case。
+- Informational 项在 Iteration 中只展示，但归并前全量回归仍受 universal no-regression gate。
+
+## Composer
+
+消息和附件使用同一表单；Enter 发送、Shift+Enter 换行、IME 组词不误发送。发送成功后清空，失败时保留输入。工具/命令/MCP 继续使用灰色折叠 Activity，Agent 正文使用安全 Markdown。
 
 ## 本地预览
 

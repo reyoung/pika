@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+if [[ ! -f priv/static/assets/app.js ]]; then
+  mix assets.build
+fi
+exec mix run --no-start -e 'Pika.CLI.main(System.argv())' -- "$@"

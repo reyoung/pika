@@ -59,7 +59,8 @@ Not started
 - [ ] 在一个 Agent 运行中 kill Agent 进程并恢复同一 Attempt。
 - [ ] 在另一个 Attempt 运行中 kill Pika Server 并重启。
 - [ ] 验证 Attempt 预算、worktree、JSONL、Metrics 和 Session identity 没有重复。
-- [ ] 如启用 Mainline Validation，至少执行一次复验；可用受控测试验证 Revert。
+- [ ] 至少一次候选通过 Full Case Set Screening 后安全归并。
+- [ ] 至少一次受控回退触发独立 30 Pair、归并前拒绝和 Sampling Advanced，Best SHA 不变。
 
 ### 6.5 手工 Sync
 
@@ -72,7 +73,7 @@ Not started
 ### 6.6 完成与清理
 
 - [ ] 达到 max_attempts 或目标后进入 Draining。
-- [ ] 排空 Integration、Validation、Revert。
+- [ ] 排空 Integration 与 Sampling Feedback。
 - [ ] Campaign 进入 Completed。
 - [ ] 终态 worktree/branch 按配置清理。
 - [ ] Patch、Summary、Metrics、Profiler、JSONL 和 Best Branch 保留。

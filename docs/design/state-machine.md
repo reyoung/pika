@@ -9,18 +9,21 @@ stateDiagram-v2
     DraftingSpec --> AwaitingConfirmation
     AwaitingConfirmation --> DraftingSpec: 用户要求修改
     AwaitingConfirmation --> BuildingBaseline: 用户确认 Spec
-    BuildingBaseline --> Optimizing: Baseline 与噪声估算完成
+    BuildingBaseline --> SelectingIterationSample: 全量 Baseline 与噪声估算完成
+    SelectingIterationSample --> Optimizing: 初始 Sampling Revision 建立
     Optimizing --> Draining: 达到目标或 max_attempts
-    Draining --> Completed: Attempt/Integration/Validation/Revert 队列清空
+    Draining --> Completed: Attempt/Integration 队列清空
     Optimizing --> AwaitingSpecConfirmation: Guidance 或 Sync 改变边界
     AwaitingSpecConfirmation --> BuildingBaseline: 用户确认新 Revision
     AwaitingSpecConfirmation --> Optimizing: 用户拒绝变更且 Best 未改变
     DraftingSpec --> Stopped: Stop Now
     BuildingBaseline --> Stopped: Stop Now
+    SelectingIterationSample --> Stopped: Stop Now
     Optimizing --> Stopped: Stop Now
     Draining --> Stopped: Stop Now
     Stopped --> DraftingSpec: Resume 到原状态
     Stopped --> BuildingBaseline: Resume 到原状态
+    Stopped --> SelectingIterationSample: Resume 到原状态
     Stopped --> Optimizing: Resume 到原状态
     Stopped --> Draining: Resume 到原状态
     Optimizing --> Paused: Pause
@@ -28,12 +31,12 @@ stateDiagram-v2
     Draining --> Paused: Pause
     Paused --> Draining: Resume
     Optimizing --> Blocked: 无法解释或安全恢复
-    Draining --> Blocked: Revert/Integration 无法恢复
+    Draining --> Blocked: Integration 无法恢复
     Blocked --> Optimizing: 用户解决并显式恢复
     Blocked --> Draining: 用户解决并显式恢复
 ```
 
-`Paused` 不取消在途 Agent、Integration 或 Validation，只关闭新 Attempt dispatch。`Stopped` 会调用 `AgentBackend.interrupt` 终止活跃 Backend Turn，关闭自动恢复和归并，但保留全部状态。为正确 Resume，Campaign 表保存 `resume_state`。
+`Paused` 不取消在途 Agent 或 Integration，只关闭新 Attempt dispatch。`Stopped` 会调用 `AgentBackend.interrupt` 终止活跃 Backend Turn，关闭自动恢复和归并，但保留全部状态。为正确 Resume，Campaign 表保存 `resume_state`。
 
 Sync 不替换 Campaign 主状态，而设置 `dispatch_gate=sync`。这允许已有 Iteration 继续工作，同时禁止派生新 Attempt。UI 可以将其显示为 `Optimizing · Syncing`。
 
@@ -54,7 +57,7 @@ Sync 不替换 Campaign 主状态，而设置 `dispatch_gate=sync`。这允许�
 
 `awaiting_report` 没有自动超时和次数预算。Pika 在同一 Backend Session 无限 follow-up；进程失效则进入 `interrupted` 并用新 Session 继续。只有用户取消或其他 Campaign 停止条件可以结束该循环。
 
-Attempt 创建时即消耗 `max_attempts`。Plan Session、恢复 Session、Integration、Validation、Revert 和 Sync 不消耗 Attempt 预算。
+Attempt 创建时即消耗 `max_attempts`。Plan Session、恢复 Session、Integration 和 Sync 不消耗 Attempt 预算。
 
 ## 3. Integration 状态
 
@@ -63,26 +66,20 @@ queued
   → lease_acquired
   → checking_base
   → refreshing              # base_sha != current best_sha
-  → validating              # protected paths + correctness + paired metrics
+  → screening_full_suite     # 全量正确性 + 每项 5 Pair
+  → escalating_regressions  # 异常组合独立 30 Pair
+  → regression_rejected     # 不修改 Git；可推进 Sampling Revision
+  → validation_passed       # 生成 Full Regression Receipt
   → git_mutating            # 已持久化 Operation Intent
   → verifying_git
   → committed               # Accepted + BestAdvanced 同事务
 ```
 
-任一阶段进程崩溃后，Integration Lease 保留。恢复流程不得根据 PID 消失直接释放；必须核对 Operation Intent、Git HEAD、merge/revert 状态和 trailers。无法唯一判断“未执行/已执行/部分执行”时 Campaign 进入 Blocked。
+任一阶段进程崩溃后，Integration Lease 保留。恢复流程不得根据 PID 消失直接释放；必须核对 Screening/Full Artifact、Full Regression Receipt、Operation Intent、Git HEAD、merge 状态和 trailers。无法唯一判断“未执行/已执行/部分执行”时 Campaign 进入 Blocked。
 
-## 4. Mainline Validation 状态
+`regression_rejected` 释放 Lease 并终结 Attempt；如果存在尚未采样的确认回退 Case，先要求 Integration Agent 提交代表 Case，再原子生成 Sampling Revision 和 Sampling Advanced。
 
-```text
-queued → running_at_pinned_sha → metrics_updated → passed
-                                      └──────────→ revert_required
-revert_required → lease_acquired → reverting_latest_best → verified → reverted
-                                                            └──────→ blocked
-```
-
-Validation 固定测试原 squash SHA，但 Revert 必须在最新 Best 上执行。Validation 不阻塞后续 Integration；Revert 获取同一个 Integration Lease。Revert 后所有活动 Attempt 收到 BestAdvanced，并在正式 Benchmark/完成/归并前刷新。
-
-## 5. Sync 状态
+## 4. Sync 状态
 
 | 状态 | 行为 |
 |---|---|
@@ -99,18 +96,19 @@ Validation 固定测试原 squash SHA，但 Revert 必须在最新 Best 上执�
 
 Push 成功而本地推进前崩溃时，恢复流程 fetch 远端并核对 Sync Intent 的 candidate SHA；完全匹配才补做 `advancing_best`，不匹配则 Blocked。
 
-## 6. 恢复决策表
+## 5. 恢复决策表
 
 | SQLite 状态 | 外部事实 | 恢复动作 |
 |---|---|---|
 | Agent `running` | 对应 OS 进程不存在 | 标记 `interrupted`，保留 worktree，启动新 Session |
 | `awaiting_report` | Backend Session 存活 | 同 Session 发送 completion follow-up |
 | Integration Lease 存在 | Git 未变化、无 merge state | 恢复 Integration Agent，继续 Intent |
-| Integration Lease 存在 | HEAD 已含合法 trailer commit | 核验 Diff/Metrics 后幂等完成事务 |
-| Integration Lease 存在 | Git 处于 merge/revert 冲突 | 启动恢复 Agent解决，不释放 Lease |
+| Integration Lease 存在 | Full Regression Receipt 存在且 Git 未变化 | 恢复 Agent，继续创建 Intent/归并 |
+| Integration Lease 存在 | HEAD 已含合法 trailer commit | 核验 Receipt/Diff/Metrics 后幂等完成事务 |
+| Integration Lease 存在 | Git 处于 merge 冲突 | 启动恢复 Agent解决，不释放 Lease |
 | Sync `pushing` | remote SHA 等于 candidate SHA | 完成本地 Best 推进与事务 |
 | Sync `pushing` | remote SHA 不等于 expected/candidate | Campaign `blocked` |
 | Artifact 哈希不符 | 任意 | 停止危险推进并通知用户 |
 | Managed Repo lock 无法获取 | 启动/恢复 | 拒绝启动，不修改仓库 |
 
-所有恢复操作必须携带稳定 idempotency key。重复恢复只能返回先前结果或继续未完成步骤，不能创建第二个 Agent、第二次 Merge、第二个 Revert 或第二次 Push。
+所有恢复操作必须携带稳定 idempotency key。重复恢复只能返回先前结果或继续未完成步骤，不能创建第二个 Agent、第二次 Full Regression、第二次 Merge 或第二次 Push。

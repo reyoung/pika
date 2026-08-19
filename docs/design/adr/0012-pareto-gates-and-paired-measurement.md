@@ -11,3 +11,7 @@ status: accepted
 - Agent 的自由 Benchmark 可以指导开发，但不能代替正式配对测量。
 - Harness 必须能在同一环境中可重复地运行两个 Git 版本。
 - 新增或改变 Benchmark Case 会产生 Spec Revision，而不是悄悄改变既有曲线。
+
+## Amendment — ADR-0029
+
+日常 Attempt 的 Pareto 门禁只要求其固定 Sampling Revision；归并前全量回归对 Full Case Set 使用更严格的 universal no-regression gate。Sampling Revision 只改变已有 Case 的正式测量调度，不新增或修改 Benchmark Case，因此不产生 Spec Revision。

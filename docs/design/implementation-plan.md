@@ -59,21 +59,21 @@
 
 门禁：三个 Fake Agent 并发运行互不污染；Agent 正常结束但漏报 Metric 时不会误完成；进程多次崩溃仍继续同一 Attempt 且不多计预算。
 
-## 6. Phase 4：Integration、BestAdvanced 与 Mainline
+## 6. Phase 4：Integration、Full Regression 与 BestAdvanced
 
 交付：
 
 - FIFO Integration Queue、无 TTL Integration Lease、Operation Intent。
-- 陈旧 Base refresh/rebase、正式 Pareto 门禁、Agent squash merge 与 Git 独立核验。
+- 陈旧 Base refresh/rebase、全量 5 Pair Screening、异常 30 Pair、Agent squash merge 与 Git 独立核验。
 - BestAdvanced 至少一次投递和正式动作前 stale-base gate。
-- 可选 Mainline Validation、Metric 覆盖、RevertRequired 与最新 Best revert。
+- Regression Feedback、Sampling Revision 与 Sampling Advanced。
 - 终态 Attempt Artifact 后自动 worktree/branch 清理。
 
 门禁：
 
 - 两个 Attempt 同时完成时只有一个推进 Best，另一个必须刷新。
 - 在 merge 前、commit 后、数据库事务前后逐点 kill -9，恢复不重复 Merge。
-- Mainline 迟到失败时，即使后续 Commit 已存在，也由 Agent在最新 Best 上创建可验证 revert commit。
+- 确认回退时 Best SHA 不变，代表 Case 自动进入后续 Sampling Revision。
 
 ## 7. Phase 5：Sync、停止与完整 UI
 
@@ -115,7 +115,7 @@
 
 - SQLite 事务 + PubSub outbox 顺序。
 - Fake Agent Backend 的标准事件、权限、steer、interrupt、漏报和崩溃。
-- Git worktree、submodule 注入/移除、squash、rebase、revert 和冲突恢复。
+- Git worktree、submodule 注入/移除、squash、rebase、merge 和冲突恢复。
 - Managed Repo advisory lock 与软链接替换检测。
 - HTTP Token 对 HTML、JSON、LiveView、SSE/WebSocket、MCP 的完整保护。
 
@@ -133,7 +133,7 @@
 - 所有 accepted ADR 的核心契约有自动化测试。
 - Codex App Server、Cursor ACP 与统一 HTTP MCP conformance 通过。
 - SQLite migration、备份/恢复和三源权威核对通过。
-- Git 并发、crash recovery、Mainline revert 和 Sync E2E 通过。
+- Git 并发、Full Regression crash recovery、Sampling Feedback 和 Sync E2E 通过。
 - UI 与已确认原型一致，Metrics hover 包含 Summary。
 - 真实 GPU Campaign 按 Phase 6 全流程通过。
 - 文档中所有“待决问题”清零，发布配置不使用未固定依赖或 `latest` 容器标签。
@@ -144,4 +144,4 @@
 - Pika GPU Worker、远程节点注册、心跳或 GPU RPC。
 - 未实现 `Pika.AgentBackend` contract 的 Agent、Cursor ACP v2、provider resume 正确性依赖。
 - S3 Artifact、自动 Push、内置 daemon、Kubernetes/Temporal。
-- 默认 Plan、默认 Mainline Validation 或默认 Plateau 停止。
+- 默认 Plan 或默认 Plateau 停止。

@@ -27,6 +27,7 @@ Not started
 ### 2.1 补齐 Spec Schema
 
 - [ ] migrations：`spec_revisions`、`benchmark_cases`、`metric_definitions`、`best_revisions`、`best_metrics`。
+- [ ] migrations：`sampling_revisions`、`sampling_revision_cases`；初始 Sampling Revision 最多十个 Case。
 - [ ] Campaign 状态：DraftingSpec、AwaitingConfirmation、BuildingBaseline、Optimizing、AwaitingSpecConfirmation。
 - [ ] `submit_spec` 和 `submit_harness` MCP 实现。
 - [ ] 用户确认是 UI 动作，不是 Agent MCP 工具。
@@ -34,8 +35,9 @@ Not started
 ### 2.2 Alignment Conversation
 
 - [ ] 通过 `Pika.AgentBackend` 启动 Boundary Backend Session。
-- [ ] Prompt 注入 repo 状态、目标硬件、已知输入与必需 MCP 操作。
-- [ ] 支持上传/登记测试脚本、pickle dump、JSONL 等 Artifact。
+- [ ] Alignment/setup merge/Baseline Prompt 从 Config 指向的独立 EEx 资源加载；启动 Turn 前校验资源。
+- [ ] Alignment Prompt 注入 repo 状态、目标硬件、已知输入与必需 MCP 操作，并提示用户选择合适而非固定的性能 Metrics。
+- [ ] Composer 把文字与测试脚本、pickle dump、JSONL 等附件作为同一消息原子登记；允许纯附件。
 - [ ] Backend Turn 缺少 `submit_spec`/`submit_harness` 时无限 follow-up。
 - [ ] UI 展示对话、Artifact、Spec draft 和结构化缺失项。
 
@@ -68,6 +70,8 @@ Not started
 
 - [ ] 验证所有 Benchmark Cases 正确性。
 - [ ] 每个 Case warmup 10，进行 30 个交替 Pair 的自配对/重复测量。
+- [ ] Full Case Set 全部建立 Baseline 后，Baseline Agent 自动提交初始 Iteration Sample Set、逐项理由与成本摘要。
+- [ ] `submit_iteration_sample` 完成前停留在 `SelectingIterationSample`，不进入 Optimizing。
 - [ ] 使用中位数和 `max(0.5%, 3×1.4826×MAD)` 建立 noise tolerance。
 - [ ] 有效 Pair 少于 24 时整组重跑一次；再次失败不进入 Optimizing。
 - [ ] 写入 Baseline Best Revision 和 Best Metrics。
@@ -101,5 +105,5 @@ Not started
 ## 非目标
 
 - 并发 Iteration Attempt。
-- Integration Best 合并与 Mainline Validation。
+- Attempt Loop 与 Integration Full Regression。
 - Sync 和完整 Metrics Timeline。

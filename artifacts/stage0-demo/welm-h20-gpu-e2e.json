@@ -1,0 +1,733 @@
+{
+  "artifacts": [
+    {
+      "id": "artifact_58rPic7hfApgSM4_",
+      "kind": "baseline_raw_bundle",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/gzip",
+      "relative_path": "artifacts/baseline/afs_baseline_and_profile.tar.gz",
+      "sha256": "724d5365a90690c3c680f6a268566ef1ce261a1df905476c2d68d6936aa6abc0",
+      "size": 13887
+    },
+    {
+      "id": "artifact_oMXye_6TUC1IKHn-",
+      "kind": "remote_raw_bundle",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/gzip",
+      "relative_path": "artifacts/baseline/afs_baseline_and_profile_attempt0_failed.tar.gz",
+      "sha256": "28f5c18c3eebda458596b5151c174f45c625ebb595f4f8ed48bbf4c0068b2394",
+      "size": 224
+    },
+    {
+      "id": "artifact_ED2jrztQeNJ7UgL9",
+      "kind": "remote_raw_bundle",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/gzip",
+      "relative_path": "artifacts/baseline/afs_baseline_and_profile_attempt1_failed.tar.gz",
+      "sha256": "819373440e5d86f050500def3b76f4b7f0bd50d9b1b48f0302d7b0dc16f664a4",
+      "size": 325
+    },
+    {
+      "id": "artifact_AQftgSnJGV0sBd6K",
+      "kind": "remote_raw_bundle",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/gzip",
+      "relative_path": "artifacts/baseline/afs_baseline_and_profile_attempt2_failed.tar.gz",
+      "sha256": "27017e72f700fb3e465445fa5f4e3c47e45b4998288b35a24e55ddf1a977010c",
+      "size": 451
+    },
+    {
+      "id": "artifact_S7jT2wvqIN-D8AHt",
+      "kind": "baseline_correctness",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/json",
+      "relative_path": "artifacts/baseline/correctness.json",
+      "sha256": "b4f85b16a6ee86d15e9b60d2928553b2f1cdb67e5164581ca98aaa74c7b3e205",
+      "size": 661
+    },
+    {
+      "id": "artifact_RehTmAHWeAes34Ha",
+      "kind": "correctness_raw",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/json",
+      "relative_path": "artifacts/baseline/correctness_raw.json",
+      "sha256": "4dc1ae895db96c0d18c3d060d95fdf2ffa39b39559fee61407c88905042c4920",
+      "size": 1697
+    },
+    {
+      "id": "artifact_Pmv0931O5B2ji5HC",
+      "kind": "baseline_samples",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/x-ndjson",
+      "relative_path": "artifacts/baseline/pairs.jsonl",
+      "sha256": "c5ce0c5e9028e02a60aaf95ea082ddf5d7645bc717d1f13e050b916e2c59272f",
+      "size": 21969
+    },
+    {
+      "id": "artifact_6oUvi6yC08ll0NDq",
+      "kind": "profiler_analysis",
+      "metadata": {
+        "case_id": "trace_5493",
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/markdown",
+      "relative_path": "artifacts/profiles/REPORT.md",
+      "sha256": "f71bc137b76227030b3b66e2f8962569c31ead58070020d08ad11d42920f477b",
+      "size": 5231
+    },
+    {
+      "id": "artifact_bfQ4qmXBjE6XI38W",
+      "kind": "profiler_raw_bundle",
+      "metadata": {
+        "case_id": "trace_5493",
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/gzip",
+      "relative_path": "artifacts/profiles/afs_profile.tar.gz",
+      "sha256": "5152e232c25f17fadc720704347fae321d897e085bf2457a10e2077a5430793a",
+      "size": 11075945
+    },
+    {
+      "id": "artifact_2x_6DYJwoZaJfHOb",
+      "kind": "profiler_analysis",
+      "metadata": {
+        "case_id": "trace_5493",
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/profiles/details_trace_5493.txt",
+      "sha256": "0748efffd732b7bff020e9d7eb4900f11ca7379e0a90bb624d41e0d0df49f5d0",
+      "size": 17524
+    },
+    {
+      "id": "artifact_zxNnhr4Mo-iaXUCa",
+      "kind": "profiler_report",
+      "metadata": {
+        "case_id": "trace_5493",
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/octet-stream",
+      "relative_path": "artifacts/profiles/full_trace_5493.ncu-rep",
+      "sha256": "11330aa68ee4934b4640c1ebf059c5056923844936b063418ac0b504a420e82b",
+      "size": 3039590
+    },
+    {
+      "id": "artifact_omBoQWsNe6m42wH5",
+      "kind": "profiler_analysis",
+      "metadata": {
+        "case_id": "trace_5493",
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/json",
+      "relative_path": "artifacts/profiles/metrics_key_trace_5493.json",
+      "sha256": "39a3741c1e8c285e2308e1f602eb82d5a5fc90d020236029f2941e68c74b53ab",
+      "size": 6502
+    },
+    {
+      "id": "artifact_TpsunNlyh-fOaTMK",
+      "kind": "profiler_analysis",
+      "metadata": {
+        "case_id": "trace_5493",
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/profiles/pm_timeline_plots.txt",
+      "sha256": "3dc1c106845533c558b45c85250c354b7b37092f5854b676d868c4ed2b6292e8",
+      "size": 8963
+    },
+    {
+      "id": "artifact_qdhWdjJ3MH2nZZAC",
+      "kind": "profiler_manifest",
+      "metadata": {
+        "case_id": "trace_5493",
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b",
+        "skill_sha": "1cf238d6b41c79bd35041192506c4d45e765a3f1"
+      },
+      "mime": "application/json",
+      "relative_path": "artifacts/profiles/profiler_manifest.json",
+      "sha256": "28f491cafeb49174598399c3b20ad3cc7591e971fcaeb661db2efb732c6e66f1",
+      "size": 3016
+    },
+    {
+      "id": "artifact_QqBSZ0T_reSqOY4U",
+      "kind": "profiler_report",
+      "metadata": {
+        "case_id": "trace_5493",
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "application/octet-stream",
+      "relative_path": "artifacts/profiles/source_trace_5493.ncu-rep",
+      "sha256": "edfa4f52002f4c97f06b02fb1eabca7d9eb8372d95c4c7bd325131c1be91eb29",
+      "size": 2163286
+    },
+    {
+      "id": "artifact_I56K-9wNzBjnHnwv",
+      "kind": "profiler_analysis",
+      "metadata": {
+        "case_id": "trace_5493",
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/profiles/stall_hotspots_trace_5493.txt",
+      "sha256": "0ec8e60f79f696be0345c6e6771460e8195d9da82fa7e19196b19f3690cd3f3c",
+      "size": 9714
+    },
+    {
+      "id": "artifact_LM2VIlOIDgj5wnXX",
+      "kind": "remote_evidence",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/remote_evidence/baseline_and_profile_afs.log",
+      "sha256": "4af5a765dd5e5db01415111917628c9f5dc4f9d0f46daf6a0ccbd0602a38cc9e",
+      "size": 99834
+    },
+    {
+      "id": "artifact_kHKo0UNZ5Qx8WqAm",
+      "kind": "remote_evidence",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/remote_evidence/baseline_and_profile_attempt0_failed_afs.log",
+      "sha256": "034bbdd9630e40fc27c1fe72a219ea5b023cbdf3fbfbeef07e91ae8f541665fc",
+      "size": 22245
+    },
+    {
+      "id": "artifact_ImqmK9-TCKgXwk7Z",
+      "kind": "remote_evidence",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/remote_evidence/baseline_and_profile_attempt1_failed_afs.log",
+      "sha256": "a01f431197d0fdf33df9e404445571eb04e936bcdf39b38e8be11aac561898ad",
+      "size": 22204
+    },
+    {
+      "id": "artifact_QlKuMAudmubZrYxZ",
+      "kind": "remote_evidence",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/remote_evidence/baseline_and_profile_attempt2_failed_afs.log",
+      "sha256": "daa747787aae32affd48937a2496b1fe7d953a2b8f38e6a53952979b36ae7f18",
+      "size": 22854
+    },
+    {
+      "id": "artifact_dUvDE5vmhuJ0iWO7",
+      "kind": "remote_evidence",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/remote_evidence/env_probe_afs.log",
+      "sha256": "cea730656d2008ee620554d1bfec54c091d20ae4302418362364ee36961db2c3",
+      "size": 12012
+    },
+    {
+      "id": "artifact_ys0GuUKfNQIsM5zM",
+      "kind": "remote_evidence",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/remote_evidence/profile_afs.log",
+      "sha256": "629595e7ab4cb8b678c0f40edaaab1778152165cae41b52e49e6d7aec8576a50",
+      "size": 23729
+    },
+    {
+      "id": "artifact_3HByFqmhtTFKxgEu",
+      "kind": "remote_evidence",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/remote_evidence/proxy_status_after.txt",
+      "sha256": "efa3b6e3fcb7b89288d2174d2cdd256d2cebfb3cc58e186ce85668bc3727b5ac",
+      "size": 1162
+    },
+    {
+      "id": "artifact_zEeNDsBBrq4RvHMt",
+      "kind": "remote_evidence",
+      "metadata": {
+        "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b"
+      },
+      "mime": "text/plain",
+      "relative_path": "artifacts/remote_evidence/proxy_status_before.txt",
+      "sha256": "9247d27fe53b1895f89c6baa8fbc0abd310c4c3aadd97ba9476396fd071b3e85",
+      "size": 1162
+    }
+  ],
+  "backend_session_id": "session__H2f7NwyS1vR6UaQ",
+  "baseline": {
+    "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b",
+    "metrics": [
+      {
+        "case_id": "trace_5493",
+        "direction": "minimize",
+        "mad": 0.0037961440970907877,
+        "metric_id": "latency_us",
+        "noise_tolerance": 0.016884489715040404,
+        "pair_count": 30,
+        "pair_delta_median": 0.0012685085588147907,
+        "unit": "us",
+        "valid_pair_count": 30,
+        "value": 75.69600269198418
+      },
+      {
+        "case_id": "trace_1104",
+        "direction": "minimize",
+        "mad": 0.0028976356596392716,
+        "metric_id": "latency_us",
+        "noise_tolerance": 0.012888103886943551,
+        "pair_count": 30,
+        "pair_delta_median": 0.0004962128422759891,
+        "unit": "us",
+        "valid_pair_count": 30,
+        "value": 548.1760203838348
+      },
+      {
+        "case_id": "trace_179",
+        "direction": "minimize",
+        "mad": 0.0013210961880582685,
+        "metric_id": "latency_us",
+        "noise_tolerance": 0.005875971625245567,
+        "pair_count": 30,
+        "pair_delta_median": 0.0004698680199387234,
+        "unit": "us",
+        "valid_pair_count": 30,
+        "value": 544.4799959659576
+      }
+    ],
+    "profiler": {
+      "case_id": "trace_5493",
+      "measured_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b",
+      "registered_artifacts": {
+        "artifacts/profiles/REPORT.md": "artifact_6oUvi6yC08ll0NDq",
+        "artifacts/profiles/afs_profile.tar.gz": "artifact_bfQ4qmXBjE6XI38W",
+        "artifacts/profiles/details_trace_5493.txt": "artifact_2x_6DYJwoZaJfHOb",
+        "artifacts/profiles/full_trace_5493.ncu-rep": "artifact_zxNnhr4Mo-iaXUCa",
+        "artifacts/profiles/metrics_key_trace_5493.json": "artifact_omBoQWsNe6m42wH5",
+        "artifacts/profiles/pm_timeline_plots.txt": "artifact_TpsunNlyh-fOaTMK",
+        "artifacts/profiles/source_trace_5493.ncu-rep": "artifact_QqBSZ0T_reSqOY4U",
+        "artifacts/profiles/stall_hotspots_trace_5493.txt": "artifact_I56K-9wNzBjnHnwv",
+        "artifacts/remote_evidence/baseline_and_profile_afs.log": "artifact_LM2VIlOIDgj5wnXX",
+        "artifacts/remote_evidence/baseline_and_profile_attempt0_failed_afs.log": "artifact_kHKo0UNZ5Qx8WqAm",
+        "artifacts/remote_evidence/baseline_and_profile_attempt1_failed_afs.log": "artifact_ImqmK9-TCKgXwk7Z",
+        "artifacts/remote_evidence/baseline_and_profile_attempt2_failed_afs.log": "artifact_QlKuMAudmubZrYxZ",
+        "artifacts/remote_evidence/env_probe_afs.log": "artifact_dUvDE5vmhuJ0iWO7",
+        "artifacts/remote_evidence/profile_afs.log": "artifact_ys0GuUKfNQIsM5zM",
+        "artifacts/remote_evidence/proxy_status_after.txt": "artifact_3HByFqmhtTFKxgEu",
+        "artifacts/remote_evidence/proxy_status_before.txt": "artifact_zEeNDsBBrq4RvHMt"
+      },
+      "remote_evidence_paths": [
+        "artifacts/remote_evidence/proxy_status_before.txt",
+        "artifacts/remote_evidence/env_probe_afs.log",
+        "artifacts/remote_evidence/baseline_and_profile_attempt0_failed_afs.log",
+        "artifacts/remote_evidence/baseline_and_profile_attempt1_failed_afs.log",
+        "artifacts/remote_evidence/baseline_and_profile_attempt2_failed_afs.log",
+        "artifacts/remote_evidence/baseline_and_profile_afs.log",
+        "artifacts/remote_evidence/profile_afs.log",
+        "artifacts/remote_evidence/proxy_status_after.txt"
+      ],
+      "report_paths": [
+        "artifacts/profiles/full_trace_5493.ncu-rep",
+        "artifacts/profiles/source_trace_5493.ncu-rep",
+        "artifacts/profiles/REPORT.md",
+        "artifacts/profiles/metrics_key_trace_5493.json",
+        "artifacts/profiles/stall_hotspots_trace_5493.txt",
+        "artifacts/profiles/details_trace_5493.txt",
+        "artifacts/profiles/pm_timeline_plots.txt",
+        "artifacts/profiles/afs_profile.tar.gz"
+      ],
+      "schema_version": 1,
+      "skill_sha": "1cf238d6b41c79bd35041192506c4d45e765a3f1",
+      "summary": "Nsight Compute 2025.2.1 profiled confirmed H20 case trace_5493 with a 44-pass full report and a five-pass source report. The captured verify_attention_warp_mma_bypass_attention_kernel launch is latency/occupancy limited: 71.648 us profiler duration, 18.64% achieved occupancy, 43.64% SM throughput, 29.86% peak DRAM-read throughput, 168 registers/thread, and barrier stalls led by 1087 samples at verify_attention_welmv45_warp_mma.cuh:1093. PM sampling dropped zero samples."
+    },
+    "summary": "H20 baseline at 2d21882: correctness passed for trace_5493, trace_1104 and trace_179; 30/30 valid alternating self-pairs per case for latency_us (90 JSONL lines, 180 raw side outputs). Mean latency across all A/B observations: 75.678 us, 548.398 us and 544.561 us respectively; equal-weight case mean 389.546 us. Nsight Compute full/source reports registered for trace_5493; final AFS proxy status shows running=0 and all 14 H20 devices available."
+  },
+  "best_sha": "2d21882a707ae95c64459a53eaafb39cbb9d364b",
+  "campaign_status": "optimizing",
+  "harness": {
+    "benchmark_path": "pika_stage0/benchmark.py",
+    "correctness_paths": [
+      "pika_stage0/correctness.py",
+      "pika_stage0/test_reference.py"
+    ],
+    "digest": "ee3e45d99b564b5f47cf3829f93e963d8bb7493744ef193ac9af100811b81141",
+    "manifest": [
+      {
+        "path": "benchmarks/bench_verify_attention_welmv45.py",
+        "sha256": "d31d3379306c5289922220ad45bf7a3fc7ef3b4e37d7c49498f58bdc379eec67"
+      },
+      {
+        "path": "benchmarks/verify_attention_trace.py",
+        "sha256": "408e3bb99829fced48a1417e24b702a39d94a9ef452d7f8c27f2299ecdd182eb"
+      },
+      {
+        "path": "fixtures/welm4.5_80a3_tp4_verify_attn_calls_rank0.pkl.zst",
+        "sha256": "26e4ea21ee7d10ee5e506421d4569d6daca9b9ed05d6913dbe7dfc722c513c73"
+      },
+      {
+        "path": "pika_stage0/benchmark.py",
+        "sha256": "100e1671b85bcb2a612f0b00bff45991f84392a2d2e6e24a2625418ede37e610"
+      },
+      {
+        "path": "pika_stage0/correctness.py",
+        "sha256": "57c74867f04c44dc6b7a567ff3fd8298e4f95bf5fd6484a0d33c0373787eb7f0"
+      },
+      {
+        "path": "pika_stage0/reference.py",
+        "sha256": "26230e438b3de81451f17859f0f9d8a83b1034ebd7236a10ee5235467254e0a5"
+      },
+      {
+        "path": "pika_stage0/test_reference.py",
+        "sha256": "36d775ad1b6bd7041acb8f70b4627c6efbd09821571940fe120b1c6c62b79f68"
+      }
+    ],
+    "protected_paths": [
+      "pika_stage0/reference.py",
+      "pika_stage0/benchmark.py",
+      "pika_stage0/correctness.py",
+      "pika_stage0/test_reference.py",
+      "benchmarks/bench_verify_attention_welmv45.py",
+      "benchmarks/verify_attention_trace.py",
+      "fixtures/welm4.5_80a3_tp4_verify_attn_calls_rank0.pkl.zst"
+    ],
+    "reference_path": "pika_stage0/reference.py"
+  },
+  "required_operations": [],
+  "source_dirty_entries_ignored": 16,
+  "source_repo": "/Users/yuyang/projs/welm_v45_80a3_attention",
+  "source_repo_unchanged": false,
+  "source_sha": "fc55f8fe14fe619e0079ee84a7976ca640a394b2",
+  "spec": {
+    "benchmark": {
+      "harness_path": "pika_stage0/benchmark.py",
+      "min_valid_pairs": 24,
+      "pair_count": 30,
+      "retry_limit": 1,
+      "warmup": 10
+    },
+    "benchmark_cases": [
+      {
+        "dtype": "bfloat16",
+        "id": "trace_5493",
+        "kind": "target",
+        "layout": "committed fixture layout: contiguous query [batch*4,6,256], paged KV [pages,16,1,256]",
+        "name": "production full-context trace 5493; Q=6, KV=1, D=256, page=16, four verify tokens/request",
+        "shape": {
+          "trace_index": 5493
+        }
+      },
+      {
+        "dtype": "bfloat16",
+        "id": "trace_1104",
+        "kind": "target",
+        "layout": "committed fixture layout: contiguous query [batch*4,6,256], paged KV [pages,16,1,256]",
+        "name": "production full-context trace 1104; Q=6, KV=1, D=256, page=16, four verify tokens/request",
+        "shape": {
+          "trace_index": 1104
+        }
+      },
+      {
+        "dtype": "bfloat16",
+        "id": "trace_179",
+        "kind": "target",
+        "layout": "committed fixture layout: contiguous query [batch*4,6,256], paged KV [pages,16,1,256]",
+        "name": "production full-context trace 179; Q=6, KV=1, D=256, page=16, four verify tokens/request",
+        "shape": {
+          "trace_index": 179
+        }
+      }
+    ],
+    "computation": {
+      "correctness": {
+        "atol": 0.03,
+        "invariants": [
+          "Run exactly committed trace indices 5493, 1104, and 179.",
+          "Require NVIDIA H20, SM90 capability, and exactly 78 SMs.",
+          "Preserve BF16 contiguous Q=6, KV=1, D=256, page=16 layouts and four verify tokens per request.",
+          "Preserve causal=True, softcap=0, full-context window_size=(-1,-1), per-trace softmax_scale, page mapping, cache lengths, and optional sinks.",
+          "Output shape, dtype, device, and contiguity match query; every output value is finite.",
+          "Compare against the independent self-contained PyTorch reference, not FlashAttention, at rtol=atol=3e-2."
+        ],
+        "rtol": 0.03
+      },
+      "fusion_scope": "Preserve the existing verify_attention_welmv45 plan/prepare/run boundary. The optimized fused run includes paged KV gather, GQA QK, linear causal/full-context masking, sink-aware softmax, PV, and the existing direct or split/merge executor selected by schedule_policy=auto. Host planning, workspace preparation/reset, fixture materialization, CUDA Graph replay, and GEMM warmup are outside the timed CUDA-event interval. Do not fuse unrelated model operations or change the public boundary.",
+      "inputs": [
+        {
+          "dtype": "bfloat16",
+          "layout": "contiguous [token, q_head, head_dim]",
+          "name": "query",
+          "shape": [
+            "batch * 4",
+            6,
+            256
+          ]
+        },
+        {
+          "dtype": "bfloat16",
+          "layout": "contiguous [page, token_in_page, kv_head, head_dim]",
+          "name": "key_cache",
+          "shape": [
+            "num_physical_pages",
+            16,
+            1,
+            256
+          ]
+        },
+        {
+          "dtype": "bfloat16",
+          "layout": "contiguous [page, token_in_page, kv_head, head_dim]",
+          "name": "value_cache",
+          "shape": [
+            "num_physical_pages",
+            16,
+            1,
+            256
+          ]
+        },
+        {
+          "dtype": "int32",
+          "layout": "CSR logical-to-physical page mapping; compacted by committed fixture materializer",
+          "name": "page_table",
+          "shape": {
+            "indices": [
+              "referenced_pages"
+            ],
+            "indptr": [
+              "batch + 1"
+            ],
+            "logical_shape": [
+              "batch",
+              "max_pages"
+            ]
+          }
+        },
+        {
+          "dtype": "int32",
+          "layout": "contiguous per-request lengths including four verify tokens",
+          "name": "cache_seqlens",
+          "shape": [
+            "batch"
+          ]
+        },
+        {
+          "dtype": "int32",
+          "layout": "exactly [0, 4, ..., 4 * batch]",
+          "name": "cu_seqlens_q",
+          "shape": [
+            "batch + 1"
+          ]
+        },
+        {
+          "dtype": "optional bfloat16",
+          "layout": "contiguous per-query-head sink logits",
+          "name": "sinks",
+          "shape": [
+            6
+          ]
+        },
+        {
+          "dtype": "scalar",
+          "layout": "host planning metadata",
+          "name": "attention_metadata",
+          "shape": {
+            "causal": true,
+            "max_seqlen_q": 4,
+            "softcap": 0,
+            "softmax_scale": "from committed trace record",
+            "window_size": [
+              -1,
+              -1
+            ]
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "dtype": "bfloat16",
+          "layout": "contiguous and identical to query layout",
+          "name": "output",
+          "shape": [
+            "batch * 4",
+            6,
+            256
+          ]
+        }
+      ],
+      "reference_path": "pika_stage0/reference.py",
+      "semantics": "Fixed WeLM v4.5 80A3 paged grouped-query verify attention. Each request has four linear causal verify tokens; Q=6 query heads, KV=1 head, head dimension 256, page size 16, BF16 inputs/output, and FP32 score/softmax/value accumulation semantics. For query token t in [0,3], causal_position=cache_seqlen-4+t and valid keys are [0, causal_position] for the selected full-context traces. The per-trace softmax_scale is applied to QK logits. Optional per-query-head sinks participate as one extra softmax-denominator logit with a zero value vector. softcap is fixed to 0. Logical paged KV is addressed by CSR page_indptr/page_indices and cache_seqlens."
+    },
+    "metrics": [
+      {
+        "direction": "minimize",
+        "id": "latency_us",
+        "min_improvement_ratio": 0.01,
+        "name": "Equal-weight mean verify-attention latency across traces 5493, 1104, and 179",
+        "role": "target",
+        "unit": "us"
+      }
+    ],
+    "reference_ids": [
+      "cutlass",
+      "cutex",
+      "cuLA",
+      "flash-attention",
+      "flashinfer",
+      "FlyDSL",
+      "triton",
+      "DeepGEMM",
+      "LeetCUDA",
+      "FlashMLA",
+      "composable_kernel",
+      "cute-gemm",
+      "hpc-ops",
+      "aiter",
+      "quack",
+      "tilelang"
+    ],
+    "reference_snapshot": [
+      {
+        "branch": "main",
+        "id": "cutlass",
+        "sha": "6c68991985ca8b09594ac6fd43abbfd5830c4140",
+        "url": "https://github.com/NVIDIA/cutlass.git"
+      },
+      {
+        "branch": "main",
+        "id": "cutex",
+        "sha": "1d86cefa39c3ef9cb4211e68146965b8035a7402",
+        "url": "https://github.com/deciding/cutex.git"
+      },
+      {
+        "branch": "main",
+        "id": "cuLA",
+        "sha": "4cc51c5eff79761744ae630536c808a3f8039a0f",
+        "url": "https://github.com/inclusionAI/cuLA.git"
+      },
+      {
+        "branch": "main",
+        "id": "flash-attention",
+        "sha": "0251105a2fb19d2957484b7f023cd8c115286ced",
+        "url": "https://github.com/Dao-AILab/flash-attention.git"
+      },
+      {
+        "branch": "main",
+        "id": "flashinfer",
+        "sha": "27a5a2945a2af3a4aaa0d1f659c6933d411bdfed",
+        "url": "https://github.com/flashinfer-ai/flashinfer.git"
+      },
+      {
+        "branch": "main",
+        "id": "FlyDSL",
+        "sha": "e338067610c0d420e63d4f36042987ad8c87841a",
+        "url": "https://github.com/ROCm/FlyDSL.git"
+      },
+      {
+        "branch": "main",
+        "id": "triton",
+        "sha": "1e878e725dd158b5214ad0ed1960b9eff90b5a66",
+        "url": "https://github.com/triton-lang/triton.git"
+      },
+      {
+        "branch": "main",
+        "id": "DeepGEMM",
+        "sha": "559d79fb6994a58b8a15b4b93bf13ccc16edf247",
+        "url": "https://github.com/deepseek-ai/DeepGEMM.git"
+      },
+      {
+        "branch": "main",
+        "id": "LeetCUDA",
+        "sha": "e831d970a099f5ce8fd0495ddd1df09206d56918",
+        "url": "https://github.com/xlite-dev/LeetCUDA.git"
+      },
+      {
+        "branch": "main",
+        "id": "FlashMLA",
+        "sha": "15f13e5030374295491c5ce31b02d7e63a7772c6",
+        "url": "https://github.com/deepseek-ai/FlashMLA.git"
+      },
+      {
+        "branch": "develop",
+        "id": "composable_kernel",
+        "sha": "8829582912a914c79c061580d716573080bac43f",
+        "url": "https://github.com/ROCm/composable_kernel.git"
+      },
+      {
+        "branch": "main",
+        "id": "cute-gemm",
+        "sha": "37f3a01eeef7ac7f404343b2cc67e8f0c21018f2",
+        "url": "https://github.com/reed-lau/cute-gemm.git"
+      },
+      {
+        "branch": "main",
+        "id": "hpc-ops",
+        "sha": "1cd332980ed46bd0172091c1c35d55338fcae47a",
+        "url": "https://github.com/Tencent/hpc-ops.git"
+      },
+      {
+        "branch": "main",
+        "id": "aiter",
+        "sha": "fc2e5d57fb5b8ad8e7e23f7103071dde798ea618",
+        "url": "https://github.com/ROCm/aiter.git"
+      },
+      {
+        "branch": "main",
+        "id": "quack",
+        "sha": "60d88082272a256fa9b3b2ab631c82cfa78337c6",
+        "url": "https://github.com/Dao-AILab/quack.git"
+      },
+      {
+        "branch": "main",
+        "id": "tilelang",
+        "sha": "23c29fa3612781f1de547e51b8a1acb1d10be521",
+        "url": "https://github.com/tile-ai/tilelang.git"
+      }
+    ],
+    "revision": 1,
+    "schema_version": 1,
+    "skill_snapshot": {
+      "name": "ncu-report-skill",
+      "sha": "1cf238d6b41c79bd35041192506c4d45e765a3f1",
+      "url": "https://github.com/mit-han-lab/ncu-report-skill.git"
+    },
+    "stopping": {
+      "max_attempts": 10,
+      "metric_goals": [
+        {
+          "metric_id": "latency_us",
+          "min_improvement_ratio": 0.01
+        }
+      ],
+      "mode": "all_goals"
+    },
+    "target_hardware": "NVIDIA H20 / sm_90a (78 SMs)",
+    "title": "WeLM v4.5 80A3 fused verify-attention mega-kernel H20 acceptance"
+  },
+  "status": "passed",
+  "workspace": "/var/folders/b6/0w06zks140bb0dpl9gt2gb4h0000gn/T/pika-stage0-20260818-135716-908",
+  "source_head_at_end": "be04be8f454bf376d33a198902c8620b54917aec",
+  "source_changed_during_run": true,
+  "source_isolation_verified": true,
+  "source_change_note": "The source repo advanced concurrently after Stage0 cloned fc55f8f; the temporary clone had no origin and remained pinned to the recorded source SHA.",
+  "best_worktree_clean": true
+}

@@ -16,6 +16,8 @@ erDiagram
     campaigns ||--o{ spec_revisions : has
     spec_revisions ||--o{ benchmark_cases : defines
     spec_revisions ||--o{ metric_definitions : defines
+    spec_revisions ||--o{ sampling_revisions : schedules
+    sampling_revisions ||--o{ sampling_revision_cases : contains
     campaigns ||--o{ best_revisions : advances
     campaigns ||--o{ attempts : creates
     attempts ||--o{ attempt_metrics : measures
@@ -55,7 +57,6 @@ erDiagram
 | `attempts_created` | INTEGER | 非负 |
 | `max_attempts` | INTEGER NULL | NULL 表示只用目标停止 |
 | `plan_enabled` | INTEGER | Boolean |
-| `mainline_validation_enabled` | INTEGER | Boolean，默认 0 |
 | `history_limit` | INTEGER | 默认 10 |
 | `stop_mode` | TEXT | `all_goals`, `any_goal` |
 | `config_hash` | TEXT | `config.json` SHA-256 |
@@ -107,6 +108,21 @@ erDiagram
 | `min_improvement_ratio` | REAL | 默认 0.01 |
 | `parser_json` | TEXT | Harness 输出解析契约 |
 
+### `sampling_revisions`
+
+| 字段 | 类型 | 约束/说明 |
+|---|---|---|
+| `id` | TEXT | PK |
+| `campaign_id` | TEXT | FK |
+| `spec_revision_id` | TEXT | FK |
+| `sequence` | INTEGER | UNIQUE(campaign_id, spec_revision_id, sequence) |
+| `cause` | TEXT | `baseline`, `regression_feedback` |
+| `source_attempt_id` | TEXT NULL | 回退反馈来源 Attempt |
+| `summary` | TEXT | 选择与成本摘要 |
+| `created_at` | INTEGER | |
+
+`sampling_revision_cases` 以 `(sampling_revision_id, benchmark_case_id)` 为主键，保存 `reason` 与可选 `evidence_json`。同一 Spec Revision 后一版本必须是前一版本的超集；初始版本最多十个 Case，反馈版本不受该上限限制。
+
 ## 4. Revision 与 Attempt
 
 ### `best_revisions`
@@ -117,7 +133,7 @@ erDiagram
 | `campaign_id` | TEXT | FK |
 | `sequence` | INTEGER | UNIQUE(campaign_id, sequence) |
 | `sha` | TEXT | UNIQUE(campaign_id, sha) |
-| `cause` | TEXT | `baseline`, `attempt`, `sync`, `revert` |
+| `cause` | TEXT | `baseline`, `attempt`, `sync` |
 | `attempt_id` | TEXT NULL | FK |
 | `sync_run_id` | TEXT NULL | FK |
 | `spec_revision_id` | TEXT | FK |
@@ -133,6 +149,7 @@ erDiagram
 | `ordinal` | INTEGER | UNIQUE(campaign_id, ordinal) |
 | `spec_revision_id` | TEXT | FK |
 | `slot_index` | INTEGER | 显式 Iteration Slot |
+| `sampling_revision_id` | TEXT | Attempt 创建时固定的采样版本 FK |
 | `status` | TEXT | Attempt 状态 CHECK |
 | `resume_state` | TEXT NULL | Interrupted 前状态 |
 | `base_sha` | TEXT | 创建/最近刷新 Base |
@@ -148,7 +165,7 @@ erDiagram
 
 ### `attempt_metrics`
 
-主键为 `(attempt_id, benchmark_case_id, metric_definition_id)`；主线复验使用 UPSERT 覆盖当前快照。
+主键为 `(attempt_id, benchmark_case_id, metric_definition_id)`；Integration Full Regression 使用 UPSERT 覆盖 Iteration 快照并补齐 Full Case Set。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -162,10 +179,10 @@ erDiagram
 | `mad` | REAL | Pair ratio MAD |
 | `noise_tolerance` | REAL | `max(0.005, 3*1.4826*MAD)` |
 | `pair_count`, `valid_pair_count` | INTEGER | 默认 30 / 至少 24 |
-| `source` | TEXT | `iteration`, `mainline` |
+| `source` | TEXT | `iteration`, `integration_screen`, `integration_full` |
 | `measured_at` | INTEGER | |
 
-`best_metrics` 使用同样字段，以 `(best_revision_id, benchmark_case_id, metric_definition_id)` 为主键，覆盖 Baseline、Sync 和 Revert 后 Best 时间线。
+`best_metrics` 使用同样字段，以 `(best_revision_id, benchmark_case_id, metric_definition_id)` 为主键；Accepted Best 必须由归并前全量回归提供完整 Case 覆盖。
 
 ## 5. Agent 与消息
 
@@ -197,7 +214,7 @@ erDiagram
 
 ### `operation_intents`
 
-包含 `id`、`campaign_id`、`kind` (`merge`, `revert`, `sync`, `cleanup`)、`owner_type/id`、`state` (`pending`, `applied`, `verified`, `aborted`)、`expected_best_sha`、`target_sha`、`idempotency_key`、`payload_json`、`created_at`、`updated_at`。`idempotency_key` 唯一。
+包含 `id`、`campaign_id`、`kind` (`merge`, `sync`, `cleanup`)、`owner_type/id`、`state` (`pending`, `applied`, `verified`, `aborted`)、`expected_best_sha`、`target_sha`、`idempotency_key`、`payload_json`、`created_at`、`updated_at`。`idempotency_key` 唯一。
 
 ### `integration_leases`
 

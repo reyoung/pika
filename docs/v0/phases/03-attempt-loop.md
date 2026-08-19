@@ -15,9 +15,10 @@ Not started
 ## 本 Phase 交付
 
 - `attempts`、`attempt_metrics`、`agent_sessions`、`agent_messages`、`guidance` schema。
+- Attempt 固定 `sampling_revision_id`，正式 Metrics 只要求该 Revision 的 Case × Metric。
 - 显式 Iteration Slots 与 per-slot Agent Profile。
 - Attempt branch/worktree 与选中 Ref submodule 注入。
-- 最近 N 次历史、Agent Mailbox、BestAdvanced/Revert/Guidance 上下文。
+- 最近 N 次历史、Agent Mailbox、BestAdvanced/SamplingAdvanced/Guidance 上下文。
 - 可选 Plan Agent 和 Artifact `plan.md`。
 - Iteration MCP：Metrics、Summary、Artifact、complete_attempt。
 - 无限 MCP completion follow-up 与新 Session 恢复。
@@ -45,7 +46,7 @@ Not started
 
 - [ ] 注入 Campaign Spec、Best SHA、protected paths、停止条件和本角色必需 MCP 操作。
 - [ ] 默认注入最近 10 个终态 Attempt 的 Description、Summary、Outcome、Metric delta、关键失败原因。
-- [ ] 未读 BestAdvanced、Revert 和 Guidance 不受 N 限制。
+- [ ] 未读 BestAdvanced、SamplingAdvanced 和 Guidance 不受 N 限制。
 - [ ] 提供 `query_attempt_history`，不把完整历史硬塞 Prompt。
 
 ### 3.4 Plan 可选路径
@@ -67,6 +68,8 @@ Not started
 ### 3.6 Iteration MCP
 
 - [ ] `record_metrics`：校验 base/candidate SHA、Pair 统计、Harness、正确性。
+- [ ] `record_metrics`/`complete_attempt` 校验 Sampling Revision 身份与完整覆盖。
+- [ ] Sampling Advanced 投递活动 Agent，但不强迫已运行 Attempt 补测；新 Attempt 使用最新 Revision。
 - [ ] `submit_attempt_summary`：Description、Summary、修改范围、风险、Profiler 摘要。
 - [ ] `register_artifact`：Patch/Profiler/Prompt/Log。
 - [ ] `complete_attempt`：要求 Metrics、Summary、clean worktree、无 protected 修改。
@@ -109,5 +112,5 @@ Not started
 ## 非目标
 
 - Accepted/Rejected 最终判定和 squash merge。
-- Mainline Validation/Revert。
+- Integration Full Regression 与 Regression Feedback。
 - Remote Sync 和完整 Metrics UI。

@@ -1,0 +1,18 @@
+{
+  "backend": "cursor_acp",
+  "backend_session_id": "session_-jrq5xfcfhPgYrBv",
+  "campaign_status": "awaiting_confirmation",
+  "cases": [
+    "target_case"
+  ],
+  "metrics": [
+    "latency_us"
+  ],
+  "protected_digest": "ec2155b4a3299337fdee972036d61edfcb8dea9d4155a8dfa1832294172ca948",
+  "required_operations": [],
+  "source_repo_unchanged": true,
+  "spec_ready": true,
+  "spec_title": "H20 identity float16 contiguous n=1024",
+  "status": "passed",
+  "workspace": "/var/folders/b6/0w06zks140bb0dpl9gt2gb4h0000gn/T/pika-stage0-20260818-134548-6466"
+}

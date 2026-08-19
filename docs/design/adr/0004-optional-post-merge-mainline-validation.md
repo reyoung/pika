@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0029
 ---
 
 # Iteration 结果默认直接生效，主线复验异步可选

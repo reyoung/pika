@@ -32,7 +32,7 @@ Not started
 - [ ] YAML 校验错误逐字段报告，不能静默使用猜测值。
 - [ ] 解析后写入 Workspace `config.json`，保存 SHA-256。
 - [ ] 恢复时比较不可变字段：Workspace、Managed Repo、listen address、Backend type/command/protocol config。
-- [ ] 允许未来修改的字段：Plan、max attempts、mainline validation、history N、Reference Catalog、停止条件。
+- [ ] 允许未来修改的字段：Plan、max attempts、history N、Reference Catalog、停止条件。
 
 ### 1.2 Workspace 初始化
 

@@ -10,4 +10,4 @@ Pika 不依赖任何 Agent 厂商的会话 resume。服务启动后自动检查 
 
 - Prompt 和持久化 Artifact 必须足以让无历史对话的新 Agent 接续工作。
 - Agent adapter 可以提供 resume 作为优化，但不能成为正确性依赖。
-- 自动恢复必须是幂等的，不能重复启动 Agent、重复 Merge 或重复 Revert。
+- 自动恢复必须是幂等的，不能重复启动 Agent、重复 Full Regression 或重复 Merge。

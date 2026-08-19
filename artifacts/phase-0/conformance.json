@@ -1,7 +1,7 @@
 {
   "backends": {
     "codex_app_server": {
-      "backend_session_id": "01a014d0-2fe5-7f80-9251-876314e23596",
+      "backend_session_id": "01a01548-7580-7df2-be43-d2e81cc7c5c9",
       "capabilities": {
         "close": "process",
         "http_mcp": true,
@@ -14,13 +14,13 @@
       "controls": {
         "interrupt": {
           "completion_status": "interrupted",
-          "turn_id": "01a014d0-c10e-7773-9aa3-936b8a8d6ff6"
+          "turn_id": "01a01549-0558-76f0-93a8-f094adf75794"
         },
         "steer": {
           "completion_status": "completed",
           "implementation": "turn/steer",
-          "original_turn_id": "01a014d0-6d31-7813-a8e7-cd7db4630cb6",
-          "resulting_turn_id": "01a014d0-6d31-7813-a8e7-cd7db4630cb6"
+          "original_turn_id": "01a01548-b931-7460-8d12-4035132976c0",
+          "resulting_turn_id": "01a01548-b931-7460-8d12-4035132976c0"
         }
       },
       "event_types": [
@@ -28,28 +28,28 @@
         "turn_started",
         "tool_started",
         "tool_completed",
-        "usage_updated",
         "message_delta",
+        "usage_updated",
         "turn_completed",
         "process_exited"
       ],
       "isolation": {
-        "crashed_backend_session_id": "01a014d0-c4c1-7c13-aba1-5ff2cda2e519",
+        "crashed_backend_session_id": "01a01549-0913-7f31-89c9-8cdf2be085b8",
         "killed_process_status": 137,
         "provider_resume_used": false,
-        "recovery_backend_session_id": "01a014d0-c596-7a33-960c-bf38e5f0f6e2",
+        "recovery_backend_session_id": "01a01549-09ea-73f0-891a-28ca09491577",
         "survivor_process_alive": true
       },
       "mcp_completion": {
-        "completion_id": "completion_LhCWSAHkIQyWZKdD",
+        "completion_id": "completion_V3clWi-pF70qXuvU",
         "idempotency_key": "codex_app_server-phase-0",
         "session_identity": {
           "backend": "codex_app_server",
           "purpose": "conformance"
         },
-        "summary": "ncu-report-skill"
+        "summary": "Read and applied the injected ncu-report-skill for the required Phase 0 probe."
       },
-      "probe_turn_id": "01a014d0-3099-7ab0-87d1-fc7abf215f76",
+      "probe_turn_id": "01a01548-7619-72c2-b14c-fb5e8f382bc4",
       "probe_turn_status": "completed",
       "process_exit": {
         "expected": true,
@@ -60,7 +60,7 @@
       "raw_jsonl": "codex_app_server.jsonl",
       "replay": {
         "backend": "codex_app_server",
-        "event_count": 43,
+        "event_count": 83,
         "event_types": [
           "session_started",
           "turn_started",
@@ -68,16 +68,56 @@
           "tool_completed",
           "tool_started",
           "tool_completed",
+          "tool_started",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "tool_completed",
           "usage_updated",
           "tool_started",
           "tool_completed",
-          "tool_started",
-          "tool_completed",
           "usage_updated",
           "tool_started",
           "tool_completed",
           "usage_updated",
           "tool_started",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
+          "message_delta",
           "message_delta",
           "message_delta",
           "tool_completed",
@@ -107,13 +147,13 @@
           "turn_completed"
         ],
         "last_event_type": "turn_completed",
-        "record_count": 84
+        "record_count": 124
       },
-      "session_id": "session_JlsJtUUUlipJuXUQ",
+      "session_id": "session_CiaxN42PIZsJpF-W",
       "status": "passed"
     },
     "cursor_acp": {
-      "backend_session_id": "cc54c860-97e9-4f56-9614-0dacfa7d41dc",
+      "backend_session_id": "160f65d9-bd8b-4d3e-a80d-907e259dfb05",
       "capabilities": {
         "close": "process_fallback",
         "http_mcp": true,
@@ -127,13 +167,13 @@
       "controls": {
         "interrupt": {
           "completion_status": "cancelled",
-          "turn_id": "turn_xCccspe2heaqCg7N"
+          "turn_id": "turn_4fF14DDeZYI35W2m"
         },
         "steer": {
           "completion_status": "end_turn",
           "implementation": "session/cancel + session/prompt",
-          "original_turn_id": "turn_jiAHMC3zw9aqagDH",
-          "resulting_turn_id": "turn_OEs4mtjNBpUG2mXy"
+          "original_turn_id": "turn_5lWT3niRpPZwEabV",
+          "resulting_turn_id": "turn_6wBSNTYxJjyBNmv-"
         }
       },
       "event_types": [
@@ -147,14 +187,14 @@
         "process_exited"
       ],
       "isolation": {
-        "crashed_backend_session_id": "cd9ebc0e-ffa1-4863-bfd6-d4262db5d3d1",
+        "crashed_backend_session_id": "e78c6105-15af-42c5-8120-521756a707f1",
         "killed_process_status": 137,
         "provider_resume_used": false,
-        "recovery_backend_session_id": "caaa70ac-5054-41da-a41a-84834d9f42c6",
+        "recovery_backend_session_id": "5f916781-c656-4eac-ada2-5cf815442b87",
         "survivor_process_alive": true
       },
       "mcp_completion": {
-        "completion_id": "completion_CrWl4b26eBr44iHG",
+        "completion_id": "completion_RYb1WJi4YWNkH_PB",
         "idempotency_key": "cursor_acp-phase-0",
         "session_identity": {
           "backend": "cursor_acp",
@@ -162,7 +202,7 @@
         },
         "summary": "Read injected skill ncu-report-skill and completed phase-0 probe."
       },
-      "probe_turn_id": "turn_ErRY17IjCyrmjkEZ",
+      "probe_turn_id": "turn_zMBwXPqXgeInkXcU",
       "probe_turn_status": "end_turn",
       "process_exit": {
         "expected": true,
@@ -174,7 +214,7 @@
       "raw_jsonl": "cursor_acp.jsonl",
       "replay": {
         "backend": "cursor_acp",
-        "event_count": 75,
+        "event_count": 63,
         "event_types": [
           "message_delta",
           "message_delta",
@@ -231,18 +271,6 @@
           "message_delta",
           "message_delta",
           "message_delta",
-          "message_delta",
-          "message_delta",
-          "message_delta",
-          "message_delta",
-          "message_delta",
-          "message_delta",
-          "message_delta",
-          "message_delta",
-          "message_delta",
-          "message_delta",
-          "message_delta",
-          "message_delta",
           "turn_completed",
           "turn_completed",
           "message_delta",
@@ -253,16 +281,16 @@
           "turn_completed"
         ],
         "last_event_type": "turn_completed",
-        "record_count": 107
+        "record_count": 91
       },
-      "session_id": "session_an9vPCYv8rW2X6Hw",
+      "session_id": "session_PrQqAylrmKOFpg2d",
       "status": "passed"
     }
   },
   "codex_schema": {
     "cli_version": "codex-cli 0.148.0-alpha.21",
     "command": "codex app-server generate-json-schema --out <temporary-directory>",
-    "generated_at": "2026-08-18T12:21:02.699186Z",
+    "generated_at": "2026-08-18T14:32:28.792938Z",
     "required_methods": {
       "initialize": true,
       "skills/extraRoots/set": true,
@@ -275,7 +303,7 @@
     "schema_file": "codex_app_server_protocol.v2.schemas.json",
     "schema_sha256": "3fe8c4b299934cca548df5ab382a15c9832a1e0c4755f516478d6820de6462de"
   },
-  "generated_at": "2026-08-18T12:21:03.265048Z",
+  "generated_at": "2026-08-18T14:32:29.297760Z",
   "phase": 0,
   "skill": {
     "name": "ncu-report-skill",
