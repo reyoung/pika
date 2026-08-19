@@ -59,7 +59,7 @@ defmodule Pika.Test.AttemptAgentBackend do
         run(server, state, input)
       end)
 
-    if Process.alive?(server), do: Agent.update(server, &%{&1 | task_pid: task_pid})
+    store_task(server, task_pid)
 
     {:ok, turn_id}
   end
@@ -72,7 +72,12 @@ defmodule Pika.Test.AttemptAgentBackend do
 
   def interrupt(server) do
     if Process.alive?(server) do
-      stop_task(Agent.get(server, & &1.task_pid))
+      state = Agent.get(server, & &1)
+
+      if pid = env(state)[:test_pid],
+        do: send(pid, {:attempt_interrupted, state.mcp && state.mcp.attempt_id})
+
+      stop_task(state.task_pid)
       emit(server, :turn_completed, %{status: "interrupted"})
     end
 
@@ -102,6 +107,11 @@ defmodule Pika.Test.AttemptAgentBackend do
         if state.turn_count == 1,
           do: iteration(server, state, complete?: false),
           else: complete_only(server, state)
+
+      :multi_followup ->
+        if state.turn_count <= 2,
+          do: complete_turn(server),
+          else: iteration(server, state, complete?: true)
 
       _ ->
         if state.mcp.role == :plan,
@@ -235,6 +245,12 @@ defmodule Pika.Test.AttemptAgentBackend do
   end
 
   defp stop_task(_pid), do: :ok
+
+  defp store_task(server, task_pid) do
+    Agent.update(server, &%{&1 | task_pid: task_pid})
+  catch
+    :exit, _reason -> :ok
+  end
 
   defp notify_start(state) do
     if pid = env(state)[:test_pid] do

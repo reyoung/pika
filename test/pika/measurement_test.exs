@@ -112,6 +112,56 @@ defmodule Pika.MeasurementTest do
              )
   end
 
+  test "integration escalates an invalid screen to one independent 30-pair result", context do
+    full = Path.join(context.root, "full.jsonl")
+
+    write_pairs(context.samples, context.context, 5, fn index ->
+      {10.0, 9.8, index < 3}
+    end)
+
+    write_pairs(full, context.context, 30, fn _index -> {10.0, 9.8, true} end)
+
+    assert {:ok, result} =
+             Measurement.evaluate_integration(
+               context.samples,
+               full,
+               context.correctness,
+               context.context,
+               %{}
+             )
+
+    assert result.escalated == [{"target_case", "latency_us"}]
+    assert result.regressions == []
+
+    assert [%{source: "integration_full", pair_count: 30, valid_pair_count: 30}] =
+             result.metrics
+  end
+
+  test "an informational metric is still rejected after confirmed regression", context do
+    full = Path.join(context.root, "full.jsonl")
+
+    informational = %{
+      context.context
+      | metrics: put_in(context.context.metrics, [Access.at(0), "role"], "informational")
+    }
+
+    write_pairs(context.samples, informational, 5, fn _index -> {10.0, 10.2, true} end)
+    write_pairs(full, informational, 30, fn _index -> {10.0, 10.2, true} end)
+
+    assert {:ok, result} =
+             Measurement.evaluate_integration(
+               context.samples,
+               full,
+               context.correctness,
+               informational,
+               %{}
+             )
+
+    assert result.escalated == [{"target_case", "latency_us"}]
+    assert result.regressions == [{"target_case", "latency_us"}]
+    assert [%{role: "informational", source: "integration_full"}] = result.metrics
+  end
+
   defp write_pairs(path, context, count, values, order \\ nil) do
     records =
       for index <- 0..(count - 1) do

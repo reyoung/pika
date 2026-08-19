@@ -89,15 +89,12 @@ defmodule Pika.Optimization.MCP.Router do
          "id" => id,
          "params" => %{"uri" => uri}
        }) do
-    with {:ok, %{attempt: attempt}} <-
-           Pika.AttemptCoordinator.mcp_call(token, "get_context", %{}),
-         true <- attempt.plan_artifact_id != nil,
-         true <- uri == plan_uri(attempt.id),
-         workspace <- Pika.WorkspaceLock.workspace(),
-         {:ok, body} <-
-           File.read(Path.join(workspace.root, "artifacts/plans/#{attempt.id}/plan.md")) do
+    with {:ok, plan} <- Pika.AttemptCoordinator.read_plan(token),
+         true <- uri == plan_uri(plan.attempt_id) do
       rpc_result(conn, id, %{
-        "contents" => [%{"uri" => uri, "mimeType" => "text/markdown", "text" => body}]
+        "contents" => [
+          %{"uri" => uri, "mimeType" => "text/markdown", "text" => plan.text}
+        ]
       })
     else
       _ -> rpc_error(conn, id, -32_002, "resource not found", %{}, 404)

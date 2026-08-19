@@ -144,7 +144,8 @@ defmodule Pika.AttemptWorkspace do
           description: reference[:description] || reference["description"] || "",
           selected: Map.get(reference, :selected, Map.get(reference, "selected", true)),
           branch: reference[:branch] || reference["branch"],
-          sha: reference[:sha] || reference["sha"]
+          sha: reference[:sha] || reference["sha"],
+          status: reference_status(reference[:status] || reference["status"])
         }
       end)
 
@@ -153,6 +154,13 @@ defmodule Pika.AttemptWorkspace do
       {:error, failures} -> {:error, {:reference_materialization_failed, failures}}
     end
   end
+
+  defp reference_status(nil), do: :resolved
+  defp reference_status(status) when is_atom(status), do: status
+  defp reference_status("resolved"), do: :resolved
+  defp reference_status("unresolved"), do: :unresolved
+  defp reference_status("error"), do: :error
+  defp reference_status(_status), do: :resolved
 
   defp branch_exists?(repo, branch) do
     match?({:ok, _}, Git.run(repo, ["show-ref", "--verify", "--quiet", "refs/heads/#{branch}"]))

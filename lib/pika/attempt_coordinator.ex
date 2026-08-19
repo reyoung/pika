@@ -22,6 +22,7 @@ defmodule Pika.AttemptCoordinator do
   def stop_now(server \\ __MODULE__), do: call(server, :stop_now)
   def resume(server \\ __MODULE__), do: call(server, :resume)
   def authorize(token, server \\ __MODULE__), do: call(server, {:authorize, token})
+  def read_plan(token, server \\ __MODULE__), do: call(server, {:read_plan, token})
 
   def mcp_call(token, tool, args, server \\ __MODULE__),
     do: call(server, {:mcp, token, tool, args})
@@ -82,6 +83,28 @@ defmodule Pika.AttemptCoordinator do
     {:reply,
      if(Map.has_key?(state.tokens, token_hash(token)), do: :ok, else: {:error, :unauthorized}),
      state}
+  end
+
+  def handle_call({:read_plan, token}, _from, state) do
+    result =
+      with {:ok, session_id} <- Map.fetch(state.tokens, token_hash(token)),
+           session <- Map.fetch!(state.sessions, session_id),
+           attempt_id <- session.identity.attempt_id,
+           {:ok, attempt} <- Store.attempt(attempt_id),
+           true <- not is_nil(attempt.plan_artifact_id),
+           relative_path <- "artifacts/plans/#{attempt_id}/plan.md",
+           {:ok, artifact} <- Store.artifact(state.campaign_id, relative_path),
+           true <- artifact.id == attempt.plan_artifact_id,
+           {:ok, path} <- Pika.ArtifactStore.resolve(state.workspace, relative_path),
+           {:ok, body} <- File.read(path) do
+        {:ok, %{attempt_id: attempt_id, text: body}}
+      else
+        :error -> {:error, :unauthorized}
+        false -> {:error, :plan_not_found}
+        {:error, _reason} = error -> error
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({:mcp, token, tool, args}, _from, state) do
@@ -344,7 +367,13 @@ defmodule Pika.AttemptCoordinator do
                coordinator: self()
              },
              skill_roots(state.workspace),
-             recovery_instructions(instructions, recovering?, required)
+             recovery_instructions(
+               instructions,
+               recovering?,
+               required,
+               state.workspace,
+               attempt
+             )
            ) do
       identity = %{
         session_id: session.id,
@@ -465,7 +494,7 @@ defmodule Pika.AttemptCoordinator do
 
     if is_integer(limit) and limit in 1..500 do
       attempts =
-        Store.attempts(state.campaign_id,
+        Store.query_terminal_history(state.campaign_id,
           limit: limit,
           before_ordinal: args["before_ordinal"],
           outcome: args["outcome"]
@@ -1101,13 +1130,37 @@ defmodule Pika.AttemptCoordinator do
   defp maybe_required(required, true, operation), do: required ++ [operation]
   defp maybe_required(required, false, _operation), do: required
 
-  defp recovery_instructions(instructions, false, _required), do: instructions
+  defp recovery_instructions(instructions, false, _required, _workspace, _attempt),
+    do: instructions
 
-  defp recovery_instructions(instructions, true, required) do
+  defp recovery_instructions(instructions, true, required, workspace, attempt) do
     instructions <>
       "\n\nThis is a recovery Session for the same Attempt. Do not create a new Attempt. " <>
-      "Inspect the worktree and JSONL tail, then complete only the missing operations: " <>
-      Enum.join(required, ", ") <> "."
+      "Continue in the existing worktree and complete only the missing operations: " <>
+      Enum.join(required, ", ") <>
+      ".\n\nRecovery JSONL tail (oldest to newest):\n" <>
+      Jason.encode!(recovery_jsonl_tail(workspace, attempt.id), pretty: true)
+  end
+
+  defp recovery_jsonl_tail(workspace, attempt_id) do
+    pattern = Path.join([workspace.root, "artifacts", "logs", attempt_id, "*.jsonl"])
+
+    pattern
+    |> Path.wildcard()
+    |> Enum.sort()
+    |> Enum.flat_map(fn path ->
+      relative = Path.relative_to(path, workspace.root)
+
+      path
+      |> File.stream!(:line)
+      |> Stream.map(&Jason.decode/1)
+      |> Stream.filter(&match?({:ok, _}, &1))
+      |> Stream.map(fn {:ok, record} -> %{"artifact" => relative, "record" => record} end)
+      |> Enum.to_list()
+    end)
+    |> Enum.take(-50)
+  rescue
+    _error -> []
   end
 
   defp kickoff(:plan, attempt, false, _required),

@@ -515,7 +515,8 @@ defmodule Pika.IntegrationCoordinator do
            state.session.session.id,
            attempt_id,
            args["receipt_id"],
-           List.wrap(args["representative_case_ids"])
+           List.wrap(args["representative_case_ids"]),
+           args["representative_case_reasons"] || %{}
          ) do
       {:ok, attempt} -> {{:ok, attempt}, set_required(state, [])}
       {:error, reason} -> {mcp_error("missing_required_data", inspect(reason)), state}
@@ -786,7 +787,7 @@ defmodule Pika.IntegrationCoordinator do
   defp recovery_instructions(instructions, true),
     do:
       instructions <>
-        "\n\nRecover the persisted Integration Lease, Receipt, and Intent before doing new work."
+        "\n\nRecover the persisted Integration Lease, Receipt, Intent, and registered Artifacts before doing new work. Before starting a measurement, inspect context.artifacts and the on-disk integration outputs. Reuse a complete output only after validating its Base SHA, Candidate SHA, Case/Metric coverage, pair indexes, and alternating order. Never rerun a completed 5-pair screening or 30-pair escalation; rerun only a missing or incomplete combination."
 
   defp kickoff(attempt, false), do: "Integrate FIFO Attempt ##{attempt.ordinal}."
   defp kickoff(attempt, true), do: "Recover Integration for existing Attempt ##{attempt.ordinal}."

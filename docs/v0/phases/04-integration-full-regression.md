@@ -79,4 +79,5 @@ Completed (2026-08-19)
 ## 验收证据
 
 - `mix test test/pika/integration_full_regression_test.exs`：`10 passed`。
-- 故障矩阵覆盖 Lease、Screening、30 Pair escalation、Receipt、Intent、squash、SQLite 事务前后。
+- `mix test test/pika/integration_full_regression_test.exs test/pika/measurement_test.exs`：`15 passed`。
+- 故障矩阵覆盖 Lease、Screening、30 Pair escalation、Receipt、Intent、squash、SQLite 事务前后，并断言恢复不会重复执行已完整落盘的 Screening/30 Pair 测量。

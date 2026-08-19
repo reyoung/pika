@@ -139,7 +139,14 @@ defmodule Pika.IntegrationStore do
     error -> {:error, {:merge_intent_failed, Exception.message(error)}}
   end
 
-  def reject_attempt(lease_id, session_id, attempt_id, receipt_id, representative_case_ids) do
+  def reject_attempt(
+        lease_id,
+        session_id,
+        attempt_id,
+        receipt_id,
+        representative_case_ids,
+        representative_case_reasons
+      ) do
     transaction =
       Repo.transaction(fn ->
         lease = owned_lease!(lease_id, session_id, attempt_id)
@@ -150,7 +157,12 @@ defmodule Pika.IntegrationStore do
           do: Repo.rollback(:rejected_receipt_required)
 
         sampling_event =
-          maybe_advance_sampling!(attempt, receipt.regressed_case_ids, representative_case_ids)
+          maybe_advance_sampling!(
+            attempt,
+            receipt.regressed_case_ids,
+            representative_case_ids,
+            representative_case_reasons
+          )
 
         now = now_us()
 
@@ -271,7 +283,8 @@ defmodule Pika.IntegrationStore do
          attempt: attempt,
          lease: optional(&lease/1, campaign_id),
          receipt: optional(&receipt_for_attempt/1, attempt_id),
-         intent: optional(&intent_for_attempt/1, attempt_id)
+         intent: optional(&intent_for_attempt/1, attempt_id),
+         artifacts: AttemptStore.artifacts_for_owner(campaign_id, "attempt", attempt_id)
        })}
     end
   end
@@ -473,7 +486,12 @@ defmodule Pika.IntegrationStore do
     end
   end
 
-  defp maybe_advance_sampling!(attempt, regressed_case_ids, representative_case_ids) do
+  defp maybe_advance_sampling!(
+         attempt,
+         regressed_case_ids,
+         representative_case_ids,
+         representative_case_reasons
+       ) do
     sampled = sampled_case_ids(attempt.sampling_revision_id)
     unsampled = regressed_case_ids -- sampled
     representatives = Enum.uniq(representative_case_ids)
@@ -487,6 +505,9 @@ defmodule Pika.IntegrationStore do
 
       not MapSet.subset?(MapSet.new(representatives), MapSet.new(unsampled)) ->
         Repo.rollback({:invalid_representative_cases, representatives, unsampled})
+
+      not valid_representative_reasons?(representatives, representative_case_reasons) ->
+        Repo.rollback({:representative_case_reasons_required, representatives})
 
       true ->
         campaign = campaign!(attempt.campaign_id)
@@ -531,7 +552,10 @@ defmodule Pika.IntegrationStore do
                 do: "carried forward",
                 else: "confirmed regression representative"
               ),
-              Jason.encode!(%{source_attempt_id: attempt.id})
+              Jason.encode!(%{
+                source_attempt_id: attempt.id,
+                representative_reason: representative_case_reasons[case_name]
+              })
             ]
           )
         end)
@@ -549,6 +573,17 @@ defmodule Pika.IntegrationStore do
         event
     end
   end
+
+  defp valid_representative_reasons?(representatives, reasons) when is_map(reasons) do
+    Enum.all?(representatives, fn case_name ->
+      case reasons[case_name] do
+        reason when is_binary(reason) -> String.trim(reason) != ""
+        _ -> false
+      end
+    end)
+  end
+
+  defp valid_representative_reasons?(_representatives, _reasons), do: false
 
   defp accept_merge!(campaign, attempt, receipt, intent, new_sha) do
     now = now_us()

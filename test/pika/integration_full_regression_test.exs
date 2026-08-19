@@ -91,6 +91,14 @@ defmodule Pika.IntegrationFullRegressionTest do
 
     assert sampling_sequence == 2
 
+    [[feedback_evidence]] =
+      Repo.query!(
+        "SELECT src.evidence_json FROM sampling_revision_cases src JOIN benchmark_cases bc ON bc.id = src.benchmark_case_id JOIN sampling_revisions sr ON sr.id = src.sampling_revision_id WHERE sr.campaign_id = ? AND sr.sequence = 2 AND bc.name = 'guard_case'",
+        [context.campaign.id]
+      ).rows
+
+    assert Jason.decode!(feedback_evidence)["representative_reason"] =~ "shape family"
+
     [[sampled_count]] =
       Repo.query!(
         "SELECT COUNT(*) FROM sampling_revision_cases WHERE sampling_revision_id = (SELECT id FROM sampling_revisions WHERE campaign_id = ? ORDER BY sequence DESC LIMIT 1)",
@@ -139,6 +147,7 @@ defmodule Pika.IntegrationFullRegressionTest do
   test "a crash after squash recovers the durable Lease, Receipt, and Intent without a second merge" do
     context = ready_attempts(1)
     {:ok, crash_counter} = Agent.start_link(fn -> 0 end)
+    {:ok, measurement_counter} = Agent.start_link(fn -> %{} end)
 
     coordinator =
       start_integration(
@@ -146,7 +155,8 @@ defmodule Pika.IntegrationFullRegressionTest do
         integration_profile(%{
           test_pid: self(),
           crash_stage: :after_squash,
-          crash_counter: crash_counter
+          crash_counter: crash_counter,
+          measurement_counter: measurement_counter
         })
       )
 
@@ -167,6 +177,7 @@ defmodule Pika.IntegrationFullRegressionTest do
     assert best_revisions == 2
     assert merge_intents == 1
     assert receipts == 1
+    assert Agent.get(measurement_counter, & &1) == %{screening: 1}
     assert IntegrationCoordinator.snapshot(coordinator).recovery_count == 1
     assert {:error, :integration_lease_missing} = IntegrationStore.lease(context.campaign.id)
   end
@@ -181,6 +192,7 @@ defmodule Pika.IntegrationFullRegressionTest do
     test "recovers safely from #{crash_stage} without duplicate durable Integration records" do
       context = ready_attempts(1)
       {:ok, crash_counter} = Agent.start_link(fn -> 0 end)
+      {:ok, measurement_counter} = Agent.start_link(fn -> %{} end)
 
       coordinator =
         start_integration(
@@ -188,7 +200,8 @@ defmodule Pika.IntegrationFullRegressionTest do
           integration_profile(%{
             test_pid: self(),
             crash_stage: unquote(crash_stage),
-            crash_counter: crash_counter
+            crash_counter: crash_counter,
+            measurement_counter: measurement_counter
           })
         )
 
@@ -207,6 +220,7 @@ defmodule Pika.IntegrationFullRegressionTest do
         ).rows
 
       assert {best_revisions, merge_intents, receipts} == {2, 1, 1}
+      assert Agent.get(measurement_counter, & &1) == %{screening: 1}
       assert IntegrationCoordinator.snapshot(coordinator).recovery_count == 1
       assert {:error, :integration_lease_missing} = IntegrationStore.lease(context.campaign.id)
     end
@@ -281,6 +295,7 @@ defmodule Pika.IntegrationFullRegressionTest do
   test "recovers during 30-pair escalation and rejects before mutating Best" do
     context = ready_attempts(1) |> OptimizationFixtures.add_guard_case()
     {:ok, crash_counter} = Agent.start_link(fn -> 0 end)
+    {:ok, measurement_counter} = Agent.start_link(fn -> %{} end)
 
     _coordinator =
       start_integration(
@@ -289,6 +304,7 @@ defmodule Pika.IntegrationFullRegressionTest do
           test_pid: self(),
           crash_stage: :during_escalation,
           crash_counter: crash_counter,
+          measurement_counter: measurement_counter,
           regress_ordinals: [1]
         })
       )
@@ -307,6 +323,7 @@ defmodule Pika.IntegrationFullRegressionTest do
       ).rows
 
     assert {best_revisions, receipts, sampling_revisions} == {1, 1, 2}
+    assert Agent.get(measurement_counter, & &1) == %{escalation: 1, screening: 1}
     assert Pika.Persistence.current_campaign().best_sha == context.best_sha
     assert {:error, :integration_lease_missing} = IntegrationStore.lease(context.campaign.id)
   end

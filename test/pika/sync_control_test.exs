@@ -1,8 +1,25 @@
 defmodule Pika.SyncControlTest do
   use ExUnit.Case, async: false
 
-  alias Pika.{Control, Git, Repo, SyncCoordinator, SyncStore}
-  alias Pika.Test.{AlignmentFixtures, OptimizationFixtures, SyncAgentBackend}
+  alias Pika.{
+    AttemptCoordinator,
+    AttemptStore,
+    Control,
+    Git,
+    IntegrationCoordinator,
+    IntegrationStore,
+    Repo,
+    SyncCoordinator,
+    SyncStore
+  }
+
+  alias Pika.Test.{
+    AlignmentFixtures,
+    AttemptAgentBackend,
+    IntegrationAgentBackend,
+    OptimizationFixtures,
+    SyncAgentBackend
+  }
 
   setup do
     on_exit(fn -> OptimizationFixtures.stop_repo() end)
@@ -112,6 +129,41 @@ defmodule Pika.SyncControlTest do
       ).rows
 
     assert {revisions, intents} == {1, 1}
+  end
+
+  test "recovery blocks when the remote moves to a third SHA after Push" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 5)
+    remote = create_remote(context.workspace.repo)
+    local_sha = advance_local_best(context, "LOCAL.md", "candidate before race\n")
+    {:ok, callback_count} = Agent.start_link(fn -> 0 end)
+
+    coordinator =
+      start_sync(context,
+        after_remote_push: fn _run ->
+          if Agent.get_and_update(callback_count, &{&1, &1 + 1}) == 0 do
+            remote_commit(remote, "THIRD.md", "external concurrent update\n")
+            {:error, :injected_crash}
+          else
+            :ok
+          end
+        end
+      )
+
+    assert {:ok, _} = SyncCoordinator.request(remote, "main", "sync-third-sha", coordinator)
+
+    eventually(fn ->
+      match?({:ok, %{status: "blocked"}}, SyncStore.latest_run(context.campaign.id))
+    end)
+
+    {:ok, blocked} = SyncStore.latest_run(context.campaign.id)
+    {:ok, remote_sha} = Pika.SyncWorkspace.remote_sha(context.workspace.repo, remote, "main")
+
+    assert Pika.Persistence.current_campaign().status == "blocked"
+    assert Pika.Persistence.current_campaign().best_sha == local_sha
+    assert Git.run!(context.workspace.repo, ["rev-parse", "HEAD"]) == local_sha
+    refute remote_sha in [blocked.remote_before_sha, blocked.candidate_sha]
+    assert blocked.failure_reason =~ "unexpected_remote_sha"
+    assert File.dir?(Path.join(context.workspace.root, blocked.worktree_relative_path))
   end
 
   test "Sync Agent resolves a real merge conflict on its temporary branch" do
@@ -259,6 +311,66 @@ defmodule Pika.SyncControlTest do
     assert {:ok, %{status: "completed"}} = Control.reconcile(context.campaign.id)
   end
 
+  test "Stop interrupts an active Attempt while Pause leaves its turn and worktree intact" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+
+    {:ok, coordinator} =
+      AttemptCoordinator.start_link(
+        workspace: context.workspace,
+        campaign: context.campaign,
+        profiles: [attempt_profile(%{test_pid: self(), barrier: true})],
+        backend_modules: %{codex_app_server: AttemptAgentBackend},
+        mcp_url: "http://127.0.0.1:18080/mcp"
+      )
+
+    Process.unlink(coordinator)
+    on_exit(fn -> if Process.alive?(coordinator), do: GenServer.stop(coordinator) end)
+
+    assert_receive {:attempt_started, attempt_id, task_pid, _token, _instructions}, 5_000
+
+    assert {:ok, %{status: "paused"}} = Control.pause("pause-attempt")
+    refute_receive {:attempt_interrupted, ^attempt_id}, 100
+    assert Process.alive?(task_pid)
+
+    assert {:ok, %{status: "stopped"}} = Control.stop_now("stop-attempt")
+    assert_receive {:attempt_interrupted, ^attempt_id}, 2_000
+    refute Process.alive?(task_pid)
+
+    assert {:ok, attempt} = AttemptStore.attempt(attempt_id)
+    assert attempt.status == "interrupted"
+    assert File.dir?(Path.join(context.workspace.root, attempt.worktree_relative_path))
+  end
+
+  test "Stop interrupts active Integration without releasing its Lease or cleaning its worktree" do
+    context = ready_attempt(context: OptimizationFixtures.setup_campaign(max_attempts: 1))
+    [attempt] = AttemptStore.attempts(context.campaign.id, limit: 2)
+    attempt_id = attempt.id
+
+    {:ok, coordinator} =
+      IntegrationCoordinator.start_link(
+        workspace: context.workspace,
+        campaign: context.campaign,
+        profile: integration_profile(%{test_pid: self(), barrier_after_lease: true}),
+        backend_modules: %{codex_app_server: IntegrationAgentBackend},
+        mcp_url: "http://127.0.0.1:18080/mcp"
+      )
+
+    Process.unlink(coordinator)
+    on_exit(fn -> if Process.alive?(coordinator), do: GenServer.stop(coordinator) end)
+
+    assert_receive {:integration_started, ^attempt_id, task_pid, _token}, 5_000
+    assert_receive {:integration_lease_waiting, ^task_pid}, 5_000
+    assert {:ok, %{status: "paused"}} = Control.pause("pause-integration")
+    refute_receive {:integration_interrupted, ^attempt_id}, 100
+    assert Process.alive?(task_pid)
+
+    assert {:ok, %{status: "stopped"}} = Control.stop_now("stop-integration")
+    assert_receive {:integration_interrupted, ^attempt_id}, 2_000
+    refute Process.alive?(task_pid)
+    assert {:ok, %{attempt_id: ^attempt_id}} = IntegrationStore.lease(context.campaign.id)
+    assert File.dir?(Path.join(context.workspace.root, attempt.worktree_relative_path))
+  end
+
   defp start_sync(context, opts \\ []) do
     profile = Keyword.get(opts, :profile, sync_profile(%{test_pid: self()}))
 
@@ -290,6 +402,39 @@ defmodule Pika.SyncControlTest do
       "env" => env,
       "protocol_config" => %{}
     }
+  end
+
+  defp attempt_profile(env) do
+    %{
+      "name" => "iteration",
+      "backend" => "codex_app_server",
+      "command" => ["codex", "app-server", "--listen", "stdio://"],
+      "reasoning_effort" => "high",
+      "env" => env,
+      "protocol_config" => %{}
+    }
+  end
+
+  defp integration_profile(env), do: attempt_profile(env) |> Map.put("name", "integration")
+
+  defp ready_attempt(context: context) do
+    {:ok, coordinator} =
+      AttemptCoordinator.start_link(
+        workspace: context.workspace,
+        campaign: context.campaign,
+        profiles: [attempt_profile(%{test_pid: self()})],
+        backend_modules: %{codex_app_server: AttemptAgentBackend},
+        mcp_url: "http://127.0.0.1:18080/mcp"
+      )
+
+    Process.unlink(coordinator)
+
+    eventually(fn ->
+      match?([%{status: "ready_for_integration"}], AttemptStore.attempts(context.campaign.id))
+    end)
+
+    GenServer.stop(coordinator)
+    context
   end
 
   defp create_remote(repo) do

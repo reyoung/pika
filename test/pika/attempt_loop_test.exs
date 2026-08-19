@@ -71,13 +71,13 @@ defmodule Pika.AttemptLoopTest do
     assert Pika.Persistence.current_campaign().best_sha == context.best_sha
   end
 
-  test "a completed Backend turn with missing MCP work follows up in the same Session" do
+  test "multiple completed Backend turns with missing MCP work follow up in the same Session" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 1)
 
     coordinator =
       start_coordinator(
         context,
-        profiles(1, %{test_pid: self(), mode: :followup, barrier: true})
+        profiles(1, %{test_pid: self(), mode: :multi_followup, barrier: true})
       )
 
     [first] = receive_starts(1)
@@ -88,6 +88,12 @@ defmodule Pika.AttemptLoopTest do
     assert {:ok, %{status: "awaiting_report"}} = AttemptStore.attempt(first.attempt_id)
 
     send(second.task_pid, :release)
+    [third] = receive_starts(1)
+    assert third.attempt_id == first.attempt_id
+    assert third.token == first.token
+    assert {:ok, %{status: "awaiting_report"}} = AttemptStore.attempt(first.attempt_id)
+
+    send(third.task_pid, :release)
 
     eventually(fn ->
       match?(
@@ -107,7 +113,7 @@ defmodule Pika.AttemptLoopTest do
 
     assert attempts_created == 1
     assert session_count == 1
-    assert max_turns >= 2
+    assert max_turns >= 3
     assert AttemptCoordinator.snapshot(coordinator).last_error == nil
   end
 
@@ -124,6 +130,8 @@ defmodule Pika.AttemptLoopTest do
     starts = receive_starts(3)
     assert starts |> Enum.map(& &1.attempt_id) |> Enum.uniq() == [hd(starts).attempt_id]
     assert starts |> Enum.map(& &1.token) |> Enum.uniq() |> length() == 3
+    assert Enum.all?(tl(starts), &String.contains?(&1.instructions, "Recovery JSONL tail"))
+    assert Enum.all?(tl(starts), &String.contains?(&1.instructions, "record_metrics"))
 
     eventually(fn ->
       match?(
@@ -279,22 +287,37 @@ defmodule Pika.AttemptLoopTest do
 
   test "optional Plan Session writes one plan before Iteration without spending another Attempt" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 1, plan_enabled: true)
-    coordinator = start_coordinator(context, profiles(1, %{test_pid: self()}))
+    coordinator = start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
 
-    starts = receive_starts(2)
-    assert starts |> Enum.map(& &1.attempt_id) |> Enum.uniq() == [hd(starts).attempt_id]
+    [plan_start] = receive_starts(1)
+    send(plan_start.task_pid, :release)
+    [iteration_start] = receive_starts(1)
+    assert iteration_start.attempt_id == plan_start.attempt_id
+
+    resources =
+      mcp_rpc(iteration_start.token, 30, "resources/list", %{})
+      |> get_in(["result", "resources"])
+
+    assert [%{"uri" => uri, "mimeType" => "text/markdown"}] = resources
+
+    assert [%{"text" => plan_body}] =
+             mcp_rpc(iteration_start.token, 31, "resources/read", %{"uri" => uri})
+             |> get_in(["result", "contents"])
+
+    assert plan_body =~ "Improve the candidate"
+    send(iteration_start.task_pid, :release)
 
     eventually(fn ->
       match?(
         {:ok, %{status: "ready_for_integration", plan_artifact_id: id}} when not is_nil(id),
-        AttemptStore.attempt(hd(starts).attempt_id)
+        AttemptStore.attempt(plan_start.attempt_id)
       )
     end)
 
     assert File.read!(
              Path.join(
                context.workspace.root,
-               "artifacts/plans/#{hd(starts).attempt_id}/plan.md"
+               "artifacts/plans/#{plan_start.attempt_id}/plan.md"
              )
            ) =~ "Improve the candidate"
 
@@ -306,6 +329,93 @@ defmodule Pika.AttemptLoopTest do
 
     assert attempts_created == 1
     assert sessions == 2
+    assert AttemptCoordinator.snapshot(coordinator).last_error == nil
+  end
+
+  test "Prompt history is limited to ten terminal Attempts and history queries exclude active work" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 13)
+
+    for index <- 1..12 do
+      {:ok, attempt} = AttemptStore.create_attempt(context.campaign.id, 0)
+
+      assert {:ok, _event} =
+               AttemptStore.submit_summary(attempt.id, %{
+                 description: "history-description-#{index}",
+                 summary: "history-token-#{String.pad_leading(to_string(index), 2, "0")}",
+                 modification_scope: [],
+                 risks: [],
+                 profiler_summary: nil,
+                 recommended_outcome: "skip"
+               })
+
+      assert {:ok, _attempt} = AttemptStore.mark_cancelled(attempt.id, "history fixture")
+    end
+
+    coordinator = start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
+    [start] = receive_starts(1)
+
+    assert start.instructions =~ "history-token-03"
+    assert start.instructions =~ "history-token-12"
+    refute start.instructions =~ "history-token-01"
+    refute start.instructions =~ "history-token-02"
+
+    assert {:ok, history} =
+             AttemptCoordinator.mcp_call(
+               start.token,
+               "query_attempt_history",
+               %{"limit" => 20, "outcome" => "cancelled"},
+               coordinator
+             )
+
+    assert length(history) == 12
+    assert Enum.all?(history, &(&1.status == "cancelled"))
+    refute Enum.any?(history, &(&1.id == start.attempt_id))
+    send(start.task_pid, :release)
+  end
+
+  test "selected Reference submodules and Skill roots never enter the candidate Patch" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+    source = Pika.Test.AlignmentFixtures.git_repo()
+    sha = Git.run!(source, ["rev-parse", "HEAD"])
+
+    reference = [
+      %{
+        id: "local-ref",
+        url: source,
+        description: "local reference",
+        selected: true,
+        branch: Git.run!(source, ["branch", "--show-current"]),
+        sha: sha
+      }
+    ]
+
+    Repo.query!("UPDATE spec_revisions SET reference_snapshot_json = ? WHERE id = ?", [
+      Jason.encode!(reference),
+      context.spec_id
+    ])
+
+    coordinator = start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
+    [start] = receive_starts(1)
+    {:ok, running} = AttemptStore.attempt(start.attempt_id)
+    worktree = Path.join(context.workspace.root, running.worktree_relative_path)
+    assert Git.run!(Path.join(worktree, "ref/local-ref"), ["rev-parse", "HEAD"]) == sha
+    send(start.task_pid, :release)
+
+    eventually(fn ->
+      match?(
+        {:ok, %{status: "ready_for_integration"}},
+        AttemptStore.attempt(start.attempt_id)
+      )
+    end)
+
+    patch =
+      File.read!(
+        Path.join(context.workspace.root, "artifacts/patches/#{start.attempt_id}/candidate.patch")
+      )
+
+    refute patch =~ ".gitmodules"
+    refute patch =~ "ref/local-ref"
+    refute patch =~ ".pika/skills"
     assert AttemptCoordinator.snapshot(coordinator).last_error == nil
   end
 
@@ -452,6 +562,19 @@ defmodule Pika.AttemptLoopTest do
     names = Enum.map(tools["result"]["tools"], & &1["name"])
     assert "record_metrics" in names
     refute "submit_plan" in names
+  end
+
+  defp mcp_rpc(token, id, method, params) do
+    Plug.Test.conn(
+      :post,
+      "/mcp",
+      Jason.encode!(%{"jsonrpc" => "2.0", "id" => id, "method" => method, "params" => params})
+    )
+    |> Plug.Conn.put_req_header("content-type", "application/json")
+    |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
+    |> PikaWeb.MCPGateway.call([])
+    |> Map.fetch!(:resp_body)
+    |> Jason.decode!()
   end
 
   defp eventually(fun, attempts \\ 100)

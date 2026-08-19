@@ -461,6 +461,40 @@ defmodule Pika.AttemptStore do
     end
   end
 
+  def artifacts_for_owner(campaign_id, owner_type, owner_id) do
+    Repo.query!(
+      "SELECT id, campaign_id, owner_type, owner_id, kind, relative_path, sha256, byte_size, mime_type, metadata_json, created_at FROM artifacts WHERE campaign_id = ? AND owner_type = ? AND owner_id = ? ORDER BY created_at, relative_path",
+      [campaign_id, owner_type, owner_id]
+    ).rows
+    |> Enum.map(fn [
+                     id,
+                     campaign_id,
+                     owner_type,
+                     owner_id,
+                     kind,
+                     path,
+                     sha,
+                     size,
+                     mime,
+                     metadata,
+                     at
+                   ] ->
+      %{
+        id: id,
+        campaign_id: campaign_id,
+        owner_type: owner_type,
+        owner_id: owner_id,
+        kind: kind,
+        relative_path: path,
+        sha256: sha,
+        byte_size: size,
+        mime_type: mime,
+        metadata: Jason.decode!(metadata),
+        created_at: at
+      }
+    end)
+  end
+
   def attach_session_log(session_id, artifact_id) do
     Repo.query!("UPDATE agent_sessions SET log_artifact_id = ? WHERE id = ?", [
       artifact_id,
@@ -518,11 +552,26 @@ defmodule Pika.AttemptStore do
   end
 
   def terminal_history(campaign_id, limit) do
+    query_terminal_history(campaign_id, limit: limit)
+  end
+
+  def query_terminal_history(campaign_id, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 100)
+    before = Keyword.get(opts, :before_ordinal)
+    outcome = Keyword.get(opts, :outcome)
     placeholders = Enum.map_join(@terminal_statuses, ",", fn _ -> "?" end)
 
+    {extra_conditions, extra_params} =
+      []
+      |> maybe_condition(before, "ordinal < ?")
+      |> maybe_condition(outcome, "status = ?")
+      |> Enum.unzip()
+
+    conditions = ["campaign_id = ?", "status IN (#{placeholders})"] ++ extra_conditions
+
     Repo.query!(
-      "SELECT #{attempt_columns()} FROM attempts WHERE campaign_id = ? AND status IN (#{placeholders}) ORDER BY ordinal DESC LIMIT ?",
-      [campaign_id | @terminal_statuses] ++ [limit]
+      "SELECT #{attempt_columns()} FROM attempts WHERE #{Enum.join(conditions, " AND ")} ORDER BY ordinal DESC LIMIT ?",
+      [campaign_id | @terminal_statuses] ++ extra_params ++ [limit]
     ).rows
     |> Enum.map(&attempt_from_row/1)
   end

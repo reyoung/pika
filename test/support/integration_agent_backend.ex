@@ -7,7 +7,15 @@ defmodule Pika.Test.IntegrationAgentBackend do
 
   def start_link(profile, sink) do
     Agent.start_link(fn ->
-      %{sink: sink, profile: profile, session: nil, cwd: nil, mcp: nil, turn: nil}
+      %{
+        sink: sink,
+        profile: profile,
+        session: nil,
+        cwd: nil,
+        mcp: nil,
+        turn: nil,
+        task_pid: nil
+      }
     end)
   end
 
@@ -41,16 +49,34 @@ defmodule Pika.Test.IntegrationAgentBackend do
       end)
 
     emit(server, :turn_started)
-    Task.start(fn -> run(server, state) end)
+    {:ok, task_pid} = Task.start(fn -> run(server, state) end)
+    store_task(server, task_pid)
     {:ok, turn_id}
   end
 
   def steer(server, _input), do: {:ok, Agent.get(server, & &1.turn)}
-  def interrupt(_server), do: :ok
+
+  def interrupt(server) do
+    if Process.alive?(server) do
+      state = Agent.get(server, & &1)
+
+      if pid = env(state)[:test_pid],
+        do: send(pid, {:integration_interrupted, state.mcp && state.mcp.attempt_id})
+
+      stop_task(state.task_pid)
+    end
+
+    :ok
+  end
+
   def capabilities(_server), do: %{protocol: "integration-fake-v1", native_steer: true}
 
   def close_session(server) do
-    if Process.alive?(server), do: Agent.stop(server)
+    if Process.alive?(server) do
+      stop_task(Agent.get(server, & &1.task_pid))
+      Agent.stop(server)
+    end
+
     :ok
   end
 
@@ -65,6 +91,8 @@ defmodule Pika.Test.IntegrationAgentBackend do
         "expected_best_sha" => context.best_sha
       })
 
+    maybe_wait_after_lease(state)
+
     if lease.stale_base, do: refresh(state, lease)
 
     maybe_crash(server, state, :after_lease)
@@ -78,7 +106,12 @@ defmodule Pika.Test.IntegrationAgentBackend do
           "idempotency_key" => "reject-#{state.mcp.attempt_id}",
           "lease_id" => lease.id,
           "receipt_id" => receipt.id,
-          "representative_case_ids" => receipt.regressed_case_ids
+          "representative_case_ids" => receipt.regressed_case_ids,
+          "representative_case_reasons" =>
+            Map.new(receipt.regressed_case_ids, fn case_id ->
+              {case_id,
+               "Representative by shape family, confirmed regression magnitude, and production weight"}
+            end)
         })
     else
       intent =
@@ -180,29 +213,45 @@ defmodule Pika.Test.IntegrationAgentBackend do
     correctness_path = Path.join(root, correctness_relative)
     File.mkdir_p!(Path.dirname(screening_path))
 
-    screening =
+    screening_keys =
       for benchmark_case <- context.cases,
           metric <- context.metrics,
-          index <- 0..4 do
-        improvement =
-          if regression? and benchmark_case["id"] == "guard_case", do: -0.02, else: 0.02
+          do: {benchmark_case["id"], metric["id"]}
 
-        pair(context, benchmark_case["id"], metric["id"], index, improvement)
-      end
+    unless reusable_jsonl?(screening_path, context, screening_keys, 5) do
+      screening =
+        for benchmark_case <- context.cases,
+            metric <- context.metrics,
+            index <- 0..4 do
+          improvement =
+            if regression? and benchmark_case["id"] == "guard_case", do: -0.02, else: 0.02
 
-    File.write!(screening_path, encode_jsonl(screening))
+          pair(context, benchmark_case["id"], metric["id"], index, improvement)
+        end
+
+      track_measurement(state, :screening)
+      File.write!(screening_path, encode_jsonl(screening))
+    end
+
+    register(state, screening_relative, "full_regression_screening")
     maybe_crash(server, state, :during_screening)
 
-    full =
-      if regression? do
+    full? = regression?
+
+    if full? and
+         not reusable_jsonl?(full_path, context, [{"guard_case", "latency_us"}], 30) do
+      full =
         for index <- 0..29,
             do: pair(context, "guard_case", "latency_us", index, -0.02)
-      else
-        []
-      end
 
-    if full != [], do: File.write!(full_path, encode_jsonl(full))
-    if full != [], do: maybe_crash(server, state, :during_escalation)
+      track_measurement(state, :escalation)
+      File.write!(full_path, encode_jsonl(full))
+    end
+
+    if full? do
+      register(state, full_relative, "full_regression_escalation")
+      maybe_crash(server, state, :during_escalation)
+    end
 
     File.write!(
       correctness_path,
@@ -212,9 +261,7 @@ defmodule Pika.Test.IntegrationAgentBackend do
       })
     )
 
-    register(state, screening_relative, "full_regression_screening")
     register(state, correctness_relative, "full_regression_correctness")
-    if full != [], do: register(state, full_relative, "full_regression_escalation")
 
     {:ok, receipt} =
       mcp(state, "submit_full_regression", %{
@@ -225,7 +272,7 @@ defmodule Pika.Test.IntegrationAgentBackend do
         "harness_digest" => context.spec_revision.protected_digest,
         "screening_artifact" => screening_relative,
         "correctness_artifact" => correctness_relative,
-        "full_artifact" => if(full == [], do: nil, else: full_relative)
+        "full_artifact" => if(full?, do: full_relative, else: nil)
       })
 
     receipt
@@ -243,6 +290,55 @@ defmodule Pika.Test.IntegrationAgentBackend do
     Git.run!(context.best_worktree, ["commit", "-m", message])
     Git.run!(context.best_worktree, ["rev-parse", "HEAD"])
   end
+
+  defp reusable_jsonl?(path, context, expected_keys, pair_count) do
+    with {:ok, body} <- File.read(path),
+         records <-
+           body
+           |> String.split("\n", trim: true)
+           |> Enum.map(&Jason.decode/1),
+         true <- Enum.all?(records, &match?({:ok, _}, &1)),
+         decoded <- Enum.map(records, &elem(&1, 1)),
+         true <-
+           Enum.all?(decoded, fn record ->
+             record["base_sha"] == context.best_sha and
+               record["candidate_sha"] == context.attempt.candidate_sha
+           end),
+         grouped <- Enum.group_by(decoded, &{&1["case_id"], &1["metric_id"]}),
+         true <- Enum.sort(Map.keys(grouped)) == Enum.sort(expected_keys),
+         true <-
+           Enum.all?(grouped, fn {_key, values} ->
+             ordered = Enum.sort_by(values, & &1["pair_index"])
+
+             Enum.map(ordered, & &1["pair_index"]) == Enum.to_list(0..(pair_count - 1)) and
+               Enum.with_index(ordered)
+               |> Enum.all?(fn {record, index} ->
+                 record["order"] == if(rem(index, 2) == 0, do: "bc", else: "cb")
+               end)
+           end) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp track_measurement(state, kind) do
+    if counter = env(state)[:measurement_counter] do
+      Agent.update(counter, &Map.update(&1, kind, 1, fn count -> count + 1 end))
+    end
+  end
+
+  defp store_task(server, task_pid) do
+    Agent.update(server, &%{&1 | task_pid: task_pid})
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp stop_task(pid) when is_pid(pid) do
+    if Process.alive?(pid), do: Process.exit(pid, :kill)
+  end
+
+  defp stop_task(_pid), do: :ok
 
   defp register(state, relative_path, kind) do
     root = workspace_root(state.cwd)
@@ -295,6 +391,18 @@ defmodule Pika.Test.IntegrationAgentBackend do
 
   defp maybe_wait(state) do
     if env(state)[:barrier] do
+      receive do
+        :release -> :ok
+      after
+        5_000 -> :ok
+      end
+    end
+  end
+
+  defp maybe_wait_after_lease(state) do
+    if env(state)[:barrier_after_lease] do
+      if pid = env(state)[:test_pid], do: send(pid, {:integration_lease_waiting, self()})
+
       receive do
         :release -> :ok
       after

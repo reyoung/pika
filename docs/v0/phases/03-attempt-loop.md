@@ -112,7 +112,7 @@ Completed (2026-08-19)
 ## 验收证据
 
 - `mix test test/pika/attempt_loop_test.exs test/pika/measurement_test.exs`
-- 全量回归：`116 passed, 1 excluded`（外部真实 Backend conformance 默认排除）。
+- 全量回归：`123 passed, 1 excluded`（外部真实 Backend conformance 默认排除）。
 
 ## 非目标
 

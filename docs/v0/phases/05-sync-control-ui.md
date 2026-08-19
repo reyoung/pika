@@ -120,8 +120,9 @@ Implementation complete (2026-08-19); browser console acceptance pending
 
 ## 验收证据
 
-- `mix test test/pika/sync_control_test.exs test/pika_web/control_live_test.exs test/pika_web/alignment_live_test.exs`。
-- 全量回归与前端静态构建通过。
+- `mix test test/pika/sync_control_test.exs`：`10 passed`；覆盖 Attempt/Integration/Sync Stop 和远端第三 SHA Blocked。
+- `mix test test/pika_web/control_live_test.exs test/pika_web/alignment_live_test.exs`：`10 passed`。
+- 全量回归 `123 passed, 1 excluded`；`mix assets.build` 通过。
 - 浏览器 acceptance 未勾选：本次会话没有可绑定的内置浏览器实例，无法核实 console 与 overlay；不得用其他浏览器表面伪造该项。
 
 ## 非目标

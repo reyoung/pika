@@ -6,7 +6,15 @@ defmodule Pika.Test.SyncAgentBackend do
 
   def start_link(profile, sink) do
     Agent.start_link(fn ->
-      %{profile: profile, sink: sink, session: nil, cwd: nil, mcp: nil, turn: nil}
+      %{
+        profile: profile,
+        sink: sink,
+        session: nil,
+        cwd: nil,
+        mcp: nil,
+        turn: nil,
+        task_pid: nil
+      }
     end)
   end
 
@@ -40,7 +48,8 @@ defmodule Pika.Test.SyncAgentBackend do
       end)
 
     emit(server, :turn_started)
-    Task.start(fn -> run(server, state) end)
+    {:ok, task_pid} = Task.start(fn -> run(server, state) end)
+    store_task(server, task_pid)
     {:ok, turn_id}
   end
 
@@ -52,13 +61,19 @@ defmodule Pika.Test.SyncAgentBackend do
 
       if pid = env(state)[:test_pid],
         do: send(pid, {:sync_interrupted, state.mcp && state.mcp.sync_run_id})
+
+      stop_task(state.task_pid)
     end
 
     :ok
   end
 
   def close_session(server) do
-    if Process.alive?(server), do: Agent.stop(server)
+    if Process.alive?(server) do
+      stop_task(Agent.get(server, & &1.task_pid))
+      Agent.stop(server)
+    end
+
     :ok
   end
 
@@ -263,5 +278,17 @@ defmodule Pika.Test.SyncAgentBackend do
   end
 
   defp env(state), do: state.profile[:env] || state.profile["env"] || %{}
+
+  defp store_task(server, task_pid) do
+    Agent.update(server, &%{&1 | task_pid: task_pid})
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp stop_task(pid) when is_pid(pid) do
+    if Process.alive?(pid), do: Process.exit(pid, :kill)
+  end
+
+  defp stop_task(_pid), do: :ok
   defp workspace_root(cwd), do: cwd |> Path.dirname() |> Path.dirname()
 end
