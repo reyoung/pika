@@ -659,7 +659,8 @@ defmodule Pika.AttemptCoordinator do
          {:ok, correctness} <- Store.artifact(state.campaign_id, args["correctness_artifact"]),
          :ok <- verify_attempt_artifact(samples, attempt_id),
          :ok <- verify_attempt_artifact(correctness, attempt_id),
-         {:ok, samples_path} <- Pika.ArtifactStore.resolve(state.workspace, samples.relative_path),
+         {:ok, samples_path} <-
+           Pika.ArtifactStore.resolve(state.workspace, samples.relative_path),
          {:ok, correctness_path} <-
            Pika.ArtifactStore.resolve(state.workspace, correctness.relative_path),
          {:ok, metrics} <-
@@ -667,7 +668,8 @@ defmodule Pika.AttemptCoordinator do
              base_sha: attempt.base_sha,
              candidate_sha: args["candidate_sha"],
              case_ids: context.sampled_case_ids,
-             metrics: context.metrics
+             metrics: context.metrics,
+             benchmark: context.spec["benchmark"]
            }),
          {:ok, _event} <- Store.record_metrics(attempt_id, metrics, args["candidate_sha"]),
          :ok <- Store.attach_artifact(attempt_id, "metrics_artifact_id", samples.id),

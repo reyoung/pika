@@ -7,6 +7,8 @@ defmodule Pika.Test.OptimizationFixtures do
   def setup_campaign(opts \\ []) do
     max_attempts = Keyword.get(opts, :max_attempts, 3)
     plan_enabled = Keyword.get(opts, :plan_enabled, false)
+    pair_count = Keyword.get(opts, :pair_count, 30)
+    min_valid_pairs = Keyword.get(opts, :min_valid_pairs, div(pair_count * 4 + 4, 5))
     root = CampaignFixtures.workspace()
     config_path = CampaignFixtures.config_file(config(max_attempts, plan_enabled))
     {:ok, config} = Config.load(config_path, workspace: root)
@@ -33,7 +35,13 @@ defmodule Pika.Test.OptimizationFixtures do
     :ok = Persistence.migrate()
     {:ok, campaign, :initialized} = Persistence.initialize_or_recover(workspace)
     {:ok, harness} = Harness.validate(workspace.repo, harness_args())
-    ids = insert_alignment_state(campaign.id, best_sha, harness)
+
+    spec =
+      AlignmentFixtures.spec()
+      |> put_in(["benchmark", "pair_count"], pair_count)
+      |> put_in(["benchmark", "min_valid_pairs"], min_valid_pairs)
+
+    ids = insert_alignment_state(campaign.id, best_sha, harness, spec)
     campaign = Persistence.current_campaign()
 
     %{
@@ -41,6 +49,7 @@ defmodule Pika.Test.OptimizationFixtures do
       campaign: campaign,
       best_sha: best_sha,
       harness: harness,
+      spec: spec,
       spec_id: ids.spec_id,
       case_id: ids.case_id,
       metric_id: ids.metric_id,
@@ -60,7 +69,8 @@ defmodule Pika.Test.OptimizationFixtures do
 
   def write_iteration_artifacts(workspace_root, attempt_id, base_sha, candidate_sha, opts \\ []) do
     improvement = Keyword.get(opts, :improvement, 0.02)
-    valid_count = Keyword.get(opts, :valid_count, 30)
+    pair_count = Keyword.get(opts, :pair_count, 30)
+    valid_count = Keyword.get(opts, :valid_count, pair_count)
     samples_relative = "artifacts/logs/#{attempt_id}/pairs.jsonl"
     correctness_relative = "artifacts/logs/#{attempt_id}/correctness.json"
     samples_path = Path.join(workspace_root, samples_relative)
@@ -68,7 +78,7 @@ defmodule Pika.Test.OptimizationFixtures do
     File.mkdir_p!(Path.dirname(samples_path))
 
     records =
-      for index <- 0..29 do
+      for index <- 0..(pair_count - 1) do
         baseline = 10.0 + index / 10_000
 
         %{
@@ -116,9 +126,19 @@ defmodule Pika.Test.OptimizationFixtures do
         [context.campaign.id]
       ).rows
 
+    pair_count = get_in(context.spec, ["benchmark", "pair_count"])
+
     Repo.query!(
-      "INSERT INTO best_metrics(best_revision_id, benchmark_case_id, metric_definition_id, measured_sha, value, baseline_value, improvement_ratio, mad, noise_tolerance, pair_count, valid_pair_count, source, measured_at) VALUES (?, ?, ?, ?, 10.0, 10.0, 0.0, 0.001, 0.005, 30, 30, 'baseline', ?)",
-      [best_revision_id, case_id, context.metric_id, context.best_sha, now]
+      "INSERT INTO best_metrics(best_revision_id, benchmark_case_id, metric_definition_id, measured_sha, value, baseline_value, improvement_ratio, mad, noise_tolerance, pair_count, valid_pair_count, source, measured_at) VALUES (?, ?, ?, ?, 10.0, 10.0, 0.0, 0.001, 0.005, ?, ?, 'baseline', ?)",
+      [
+        best_revision_id,
+        case_id,
+        context.metric_id,
+        context.best_sha,
+        pair_count,
+        pair_count,
+        now
+      ]
     )
 
     Map.put(context, :guard_case_id, case_id)
@@ -153,14 +173,13 @@ defmodule Pika.Test.OptimizationFixtures do
     """
   end
 
-  defp insert_alignment_state(campaign_id, best_sha, harness) do
+  defp insert_alignment_state(campaign_id, best_sha, harness, spec) do
     now = System.system_time(:microsecond)
     spec_id = Ecto.UUID.generate()
     case_id = Ecto.UUID.generate()
     metric_id = Ecto.UUID.generate()
     sampling_id = Ecto.UUID.generate()
     best_id = Ecto.UUID.generate()
-    spec = AlignmentFixtures.spec()
 
     Repo.query!(
       """
@@ -239,9 +258,17 @@ defmodule Pika.Test.OptimizationFixtures do
         best_revision_id, benchmark_case_id, metric_definition_id, measured_sha,
         value, baseline_value, improvement_ratio, mad, noise_tolerance,
         pair_count, valid_pair_count, source, measured_at
-      ) VALUES (?, ?, ?, ?, 10.0, 10.0, 0.0, 0.001, 0.005, 30, 30, 'baseline', ?)
+      ) VALUES (?, ?, ?, ?, 10.0, 10.0, 0.0, 0.001, 0.005, ?, ?, 'baseline', ?)
       """,
-      [best_id, case_id, metric_id, best_sha, now]
+      [
+        best_id,
+        case_id,
+        metric_id,
+        best_sha,
+        spec["benchmark"]["pair_count"],
+        spec["benchmark"]["pair_count"],
+        now
+      ]
     )
 
     Repo.query!(

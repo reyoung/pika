@@ -415,7 +415,8 @@ defmodule Pika.SyncCoordinator do
          true <- args["base_sha"] == run.base_sha and args["candidate_sha"] == run.candidate_sha,
          {:ok, samples} <- registered_artifact(state, args["samples_artifact"], run_id),
          {:ok, correctness} <- registered_artifact(state, args["correctness_artifact"], run_id),
-         {:ok, samples_path} <- Pika.ArtifactStore.resolve(state.workspace, samples.relative_path),
+         {:ok, samples_path} <-
+           Pika.ArtifactStore.resolve(state.workspace, samples.relative_path),
          {:ok, correctness_path} <-
            Pika.ArtifactStore.resolve(state.workspace, correctness.relative_path),
          {:ok, metrics} <-
@@ -423,7 +424,8 @@ defmodule Pika.SyncCoordinator do
              base_sha: run.base_sha,
              candidate_sha: run.candidate_sha,
              case_ids: Enum.map(context.cases, & &1["id"]),
-             metrics: context.metrics
+             metrics: context.metrics,
+             benchmark: context.spec["benchmark"]
            }),
          {:ok, updated} <-
            SyncStore.record_validation(run_id, metrics, correctness.id, samples.id) do

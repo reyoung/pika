@@ -82,6 +82,40 @@ defmodule Pika.Alignment.MCP.Router do
         %{}
       ),
       tool(
+        "ask_questions",
+        "Ask the user one or more blocking clarification questions in one batch. The UI presents them sequentially and returns all answers after the batch is complete.",
+        %{
+          "questions" => %{
+            "type" => "array",
+            "minItems" => 1,
+            "items" => %{
+              "type" => "object",
+              "properties" => %{
+                "id" => string(),
+                "question" => string(),
+                "options" => %{
+                  "type" => "array",
+                  "minItems" => 2,
+                  "maxItems" => 4,
+                  "items" => %{
+                    "type" => "object",
+                    "properties" => %{
+                      "label" => string(),
+                      "description" => string()
+                    },
+                    "required" => ["label"],
+                    "additionalProperties" => false
+                  }
+                }
+              },
+              "required" => ~w(id question options),
+              "additionalProperties" => false
+            }
+          }
+        },
+        ["questions"]
+      ),
+      tool(
         "register_artifact",
         "Register an existing file under the Alignment Workspace.",
         %{

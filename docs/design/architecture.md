@@ -108,7 +108,7 @@ Codex 每个 Session 通过进程级 config override 注入 Pika MCP URL、Beare
 - FIFO 串行处理准备归并的 Attempt。
 - 原子签发绑定 Backend Session 与进程的 Integration Lease。
 - 检查陈旧 Base，要求 Agent刷新并重新进行正式配对测量。
-- 在 Git mutation 前校验全量正确性、5 Pair Screening、异常 30 Pair 和 Full Regression Receipt。
+- 在 Git mutation 前校验全量正确性、5 Pair Screening、异常组合的 Campaign Spec 正式 Pair 测量和 Full Regression Receipt。
 - 回退候选拒绝并推进 Sampling Revision；通过候选才允许创建 Intent 和调用 `complete_merge`。
 - 在 `complete_merge` 后联合核验 Receipt、SQLite Intent、Git 与全量 Metrics。
 

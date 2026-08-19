@@ -84,7 +84,7 @@ Backend-specific 注入方式：
 
 ### `submit_baseline`
 
-Boundary Agent 在已核验的 Best SHA 上完成正确性、每个 Case/Metric 的 30 个交替自配对、以及至少一个 Target Case 的 Profiler 后，提交 raw Pair JSONL、正确性报告、Profiler manifest 和 Summary 的 Artifact 引用。Pika 读取原始文件并重新计算 Baseline 中位数、Pair delta、MAD、有效 Pair 数和 `max(0.5%, 3×1.4826×MAD)`；不接受 Agent 预计算值作为权威结果。有效 Pair 少于 24 时只允许整组重跑一次。
+Boundary Agent 在已核验的 Best SHA 上完成正确性、每个 Case/Metric 的 Campaign Spec 正式 Pair 数（默认 30）交替自配对、以及至少一个 Target Case 的 Profiler 后，提交 raw Pair JSONL、正确性报告、Profiler manifest 和 Summary 的 Artifact 引用。Pika 读取原始文件并重新计算 Baseline 中位数、Pair delta、MAD、有效 Pair 数和 `max(0.5%, 3×1.4826×MAD)`；不接受 Agent 预计算值作为权威结果。有效 Pair 少于 Spec 的 `min_valid_pairs`（默认 24）时只允许整组重跑一次。
 
 ### `submit_iteration_sample`
 
@@ -130,7 +130,7 @@ Backend Turn 结束但缺少任一必需工具时，Pika 向同一 Backend Sessi
 
 ### `submit_full_regression`
 
-参数：Lease ID、`base_sha`、`candidate_sha`、全量正确性 Artifact、每个 Full Case/Metric 的 5 Pair Screening Artifact，以及异常组合的独立 30 Pair Artifact。Pika 重算结果：Screening 至少 4/5 有效；中位数回退超过当前 Best noise tolerance 或样本无效的组合必须出现在完整 Artifact；完整测量至少 24/30 有效。任一组合确认回退即拒绝候选，否则生成只能用于该 Lease/Base/Candidate 的 Full Regression Receipt。
+参数：Lease ID、`base_sha`、`candidate_sha`、全量正确性 Artifact、每个 Full Case/Metric 的 5 Pair Screening Artifact，以及异常组合按 Campaign Spec 正式 Pair 数生成的独立 Artifact。Pika 重算结果：Screening 至少 4/5 有效；中位数回退超过当前 Best noise tolerance 或样本无效的组合必须出现在完整 Artifact；完整测量必须达到 Spec 的 `min_valid_pairs`。任一组合确认回退即拒绝候选，否则生成只能用于该 Lease/Base/Candidate 的 Full Regression Receipt。
 
 ### `submit_sampling_feedback`
 

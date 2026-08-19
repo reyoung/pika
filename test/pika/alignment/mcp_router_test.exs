@@ -54,6 +54,7 @@ defmodule Pika.Alignment.MCP.RouterTest do
 
     assert Enum.map(tools, & &1["name"]) == [
              "get_context",
+             "ask_questions",
              "register_artifact",
              "submit_spec",
              "submit_harness",
@@ -61,6 +62,13 @@ defmodule Pika.Alignment.MCP.RouterTest do
              "submit_baseline",
              "submit_iteration_sample"
            ]
+
+    refute Enum.any?(tools, &(&1["name"] == "ask_question"))
+
+    questions_tool = Enum.find(tools, &(&1["name"] == "ask_questions"))
+    questions_schema = get_in(questions_tool, ["inputSchema", "properties", "questions"])
+    assert questions_schema["minItems"] == 1
+    refute Map.has_key?(questions_schema, "maxItems")
 
     assert %{"result" => %{"structuredContent" => %{"required_operations" => required}}} =
              rpc(@token, %{
@@ -83,6 +91,66 @@ defmodule Pika.Alignment.MCP.RouterTest do
     assert conn.status == 401
   end
 
+  test "keeps ask_questions open until the UI returns every answer" do
+    task =
+      Task.async(fn ->
+        rpc(@token, %{
+          "jsonrpc" => "2.0",
+          "id" => 4,
+          "method" => "tools/call",
+          "params" => %{
+            "name" => "ask_questions",
+            "arguments" => %{
+              "questions" => [
+                %{
+                  "id" => "fusion_scope",
+                  "question" => "选择融合边界",
+                  "options" => [
+                    %{"label" => "核心算子"},
+                    %{"label" => "包含 epilogue", "description" => "允许额外融合"}
+                  ]
+                },
+                %{
+                  "id" => "layout",
+                  "question" => "选择输入布局",
+                  "options" => [%{"label" => "连续"}, %{"label" => "分块"}]
+                }
+              ]
+            }
+          }
+        })
+      end)
+
+    assert eventually(fn -> not is_nil(Campaign.snapshot().pending_question) end)
+    question = Campaign.snapshot().pending_question
+    assert :ok = Campaign.answer_question(question.id, "包含 epilogue", "option-2")
+    refute Task.yield(task, 20)
+
+    question = Campaign.snapshot().pending_question
+    assert question.question == "选择输入布局"
+    assert :ok = Campaign.answer_question(question.id, "连续", "option-1")
+
+    assert %{
+             "result" => %{
+               "isError" => false,
+               "structuredContent" => %{
+                 "answers" => [
+                   %{
+                     "question_id" => "fusion_scope",
+                     "answer" => "包含 epilogue",
+                     "selected_option" => "包含 epilogue"
+                   },
+                   %{
+                     "question_id" => "layout",
+                     "answer" => "连续",
+                     "selected_option" => "连续"
+                   }
+                 ]
+               }
+             }
+           } = Task.await(task)
+  end
+
   defp rpc(token, request) do
     conn =
       :post
@@ -93,5 +161,17 @@ defmodule Pika.Alignment.MCP.RouterTest do
 
     assert conn.status == 200
     Jason.decode!(conn.resp_body)
+  end
+
+  defp eventually(fun, attempts \\ 30)
+  defp eventually(fun, 0), do: fun.()
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
   end
 end

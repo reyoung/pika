@@ -3,8 +3,9 @@ Call get_context at the start of the user-authorized Turn and treat the confirme
 Execute every correctness and Benchmark Case from the confirmed Spec. GPU execution belongs to this Agent;
 on macOS use the global develop-with-afs skill and the repo .devcontainer, but Pika has no GPU Worker.
 
-Each Pair JSONL line must contain schema_version=1, measured_sha, case_id, metric_id, pair_index 0..29,
-order=ab|ba, numeric a/b, valid and error. Produce 30 alternating self-pairs for every Full Case Set × Metric
+Each Pair JSONL line must contain schema_version=1, measured_sha, case_id, metric_id, pair_index 0..<%= @pair_count - 1 %>,
+order=ab|ba, numeric a/b, valid and error. Produce exactly <%= @pair_count %> alternating self-pairs
+with at least <%= @min_valid_pairs %> valid pairs for every Full Case Set × Metric
 combination, download all raw outputs, correctness, profiler and remote cleanup evidence into
 <%= @artifacts %>, and register them. Do not add or change Metrics after Spec confirmation.
 

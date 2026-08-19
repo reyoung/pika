@@ -1,18 +1,18 @@
 defmodule Pika.Measurement do
   @moduledoc false
 
-  @iteration_pairs 30
-  @iteration_min_valid 24
   @screen_pairs 5
   @screen_min_valid 4
 
   def evaluate_iteration(samples_path, correctness_path, context) do
+    {pair_count, min_valid_pairs} = formal_protocol(context)
+
     with {:ok, records} <- read_jsonl(samples_path),
          :ok <- validate_correctness(correctness_path, context.case_ids, context.candidate_sha),
          {:ok, metrics} <-
            evaluate_records(records, context,
-             expected_pairs: @iteration_pairs,
-             min_valid: @iteration_min_valid,
+             expected_pairs: pair_count,
+             min_valid: min_valid_pairs,
              source: "iteration",
              allow_insufficient: false
            ) do
@@ -74,13 +74,15 @@ defmodule Pika.Measurement do
   defp evaluate_escalations(nil, keys, _context), do: {:error, {:missing_full_escalation, keys}}
 
   defp evaluate_escalations(path, keys, context) do
+    {pair_count, min_valid_pairs} = formal_protocol(context)
+
     with {:ok, records} <- read_jsonl(path) do
       expected = MapSet.new(keys)
       records = Enum.filter(records, &MapSet.member?(expected, {&1["case_id"], &1["metric_id"]}))
 
       case evaluate_records(records, context,
-             expected_pairs: @iteration_pairs,
-             min_valid: @iteration_min_valid,
+             expected_pairs: pair_count,
+             min_valid: min_valid_pairs,
              source: "integration_full",
              allow_insufficient: false,
              expected_keys: keys
@@ -170,6 +172,7 @@ defmodule Pika.Measurement do
                source,
                expected_pairs,
                0,
+               min_valid,
                nil,
                nil,
                nil,
@@ -189,6 +192,7 @@ defmodule Pika.Measurement do
                source,
                expected_pairs,
                length(valid),
+               min_valid,
                median(Enum.map(valid, & &1["candidate"])),
                median(Enum.map(valid, & &1["baseline"])),
                center,
@@ -205,6 +209,7 @@ defmodule Pika.Measurement do
          source,
          pair_count,
          valid_count,
+         min_valid,
          value,
          baseline_value,
          improvement_ratio,
@@ -223,11 +228,14 @@ defmodule Pika.Measurement do
       noise_tolerance: if(is_nil(mad), do: 0.005, else: max(0.005, 3.0 * 1.4826 * mad)),
       pair_count: pair_count,
       valid_pair_count: valid_count,
-      insufficient?:
-        valid_count <
-          if(pair_count == @screen_pairs, do: @screen_min_valid, else: @iteration_min_valid),
+      insufficient?: valid_count < min_valid,
       source: source
     }
+  end
+
+  defp formal_protocol(context) do
+    benchmark = Map.fetch!(context, :benchmark)
+    {Map.fetch!(benchmark, "pair_count"), Map.fetch!(benchmark, "min_valid_pairs")}
   end
 
   defp validate_record_shapes(records, context) do

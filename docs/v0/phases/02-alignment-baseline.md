@@ -69,11 +69,11 @@ Completed — 2026-08-19
 ### 2.6 Baseline 与噪声
 
 - [x] 验证所有 Benchmark Cases 正确性。
-- [x] 每个 Case warmup 10，进行 30 个交替 Pair 的自配对/重复测量。
+- [x] 每个 Case 按 Campaign Spec 的 warmup 与正式 Pair 数进行交替自配对/重复测量（默认 10 / 30）。
 - [x] Full Case Set 全部建立 Baseline 后，Baseline Agent 自动提交初始 Iteration Sample Set、逐项理由与成本摘要。
 - [x] `submit_iteration_sample` 完成前停留在 `SelectingIterationSample`，不进入 Optimizing。
 - [x] 使用中位数和 `max(0.5%, 3×1.4826×MAD)` 建立 noise tolerance。
-- [x] 有效 Pair 少于 24 时整组重跑一次；再次失败不进入 Optimizing。
+- [x] 有效 Pair 少于 Campaign Spec 的 `min_valid_pairs`（默认 24）时整组重跑一次；再次失败不进入 Optimizing。
 - [x] 写入 Baseline Best Revision 和 Best Metrics。
 
 ### 2.7 Baseline Profiler

@@ -77,8 +77,8 @@ defmodule Pika.CampaignSpec do
           "properties" => %{
             "harness_path" => string_schema(),
             "warmup" => %{"type" => "integer", "const" => 10},
-            "pair_count" => %{"type" => "integer", "const" => 30},
-            "min_valid_pairs" => %{"type" => "integer", "const" => 24},
+            "pair_count" => %{"type" => "integer", "minimum" => 1},
+            "min_valid_pairs" => %{"type" => "integer", "minimum" => 1},
             "retry_limit" => %{"type" => "integer", "const" => 1},
             "shape_source" => %{
               "type" => ["object", "null"],
@@ -135,14 +135,17 @@ defmodule Pika.CampaignSpec do
         Map.put_new(metric, "min_improvement_ratio", 0.01)
       end)
 
+    supplied_benchmark = map(spec["benchmark"])
+    pair_count = Map.get(supplied_benchmark, "pair_count", 30)
+
     benchmark =
       %{
         "warmup" => 10,
-        "pair_count" => 30,
-        "min_valid_pairs" => 24,
+        "pair_count" => pair_count,
+        "min_valid_pairs" => default_min_valid_pairs(pair_count),
         "retry_limit" => 1
       }
-      |> Map.merge(map(spec["benchmark"]))
+      |> Map.merge(supplied_benchmark)
 
     spec
     |> Map.put_new("schema_version", 1)
@@ -206,8 +209,20 @@ defmodule Pika.CampaignSpec do
     )
     |> add_error(Enum.any?(metrics, &(not valid_metric?(&1))), "Metrics have invalid fields")
     |> add_error(benchmark["warmup"] != 10, "benchmark warmup must equal 10")
-    |> add_error(benchmark["pair_count"] != 30, "benchmark pair_count must equal 30")
-    |> add_error(benchmark["min_valid_pairs"] != 24, "benchmark min_valid_pairs must equal 24")
+    |> add_error(
+      not positive_integer?(benchmark["pair_count"]),
+      "benchmark pair_count must be a positive integer"
+    )
+    |> add_error(
+      not positive_integer?(benchmark["min_valid_pairs"]),
+      "benchmark min_valid_pairs must be a positive integer"
+    )
+    |> add_error(
+      positive_integer?(benchmark["pair_count"]) and
+        positive_integer?(benchmark["min_valid_pairs"]) and
+        benchmark["min_valid_pairs"] > benchmark["pair_count"],
+      "benchmark min_valid_pairs must not exceed pair_count"
+    )
     |> add_error(benchmark["retry_limit"] != 1, "benchmark retry_limit must equal 1")
     |> add_error(not valid_shape_source?(benchmark["shape_source"]), "shape_source is invalid")
     |> add_error(
@@ -254,6 +269,11 @@ defmodule Pika.CampaignSpec do
 
   defp nullable_positive_integer?(nil), do: true
   defp nullable_positive_integer?(value), do: positive_integer?(value)
+
+  defp default_min_valid_pairs(pair_count) when is_integer(pair_count) and pair_count > 0,
+    do: div(pair_count * 4 + 4, 5)
+
+  defp default_min_valid_pairs(_pair_count), do: 24
 
   defp valid_metric?(metric) do
     slug?(metric["id"]) and present?(metric["name"]) and present?(metric["unit"]) and

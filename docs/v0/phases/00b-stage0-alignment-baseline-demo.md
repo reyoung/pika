@@ -28,7 +28,7 @@ Stage0 Demo 是 Phase 0 Backend 之上的一次性内存纵切，不是 Phase 1 
 2. 用户发送首条消息与可选 Artifact 完成 Campaign Kick-off；该用户输入原样成为 Session 的首个 Turn。Boundary Agent 随后访谈用户，创建 Reference、正确性测试与 Benchmark Harness。
 3. Agent 必须调用 `submit_spec` 和 `submit_harness`；两项通过后 UI 才允许用户确认。
 4. 用户点击“确认并建立 Baseline”后，该确认动作作为用户授权驱动 Agent commit setup、squash merge 临时 `pika/best`，调用 `complete_setup_merge`；Pika 核验父 SHA、Diff 与 protected digest。
-5. Pika 为新 Baseline Session 注入系统级 Agent Instructions，并重用第 4 步的用户确认动作启动已获授权的 Baseline 工作；系统模板不会伪装成首条用户消息。Agent 在 Best SHA 上运行 Full Case Set 的所有正确性和 30 Pair 自配对，生成 Pair JSONL、Profiler 与远程执行/清理 Artifact，并调用 `submit_baseline`。
+5. Pika 为新 Baseline Session 注入系统级 Agent Instructions，并重用第 4 步的用户确认动作启动已获授权的 Baseline 工作；系统模板不会伪装成首条用户消息。Agent 在 Best SHA 上运行 Full Case Set 的所有正确性和 Campaign Spec 正式 Pair 自配对，生成 Pair JSONL、Profiler 与远程执行/清理 Artifact，并调用 `submit_baseline`。
 6. Pika 重算中位数、MAD、noise tolerance 和有效 Pair 数，进入 `SelectingIterationSample`。
 7. Baseline Agent 调用 `submit_iteration_sample`，从全量结果中自动选择最多十个初始 Cases、逐项理由和成本摘要。Pika 创建 Sampling Revision v1 后进入 `Optimizing`，但 Preview 明确停止，不创建 Attempt。
 
@@ -53,7 +53,7 @@ Stage0 Demo 是 Phase 0 Backend 之上的一次性内存纵切，不是 Phase 1 
 }
 ```
 
-每个 Campaign Spec Case/Metric 组合必须恰好出现 `pair_index=0..29`。Pika 只使用 finite、positive 且 `valid=true` 的 Pair；少于 24 个时要求一次整组重跑，第二次仍不足则保留 `BuildingBaseline` 和错误。
+每个 Campaign Spec Case/Metric 组合必须恰好出现 `pair_index=0..pair_count-1`。Pika 只使用 finite、positive 且 `valid=true` 的 Pair；少于 `min_valid_pairs` 时要求一次整组重跑，第二次仍不足则保留 `BuildingBaseline` 和错误。默认协议为 30 / 24。
 
 ## 已完成验证
 

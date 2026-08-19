@@ -76,6 +76,18 @@ defmodule Pika.ConfigWorkspaceTest do
     assert second.base_sha == first.base_sha
   end
 
+  test "treats a Workspace containing only its active YAML config as fresh" do
+    root = CampaignFixtures.workspace()
+    config_path = Path.join(root, "pika.yaml")
+    File.write!(config_path, CampaignFixtures.default_config())
+
+    assert {:ok, config} = Config.load(config_path, workspace: root)
+    assert {:ok, %{fresh?: true} = plan} = Workspace.plan(config)
+    assert {:ok, workspace} = Workspace.activate(plan)
+    assert File.regular?(workspace.config_path)
+    assert File.regular?(config_path)
+  end
+
   test "resolves independent Prompt resources from YAML Config" do
     workspace = CampaignFixtures.workspace()
     config_root = CampaignFixtures.workspace()
@@ -153,9 +165,12 @@ defmodule Pika.ConfigWorkspaceTest do
     release = %Mix.Release{name: :pika, path: root}
     assert ^release = Pika.Release.add_cli(release)
     generated = File.read!(executable)
+    assert generated =~ "init)"
     assert generated =~ "serve)"
+    assert generated =~ "Pika.CLI.main([\"init\" | System.argv()])"
     assert generated =~ "Pika.CLI.main([\"serve\" | System.argv()])"
     assert generated =~ ~s(--boot "$REL_VSN_DIR/$RELEASE_BOOT_SCRIPT_CLEAN")
+    assert generated =~ "init           Interactively initializes a Pika Workspace"
     assert generated =~ "serve          Starts Pika Server in the foreground"
   end
 end

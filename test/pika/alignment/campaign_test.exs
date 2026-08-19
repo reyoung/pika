@@ -184,6 +184,107 @@ defmodule Pika.Alignment.CampaignTest do
              Campaign.mcp_call(@token, "submit_spec", changed)
   end
 
+  test "ask_questions presents a batch sequentially and returns all answers together" do
+    task =
+      Task.async(fn ->
+        Campaign.mcp_call(@token, "ask_questions", %{
+          "questions" => [
+            %{
+              "id" => "fusion_scope",
+              "question" => "优化边界应包含 epilogue 吗？",
+              "options" => [
+                %{"label" => "包含", "description" => "允许融合 epilogue"},
+                %{"label" => "不包含", "description" => "只优化核心算子"}
+              ]
+            },
+            %{
+              "id" => "correctness",
+              "question" => "正确性容差使用哪一档？",
+              "options" => [
+                %{"label" => "严格", "description" => "rtol 1e-5"},
+                %{"label" => "宽松", "description" => "rtol 1e-3"}
+              ]
+            }
+          ]
+        })
+      end)
+
+    assert eventually(fn -> not is_nil(Campaign.snapshot().pending_question) end)
+    snapshot = Campaign.snapshot()
+    assert snapshot.pending_question.question == "优化边界应包含 epilogue 吗？"
+    assert snapshot.pending_question.position == 1
+    assert snapshot.pending_question.total == 2
+    assert Enum.map(snapshot.pending_question.options, & &1.label) == ["包含", "不包含"]
+    assert List.last(snapshot.messages).kind == :question
+    first_question_id = snapshot.pending_question.id
+
+    assert :ok =
+             Campaign.answer_question(snapshot.pending_question.id, "包含", "option-1")
+
+    refute Task.yield(task, 20)
+    snapshot = Campaign.snapshot()
+    assert snapshot.pending_question.question == "正确性容差使用哪一档？"
+    assert snapshot.pending_question.position == 2
+    assert snapshot.pending_question.total == 2
+    assert List.last(snapshot.messages).kind == :question
+
+    assert {:error, :question_expired} =
+             Campaign.answer_question(first_question_id, "duplicate click", "option-1")
+
+    assert :ok = Campaign.answer_question(snapshot.pending_question.id, "rtol 5e-4")
+
+    assert {:ok,
+            %{
+              answers: [
+                %{
+                  question_id: "fusion_scope",
+                  answer: "包含",
+                  selected_option: "包含"
+                },
+                %{
+                  question_id: "correctness",
+                  answer: "rtol 5e-4",
+                  selected_option: nil
+                }
+              ]
+            }} = Task.await(task)
+
+    assert Campaign.snapshot().pending_question == nil
+    assert List.last(Campaign.snapshot().messages).content == "rtol 5e-4"
+  end
+
+  test "clears a pending question batch when its MCP caller disconnects" do
+    task =
+      Task.async(fn ->
+        Campaign.mcp_call(@token, "ask_questions", %{
+          "questions" => [
+            %{
+              "id" => "continue",
+              "question" => "还需要继续吗？",
+              "options" => [%{"label" => "继续"}, %{"label" => "停止"}]
+            }
+          ]
+        })
+      end)
+
+    assert eventually(fn -> not is_nil(Campaign.snapshot().pending_question) end)
+    Task.shutdown(task, :brutal_kill)
+    assert eventually(fn -> is_nil(Campaign.snapshot().pending_question) end)
+  end
+
+  test "rejects duplicate batch ids and removes the singular ask_question tool" do
+    assert {:error, "missing_required_data", "question ids must be unique", %{}} =
+             Campaign.mcp_call(@token, "ask_questions", %{
+               "questions" => [
+                 question_args("duplicate", "First?"),
+                 question_args("duplicate", "Second?")
+               ]
+             })
+
+    assert {:error, "forbidden_role", "tool is unavailable: ask_question", %{}} =
+             Campaign.mcp_call(@token, "ask_question", %{})
+  end
+
   test "a late start_turn reply cannot resurrect an already completed Turn" do
     pid = Process.whereis(Campaign)
     session_id = "race-session"
@@ -399,6 +500,14 @@ defmodule Pika.Alignment.CampaignTest do
                "mime" => artifact.mime,
                "metadata" => %{}
              })
+  end
+
+  defp question_args(id, question) do
+    %{
+      "id" => id,
+      "question" => question,
+      "options" => [%{"label" => "Yes"}, %{"label" => "No"}]
+    }
   end
 
   defp eventually(fun, attempts \\ 50)

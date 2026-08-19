@@ -150,9 +150,13 @@ defmodule Pika.Test.AttemptAgentBackend do
     Git.run!(state.cwd, ["commit", "-m", "Optimize #{attempt_id}"])
     candidate_sha = Git.run!(state.cwd, ["rev-parse", "HEAD"])
     root = state.cwd |> Path.dirname() |> Path.dirname()
+    {:ok, context} = mcp(state, "get_context", %{})
+    benchmark = context.campaign.spec["benchmark"]
 
     {samples, correctness} =
-      OptimizationFixtures.write_iteration_artifacts(root, attempt_id, base_sha, candidate_sha)
+      OptimizationFixtures.write_iteration_artifacts(root, attempt_id, base_sha, candidate_sha,
+        pair_count: benchmark["pair_count"]
+      )
 
     Enum.each([samples, correctness], &register(state, &1))
 

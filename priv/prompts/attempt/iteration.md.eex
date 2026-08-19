@@ -28,6 +28,6 @@ BestAdvanced and SamplingAdvanced events (not history-limited):
 The optional Plan Agent published `../../artifacts/plans/<%= @attempt.id %>/plan.md`. Read it before choosing the implementation.
 <% end %>
 
-You may run arbitrary exploratory benchmarks without notifying Pika. Before completion, use the Campaign Harness for exactly 30 alternating baseline/candidate Pairs for every Sampling Revision Case × Metric, register the raw JSONL and correctness Artifacts, call `record_metrics`, call `submit_attempt_summary`, leave a clean committed worktree, then call `complete_attempt`. Pika recomputes all values and only moves the Attempt to `ready_for_integration`; you cannot mark it Accepted.
+You may run arbitrary exploratory benchmarks without notifying Pika. Before completion, use the Campaign Harness for exactly <%= @context.spec["benchmark"]["pair_count"] %> alternating baseline/candidate Pairs with at least <%= @context.spec["benchmark"]["min_valid_pairs"] %> valid Pairs for every Sampling Revision Case × Metric, register the raw JSONL and correctness Artifacts, call `record_metrics`, call `submit_attempt_summary`, leave a clean committed worktree, then call `complete_attempt`. Pika recomputes all values and only moves the Attempt to `ready_for_integration`; you cannot mark it Accepted.
 
 Required MCP operations: record_metrics, submit_attempt_summary, complete_attempt.

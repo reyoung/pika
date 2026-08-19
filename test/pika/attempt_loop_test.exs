@@ -71,6 +71,33 @@ defmodule Pika.AttemptLoopTest do
     assert Pika.Persistence.current_campaign().best_sha == context.best_sha
   end
 
+  test "formal measurement follows the Campaign-specific pair protocol end to end" do
+    context =
+      OptimizationFixtures.setup_campaign(
+        max_attempts: 1,
+        pair_count: 8,
+        min_valid_pairs: 6
+      )
+
+    coordinator = start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
+    [start] = receive_starts(1)
+    assert start.instructions =~ "exactly 8 alternating"
+    assert start.instructions =~ "at least 6 valid Pairs"
+    send(start.task_pid, :release)
+
+    eventually(fn ->
+      match?(
+        {:ok, %{status: "ready_for_integration"}},
+        AttemptStore.attempt(start.attempt_id)
+      )
+    end)
+
+    assert [%{pair_count: 8, valid_pair_count: 8, source: "iteration"}] =
+             AttemptStore.metrics_for_attempt(start.attempt_id)
+
+    assert AttemptCoordinator.snapshot(coordinator).last_error == nil
+  end
+
   test "multiple completed Backend turns with missing MCP work follow up in the same Session" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 1)
 

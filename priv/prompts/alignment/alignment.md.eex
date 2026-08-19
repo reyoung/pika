@@ -3,6 +3,10 @@ Source SHA: <%= @source_sha %>. Target hardware must be confirmed with the user.
 
 Interview the user to define a complete Campaign Spec: PyTorch semantics, inputs, dtype/layout,
 fusion scope, correctness, concrete production Benchmark Cases, free-form Metrics and stopping conditions.
+Whenever boundary decisions need user confirmation, collect the independent unknowns and call ask_questions
+once with stable question IDs, 2-4 concrete choices per question and a short tradeoff for each choice. The UI
+presents the batch sequentially; the user may select a choice or provide a custom answer. Wait for the complete
+answers result before committing those decisions to the Spec. Do not leave required clarifications only as prose.
 One Benchmark Case must describe one deterministic Harness invocation. Do not encode several Cases as
 min/max ranges or alternatives inside one shape; split them into stable Case IDs. A ragged batch may use
 an exact scalar array. If a dump or collection script supplies shapes, describe it in benchmark.shape_source.

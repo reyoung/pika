@@ -3,6 +3,7 @@ defmodule Pika.PreviewAuthCLITest do
 
   alias Pika.CLI
   alias Pika.PreviewAuth, as: Auth
+  alias Pika.Test.CampaignFixtures
 
   setup do
     Auth.clear()
@@ -42,5 +43,65 @@ defmodule Pika.PreviewAuthCLITest do
     assert Keyword.get_values(opts, :skill_root) == ["/tmp/a", "/tmp/b"]
     assert {:error, _} = CLI.parse_preview(["--backend", "unknown"])
     assert {:error, _} = CLI.parse_preview(["--effort", "infinite"])
+  end
+
+  test "parses Init options and rejects conflicting repository modes" do
+    assert {:ok, opts} =
+             CLI.parse_init([
+               "/tmp/pika-workspace",
+               "--repo",
+               "/tmp/repo",
+               "--alignment-backend",
+               "cursor",
+               "--iteration-backend",
+               "codex",
+               "--iteration-agents",
+               "3",
+               "--max-attempts",
+               "12",
+               "--no-sync",
+               "--yes"
+             ])
+
+    assert opts[:workspace] == "/tmp/pika-workspace"
+    assert opts[:alignment_backend] == "cursor"
+    assert opts[:iteration_backend] == "codex"
+    assert opts[:iteration_agents] == 3
+    assert opts[:max_attempts] == 12
+    assert opts[:yes]
+
+    assert {:error, message} = CLI.parse_init(["--owned", "--repo", "/tmp/repo"])
+    assert message =~ "--owned and --repo cannot be combined"
+    assert {:error, _message} = CLI.parse_init(["--backend", "unknown"])
+    assert {:error, _message} = CLI.parse_init(["--alignment-backend", "unknown"])
+    assert {:error, _message} = CLI.parse_init(["--iteration-backend", "unknown"])
+    assert {:ok, legacy} = CLI.parse_init(["--backend", "cursor", "--yes"])
+    assert legacy[:backend] == "cursor"
+    assert {:error, _message} = CLI.parse_init(["a", "b"])
+  end
+
+  test "discovers serve options from the current Workspace" do
+    workspace = CampaignFixtures.workspace()
+    config = Path.join(workspace, "pika.yaml")
+    File.write!(config, "campaign:\n  history_n: 10\n")
+
+    File.cd!(workspace, fn ->
+      assert {:ok, opts} = CLI.parse_serve([])
+      assert opts[:workspace] == workspace
+      assert opts[:config] == config
+    end)
+
+    assert {:ok, explicit} = CLI.parse_serve(["--workspace", workspace])
+    assert explicit[:workspace] == workspace
+    assert explicit[:config] == config
+
+    File.rm!(config)
+    File.write!(Path.join(workspace, "config.json"), "{}")
+
+    File.cd!(workspace, fn ->
+      assert {:error, message} = CLI.parse_serve([])
+      refute message =~ "--workspace is required"
+      assert message =~ "--config is required"
+    end)
   end
 end

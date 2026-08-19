@@ -31,8 +31,8 @@ Completed — 2026-08-19
 - [x] 默认 `host=127.0.0.1`，默认端口由配置确定。
 - [x] YAML 校验错误逐字段报告，不能静默使用猜测值。
 - [x] 解析后写入 Workspace `config.json`，保存 SHA-256。
-- [x] 恢复时比较不可变字段：Workspace、Managed Repo、listen address、Backend type/command/protocol config。
-- [x] 允许未来修改的字段：Plan、max attempts、history N、Reference Catalog、停止条件。
+- [x] 恢复时比较不可变字段：Workspace、Managed Repo、listen address、Alignment/Baseline Backend type/command/protocol config。
+- [x] 允许未来修改的字段：Plan、max attempts、history N、Iteration Agent profiles、Reference Catalog、停止条件。
 
 ### 1.2 Workspace 初始化
 
@@ -42,12 +42,14 @@ Completed — 2026-08-19
 workspace/
 ├── repo/
 ├── attempts/
+├── prompts/{alignment,attempt,integration,sync}/  # 使用 pika init 时生成
 ├── artifacts/{plans,patches,profiles,prompts,logs}/
 ├── pika.sqlite3
+├── pika.yaml                 # 使用 pika init 时生成
 └── config.json
 ```
 
-- [x] 空目录初始化；合法 Pika Workspace 恢复；其他非空目录拒绝。
+- [x] 空目录或仅含当前 `pika.yaml` 的目录初始化；合法 Pika Workspace 恢复；其他非空目录拒绝。
 - [x] Owned Repo 在 `repo/` 创建实际仓库。
 - [x] Managed Repo 使用 `repo/` 软链接。
 - [x] 所有 Artifact API 只接受规范化相对路径并拒绝 `..` 逃逸。

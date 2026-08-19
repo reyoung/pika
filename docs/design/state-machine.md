@@ -69,7 +69,7 @@ queued
   → checking_base
   → refreshing              # base_sha != current best_sha
   → screening_full_suite     # 全量正确性 + 每项 5 Pair
-  → escalating_regressions  # 异常组合独立 30 Pair
+  → escalating_regressions  # 异常组合按 Campaign Spec 独立执行正式 Pair 测量
   → regression_rejected     # 不修改 Git；可推进 Sampling Revision
   → validation_passed       # 生成 Full Regression Receipt
   → git_mutating            # 已持久化 Operation Intent

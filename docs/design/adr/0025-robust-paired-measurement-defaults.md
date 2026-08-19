@@ -9,5 +9,5 @@ status: accepted
 ## Consequences
 
 - Agent 的快速单次 Benchmark 只能指导开发，不能提交正式接受结果。
-- Campaign 可以覆盖 warmup 与 Pair 数，但改变正式测量协议会产生 Spec Revision。
+- Campaign 可以覆盖 warmup、`pair_count` 与 `min_valid_pairs`，但改变正式测量协议会产生 Spec Revision；只覆盖 Pair 数时，有效门槛默认为向上取整的 80%。
 - 测量环境持续不稳定时，Attempt 会被拒绝而不是无限重复统计采样。

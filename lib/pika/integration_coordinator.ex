@@ -421,7 +421,8 @@ defmodule Pika.IntegrationCoordinator do
            AttemptStore.artifact(state.campaign_id, args["correctness_artifact"]),
          :ok <- own_artifact(samples, attempt_id),
          :ok <- own_artifact(correctness, attempt_id),
-         {:ok, samples_path} <- Pika.ArtifactStore.resolve(state.workspace, samples.relative_path),
+         {:ok, samples_path} <-
+           Pika.ArtifactStore.resolve(state.workspace, samples.relative_path),
          {:ok, correctness_path} <-
            Pika.ArtifactStore.resolve(state.workspace, correctness.relative_path),
          {:ok, metrics} <-
@@ -429,7 +430,8 @@ defmodule Pika.IntegrationCoordinator do
              base_sha: context.best_sha,
              candidate_sha: args["candidate_sha"],
              case_ids: sampled_case_ids(attempt.sampling_revision_id),
-             metrics: context.metrics
+             metrics: context.metrics,
+             benchmark: context.spec["benchmark"]
            }),
          {:ok, refreshed} <-
            IntegrationStore.complete_refresh(
@@ -477,7 +479,8 @@ defmodule Pika.IntegrationCoordinator do
                base_sha: attempt.base_sha,
                candidate_sha: attempt.candidate_sha,
                case_ids: Enum.map(context.cases, & &1["id"]),
-               metrics: context.metrics
+               metrics: context.metrics,
+               benchmark: context.spec["benchmark"]
              },
              context.best_metrics
            ),
@@ -787,7 +790,7 @@ defmodule Pika.IntegrationCoordinator do
   defp recovery_instructions(instructions, true),
     do:
       instructions <>
-        "\n\nRecover the persisted Integration Lease, Receipt, Intent, and registered Artifacts before doing new work. Before starting a measurement, inspect context.artifacts and the on-disk integration outputs. Reuse a complete output only after validating its Base SHA, Candidate SHA, Case/Metric coverage, pair indexes, and alternating order. Never rerun a completed 5-pair screening or 30-pair escalation; rerun only a missing or incomplete combination."
+        "\n\nRecover the persisted Integration Lease, Receipt, Intent, and registered Artifacts before doing new work. Before starting a measurement, inspect context.artifacts and the on-disk integration outputs. Reuse a complete output only after validating its Base SHA, Candidate SHA, Case/Metric coverage, pair indexes, and alternating order. Never rerun a completed 5-pair screening or Campaign-Spec formal escalation; rerun only a missing or incomplete combination."
 
   defp kickoff(attempt, false), do: "Integrate FIFO Attempt ##{attempt.ordinal}."
   defp kickoff(attempt, true), do: "Recover Integration for existing Attempt ##{attempt.ordinal}."

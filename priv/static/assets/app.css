@@ -148,9 +148,16 @@ h2 {
   line-height: 1.55;
 }
 .message-user {
+  width: fit-content;
+  max-width: min(72%, 560px);
   margin-left: auto;
-  background: #1f333d;
+  padding: 9px 12px;
   border: 1px solid #33505f;
+  background: #1f333d;
+  line-height: 1.45;
+}
+.message-user .message-body {
+  overflow-wrap: anywhere;
 }
 .message-agent {
   max-width: 100%;
@@ -168,11 +175,48 @@ h2 {
   background: #ffffff05;
   font-size: 12px;
 }
+.message-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
 .message-label {
   color: #92a8b3;
   font-size: 11px;
   letter-spacing: .05em;
   margin-bottom: 6px;
+}
+.message-meta .message-label {
+  margin-bottom: 0;
+}
+.copy-markdown {
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #667983;
+  background: transparent;
+  font-size: 10px;
+  opacity: 0;
+  transition:
+    opacity .15s ease,
+    color .15s ease,
+    border-color .15s ease;
+}
+.message-agent:hover .copy-markdown,
+.copy-markdown:focus-visible,
+.copy-markdown.copied {
+  opacity: 1;
+}
+.copy-markdown:hover,
+.copy-markdown:focus-visible {
+  color: #afbdc4;
+  border-color: #34464e;
+  outline: none;
+}
+.copy-markdown.copied {
+  color: #b8f35a;
 }
 .message-body {
   white-space: pre-wrap;
@@ -290,6 +334,127 @@ h2 {
   background: #ffffff08;
   color: #b6c2c8;
 }
+.question-card {
+  margin-top: 14px;
+  padding: 13px;
+  border: 1px solid #3d5347;
+  border-radius: 11px;
+  background: #b8f35a08;
+}
+.question-progress {
+  width: fit-content;
+  margin-bottom: 7px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: #a9d46f;
+  background: #b8f35a10;
+  font:
+    9px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  letter-spacing: .04em;
+}
+.question-card > p {
+  margin: 0 0 10px;
+  color: #8fa09d;
+  font-size: 11px;
+}
+.question-options {
+  display: grid;
+  gap: 7px;
+}
+.question-options button {
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid #34494a;
+  border-radius: 9px;
+  color: #c2ced1;
+  background: #0d1b20;
+  text-align: left;
+}
+.question-options button:hover,
+.question-options button:focus-visible {
+  border-color: #77984e;
+  background: #b8f35a0b;
+  outline: none;
+}
+.question-options strong,
+.question-options small {
+  display: block;
+}
+.question-options strong {
+  font-size: 12px;
+}
+.question-options small {
+  margin-top: 3px;
+  color: #778b91;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.question-custom {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  margin-top: 9px;
+}
+.question-custom input {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #30434d;
+  border-radius: 9px;
+  color: #d9e4e7;
+  background: #071015;
+  font-size: 12px;
+}
+.question-custom input:focus {
+  border-color: #607a67;
+  outline: 1px solid #607a67;
+}
+.question-custom button {
+  padding: 8px 12px;
+}
+.agent-typing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin: 5px 0 12px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  color: #7f9199;
+  background: #ffffff05;
+  font-size: 11px;
+}
+.typing-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  height: 10px;
+}
+.typing-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #a6d85e;
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+.typing-dots i:nth-child(2) {
+  animation-delay: .15s;
+}
+.typing-dots i:nth-child(3) {
+  animation-delay: .3s;
+}
+@keyframes typing-bounce {
+  0%, 60%, 100% {
+    opacity: .3;
+    transform: translateY(1px);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
 .activity-row {
   width: 100%;
   margin: 4px 0 12px;
@@ -406,6 +571,15 @@ h2 {
 .composer {
   border-top: 1px solid #21313a;
   padding: 16px;
+}
+.composer-paused {
+  padding: 11px 12px;
+  border: 1px solid #3d5347;
+  border-radius: 9px;
+  color: #9eae95;
+  background: #b8f35a08;
+  font-size: 12px;
+  text-align: center;
 }
 .composer textarea {
   width: 100%;
@@ -1058,6 +1232,11 @@ code {
   .spec-panel,
   .review-panel {
     max-height: none;
+  }
+}
+@media (max-width: 680px) {
+  .message-user {
+    max-width: 88%;
   }
 }
 .dashboard-shell {

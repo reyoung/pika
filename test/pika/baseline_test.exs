@@ -75,4 +75,31 @@ defmodule Pika.BaselineTest do
     assert {:error, {:non_alternating_pair_orders, "target_case", "latency_us"}} =
              Baseline.evaluate_records(records, spec, sha)
   end
+
+  test "uses the formal pair count declared by the Campaign Spec" do
+    spec =
+      AlignmentFixtures.spec()
+      |> put_in(["benchmark", "pair_count"], 8)
+      |> put_in(["benchmark", "min_valid_pairs"], 6)
+
+    sha = String.duplicate("d", 40)
+
+    records =
+      for index <- 0..7 do
+        %{
+          "schema_version" => 1,
+          "measured_sha" => sha,
+          "case_id" => "target_case",
+          "metric_id" => "latency_us",
+          "pair_index" => index,
+          "order" => if(rem(index, 2) == 0, do: "ab", else: "ba"),
+          "a" => 10.0,
+          "b" => 9.8,
+          "valid" => index < 6
+        }
+      end
+
+    assert {:ok, [%{pair_count: 8, valid_pair_count: 6}]} =
+             Baseline.evaluate_records(records, spec, sha)
+  end
 end

@@ -47396,6 +47396,34 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       this.textarea?.removeEventListener("keydown", this.onKeydown);
     }
   };
+  Hooks2.CopyMarkdown = {
+    mounted() {
+      this.defaultLabel = this.el.textContent;
+      this.onClick = async () => {
+        const markdown = this.el.dataset.markdown || "";
+        try {
+          await copyText(markdown);
+          this.showResult("\u5DF2\u590D\u5236", true);
+        } catch (_error) {
+          this.showResult("\u590D\u5236\u5931\u8D25", false);
+        }
+      };
+      this.el.addEventListener("click", this.onClick);
+    },
+    destroyed() {
+      this.el.removeEventListener("click", this.onClick);
+      window.clearTimeout(this.resetTimer);
+    },
+    showResult(label, copied) {
+      this.el.textContent = label;
+      this.el.classList.toggle("copied", copied);
+      window.clearTimeout(this.resetTimer);
+      this.resetTimer = window.setTimeout(() => {
+        this.el.textContent = this.defaultLabel;
+        this.el.classList.remove("copied");
+      }, 1400);
+    }
+  };
   Hooks2.MetricsChart = {
     mounted() {
       this.chart = init2(this.el, void 0, { renderer: "canvas" });
@@ -47490,6 +47518,22 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
   };
   function escapeHTML(value) {
     return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+  }
+  async function copyText(text) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("clipboard unavailable");
   }
   var liveSocket = new LiveSocket("/live", Socket, {
     hooks: Hooks2,

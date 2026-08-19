@@ -60,7 +60,7 @@ Not started
 - [ ] 在另一个 Attempt 运行中 kill Pika Server 并重启。
 - [ ] 验证 Attempt 预算、worktree、JSONL、Metrics 和 Session identity 没有重复。
 - [ ] 至少一次候选通过 Full Case Set Screening 后安全归并。
-- [ ] 至少一次受控回退触发独立 30 Pair、归并前拒绝和 Sampling Advanced，Best SHA 不变。
+- [ ] 至少一次受控回退触发独立正式 Pair 测量、归并前拒绝和 Sampling Advanced，Best SHA 不变。
 
 ### 6.5 手工 Sync
 

@@ -3,7 +3,17 @@ defmodule Pika.Preflight do
 
   @timeout 5_000
 
-  def run(backend) when is_map(backend) do
+  def run(backend) when is_map(backend), do: run([backend])
+
+  def run(backends) when is_list(backends) do
+    backend_types =
+      backends
+      |> Enum.map(fn
+        backend when is_map(backend) -> backend["type"] || backend["backend"]
+        backend -> backend
+      end)
+      |> MapSet.new()
+
     [
       probe("git", "Git", "git", ["--version"], true, :workspace),
       probe("python", "Python", "python3", ["--version"], false, :managed_repo_lock),
@@ -28,8 +38,8 @@ defmodule Pika.Preflight do
     |> Enum.map(fn check ->
       relevant =
         case check.id do
-          "codex_app_server" -> backend["type"] == "codex_app_server"
-          "cursor_acp" -> backend["type"] == "cursor_acp"
+          "codex_app_server" -> MapSet.member?(backend_types, "codex_app_server")
+          "cursor_acp" -> MapSet.member?(backend_types, "cursor_acp")
           _ -> true
         end
 

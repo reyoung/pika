@@ -23,7 +23,7 @@ defmodule Pika.Workspace do
   ]
 
   def plan(%Config{} = config) do
-    with {:ok, fresh?} <- classify(config.workspace),
+    with {:ok, fresh?} <- classify(config.workspace, config.source_path),
          :ok <- validate_layout(config, fresh?),
          :ok <- verify_recovery_identity(config, fresh?),
          {:ok, repo_identity} <- inspect_repo(config, fresh?) do
@@ -87,13 +87,19 @@ defmodule Pika.Workspace do
 
   def artifact_directories, do: @artifact_kinds
 
-  defp classify(root) do
+  defp classify(root, config_path) do
     case File.ls(root) do
       {:error, :enoent} -> {:ok, true}
       {:ok, []} -> {:ok, true}
+      {:ok, [entry]} -> {:ok, config_only?(root, entry, config_path)}
       {:ok, _entries} -> {:ok, false}
       {:error, reason} -> {:error, {:workspace_unreadable, root, reason}}
     end
+  end
+
+  defp config_only?(root, entry, config_path) do
+    Path.dirname(config_path) == root and Path.basename(config_path) == entry and
+      File.regular?(config_path)
   end
 
   defp validate_layout(_config, true), do: :ok

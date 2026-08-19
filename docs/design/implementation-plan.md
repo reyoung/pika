@@ -64,7 +64,7 @@
 交付：
 
 - FIFO Integration Queue、无 TTL Integration Lease、Operation Intent。
-- 陈旧 Base refresh/rebase、全量 5 Pair Screening、异常 30 Pair、Agent squash merge 与 Git 独立核验。
+- 陈旧 Base refresh/rebase、全量 5 Pair Screening、异常组合的 Campaign Spec 正式 Pair 测量、Agent squash merge 与 Git 独立核验。
 - BestAdvanced 至少一次投递和正式动作前 stale-base gate。
 - Regression Feedback、Sampling Revision 与 Sampling Advanced。
 - 终态 Attempt Artifact 后自动 worktree/branch 清理。

@@ -70,6 +70,36 @@ Hooks.Composer = {
   }
 }
 
+Hooks.CopyMarkdown = {
+  mounted() {
+    this.defaultLabel = this.el.textContent
+    this.onClick = async () => {
+      const markdown = this.el.dataset.markdown || ""
+
+      try {
+        await copyText(markdown)
+        this.showResult("已复制", true)
+      } catch (_error) {
+        this.showResult("复制失败", false)
+      }
+    }
+    this.el.addEventListener("click", this.onClick)
+  },
+  destroyed() {
+    this.el.removeEventListener("click", this.onClick)
+    window.clearTimeout(this.resetTimer)
+  },
+  showResult(label, copied) {
+    this.el.textContent = label
+    this.el.classList.toggle("copied", copied)
+    window.clearTimeout(this.resetTimer)
+    this.resetTimer = window.setTimeout(() => {
+      this.el.textContent = this.defaultLabel
+      this.el.classList.remove("copied")
+    }, 1400)
+  }
+}
+
 Hooks.MetricsChart = {
   mounted() {
     this.chart = echarts.init(this.el, undefined, {renderer: "canvas"})
@@ -173,6 +203,25 @@ function escapeHTML(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;")
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+
+  const textarea = document.createElement("textarea")
+  textarea.value = text
+  textarea.setAttribute("readonly", "")
+  textarea.style.position = "fixed"
+  textarea.style.opacity = "0"
+  document.body.appendChild(textarea)
+  textarea.select()
+
+  const copied = document.execCommand("copy")
+  textarea.remove()
+  if (!copied) throw new Error("clipboard unavailable")
 }
 
 const liveSocket = new LiveSocket("/live", Socket, {

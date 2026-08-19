@@ -25,7 +25,7 @@ Alignment Conversation 展示了由 Boundary Agent 生成采集脚本的路径�
 ## Benchmark 覆盖表达
 
 - Cases 区分 `ITERATION SAMPLE` 与 `FULL REGRESSION ONLY`，并显示 Full/Sample 数量、Sampling Revision 和选择理由。
-- 初始 Baseline 覆盖 Full Case Set 的全部 Case/Metric 30 Pair；Baseline Agent 自动选择最多十个初始 Iteration Cases。
+- 初始 Baseline 按 Campaign Spec 声明的正式 Pair 数（默认 30）覆盖 Full Case Set 的全部 Case/Metric；Baseline Agent 自动选择最多十个初始 Iteration Cases。
 - Attempt 视图固定显示其启动 Sampling Revision。Sampling Advanced 到达时提示活动 Agent，但不改变该 Attempt 的门禁快照。
 - Metrics Timeline 的点标明 `iteration`、`integration_screen` 或 `integration_full`；Integration 结果覆盖同 Attempt 的旧快照并补齐未采样 Case。
 - Informational 项在 Iteration 中只展示，但归并前全量回归仍受 universal no-regression gate。

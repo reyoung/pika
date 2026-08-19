@@ -178,7 +178,7 @@ erDiagram
 | `improvement_ratio` | REAL | 统一为正值更好 |
 | `mad` | REAL | Pair ratio MAD |
 | `noise_tolerance` | REAL | `max(0.005, 3*1.4826*MAD)` |
-| `pair_count`, `valid_pair_count` | INTEGER | 默认 30 / 至少 24 |
+| `pair_count`, `valid_pair_count` | INTEGER | Spec 声明的正式数量 / 达到 `min_valid_pairs`；默认 30 / 24 |
 | `source` | TEXT | `iteration`, `integration_screen`, `integration_full` |
 | `measured_at` | INTEGER | |
 

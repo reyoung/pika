@@ -33,7 +33,7 @@ defmodule Pika.Alignment.Campaign do
   def authorize(token), do: call_if_started({:authorize, token}, {:error, :not_started})
 
   def mcp_call(token, tool, args),
-    do: call_if_started({:mcp, token, tool, args}, {:error, :not_started})
+    do: call_if_started({:mcp, token, tool, args}, {:error, :not_started}, :infinity)
 
   def send_message(body, artifacts \\ []),
     do: call_if_started({:send_message, body, artifacts}, {:error, :not_started})
@@ -43,6 +43,13 @@ defmodule Pika.Alignment.Campaign do
 
   def request_changes(body, artifacts \\ []),
     do: call_if_started({:request_changes, body, artifacts}, {:error, :not_started})
+
+  def answer_question(question_id, answer, option_id \\ nil),
+    do:
+      call_if_started(
+        {:answer_question, question_id, answer, option_id},
+        {:error, :not_started}
+      )
 
   @impl true
   def init(opts) do
@@ -81,8 +88,10 @@ defmodule Pika.Alignment.Campaign do
       closed_sessions: MapSet.new(),
       backend_workflow: :alignment,
       active_turn_id: nil,
+      agent_responding: false,
       stream_message_id: nil,
       activity_message_id: nil,
+      pending_questions: nil,
       mcp_url: Keyword.fetch!(opts, :mcp_url),
       mcp_tokens: initial_mcp_tokens,
       idempotency: %{},
@@ -272,7 +281,23 @@ defmodule Pika.Alignment.Campaign do
     end
   end
 
-  def handle_call({:mcp, token, tool, args}, _from, state) do
+  def handle_call({:answer_question, question_id, answer, option_id}, _from, state) do
+    answer = if is_binary(answer), do: String.trim(answer), else: ""
+
+    case state.pending_questions do
+      nil ->
+        {:reply, {:error, :no_pending_question}, state}
+
+      batch ->
+        question = current_question(batch)
+
+        if question.id == question_id,
+          do: answer_current_question(state, batch, question, answer, option_id),
+          else: {:reply, {:error, :question_expired}, state}
+    end
+  end
+
+  def handle_call({:mcp, token, tool, args}, from, state) do
     token_hash = token_hash(token)
 
     case Map.fetch(state.mcp_tokens, token_hash) do
@@ -280,7 +305,7 @@ defmodule Pika.Alignment.Campaign do
         {:reply, mcp_error("unauthorized", "invalid Backend Session token"), state}
 
       {:ok, identity} ->
-        execute_mcp(tool, stringify_keys(args), identity, token_hash, state)
+        execute_mcp(tool, stringify_keys(args), identity, token_hash, from, state)
     end
   end
 
@@ -365,7 +390,13 @@ defmodule Pika.Alignment.Campaign do
   end
 
   def handle_info({:backend_opened, _workflow, {:error, reason}}, state) do
-    state = %{state | last_error: "Backend Session 启动失败：#{inspect(reason)}", backend: nil}
+    state = %{
+      state
+      | last_error: "Backend Session 启动失败：#{inspect(reason)}",
+        backend: nil,
+        agent_responding: false
+    }
+
     broadcast(state)
     {:noreply, state}
   end
@@ -373,8 +404,11 @@ defmodule Pika.Alignment.Campaign do
   def handle_info({:backend_turn_result, result}, state) do
     state =
       case result do
-        {:ok, _turn_id} -> state
-        {:error, reason} -> %{state | last_error: "Backend Turn 失败：#{inspect(reason)}"}
+        {:ok, _turn_id} ->
+          state
+
+        {:error, reason} ->
+          %{state | last_error: "Backend Turn 失败：#{inspect(reason)}", agent_responding: false}
       end
 
     broadcast(state)
@@ -410,6 +444,15 @@ defmodule Pika.Alignment.Campaign do
     end
   end
 
+  def handle_info(
+        {:DOWN, monitor_ref, :process, _pid, _reason},
+        %{pending_questions: %{monitor_ref: monitor_ref}} = state
+      ) do
+    state = %{state | pending_questions: nil}
+    broadcast(state)
+    {:noreply, state}
+  end
+
   def handle_info(:recover_backend, state) do
     cwd =
       if state.backend_workflow == :baseline,
@@ -431,7 +474,7 @@ defmodule Pika.Alignment.Campaign do
 
   def terminate(_reason, _state), do: :ok
 
-  defp execute_mcp("get_context", _args, identity, _token_hash, state) do
+  defp execute_mcp("get_context", _args, identity, _token_hash, _from, state) do
     result = %{
       session: identity,
       campaign: public_snapshot(state),
@@ -441,7 +484,43 @@ defmodule Pika.Alignment.Campaign do
     {:reply, {:ok, result}, state}
   end
 
-  defp execute_mcp(tool, args, identity, token_hash, state) when tool in @write_tools do
+  defp execute_mcp("ask_questions", args, identity, _token_hash, from, state) do
+    with nil <- state.pending_questions,
+         {:ok, questions} <- validate_questions(args) do
+      pending = %{
+        id: Pika.AgentBackend.Id.new("questions"),
+        questions: questions,
+        current_index: 0,
+        answers: [],
+        asked_at: DateTime.utc_now(),
+        identity: identity,
+        reply_to: from,
+        monitor_ref: Process.monitor(elem(from, 0))
+      }
+
+      next_state = %{
+        state
+        | pending_questions: pending,
+          messages: state.messages ++ [question_message(current_question(pending))],
+          stream_message_id: nil,
+          activity_message_id: nil,
+          agent_responding: true
+      }
+
+      broadcast(next_state)
+      {:noreply, next_state}
+    else
+      %{id: _id} ->
+        {:reply,
+         mcp_error("questions_pending", "wait for the user to answer the current question batch"),
+         state}
+
+      {:error, message} ->
+        {:reply, mcp_error("missing_required_data", message), state}
+    end
+  end
+
+  defp execute_mcp(tool, args, identity, token_hash, _from, state) when tool in @write_tools do
     key = args["idempotency_key"]
 
     cond do
@@ -478,7 +557,7 @@ defmodule Pika.Alignment.Campaign do
     end
   end
 
-  defp execute_mcp(tool, _args, _identity, _token_hash, state),
+  defp execute_mcp(tool, _args, _identity, _token_hash, _from, state),
     do: {:reply, mcp_error("forbidden_role", "tool is unavailable: #{tool}"), state}
 
   defp perform_write("register_artifact", args, _identity, state) do
@@ -726,11 +805,16 @@ defmodule Pika.Alignment.Campaign do
     do: {mcp_error("forbidden_role", "submit_iteration_sample requires baseline session"), state}
 
   defp baseline_retry(reason, %{baseline_retry_count: 0} = state) do
+    min_valid_pairs =
+      get_in(state.spec_result.spec, ["benchmark", "min_valid_pairs"]) || 24
+
     state = %{
       state
       | baseline_retry_count: 1,
         baseline_error: inspect(reason),
-        messages: state.messages ++ [message(:system, "有效 Pair 少于 24；允许且要求整组重跑一次。")]
+        messages:
+          state.messages ++
+            [message(:system, "有效 Pair 少于 #{min_valid_pairs}；允许且要求整组重跑一次。")]
     }
 
     {mcp_error("missing_required_data", "rerun the entire Baseline group once", %{
@@ -883,7 +967,7 @@ defmodule Pika.Alignment.Campaign do
       send(parent, {:backend_turn_result, result})
     end)
 
-    state
+    %{state | agent_responding: true}
   end
 
   defp apply_backend_event(state, %{type: :session_started}), do: state
@@ -892,6 +976,7 @@ defmodule Pika.Alignment.Campaign do
     %{
       state
       | active_turn_id: turn_id,
+        agent_responding: true,
         stream_message_id: nil,
         activity_message_id: nil
     }
@@ -909,7 +994,8 @@ defmodule Pika.Alignment.Campaign do
           state
           | messages: state.messages ++ [message],
             stream_message_id: id,
-            activity_message_id: nil
+            activity_message_id: nil,
+            agent_responding: true
         }
 
       id ->
@@ -919,7 +1005,7 @@ defmodule Pika.Alignment.Campaign do
             message -> message
           end)
 
-        %{state | messages: messages}
+        %{state | messages: messages, agent_responding: true}
     end
   end
 
@@ -966,7 +1052,17 @@ defmodule Pika.Alignment.Campaign do
       do: Process.send_after(self(), {:completion_followup, turn_id}, 100)
 
     if state.active_turn_id in [nil, turn_id] do
-      %{state | active_turn_id: nil, stream_message_id: nil, activity_message_id: nil}
+      state
+      |> cancel_pending_questions(
+        "questions_cancelled",
+        "the Agent turn ended before all answers"
+      )
+      |> Map.merge(%{
+        active_turn_id: nil,
+        agent_responding: false,
+        stream_message_id: nil,
+        activity_message_id: nil
+      })
     else
       state
     end
@@ -975,6 +1071,13 @@ defmodule Pika.Alignment.Campaign do
   defp apply_backend_event(state, %{type: :process_exited}) do
     if state.backend_enabled and state.status != :optimizing,
       do: Process.send_after(self(), :recover_backend, 100)
+
+    state =
+      cancel_pending_questions(
+        state,
+        "backend_exited",
+        "the Backend exited before the user answered all questions"
+      )
 
     %{
       state
@@ -987,6 +1090,7 @@ defmodule Pika.Alignment.Campaign do
             else: state.mcp_tokens
           ),
         active_turn_id: nil,
+        agent_responding: false,
         stream_message_id: nil,
         activity_message_id: nil,
         messages: state.messages ++ [message(:system, "Backend 进程退出；将使用新 Session 重建上下文。")]
@@ -1025,6 +1129,8 @@ defmodule Pika.Alignment.Campaign do
       best_sha: state.best_sha,
       repo: state.workspace.repo,
       artifacts: state.workspace.artifacts,
+      pair_count: get_in(state.spec_result.spec, ["benchmark", "pair_count"]) || 30,
+      min_valid_pairs: get_in(state.spec_result.spec, ["benchmark", "min_valid_pairs"]) || 24,
       max_initial_cases:
         get_in(state.spec_result.spec, ["iteration_sampling", "max_initial_cases"]) || 10
     }
@@ -1079,6 +1185,8 @@ defmodule Pika.Alignment.Campaign do
       backend: state.backend_name,
       backend_session_id: state.backend_session && state.backend_session.id,
       active_turn_id: state.active_turn_id,
+      agent_responding: state.agent_responding,
+      pending_question: public_question(state.pending_questions),
       messages: state.messages,
       artifacts: Map.values(state.artifacts),
       spec: state.spec_result.spec,
@@ -1124,6 +1232,165 @@ defmodule Pika.Alignment.Campaign do
       at: DateTime.utc_now(),
       kind: :message
     }
+
+  defp answer_current_question(state, batch, question, answer, option_id) do
+    selected = Enum.find(question.options, &(&1.id == option_id))
+    resolved_answer = if selected, do: selected.label, else: answer
+
+    cond do
+      option_id not in [nil, ""] and is_nil(selected) ->
+        {:reply, {:error, :invalid_option}, state}
+
+      resolved_answer == "" ->
+        {:reply, {:error, :empty_answer}, state}
+
+      true ->
+        result = %{
+          question_id: question.key,
+          question: question.question,
+          answer: resolved_answer,
+          selected_option: selected && selected.label
+        }
+
+        answers = batch.answers ++ [result]
+        messages = state.messages ++ [message(:user, resolved_answer)]
+        next_index = batch.current_index + 1
+
+        if next_index < length(batch.questions) do
+          next_batch = %{batch | current_index: next_index, answers: answers}
+          next_question = current_question(next_batch)
+
+          next_state = %{
+            state
+            | pending_questions: next_batch,
+              messages: messages ++ [question_message(next_question)],
+              stream_message_id: nil,
+              activity_message_id: nil
+          }
+
+          broadcast(next_state)
+          {:reply, :ok, next_state}
+        else
+          Process.demonitor(batch.monitor_ref, [:flush])
+          next_state = %{state | pending_questions: nil, messages: messages}
+          broadcast(next_state)
+          GenServer.reply(batch.reply_to, {:ok, %{answers: answers}})
+          {:reply, :ok, next_state}
+        end
+    end
+  end
+
+  defp validate_questions(args) do
+    questions = args["questions"]
+
+    cond do
+      not is_list(questions) or questions == [] or not Enum.all?(questions, &is_map/1) ->
+        {:error, "questions must contain at least one question object"}
+
+      true ->
+        questions
+        |> Enum.with_index(1)
+        |> Enum.reduce_while({:ok, []}, fn {question, index}, {:ok, acc} ->
+          case validate_question(question, index) do
+            {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
+            {:error, message} -> {:halt, {:error, "question #{index}: #{message}"}}
+          end
+        end)
+        |> reverse_questions()
+        |> ensure_unique_question_keys()
+    end
+  end
+
+  defp reverse_questions({:ok, questions}), do: {:ok, Enum.reverse(questions)}
+  defp reverse_questions(error), do: error
+
+  defp validate_question(args, index) do
+    args = stringify_keys(args)
+    key = question_text(args["id"])
+    question = question_text(args["question"])
+    options = args["options"]
+
+    cond do
+      key == "" ->
+        {:error, "id is required"}
+
+      question == "" ->
+        {:error, "question is required"}
+
+      not is_list(options) or length(options) not in 2..4 or
+          not Enum.all?(options, &is_map/1) ->
+        {:error, "options must contain between 2 and 4 choices"}
+
+      true ->
+        normalized =
+          options
+          |> Enum.with_index(1)
+          |> Enum.map(fn {option, index} ->
+            option = stringify_keys(option)
+
+            %{
+              id: "option-#{index}",
+              label: question_text(option["label"]),
+              description: question_text(option["description"])
+            }
+          end)
+
+        if Enum.any?(normalized, &(&1.label == "")),
+          do: {:error, "every option requires a label"},
+          else:
+            {:ok,
+             %{
+               id: Pika.AgentBackend.Id.new("question"),
+               key: key,
+               question: question,
+               options: normalized,
+               ordinal: index
+             }}
+    end
+  end
+
+  defp ensure_unique_question_keys({:error, _message} = error), do: error
+
+  defp ensure_unique_question_keys({:ok, questions}) do
+    keys = Enum.map(questions, & &1.key)
+
+    if length(keys) == length(Enum.uniq(keys)),
+      do: {:ok, questions},
+      else: {:error, "question ids must be unique"}
+  end
+
+  defp question_text(value) when is_binary(value), do: String.trim(value)
+  defp question_text(_value), do: ""
+
+  defp public_question(nil), do: nil
+
+  defp public_question(batch) do
+    batch
+    |> current_question()
+    |> Map.take([:id, :question, :options])
+    |> Map.merge(%{
+      batch_id: batch.id,
+      position: batch.current_index + 1,
+      total: length(batch.questions),
+      asked_at: batch.asked_at
+    })
+  end
+
+  defp current_question(batch), do: Enum.fetch!(batch.questions, batch.current_index)
+
+  defp question_message(question) do
+    :agent
+    |> message(question.question)
+    |> Map.merge(%{kind: :question, question_id: question.id})
+  end
+
+  defp cancel_pending_questions(%{pending_questions: nil} = state, _code, _message), do: state
+
+  defp cancel_pending_questions(state, code, message) do
+    Process.demonitor(state.pending_questions.monitor_ref, [:flush])
+    GenServer.reply(state.pending_questions.reply_to, mcp_error(code, message))
+    %{state | pending_questions: nil}
+  end
 
   defp register_user_artifacts(state, artifacts) do
     artifact_map =
@@ -1410,10 +1677,10 @@ defmodule Pika.Alignment.Campaign do
 
   defp restore_durable_state(state, _durable), do: state
 
-  defp call_if_started(message, default) do
+  defp call_if_started(message, default, timeout \\ 120_000) do
     case Process.whereis(__MODULE__) do
       nil -> default
-      _pid -> GenServer.call(__MODULE__, message, 120_000)
+      _pid -> GenServer.call(__MODULE__, message, timeout)
     end
   end
 end

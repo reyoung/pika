@@ -4,6 +4,23 @@ defmodule Pika.CLI do
   alias Pika.PreviewAuth, as: Auth
   alias Pika.Alignment.{Campaign, Workspace}
 
+  def main(["init" | argv]) do
+    case parse_init(argv) do
+      {:ok, opts} ->
+        if opts[:help] do
+          IO.puts(init_usage())
+        else
+          case Pika.Init.run(opts) do
+            {:ok, _result} -> :ok
+            {:error, reason} -> abort(format_error("init", reason))
+          end
+        end
+
+      {:error, message} ->
+        abort(message <> "\n\n" <> init_usage())
+    end
+  end
+
   def main(["serve" | argv]) do
     case parse_serve(argv) do
       {:ok, opts} -> run_serve(opts)
@@ -20,6 +37,92 @@ defmodule Pika.CLI do
 
   def main(_argv), do: abort(usage())
 
+  def parse_init(argv) do
+    {opts, args, invalid} =
+      OptionParser.parse(argv,
+        strict: [
+          workspace: :string,
+          repo: :string,
+          owned: :boolean,
+          config: :string,
+          host: :string,
+          port: :integer,
+          backend: :string,
+          alignment_backend: :string,
+          iteration_backend: :string,
+          model: :string,
+          effort: :string,
+          iteration_agents: :integer,
+          max_attempts: :integer,
+          sync_remote: :string,
+          sync_branch: :string,
+          no_sync: :boolean,
+          yes: :boolean,
+          help: :boolean
+        ],
+        aliases: [y: :yes, h: :help]
+      )
+
+    positional_workspace = if length(args) == 1, do: List.first(args)
+
+    errors =
+      []
+      |> maybe_cli_error(invalid != [], "invalid options: #{inspect(invalid)}")
+      |> maybe_cli_error(length(args) > 1, "expected at most one WORKSPACE argument")
+      |> maybe_cli_error(
+        not is_nil(positional_workspace) and not is_nil(opts[:workspace]),
+        "WORKSPACE cannot be passed both positionally and with --workspace"
+      )
+      |> maybe_cli_error(
+        opts[:owned] == true and not is_nil(opts[:repo]),
+        "--owned and --repo cannot be combined"
+      )
+      |> maybe_cli_error(
+        opts[:no_sync] == true and
+          (not is_nil(opts[:sync_remote]) or not is_nil(opts[:sync_branch])),
+        "--no-sync cannot be combined with --sync-remote or --sync-branch"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:backend]) and opts[:backend] not in ~w(codex cursor),
+        "--backend must be codex or cursor"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:alignment_backend]) and
+          opts[:alignment_backend] not in ~w(codex cursor),
+        "--alignment-backend must be codex or cursor"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:iteration_backend]) and
+          opts[:iteration_backend] not in ~w(codex cursor),
+        "--iteration-backend must be codex or cursor"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:effort]) and opts[:effort] not in ~w(low medium high xhigh max ultra),
+        "invalid --effort"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:port]) and opts[:port] not in 1..65_535,
+        "--port must be from 1 through 65535"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:iteration_agents]) and opts[:iteration_agents] < 1,
+        "--iteration-agents must be positive"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:max_attempts]) and opts[:max_attempts] < 0,
+        "--max-attempts must be non-negative"
+      )
+
+    case errors do
+      [] ->
+        workspace = opts[:workspace] || positional_workspace
+        {:ok, if(workspace, do: Keyword.put(opts, :workspace, workspace), else: opts)}
+
+      values ->
+        {:error, Enum.join(values, "\n")}
+    end
+  end
+
   def parse_serve(argv) do
     {opts, args, invalid} =
       OptionParser.parse(argv,
@@ -32,16 +135,34 @@ defmodule Pika.CLI do
         ]
       )
 
+    cwd = invocation_cwd()
+    workspace = expand_from(opts[:workspace], cwd) || discover_workspace(cwd)
+    config = expand_from(opts[:config], cwd) || default_workspace_config(workspace)
+    repo = expand_from(opts[:repo], cwd)
+
     errors =
       []
       |> maybe_cli_error(invalid != [], "invalid options: #{inspect(invalid)}")
       |> maybe_cli_error(args != [], "unexpected arguments: #{inspect(args)}")
-      |> maybe_cli_error(is_nil(opts[:workspace]), "--workspace is required")
-      |> maybe_cli_error(is_nil(opts[:config]), "--config is required")
+      |> maybe_cli_error(
+        is_nil(workspace),
+        "--workspace is required when not running inside a Pika Workspace"
+      )
+      |> maybe_cli_error(
+        is_nil(config),
+        "--config is required when WORKSPACE/pika.yaml does not exist"
+      )
 
     case errors do
-      [] -> {:ok, opts}
-      values -> {:error, Enum.join(values, "\n")}
+      [] ->
+        {:ok,
+         opts
+         |> Keyword.put(:workspace, workspace)
+         |> Keyword.put(:config, config)
+         |> put_if_present(:repo, repo)}
+
+      values ->
+        {:error, Enum.join(values, "\n")}
     end
   end
 
@@ -87,7 +208,8 @@ defmodule Pika.CLI do
       |> put_if_present(:port, opts[:port])
 
     with {:ok, config} <- Pika.Config.load(opts[:config], config_opts),
-         preflight <- Pika.Preflight.run(config.backend),
+         preflight <-
+           Pika.Preflight.run([config.backend | config.campaign["iteration_agents"]]),
          {:ok, plan} <- Pika.Workspace.plan(config),
          :ok <- configure_serve(config, plan, preflight),
          %{token: token} <- Pika.Auth.generate(),
@@ -207,6 +329,25 @@ defmodule Pika.CLI do
   defp put_if_present(options, _key, nil), do: options
   defp put_if_present(options, key, value), do: Keyword.put(options, key, value)
 
+  defp discover_workspace(cwd) do
+    if File.regular?(Path.join(cwd, "pika.yaml")) or
+         File.regular?(Path.join(cwd, "config.json")),
+       do: cwd,
+       else: nil
+  end
+
+  defp default_workspace_config(nil), do: nil
+
+  defp default_workspace_config(workspace) do
+    path = Path.join(Path.expand(workspace), "pika.yaml")
+    if File.regular?(path), do: path, else: nil
+  end
+
+  defp invocation_cwd, do: System.get_env("PIKA_CLI_CWD") || File.cwd!()
+
+  defp expand_from(nil, _cwd), do: nil
+  defp expand_from(path, cwd), do: Path.expand(path, cwd)
+
   defp maybe_cli_error(errors, false, _message), do: errors
   defp maybe_cli_error(errors, true, message), do: errors ++ [message]
 
@@ -225,6 +366,18 @@ defmodule Pika.CLI do
     do: "immutable configuration changed:\n" <> Enum.map_join(errors, "\n", &"  - #{&1}")
 
   defp format_error(reason), do: "pika serve failed: #{inspect(reason)}"
+
+  defp format_error(command, {:invalid_config, errors}),
+    do:
+      "pika #{command} failed: configuration validation failed:\n" <>
+        Enum.map_join(errors, "\n", &"  - #{&1}")
+
+  defp format_error(command, {:immutable_config_changed, errors}),
+    do:
+      "pika #{command} failed: immutable configuration changed:\n" <>
+        Enum.map_join(errors, "\n", &"  - #{&1}")
+
+  defp format_error(command, reason), do: "pika #{command} failed: #{inspect(reason)}"
 
   defp parse_ip(host) do
     case :inet.parse_address(String.to_charlist(host)) do
@@ -250,11 +403,15 @@ defmodule Pika.CLI do
 
   defp usage do
     """
-    Usage: pika serve --workspace PATH --config PIKA_YAML [options]
+    Usage: pika init [WORKSPACE] [options]
+
+    Usage: pika serve [--workspace PATH] [--config PIKA_YAML] [options]
 
       --repo PATH        Manage an existing clean Git repository
       --host IP          Override server.host (default 127.0.0.1)
       --port PORT        Override server.port (default 8080)
+
+    From an initialized Workspace containing pika.yaml, simply run: pika serve
 
     Usage: pika preview <repo> [options]
 
@@ -265,6 +422,30 @@ defmodule Pika.CLI do
       --port PORT
       --workspace EMPTY_DIRECTORY
       --skill-root PATH
+    """
+  end
+
+  defp init_usage do
+    """
+    Usage: pika init [WORKSPACE] [options]
+
+      --repo PATH              Manage an existing clean Git repository
+      --owned                  Create a new repository inside the Workspace
+      --config PATH            Configuration output (default WORKSPACE/pika.yaml)
+      --host IP                Listen host (default 127.0.0.1)
+      --port PORT              Listen port (default 8080)
+      --alignment-backend B    Alignment/Baseline backend: codex|cursor
+      --iteration-backend B    Iteration Agent backend: codex|cursor
+      --backend codex|cursor   Set both backends (compatibility shorthand)
+      --model MODEL            Iteration model (interactive mode lists provider models)
+      --effort EFFORT          low|medium|high|xhigh|max|ultra (default high)
+      --iteration-agents N     Concurrent Iteration Agents (default 1)
+      --max-attempts N         Campaign attempt limit (default unlimited)
+      --sync-remote NAME       Configure a Git sync remote
+      --sync-branch NAME       Configure a Git sync branch
+      --no-sync                Do not configure Git sync
+      -y, --yes                Accept defaults for unspecified settings
+      -h, --help               Show this help
     """
   end
 end

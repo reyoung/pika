@@ -88,6 +88,20 @@ defmodule PikaWeb.AlignmentLive do
     {:noreply, update(socket, :show_diff, &not/1)}
   end
 
+  def handle_event("answer_question", params, socket) do
+    question = socket.assigns.snapshot.pending_question
+    answer = String.trim(params["answer"] || "")
+    option_id = params["option_id"]
+    question_id = params["question_id"] || (question && question.id)
+
+    result =
+      if question,
+        do: Campaign.answer_question(question_id, answer, option_id),
+        else: {:error, :no_pending_question}
+
+    {:noreply, assign_result(socket, result)}
+  end
+
   defp submit_message(socket, body, intent) do
     root = socket.assigns.snapshot.workspace.root
 
@@ -183,7 +197,19 @@ defmodule PikaWeb.AlignmentLive do
                 id={message.id}
                 class={"message message-#{message.role}"}
               >
-                <div class="message-label">{message_label(message.role)} · {format_time(message.at)}</div>
+                <div class="message-meta">
+                  <div class="message-label">{message_label(message.role)} · {format_time(message.at)}</div>
+                  <button
+                    :if={message.role == :agent}
+                    id={"copy-#{message.id}"}
+                    type="button"
+                    class="copy-markdown"
+                    phx-hook="CopyMarkdown"
+                    data-markdown={message.content}
+                    aria-label="复制 Markdown"
+                    title="复制 Markdown"
+                  >复制 Markdown</button>
+                </div>
                 <div :if={message.role == :agent} class="message-body markdown-body">
                   {Markdown.render(message.content)}
                 </div>
@@ -197,12 +223,59 @@ defmodule PikaWeb.AlignmentLive do
                     <small>{format_bytes(artifact.size)}</small>
                   </span>
                 </div>
+                <div
+                  :if={pending_question?(@snapshot.pending_question, message)}
+                  class="question-card"
+                >
+                  <div class="question-progress">
+                    问题 {@snapshot.pending_question.position} / {@snapshot.pending_question.total}
+                  </div>
+                  <p>请选择一个答案，或在下方输入你的回答。</p>
+                  <div class="question-options">
+                    <button
+                      :for={option <- @snapshot.pending_question.options}
+                      type="button"
+                      phx-click="answer_question"
+                      phx-value-question_id={@snapshot.pending_question.id}
+                      phx-value-answer={option.label}
+                      phx-value-option_id={option.id}
+                    >
+                      <strong>{option.label}</strong>
+                      <small :if={option.description != ""}>{option.description}</small>
+                    </button>
+                  </div>
+                  <form class="question-custom" phx-submit="answer_question">
+                    <input type="hidden" name="question_id" value={@snapshot.pending_question.id} />
+                    <input
+                      type="text"
+                      name="answer"
+                      autocomplete="off"
+                      placeholder="输入自己的回答…"
+                      aria-label="自定义回答"
+                    />
+                    <button type="submit" class="secondary">回答</button>
+                  </form>
+                </div>
               </article>
             <% end %>
+            <div
+              :if={@snapshot.agent_responding && is_nil(@snapshot.pending_question)}
+              id="agent-typing"
+              class="agent-typing"
+              role="status"
+              aria-live="polite"
+            >
+              <span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span>Agent 正在输入</span>
+            </div>
           </div>
 
           <div class="composer">
+            <div :if={@snapshot.pending_question} class="composer-paused">
+              Agent 正在等待你的选择；请依次回答上方问题（{@snapshot.pending_question.position}/{@snapshot.pending_question.total}）。
+            </div>
             <.form
+              :if={is_nil(@snapshot.pending_question)}
               for={@message_form}
               id="message-form"
               phx-submit="send_message"
@@ -366,9 +439,9 @@ defmodule PikaWeb.AlignmentLive do
               <div class="review-content">
                 <button :if={spec_editable?(@snapshot)} class="text-action" phx-click="prepare_change" phx-value-target="measurement">要求 Agent 修改</button>
                 <div class="measurement-flow">
-                  <div><span>1</span><strong>全量 Baseline</strong><small>全部 Cases × Metrics · 30 Pair</small></div>
-                  <div><span>2</span><strong>Iteration Sample</strong><small>初始最多 10 Cases · 30 Pair</small></div>
-                  <div><span>3</span><strong>归并前全量回归</strong><small>全量 5 Pair · 异常升级 30 Pair</small></div>
+                  <div><span>1</span><strong>全量 Baseline</strong><small>全部 Cases × Metrics · {nested(@snapshot.spec, ~w(benchmark pair_count))} Pair</small></div>
+                  <div><span>2</span><strong>Iteration Sample</strong><small>初始最多 10 Cases · {nested(@snapshot.spec, ~w(benchmark pair_count))} Pair</small></div>
+                  <div><span>3</span><strong>归并前全量回归</strong><small>全量 5 Pair · 异常升级 {nested(@snapshot.spec, ~w(benchmark pair_count))} Pair</small></div>
                 </div>
                 <dl class="measurement-grid">
                   <div><dt>Harness</dt><dd>{nested(@snapshot.spec, ~w(benchmark harness_path))}</dd></div>
@@ -458,6 +531,8 @@ defmodule PikaWeb.AlignmentLive do
       campaign_id: nil,
       status: :initializing,
       backend: :none,
+      agent_responding: false,
+      pending_question: nil,
       messages: [],
       spec: %{},
       spec_diff: nil,
@@ -535,6 +610,11 @@ defmodule PikaWeb.AlignmentLive do
   defp message_label(:user), do: "你"
   defp message_label(:agent), do: "Boundary Agent"
   defp message_label(_), do: "Pika"
+  defp pending_question?(nil, _message), do: false
+
+  defp pending_question?(question, message),
+    do: Map.get(message, :question_id) == question.id
+
   defp activity_status_icon("running"), do: "●"
   defp activity_status_icon("failed"), do: "×"
   defp activity_status_icon(_), do: "✓"

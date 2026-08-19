@@ -16,7 +16,7 @@ Completed (2026-08-19)
 
 - FIFO Integration Queue 与无 TTL Integration Lease。
 - 陈旧 Base Refresh、Full Regression Receipt 和 merge Operation Intent。
-- 全量正确性、5 Pair Screening、异常组合 30 Pair escalation。
+- 全量正确性、5 Pair Screening、异常组合按 Campaign Spec 正式 Pair 数 escalation。
 - Universal no-regression gate、Regression Feedback 和 Sampling Advanced。
 - Agent-owned squash merge、Pika 独立 Git 核验、BestAdvanced。
 - 终态 Attempt Artifact 与 worktree/branch 清理。
@@ -34,8 +34,8 @@ Completed (2026-08-19)
 
 - [x] 在 Git mutation 前验证 Full Case Set 正确性。
 - [x] 每个 Full Case/Metric 做 5 Pair Screening，至少 4 Pair 有效。
-- [x] Screening 中位数回退超过当前 Best noise tolerance 或样本无效的组合，独立重跑完整 30 Pair。
-- [x] 完整测量至少 24 Pair 有效；任一 Case/Metric 确认回退都拒绝，包括 Informational。
+- [x] Screening 中位数回退超过当前 Best noise tolerance 或样本无效的组合，按 Campaign Spec 独立重跑完整正式 Pair 数。
+- [x] 完整测量至少达到 Campaign Spec 的 `min_valid_pairs`；任一 Case/Metric 确认回退都拒绝，包括 Informational。
 - [x] 通过后签发绑定 Lease、Base SHA、Candidate SHA、Harness digest 的 Full Regression Receipt。
 - [x] Receipt 缺失、过期或身份不匹配时禁止创建 merge Intent。
 
@@ -65,7 +65,7 @@ Completed (2026-08-19)
 
 ## 故障注入
 
-- [x] Lease 获取后、Screening 中、30 Pair escalation 中、Receipt 写入后分别故障注入。
+- [x] Lease 获取后、Screening 中、正式 Pair escalation 中、Receipt 写入后分别故障注入。
 - [x] Receipt 后 Git 前、squash 后 `complete_merge` 前、SQLite commit 调用前后分别故障注入。
 - [x] 每个场景证明不重复 Full Regression/Merge、不错误释放 Lease；无法解释的状态进入 Blocked。
 
@@ -80,4 +80,4 @@ Completed (2026-08-19)
 
 - `mix test test/pika/integration_full_regression_test.exs`：`10 passed`。
 - `mix test test/pika/integration_full_regression_test.exs test/pika/measurement_test.exs`：`15 passed`。
-- 故障矩阵覆盖 Lease、Screening、30 Pair escalation、Receipt、Intent、squash、SQLite 事务前后，并断言恢复不会重复执行已完整落盘的 Screening/30 Pair 测量。
+- 故障矩阵覆盖 Lease、Screening、正式 Pair escalation、Receipt、Intent、squash、SQLite 事务前后，并断言恢复不会重复执行已完整落盘的 Screening/正式 Pair 测量。

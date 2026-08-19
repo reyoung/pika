@@ -88,7 +88,43 @@ Alignment、setup merge 和 Baseline Agent Instructions 是 `priv/prompts/alignm
 
 原始 Full Baseline H20 E2E 已在 WeLM v4.5 80A3 verify-attention 的固定 committed SHA 上通过：3 个 trace case、90/90 有效 Pair、3/3 correctness，以及 full/source NCU report。脱敏后的结构化结果位于 `artifacts/stage0-demo/welm-h20-gpu-e2e.json`；该历史证据早于 `submit_iteration_sample` 门禁和用户拥有 Campaign Kick-off 的新语义，新的 Sampling/Kick-off 状态由协议测试与 Fake Backend E2E 覆盖，完整 H20 流程需后续重新生成证据。
 
+## 初始化持久化 Workspace
+
+`pika init` 提供交互式向导，分别询问 Alignment/Baseline Agent 与 Iteration Agent 的 Backend，以及 Repo 模式、Workspace 路径、监听地址、Iteration Agent 模型与并发数、推理强度、最大 Attempt 数和可选 Git Sync。两个阶段可以独立选择 Codex 或 Cursor。初始化会生成 `pika.yaml`、可编辑的完整 Prompt 模板、固定 Workspace 布局与 Git `pika/best` 分支，但不会启动 Server：
+
+选择 Iteration Agent 模型时，向导会从当前已登录的 Codex App Server 或 Cursor CLI 动态读取模型列表，显示常用候选、provider 默认值和自定义 model id 入口。使用 `--model MODEL` 可直接进行非交互选择，`--yes` 则保留 provider 默认值。
+
+```bash
+pika init
+```
+
+也可以先指定 Workspace，或者通过参数完成非交互初始化：
+
+```bash
+pika init /absolute/path/to/pika-workspace \
+  --repo /absolute/path/to/clean/git/repo \
+  --alignment-backend cursor \
+  --iteration-backend codex \
+  --iteration-agents 2 \
+  --effort high \
+  --no-sync \
+  --yes
+```
+
+兼容参数 `--backend codex|cursor` 会同时设置两类 Backend；任一专用参数都可以覆盖对应阶段。
+
+Managed Repo 的默认 Workspace 位于目标仓库旁的 `.pika-workspaces/<repo-name>`，避免 Pika 状态污染目标仓库。初始化结束后进入 Workspace，直接运行 `pika serve` 即可；用 `pika init --help` 查看全部参数。
+
 ## 持久化 Server
+
+使用 `pika init` 初始化后，在 Workspace 根目录直接启动：
+
+```bash
+cd /absolute/path/to/pika-workspace
+pika serve
+```
+
+`serve` 会自动使用当前目录与其中的 `pika.yaml`。从其他目录启动或使用外部配置时，仍可显式传参：
 
 复制并编辑示例 YAML，然后以前台进程启动一个 Owned Repo Workspace：
 
@@ -124,8 +160,10 @@ _build/prod/rel/pika/bin/pika serve \
 workspace/
 ├── repo/
 ├── attempts/
+├── prompts/{alignment,attempt,integration,sync}/
 ├── artifacts/{plans,patches,profiles,prompts,logs}/
 ├── pika.sqlite3
+├── pika.yaml
 └── config.json
 ```
 

@@ -173,6 +173,118 @@ defmodule PikaWeb.AlignmentLiveTest do
     refute html =~ "Agent Activity"
   end
 
+  test "copies Agent source Markdown and shows a typing indicator for an active Turn", %{
+    conn: conn,
+    token: token
+  } do
+    conn = conn |> get("/?token=#{token}") |> recycle()
+    {:ok, view, _html} = live(conn, "/")
+    campaign = Process.whereis(Campaign)
+
+    send(
+      campaign,
+      {:pika_backend_event,
+       Pika.AgentBackend.Event.new(:turn_started, :fake, "copy-session", %{
+         turn_id: "copy-turn"
+       })}
+    )
+
+    assert eventually(fn -> render(view) =~ "Agent 正在输入" end)
+
+    send(
+      campaign,
+      {:pika_backend_event,
+       Pika.AgentBackend.Event.new(:message_delta, :fake, "copy-session", %{
+         turn_id: "copy-turn",
+         data: %{delta: "**原始** `Markdown`"}
+       })}
+    )
+
+    assert eventually(fn -> render(view) =~ ~s(phx-hook="CopyMarkdown") end)
+    html = render(view)
+    assert html =~ ~s(phx-hook="CopyMarkdown")
+    assert html =~ ~s(data-markdown="**原始** `Markdown`")
+    assert html =~ "<strong>原始</strong>"
+
+    send(
+      campaign,
+      {:pika_backend_event,
+       Pika.AgentBackend.Event.new(:turn_completed, :fake, "copy-session", %{
+         turn_id: "copy-turn"
+       })}
+    )
+
+    assert eventually(fn -> not (render(view) =~ "Agent 正在输入") end)
+  end
+
+  test "renders an MCP question batch sequentially and returns all answers", %{
+    conn: conn,
+    token: token
+  } do
+    conn = conn |> get("/?token=#{token}") |> recycle()
+    {:ok, view, _html} = live(conn, "/")
+
+    task =
+      Task.async(fn ->
+        Campaign.mcp_call("mcp-test", "ask_questions", %{
+          "questions" => [
+            %{
+              "id" => "correctness",
+              "question" => "正确性容差使用哪一档？",
+              "options" => [
+                %{"label" => "严格", "description" => "rtol 1e-5"},
+                %{"label" => "宽松", "description" => "rtol 1e-3"}
+              ]
+            },
+            %{
+              "id" => "fusion_scope",
+              "question" => "是否包含 epilogue？",
+              "options" => [
+                %{"label" => "包含", "description" => "允许融合"},
+                %{"label" => "不包含", "description" => "仅核心算子"}
+              ]
+            }
+          ]
+        })
+      end)
+
+    assert eventually(fn -> render(view) =~ "正确性容差使用哪一档？" end)
+    html = render(view)
+    assert html =~ "严格"
+    assert html =~ "宽松"
+    assert html =~ "输入自己的回答"
+    assert html =~ "Agent 正在等待你的选择"
+    assert html =~ "问题 1 / 2"
+    refute html =~ ~s(id="message-form")
+
+    view
+    |> element(".question-options button", "严格")
+    |> render_click()
+
+    refute Task.yield(task, 20)
+    assert eventually(fn -> render(view) =~ "是否包含 epilogue？" end)
+    assert render(view) =~ "问题 2 / 2"
+
+    view
+    |> form(".question-custom", %{"answer" => "使用 rtol 5e-4"})
+    |> render_submit()
+
+    assert {:ok,
+            %{
+              answers: [
+                %{question_id: "correctness", answer: "严格", selected_option: "严格"},
+                %{
+                  question_id: "fusion_scope",
+                  answer: "使用 rtol 5e-4",
+                  selected_option: nil
+                }
+              ]
+            }} = Task.await(task)
+
+    assert render(view) =~ "使用 rtol 5e-4"
+    refute render(view) =~ "请选择一个答案"
+  end
+
   test "serves the local favicon without entering the authenticated router", %{conn: conn} do
     conn = get(conn, "/favicon.svg")
     assert response(conn, 200) =~ "<svg"

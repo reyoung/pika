@@ -15,6 +15,7 @@ defmodule Pika.MeasurementTest do
       base_sha: base_sha,
       candidate_sha: candidate_sha,
       case_ids: ["target_case"],
+      benchmark: %{"pair_count" => 30, "min_valid_pairs" => 24},
       metrics: [
         %{
           "id" => "latency_us",
@@ -112,6 +113,23 @@ defmodule Pika.MeasurementTest do
              )
   end
 
+  test "uses the Campaign formal pair protocol instead of a global 30-pair constant", context do
+    configured = %{
+      context.context
+      | benchmark: %{"pair_count" => 8, "min_valid_pairs" => 6}
+    }
+
+    write_pairs(context.samples, configured, 8, fn index -> {10.0, 9.8, index < 6} end)
+
+    assert {:ok, [%{pair_count: 8, valid_pair_count: 6}]} =
+             Measurement.evaluate_iteration(context.samples, context.correctness, configured)
+
+    write_pairs(context.samples, configured, 7, fn _index -> {10.0, 9.8, true} end)
+
+    assert {:error, {:wrong_pair_count, "target_case", "latency_us", 7, 8}} =
+             Measurement.evaluate_iteration(context.samples, context.correctness, configured)
+  end
+
   test "integration escalates an invalid screen to one independent 30-pair result", context do
     full = Path.join(context.root, "full.jsonl")
 
@@ -134,6 +152,30 @@ defmodule Pika.MeasurementTest do
     assert result.regressions == []
 
     assert [%{source: "integration_full", pair_count: 30, valid_pair_count: 30}] =
+             result.metrics
+  end
+
+  test "integration escalation uses the Campaign formal pair protocol", context do
+    full = Path.join(context.root, "configured-full.jsonl")
+
+    configured = %{
+      context.context
+      | benchmark: %{"pair_count" => 8, "min_valid_pairs" => 6}
+    }
+
+    write_pairs(context.samples, configured, 5, fn index -> {10.0, 9.8, index < 3} end)
+    write_pairs(full, configured, 8, fn index -> {10.0, 9.8, index < 6} end)
+
+    assert {:ok, result} =
+             Measurement.evaluate_integration(
+               context.samples,
+               full,
+               context.correctness,
+               configured,
+               %{}
+             )
+
+    assert [%{source: "integration_full", pair_count: 8, valid_pair_count: 6}] =
              result.metrics
   end
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="$(realpath "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SCRIPT")/.." && pwd)"
+export PIKA_CLI_CWD="$PWD"
 cd "$ROOT"
 if [[ ! -f priv/static/assets/app.js ]]; then
   mix assets.build
