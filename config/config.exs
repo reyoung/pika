@@ -21,15 +21,19 @@ config :esbuild,
 config :pika, PikaWeb.Endpoint,
   adapter: Bandit.PhoenixAdapter,
   http: [ip: {127, 0, 0, 1}, port: 0],
-  live_view: [signing_salt: "pika-stage0-live"],
+  live_view: [signing_salt: "pika-preview-live"],
   pubsub_server: Pika.PubSub,
   render_errors: [formats: [html: PikaWeb.ErrorHTML, json: PikaWeb.ErrorJSON], layout: false],
-  secret_key_base: String.duplicate("pika-stage0-demo-", 8),
+  secret_key_base: String.duplicate("pika-preview-demo-", 8),
   server: false
 
-config :pika, Pika.Stage0.PromptCatalog,
-  alignment: {:priv, "prompts/stage0/alignment.md.eex"},
-  setup_merge: {:priv, "prompts/stage0/setup_merge.md.eex"},
-  baseline: {:priv, "prompts/stage0/baseline.md.eex"}
+config :pika, Pika.PromptCatalog,
+  alignment: {:priv, "prompts/alignment/alignment.md.eex"},
+  setup_merge: {:priv, "prompts/alignment/setup_merge.md.eex"},
+  baseline: {:priv, "prompts/alignment/baseline.md.eex"},
+  plan: {:priv, "prompts/attempt/plan.md.eex"},
+  iteration: {:priv, "prompts/attempt/iteration.md.eex"},
+  integration: {:priv, "prompts/integration/integration.md.eex"},
+  sync: {:priv, "prompts/sync/sync.md.eex"}
 
 import_config "#{config_env()}.exs"

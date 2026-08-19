@@ -12,9 +12,17 @@ backend:
   protocol_config: {}
 
 campaign:
-  plan: true
+  plan: false
   max_attempts: null
   history_n: 10
+  iteration_agents:
+    - name: codex-1
+      backend: codex_app_server
+      reasoning_effort: high
   reference_catalog: []
   stop_conditions:
     mode: all_goals
+
+sync:
+  remote: origin
+  branch: main

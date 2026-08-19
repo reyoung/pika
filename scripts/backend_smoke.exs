@@ -31,11 +31,11 @@ backends =
 run_opts = [
   backends: backends,
   workspace: Keyword.get(opts, :workspace, File.cwd!()),
-  artifact_dir: Keyword.get(opts, :artifact_dir, "artifacts/phase-0"),
+  artifact_dir: Keyword.get(opts, :artifact_dir, "artifacts/backend-conformance"),
   control_probes: not Keyword.get(opts, :skip_control_probes, false)
 ]
 
-case Pika.Phase0.Conformance.run(run_opts) do
-  {:ok, result} -> IO.puts(Jason.encode!(Pika.Phase0.Evidence.json_safe(result), pretty: true))
+case Pika.AgentBackend.Conformance.run(run_opts) do
+  {:ok, result} -> IO.puts(Jason.encode!(Pika.JSONSafe.json_safe(result), pretty: true))
   {:error, reason} -> Mix.raise(reason)
 end

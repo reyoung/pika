@@ -6,8 +6,10 @@
 /cover/
 /erl_crash.dump
 *.ez
-/artifacts/phase-0/codex-schema/
-/artifacts/phase-0/manual/
-/artifacts/phase-0/codex-session_*
-/artifacts/phase-0/cursor-session_*
-/artifacts/stage0-demo/*-session_*
+/assets/node_modules/
+/artifacts/backend-conformance/
+/artifacts/**/codex-schema/
+/artifacts/preview/*-session_*
+/artifacts/**/*.stderr.log
+/artifacts/**/*-session_*.jsonl
+/artifacts/**/manual/

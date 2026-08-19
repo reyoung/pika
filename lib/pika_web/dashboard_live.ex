@@ -23,7 +23,7 @@ defmodule PikaWeb.DashboardLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <main class="phase1-shell">
+    <main class="dashboard-shell">
       <header class="topbar">
         <div class="brand">
           <div class="brand-mark">P</div>
@@ -57,7 +57,7 @@ defmodule PikaWeb.DashboardLive do
             <article :for={check <- @snapshot.preflight} class="diagnostic-row">
               <span class={"diagnostic-dot diagnostic-#{check.status}"}></span>
               <div><strong>{check.label}</strong><small>{check.detail}</small></div>
-              <span class="phase-label">{check.phase}</span>
+              <span class="scope-label">{check.scope}</span>
             </article>
           </div>
         </section>
@@ -68,7 +68,7 @@ defmodule PikaWeb.DashboardLive do
             <div :for={{name, value} <- @snapshot.sqlite}><dt>{name}</dt><dd>{value}</dd></div>
           </dl>
           <p class="diagnostic-note">
-            Workspace and database diagnostics remain available when a later Agent or GPU phase is unavailable.
+            Workspace and database diagnostics remain available when an Agent or GPU capability is unavailable.
           </p>
         </section>
       </div>

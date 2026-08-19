@@ -2,7 +2,7 @@ defmodule Pika.Workspace do
   @moduledoc false
 
   alias Pika.{Config, FileSystem, Paths}
-  alias Pika.Stage0.Git
+  alias Pika.Git
 
   @artifact_kinds ~w(plans patches profiles prompts logs)
 

@@ -1,14 +1,15 @@
 defmodule PikaWeb.AlignmentLiveTest do
   use PikaWeb.ConnCase, async: false
 
-  alias Pika.Stage0.{Auth, Campaign, Workspace}
-  alias Pika.Test.Stage0Fixtures
+  alias Pika.PreviewAuth, as: Auth
+  alias Pika.Alignment.{Campaign, Workspace}
+  alias Pika.Test.AlignmentFixtures
 
   setup do
     if pid = Process.whereis(Campaign), do: GenServer.stop(pid)
     Auth.clear()
     %{token: token} = Auth.generate()
-    repo = Stage0Fixtures.git_repo()
+    repo = AlignmentFixtures.git_repo()
     {:ok, workspace} = Workspace.prepare(repo)
     skill_dir = Path.join(workspace.root, ".pika/skills/ncu-report-skill")
     File.mkdir_p!(skill_dir)

@@ -4,12 +4,12 @@ defmodule Pika.PersistenceArtifactTest do
   import Ecto.Query
 
   alias Pika.Persistence.{AgentSession, Campaign, DomainEvent}
-  alias Pika.Test.Phase1Fixtures
+  alias Pika.Test.CampaignFixtures
   alias Pika.{ArtifactStore, Config, Persistence, Repo, Workspace}
 
   setup do
-    root = Phase1Fixtures.workspace()
-    config_path = Phase1Fixtures.config_file()
+    root = CampaignFixtures.workspace()
+    config_path = CampaignFixtures.config_file()
     {:ok, config} = Config.load(config_path, workspace: root)
     {:ok, plan} = Workspace.plan(config)
     {:ok, workspace} = Workspace.activate(plan)
@@ -59,7 +59,7 @@ defmodule Pika.PersistenceArtifactTest do
     end
   end
 
-  test "upgrades an existing Phase 1 Campaign status constraint without losing state", %{
+  test "upgrades an existing Campaign status constraint without losing state", %{
     campaign: campaign
   } do
     [[sql]] =
@@ -184,7 +184,7 @@ defmodule Pika.PersistenceArtifactTest do
     assert {:error, :outside_artifact_root} =
              ArtifactStore.write(workspace, "repo/escape", "x", attrs)
 
-    outside = Phase1Fixtures.workspace()
+    outside = CampaignFixtures.workspace()
     File.ln_s!(outside, Path.join(workspace.artifacts, "logs/link"))
 
     assert {:error, {:artifact_symlink_forbidden, _}} =

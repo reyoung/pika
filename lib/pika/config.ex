@@ -3,11 +3,13 @@ defmodule Pika.Config do
 
   alias Pika.Paths
 
-  @root_fields ~w(server backend campaign prompts)
+  @root_fields ~w(server backend campaign prompts sync)
   @server_fields ~w(host port)
   @backend_fields ~w(type command protocol_config)
-  @campaign_fields ~w(plan max_attempts history_n reference_catalog stop_conditions)
-  @prompt_fields ~w(alignment setup_merge baseline)
+  @campaign_fields ~w(plan max_attempts history_n iteration_agents reference_catalog stop_conditions)
+  @prompt_fields ~w(alignment setup_merge baseline plan iteration integration sync)
+  @sync_fields ~w(remote branch)
+  @iteration_agent_fields ~w(name backend command model reasoning_effort env protocol_config)
   @backend_types ~w(codex_app_server cursor_acp)
 
   defstruct [
@@ -19,6 +21,7 @@ defmodule Pika.Config do
     :backend,
     :campaign,
     :prompts,
+    :sync,
     :snapshot,
     :existing_snapshot
   ]
@@ -109,21 +112,24 @@ defmodule Pika.Config do
         unknown_fields(map(yaml["backend"]), @backend_fields, "backend") ++
         unknown_fields(map(yaml["campaign"]), @campaign_fields, "campaign") ++
         unknown_fields(map(yaml["prompts"]), @prompt_fields, "prompts") ++
+        unknown_fields(map(yaml["sync"]), @sync_fields, "sync") ++
         section_errors(yaml)
 
     server = map(yaml["server"])
     backend = map(yaml["backend"])
     campaign = map(yaml["campaign"])
     prompts = map(yaml["prompts"])
+    sync = map(yaml["sync"])
 
     host = Keyword.get(opts, :host) || server["host"] || "127.0.0.1"
     port = Keyword.get(opts, :port) || server["port"] || 8080
     type = backend["type"] || "codex_app_server"
     command = backend["command"] || default_command(type)
     protocol_config = backend["protocol_config"] || %{}
-    plan = Map.get(campaign, "plan", true)
+    plan = Map.get(campaign, "plan", false)
     max_attempts = Map.get(campaign, "max_attempts")
     history_n = Map.get(campaign, "history_n", 10)
+    iteration_agents = Map.get(campaign, "iteration_agents", default_iteration_agents(type))
     reference_catalog = Map.get(campaign, "reference_catalog", [])
     stop_conditions = Map.get(campaign, "stop_conditions", %{})
 
@@ -132,8 +138,16 @@ defmodule Pika.Config do
         validate_host(host) ++
         validate_port(port) ++
         validate_backend(type, command, protocol_config) ++
-        validate_campaign(plan, max_attempts, history_n, reference_catalog, stop_conditions) ++
-        validate_prompts(prompts)
+        validate_campaign(
+          plan,
+          max_attempts,
+          history_n,
+          iteration_agents,
+          reference_catalog,
+          stop_conditions
+        ) ++
+        validate_prompts(prompts) ++
+        validate_sync(sync)
 
     with [] <- errors,
          {:ok, repo} <- resolve_repo(Keyword.get(opts, :repo), existing),
@@ -157,8 +171,10 @@ defmodule Pika.Config do
         "plan" => plan,
         "max_attempts" => max_attempts,
         "history_n" => history_n,
+        "iteration_agents" => normalize_iteration_agents(iteration_agents, type, command),
         "reference_catalog" => reference_catalog,
-        "stop_conditions" => stop_conditions
+        "stop_conditions" => stop_conditions,
+        "sync" => %{"remote" => sync["remote"], "branch" => sync["branch"]}
       }
 
       {:ok,
@@ -171,6 +187,7 @@ defmodule Pika.Config do
          backend: immutable["backend"],
          campaign: mutable,
          prompts: prompt_paths,
+         sync: mutable["sync"],
          snapshot: %{
            "schema_version" => 1,
            "immutable" => immutable,
@@ -275,7 +292,14 @@ defmodule Pika.Config do
     |> maybe_error(not is_map(protocol_config), "backend.protocol_config: must be a mapping")
   end
 
-  defp validate_campaign(plan, max_attempts, history_n, references, stop_conditions) do
+  defp validate_campaign(
+         plan,
+         max_attempts,
+         history_n,
+         iteration_agents,
+         references,
+         stop_conditions
+       ) do
     stop_mode =
       if is_map(stop_conditions), do: Map.get(stop_conditions, "mode", "all_goals"), else: nil
 
@@ -289,6 +313,7 @@ defmodule Pika.Config do
       not (is_integer(history_n) and history_n >= 0),
       "campaign.history_n: must be a non-negative integer"
     )
+    |> Kernel.++(validate_iteration_agents(iteration_agents))
     |> maybe_error(not is_list(references), "campaign.reference_catalog: must be a list")
     |> maybe_error(not is_map(stop_conditions), "campaign.stop_conditions: must be a mapping")
     |> maybe_error(
@@ -304,6 +329,94 @@ defmodule Pika.Config do
         else: ["prompts.#{name}: must be a non-empty path string"]
     end)
   end
+
+  defp validate_sync(sync) do
+    Enum.flat_map(~w(remote branch), fn field ->
+      case sync[field] do
+        nil -> []
+        value when is_binary(value) and value != "" -> []
+        _ -> ["sync.#{field}: must be a non-empty string when set"]
+      end
+    end)
+  end
+
+  defp validate_iteration_agents(agents) when is_list(agents) and agents != [] do
+    agents
+    |> Enum.with_index()
+    |> Enum.flat_map(fn
+      {agent, index} when is_map(agent) ->
+        prefix = "campaign.iteration_agents[#{index}]"
+        agent = stringify_keys(agent)
+
+        unknown_fields(agent, @iteration_agent_fields, prefix) ++
+          validate_optional_backend(agent["backend"], prefix) ++
+          validate_optional_command(agent["command"], prefix) ++
+          validate_optional_string(agent["name"], "#{prefix}.name") ++
+          validate_optional_string(agent["model"], "#{prefix}.model") ++
+          validate_effort(agent["reasoning_effort"], prefix) ++
+          if(is_nil(agent["env"]) or is_map(agent["env"]),
+            do: [],
+            else: ["#{prefix}.env: must be a mapping"]
+          ) ++
+          if(is_nil(agent["protocol_config"]) or is_map(agent["protocol_config"]),
+            do: [],
+            else: ["#{prefix}.protocol_config: must be a mapping"]
+          )
+
+      {_agent, index} ->
+        ["campaign.iteration_agents[#{index}]: must be a mapping"]
+    end)
+  end
+
+  defp validate_iteration_agents(_agents),
+    do: ["campaign.iteration_agents: must be a non-empty list"]
+
+  defp validate_optional_backend(nil, _prefix), do: []
+
+  defp validate_optional_backend(value, prefix),
+    do: if(value in @backend_types, do: [], else: ["#{prefix}.backend: invalid backend"])
+
+  defp validate_optional_command(nil, _prefix), do: []
+
+  defp validate_optional_command(value, prefix),
+    do: if(valid_command?(value), do: [], else: ["#{prefix}.command: invalid command"])
+
+  defp validate_optional_string(nil, _field), do: []
+  defp validate_optional_string(value, _field) when is_binary(value) and value != "", do: []
+  defp validate_optional_string(_value, field), do: ["#{field}: must be a non-empty string"]
+
+  defp validate_effort(nil, _prefix), do: []
+
+  defp validate_effort(value, prefix) do
+    if value in ~w(low medium high xhigh max ultra),
+      do: [],
+      else: ["#{prefix}.reasoning_effort: invalid effort"]
+  end
+
+  defp default_iteration_agents(type),
+    do: [%{"backend" => type, "reasoning_effort" => "high"}]
+
+  defp normalize_iteration_agents(agents, default_type, default_command) do
+    Enum.with_index(agents)
+    |> Enum.map(fn {agent, index} ->
+      agent = stringify_keys(agent)
+      type = agent["backend"] || default_type
+
+      %{
+        "name" => agent["name"] || "slot-#{index + 1}",
+        "backend" => type,
+        "command" =>
+          normalize_command(agent["command"] || command_for(type, default_type, default_command)),
+        "model" => agent["model"],
+        "reasoning_effort" => agent["reasoning_effort"] || "high",
+        "env" => agent["env"] || %{},
+        "protocol_config" => agent["protocol_config"] || %{}
+      }
+    end)
+  end
+
+  defp command_for(type, type, default_command), do: default_command
+  defp command_for(type, _default_type, _default_command), do: default_command(type)
 
   defp resolve_prompt_paths(prompts, source_path) do
     Map.new(prompts, fn {kind, path} ->

@@ -7,7 +7,7 @@ defmodule Pika.AgentBackend.Profile do
     args: [],
     env: %{},
     protocol_config: %{},
-    artifact_dir: "artifacts/phase-0"
+    artifact_dir: "artifacts/backend-conformance"
   ]
 
   @type t :: %__MODULE__{

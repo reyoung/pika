@@ -1,5 +1,5 @@
 defmodule Pika.MCP.ProbeRouter do
-  @moduledoc "Minimal stateless Streamable HTTP MCP endpoint used by Phase 0 conformance."
+  @moduledoc "Minimal stateless Streamable HTTP MCP endpoint used by backend conformance."
 
   use Plug.Router
 
@@ -17,7 +17,11 @@ defmodule Pika.MCP.ProbeRouter do
   end
 
   get "/mcp" do
-    send_resp(conn, 405, "Streamable HTTP notifications are not retained by the Phase 0 probe")
+    send_resp(
+      conn,
+      405,
+      "Streamable HTTP notifications are not retained by the conformance probe"
+    )
   end
 
   match _ do
@@ -28,7 +32,7 @@ defmodule Pika.MCP.ProbeRouter do
     rpc_result(conn, id, %{
       "protocolVersion" => "2025-06-18",
       "capabilities" => %{"tools" => %{"listChanged" => false}},
-      "serverInfo" => %{"name" => "pika-phase-0-probe", "version" => "0.0.1"}
+      "serverInfo" => %{"name" => "pika-backend-probe", "version" => "0.0.1"}
     })
   end
 
@@ -89,7 +93,7 @@ defmodule Pika.MCP.ProbeRouter do
       %{
         "name" => "complete_probe",
         "description" =>
-          "Mandatory Phase 0 completion gate. Call exactly once after reading the injected skill.",
+          "Mandatory backend conformance gate. Call exactly once after reading the injected skill.",
         "inputSchema" => %{
           "type" => "object",
           "properties" => %{

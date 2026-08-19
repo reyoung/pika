@@ -10,7 +10,7 @@ Pika 是一个常驻的单租户 HTTP 服务，用多个 Coding Agent 并行完�
 
 ## 当前状态
 
-**v1 设计已冻结；Phase 0 Backend conformance、Phase 1 Workspace 持久化与 Stage0 Alignment → H20 Baseline Preview 均已实现并通过验收。**
+**v1 设计已冻结；Backend conformance、Workspace 持久化、Alignment → H20 Baseline、Attempt Loop、Integration、人工 Sync 与 Control UI 均已实现。**
 
 - 后端：Elixir/OTP、Phoenix、LiveView、SQLite WAL
 - Agent 协议：Codex App Server 原生协议、Cursor ACP v1
@@ -52,7 +52,7 @@ npm run dev
 
 原型只用于设计评审，不是最终 Phoenix/LiveView 产品实现。
 
-## Phase 0 协议 Spike
+## Backend 协议一致性验证
 
 需要已登录的 Codex CLI 与 Cursor Agent，以及 Elixir/Erlang：
 
@@ -64,14 +64,14 @@ mix run scripts/backend_smoke.exs -- \
   --workspace /tmp/pika-backend-smoke
 ```
 
-Smoke 会验证 Codex App Server、Cursor ACP、真实 HTTP MCP、Skill 可见性、steer、interrupt、子进程隔离与无 resume 恢复，并把脱敏证据写入 `artifacts/phase-0/`。
+Smoke 会验证 Codex App Server、Cursor ACP、真实 HTTP MCP、Skill 可见性、steer、interrupt、子进程隔离与无 resume 恢复，并把脱敏证据写入 `artifacts/backend-conformance/`。
 
-## Stage0 Alignment → Baseline Preview
+## Alignment → Baseline Preview
 
-Stage0 Demo 使用 Phase 0 Backend 打通内存态目标对齐、Campaign Spec/Harness 确认、Full Case Set Baseline 和初始 Iteration Sample 选择，不依赖 SQLite，也不派发优化 Attempt：
+Preview 使用统一 Agent Backend 打通内存态目标对齐、Campaign Spec/Harness 确认、Full Case Set Baseline 和初始 Iteration Sample 选择，不依赖 SQLite，也不派发优化 Attempt：
 
 ```bash
-./bin/pika stage0-demo /absolute/path/to/clean/git/repo
+./bin/pika preview /absolute/path/to/clean/git/repo
 ```
 
 命令固定源 repo 当前提交的 HEAD，并重新 clone 到独立 Workspace；dirty working tree 和 untracked 文件不会带入。临时 clone 中创建 `pika/best` 与 `pika/setup/1`，移除 `origin` 后再启动 Agent，并打印一次性 Token URL。源 repo 的原始 dirty 状态、分支、refs 和远端不会被修改。退出后内存状态丢失，但打印的 Workspace 与 Artifact 保留。可用参数：
@@ -82,13 +82,13 @@ Stage0 Demo 使用 Phase 0 Backend 打通内存态目标对齐、Campaign Spec/H
 --skill-root PATH
 ```
 
-Alignment、setup merge 和 Baseline Agent Instructions 是 `priv/prompts/stage0/*.md.eex` 独立资源；`config :pika, Pika.Stage0.PromptCatalog` 可以分别改为绝对路径。它们作为 Backend 系统级上下文注入，不占用首条用户 Prompt，也不自动 Kick-off；Campaign 由用户首条消息启动，用户确认 Spec 的动作继续驱动 setup merge 与 Baseline。配置缺失或模板无法编译时，服务在打开 Backend Session 前失败。
+Alignment、setup merge 和 Baseline Agent Instructions 是 `priv/prompts/alignment/*.md.eex` 独立资源；`config :pika, Pika.PromptCatalog` 可以分别改为绝对路径。它们作为 Backend 系统级上下文注入，不占用首条用户 Prompt，也不自动 Kick-off；Campaign 由用户首条消息启动，用户确认 Spec 的动作继续驱动 setup merge 与 Baseline。配置缺失或模板无法编译时，服务在打开 Backend Session 前失败。
 
 确定性全流程、两个真实 Backend 的 Boundary MCP smoke 及实现边界见 [Stage0 Demo 文档](docs/v0/phases/00b-stage0-alignment-baseline-demo.md)。
 
 原始 Full Baseline H20 E2E 已在 WeLM v4.5 80A3 verify-attention 的固定 committed SHA 上通过：3 个 trace case、90/90 有效 Pair、3/3 correctness，以及 full/source NCU report。脱敏后的结构化结果位于 `artifacts/stage0-demo/welm-h20-gpu-e2e.json`；该历史证据早于 `submit_iteration_sample` 门禁和用户拥有 Campaign Kick-off 的新语义，新的 Sampling/Kick-off 状态由协议测试与 Fake Backend E2E 覆盖，完整 H20 流程需后续重新生成证据。
 
-## Phase 1 持久化 Server
+## 持久化 Server
 
 复制并编辑示例 YAML，然后以前台进程启动一个 Owned Repo Workspace：
 
@@ -129,7 +129,7 @@ workspace/
 └── config.json
 ```
 
-`config.json` 是经过字段校验的有效配置快照；Workspace、Repo identity、监听地址和 Backend 协议配置不可变。Phase 1 故障验收证据见 [`artifacts/phase-1/recovery-report.md`](artifacts/phase-1/recovery-report.md)。
+`config.json` 是经过字段校验的有效配置快照；Workspace、Repo identity、监听地址和 Backend 协议配置不可变。历史故障验收证据保留在 `artifacts/`。
 
 ## v1 非目标
 

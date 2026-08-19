@@ -1,7 +1,8 @@
 defmodule Pika.CLI do
   @moduledoc false
 
-  alias Pika.Stage0.{Auth, Campaign, Workspace}
+  alias Pika.PreviewAuth, as: Auth
+  alias Pika.Alignment.{Campaign, Workspace}
 
   def main(["serve" | argv]) do
     case parse_serve(argv) do
@@ -10,9 +11,9 @@ defmodule Pika.CLI do
     end
   end
 
-  def main(["stage0-demo", repo | argv]) do
-    case parse_stage0(argv) do
-      {:ok, opts} -> run_stage0(repo, opts)
+  def main(["preview", repo | argv]) do
+    case parse_preview(argv) do
+      {:ok, opts} -> run_preview(repo, opts)
       {:error, message} -> abort(message)
     end
   end
@@ -44,7 +45,7 @@ defmodule Pika.CLI do
     end
   end
 
-  def parse_stage0(argv) do
+  def parse_preview(argv) do
     {opts, args, invalid} =
       OptionParser.parse(argv,
         strict: [
@@ -110,14 +111,14 @@ defmodule Pika.CLI do
       Application.put_env(:pika, :preflight, preflight)
 
       if map_size(config.prompts) > 0 do
-        defaults = Application.fetch_env!(:pika, Pika.Stage0.PromptCatalog)
+        defaults = Application.fetch_env!(:pika, Pika.PromptCatalog)
 
         overrides =
           Enum.reduce(config.prompts, defaults, fn {kind, path}, acc ->
             Keyword.put(acc, String.to_existing_atom(kind), path)
           end)
 
-        Application.put_env(:pika, Pika.Stage0.PromptCatalog, overrides)
+        Application.put_env(:pika, Pika.PromptCatalog, overrides)
       end
 
       Application.put_env(:pika, Pika.Repo,
@@ -133,7 +134,7 @@ defmodule Pika.CLI do
     end
   end
 
-  defp run_stage0(repo, opts) do
+  defp run_preview(repo, opts) do
     host = Keyword.get(opts, :host, "127.0.0.1")
     port = Keyword.get(opts, :port, 0) |> choose_port()
 
@@ -142,25 +143,25 @@ defmodule Pika.CLI do
          :ok <- configure_endpoint(host, port),
          {:ok, _apps} <- Application.ensure_all_started(:pika),
          skill <-
-           Pika.Phase0.Skill.ensure_latest(
+           Pika.SkillRegistry.ensure_latest(
              Path.join(workspace.root, ".pika/skills/ncu-report-skill")
            ),
          {:ok, _campaign} <- start_campaign(workspace, skill, host, port, opts) do
       browser_host = if host in ["0.0.0.0", "::"], do: "127.0.0.1", else: host
-      IO.puts("Pika Stage0 Workspace: #{workspace.root}")
+      IO.puts("Pika Preview Workspace: #{workspace.root}")
 
       if workspace.source_status != "",
         do:
           IO.puts(
-            "Pika Stage0 Source: dirty working tree ignored; cloned committed HEAD #{workspace.source_sha}"
+            "Pika Preview Source: dirty working tree ignored; cloned committed HEAD #{workspace.source_sha}"
           )
 
-      IO.puts("Pika Stage0 URL: http://#{browser_host}:#{port}/?token=#{token}")
+      IO.puts("Pika Preview URL: http://#{browser_host}:#{port}/?token=#{token}")
       IO.puts("State is in-memory; Workspace and Artifacts are retained after exit.")
       wait_forever()
     else
       {:error, reason} ->
-        abort("stage0-demo failed: #{inspect(reason)}")
+        abort("preview failed: #{inspect(reason)}")
     end
   end
 
@@ -255,7 +256,7 @@ defmodule Pika.CLI do
       --host IP          Override server.host (default 127.0.0.1)
       --port PORT        Override server.port (default 8080)
 
-    Usage: pika stage0-demo <repo> [options]
+    Usage: pika preview <repo> [options]
 
       --backend codex|cursor
       --model MODEL

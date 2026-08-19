@@ -4,11 +4,11 @@ defmodule Pika.AgentBackend.ExternalConformanceTest do
   @moduletag :external
   @moduletag timeout: 600_000
 
-  test "real Codex App Server and Cursor ACP satisfy the Phase 0 contract" do
-    artifact_dir = Path.expand("artifacts/phase-0")
+  test "real Codex App Server and Cursor ACP satisfy the backend contract" do
+    artifact_dir = Path.expand("artifacts/backend-conformance")
 
     assert {:ok, %{status: "passed", backends: backends}} =
-             Pika.Phase0.Conformance.run(
+             Pika.AgentBackend.Conformance.run(
                backends: [:codex_app_server, :cursor_acp],
                workspace: File.cwd!(),
                artifact_dir: artifact_dir,

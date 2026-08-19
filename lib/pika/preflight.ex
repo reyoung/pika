@@ -37,7 +37,7 @@ defmodule Pika.Preflight do
     end)
   end
 
-  defp probe(id, label, executable, args, required, phase) do
+  defp probe(id, label, executable, args, required, scope) do
     case System.find_executable(executable) do
       nil ->
         %{
@@ -46,7 +46,7 @@ defmodule Pika.Preflight do
           status: :missing,
           detail: "#{executable} not found",
           required: required,
-          phase: phase
+          scope: scope
         }
 
       path ->
@@ -63,7 +63,7 @@ defmodule Pika.Preflight do
               status: :ok,
               detail: summarize(output),
               required: required,
-              phase: phase
+              scope: scope
             }
 
           {:ok, {output, status}} ->
@@ -73,7 +73,7 @@ defmodule Pika.Preflight do
               status: :failed,
               detail: "exit #{status}: #{summarize(output)}",
               required: required,
-              phase: phase
+              scope: scope
             }
 
           nil ->
@@ -83,7 +83,7 @@ defmodule Pika.Preflight do
               status: :failed,
               detail: "timed out after #{@timeout} ms",
               required: required,
-              phase: phase
+              scope: scope
             }
         end
     end

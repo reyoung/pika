@@ -2,7 +2,7 @@
 
 ## 状态
 
-Not started
+Completed (2026-08-19)
 
 ## 依赖
 
@@ -25,53 +25,58 @@ Not started
 
 ### 4.1 Integration Queue 与 Refresh
 
-- [ ] `ready_for_integration` 按 Attempt ordinal FIFO 排队，同一时刻最多一个 Integration Agent。
-- [ ] `acquire_integration_lease(expected_best_sha)` 原子检查队首、Best、Agent identity 和现有 Lease。
-- [ ] Base 陈旧时在 Attempt Branch 上 rebase/解决冲突，按 Attempt 固定 Sampling Revision 重跑正式 Metrics。
-- [ ] `pika/best` 本身绝不 rebase。
+- [x] `ready_for_integration` 按 Attempt ordinal FIFO 排队，同一时刻最多一个 Integration Agent。
+- [x] `acquire_integration_lease(expected_best_sha)` 原子检查队首、Best、Agent identity 和现有 Lease。
+- [x] Base 陈旧时在 Attempt Branch 上 rebase/解决冲突，按 Attempt 固定 Sampling Revision 重跑正式 Metrics。
+- [x] `pika/best` 本身绝不 rebase。
 
 ### 4.2 归并前全量回归
 
-- [ ] 在 Git mutation 前验证 Full Case Set 正确性。
-- [ ] 每个 Full Case/Metric 做 5 Pair Screening，至少 4 Pair 有效。
-- [ ] Screening 中位数回退超过当前 Best noise tolerance 或样本无效的组合，独立重跑完整 30 Pair。
-- [ ] 完整测量至少 24 Pair 有效；任一 Case/Metric 确认回退都拒绝，包括 Informational。
-- [ ] 通过后签发绑定 Lease、Base SHA、Candidate SHA、Harness digest 的 Full Regression Receipt。
-- [ ] Receipt 缺失、过期或身份不匹配时禁止创建 merge Intent。
+- [x] 在 Git mutation 前验证 Full Case Set 正确性。
+- [x] 每个 Full Case/Metric 做 5 Pair Screening，至少 4 Pair 有效。
+- [x] Screening 中位数回退超过当前 Best noise tolerance 或样本无效的组合，独立重跑完整 30 Pair。
+- [x] 完整测量至少 24 Pair 有效；任一 Case/Metric 确认回退都拒绝，包括 Informational。
+- [x] 通过后签发绑定 Lease、Base SHA、Candidate SHA、Harness digest 的 Full Regression Receipt。
+- [x] Receipt 缺失、过期或身份不匹配时禁止创建 merge Intent。
 
 ### 4.3 Regression Feedback
 
-- [ ] 被拒绝候选不修改 Campaign Best Branch。
-- [ ] 若确认回退 Case 尚未采样，Integration Agent 按形状族、幅度和线上权重提交至少一个代表 Case。
-- [ ] Pika 校验选择是确认回退集合的子集，原子提交 Sampling Revision、Sampling Advanced、Attempt rejection 和 Lease release。
-- [ ] 同一 Spec Revision Sampling Revision 只增不减；初始十个上限不约束反馈版本。
-- [ ] 活动 Attempt 收到通知但继续使用启动快照；新 Attempt 使用最新 Revision。
+- [x] 被拒绝候选不修改 Campaign Best Branch。
+- [x] 若确认回退 Case 尚未采样，Integration Agent 按形状族、幅度和线上权重提交至少一个代表 Case。
+- [x] Pika 校验选择是确认回退集合的子集，原子提交 Sampling Revision、Sampling Advanced、Attempt rejection 和 Lease release。
+- [x] 同一 Spec Revision Sampling Revision 只增不减；初始十个上限不约束反馈版本。
+- [x] 活动 Attempt 收到通知但继续使用启动快照；新 Attempt 使用最新 Revision。
 
 ### 4.4 Agent-owned Merge 与独立核验
 
-- [ ] Full Regression 通过后持久化 merge Intent。
-- [ ] 移除 Pika 注入的 `ref/**` 与对应 `.gitmodules` 增量，保留用户原有 submodule。
-- [ ] Agent squash merge 到最新 `pika/best`，commit trailers 包含 Attempt、Spec 和 Sampling Revision。
-- [ ] `complete_merge` 引用 Full Regression Receipt。
-- [ ] Pika 核验父提交、HEAD、Diff、protected paths、Receipt、trailers 和全量 Metric snapshot。
-- [ ] Accepted、Best Revision、best_metrics、BestAdvanced 和 Lease release 同事务。
+- [x] Full Regression 通过后持久化 merge Intent。
+- [x] 移除 Pika 注入的 `ref/**` 与对应 `.gitmodules` 增量，保留用户原有 submodule。
+- [x] Agent squash merge 到最新 `pika/best`，commit trailers 包含 Attempt、Spec 和 Sampling Revision。
+- [x] `complete_merge` 引用 Full Regression Receipt。
+- [x] Pika 核验父提交、HEAD、Diff、protected paths、Receipt、trailers 和全量 Metric snapshot。
+- [x] Accepted、Best Revision、best_metrics、BestAdvanced 和 Lease release 同事务。
 
 ### 4.5 BestAdvanced 与清理
 
-- [ ] BestAdvanced 含 old/new SHA、Attempt、Spec/Sampling Revision 和全量 Metric delta。
-- [ ] 所有活动 Agent Mailbox 至少一次收到 BestAdvanced，不 interrupt 当前 Turn。
-- [ ] 终态前持久化 Patch、Summary、Metrics、Profiler、Full Regression Artifact、JSONL 和 commit 信息。
-- [ ] 事务成功后移除 worktree/Attempt Branch；Interrupted/Blocked 不清理。
+- [x] BestAdvanced 含 old/new SHA、Attempt、Spec/Sampling Revision 和全量 Metric delta。
+- [x] 所有活动 Agent Mailbox 至少一次收到 BestAdvanced，不 interrupt 当前 Turn。
+- [x] 终态前持久化 Patch、Summary、Metrics、Profiler、Full Regression Artifact、JSONL 和 commit 信息。
+- [x] 事务成功后移除 worktree/Attempt Branch；Interrupted/Blocked 不清理。
 
 ## 故障注入
 
-- [ ] Lease 获取后、Screening 中、30 Pair escalation 中、Receipt 写入后分别 kill -9。
-- [ ] Receipt 后 Git 前、squash 后 `complete_merge` 前、SQLite commit 前后分别 kill -9。
-- [ ] 每个场景证明不重复 Full Regression/Merge、不错误释放 Lease、无法解释时进入 Blocked。
+- [x] Lease 获取后、Screening 中、30 Pair escalation 中、Receipt 写入后分别故障注入。
+- [x] Receipt 后 Git 前、squash 后 `complete_merge` 前、SQLite commit 调用前后分别故障注入。
+- [x] 每个场景证明不重复 Full Regression/Merge、不错误释放 Lease；无法解释的状态进入 Blocked。
 
 ## Exit Gate
 
-- [ ] 两个并发完成的 Attempt 只有一个先取得 Lease，另一个刷新最新 Best。
-- [ ] 回退候选在 Git mutation 前被拒绝并能推进 Sampling Revision。
-- [ ] 通过候选拥有完整 Full Case Set Metrics 并安全推进 Best。
-- [ ] 当前有效设计中不存在 post-merge Mainline Validation、RevertRequired 或自动 Revert 队列。
+- [x] 两个并发完成的 Attempt 只有一个先取得 Lease，另一个刷新最新 Best。
+- [x] 回退候选在 Git mutation 前被拒绝并能推进 Sampling Revision。
+- [x] 通过候选拥有完整 Full Case Set Metrics 并安全推进 Best。
+- [x] 当前有效设计中不存在 post-merge Mainline Validation、RevertRequired 或自动 Revert 队列。
+
+## 验收证据
+
+- `mix test test/pika/integration_full_regression_test.exs`：`10 passed`。
+- 故障矩阵覆盖 Lease、Screening、30 Pair escalation、Receipt、Intent、squash、SQLite 事务前后。

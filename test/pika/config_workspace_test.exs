@@ -1,12 +1,12 @@
 defmodule Pika.ConfigWorkspaceTest do
   use ExUnit.Case, async: false
 
-  alias Pika.Test.Phase1Fixtures
+  alias Pika.Test.CampaignFixtures
   alias Pika.{Config, Workspace}
 
   test "validates YAML fields and applies documented defaults" do
-    workspace = Phase1Fixtures.workspace()
-    config_path = Phase1Fixtures.config_file("campaign:\n  history_n: 7\n")
+    workspace = CampaignFixtures.workspace()
+    config_path = CampaignFixtures.config_file("campaign:\n  history_n: 7\n")
 
     assert {:ok, config} = Config.load(config_path, workspace: workspace)
     assert config.host == "127.0.0.1"
@@ -34,7 +34,9 @@ defmodule Pika.ConfigWorkspaceTest do
     """
 
     assert {:error, {:invalid_config, errors}} =
-             Config.load(Phase1Fixtures.config_file(yaml), workspace: Phase1Fixtures.workspace())
+             Config.load(CampaignFixtures.config_file(yaml),
+               workspace: CampaignFixtures.workspace()
+             )
 
     assert Enum.any?(errors, &String.contains?(&1, "server.surprise"))
     assert Enum.any?(errors, &String.contains?(&1, "campaign.extra"))
@@ -49,8 +51,8 @@ defmodule Pika.ConfigWorkspaceTest do
   end
 
   test "initializes and recovers the fixed owned Workspace layout" do
-    root = Phase1Fixtures.workspace()
-    config_path = Phase1Fixtures.config_file()
+    root = CampaignFixtures.workspace()
+    config_path = CampaignFixtures.config_file()
     {:ok, config} = Config.load(config_path, workspace: root)
     {:ok, plan} = Workspace.plan(config)
     {:ok, first} = Workspace.activate(plan)
@@ -65,7 +67,7 @@ defmodule Pika.ConfigWorkspaceTest do
 
     assert File.regular?(first.config_path)
     assert byte_size(first.config_hash) == 64
-    assert Pika.Stage0.Git.run!(first.repo, ["rev-parse", "--abbrev-ref", "HEAD"]) == "pika/best"
+    assert Pika.Git.run!(first.repo, ["rev-parse", "--abbrev-ref", "HEAD"]) == "pika/best"
 
     {:ok, recovered_config} = Config.load(config_path, workspace: root)
     {:ok, recovered_plan} = Workspace.plan(recovered_config)
@@ -75,15 +77,15 @@ defmodule Pika.ConfigWorkspaceTest do
   end
 
   test "resolves independent Prompt resources from YAML Config" do
-    workspace = Phase1Fixtures.workspace()
-    config_root = Phase1Fixtures.workspace()
+    workspace = CampaignFixtures.workspace()
+    config_root = CampaignFixtures.workspace()
 
     for name <- ~w(alignment setup baseline) do
       File.write!(Path.join(config_root, "#{name}.md.eex"), "#{name} <%= @value %>\n")
     end
 
     yaml =
-      Phase1Fixtures.default_config() <>
+      CampaignFixtures.default_config() <>
         """
         prompts:
           alignment: alignment.md.eex
@@ -106,37 +108,39 @@ defmodule Pika.ConfigWorkspaceTest do
   end
 
   test "rejects a non-empty directory that is not a Pika Workspace" do
-    root = Phase1Fixtures.workspace()
+    root = CampaignFixtures.workspace()
     File.write!(Path.join(root, "foreign-file"), "do not touch")
 
-    {:ok, config} = Config.load(Phase1Fixtures.config_file(), workspace: root)
+    {:ok, config} = Config.load(CampaignFixtures.config_file(), workspace: root)
     assert {:error, {:workspace_not_empty, rejected_root}} = Workspace.plan(config)
     assert rejected_root == config.workspace
     assert File.read!(Path.join(root, "foreign-file")) == "do not touch"
   end
 
   test "rejects immutable listen and backend changes but accepts mutable Campaign settings" do
-    root = Phase1Fixtures.workspace()
-    initial_path = Phase1Fixtures.config_file()
+    root = CampaignFixtures.workspace()
+    initial_path = CampaignFixtures.config_file()
     {:ok, config} = Config.load(initial_path, workspace: root)
     {:ok, plan} = Workspace.plan(config)
     {:ok, workspace} = Workspace.activate(plan)
     File.touch!(workspace.database)
 
-    mutable = Phase1Fixtures.default_config() |> String.replace("history_n: 10", "history_n: 23")
-    assert {:ok, changed} = Config.load(Phase1Fixtures.config_file(mutable), workspace: root)
+    mutable =
+      CampaignFixtures.default_config() |> String.replace("history_n: 10", "history_n: 23")
+
+    assert {:ok, changed} = Config.load(CampaignFixtures.config_file(mutable), workspace: root)
     assert changed.campaign["history_n"] == 23
 
-    immutable = Phase1Fixtures.default_config(18_081)
+    immutable = CampaignFixtures.default_config(18_081)
 
     assert {:error, {:immutable_config_changed, differences}} =
-             Config.load(Phase1Fixtures.config_file(immutable), workspace: root)
+             Config.load(CampaignFixtures.config_file(immutable), workspace: root)
 
     assert Enum.any?(differences, &String.contains?(&1, "listen.port"))
   end
 
   test "adds the foreground serve command to an assembled Elixir Release" do
-    root = Phase1Fixtures.workspace()
+    root = CampaignFixtures.workspace()
     bin = Path.join(root, "bin")
     File.mkdir_p!(bin)
     executable = Path.join(bin, "pika")

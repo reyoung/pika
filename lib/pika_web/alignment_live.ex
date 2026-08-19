@@ -1,7 +1,7 @@
 defmodule PikaWeb.AlignmentLive do
   use PikaWeb, :live_view
 
-  alias Pika.Stage0.{ArtifactStore, Campaign}
+  alias Pika.Alignment.{ArtifactStore, Campaign}
   alias PikaWeb.Markdown
 
   @impl true
@@ -34,7 +34,7 @@ defmodule PikaWeb.AlignmentLive do
   end
 
   @impl true
-  def handle_info({:stage0_updated, snapshot}, socket),
+  def handle_info({:campaign_updated, snapshot}, socket),
     do: {:noreply, assign(socket, :snapshot, snapshot)}
 
   @impl true
@@ -131,7 +131,7 @@ defmodule PikaWeb.AlignmentLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <main class="stage0-shell">
+    <main class="alignment-shell">
       <header class="topbar">
         <div class="brand">
           <div class="brand-mark">P</div>
@@ -472,17 +472,17 @@ defmodule PikaWeb.AlignmentLive do
       iteration_sampling: nil,
       sampling_revisions: [],
       best_sha: nil,
-      last_error: "Stage0 Campaign 尚未启动。",
+      last_error: "Alignment Campaign 尚未启动。",
       workspace: %{root: System.tmp_dir!()}
     }
 
-    if Application.get_env(:pika, :runtime_mode, :stage0) == :serve and
+    if Application.get_env(:pika, :runtime_mode, :preview) == :serve and
          Process.whereis(Pika.Runtime) do
       runtime = Pika.Runtime.snapshot()
 
       bootstrap_status =
-        if Process.whereis(Pika.Phase2.Bootstrap),
-          do: Pika.Phase2.Bootstrap.status(),
+        if Process.whereis(Pika.CampaignBootstrap),
+          do: Pika.CampaignBootstrap.status(),
           else: :starting
 
       message =
@@ -503,21 +503,21 @@ defmodule PikaWeb.AlignmentLive do
   end
 
   defp authenticated?(session) do
-    if Application.get_env(:pika, :runtime_mode, :stage0) == :serve do
+    if Application.get_env(:pika, :runtime_mode, :preview) == :serve do
       Pika.Auth.authenticated_marker?(session["pika_auth"])
     else
-      Pika.Stage0.Auth.authenticated_marker?(session["stage0_auth"])
+      Pika.PreviewAuth.authenticated_marker?(session["preview_auth"])
     end
   end
 
   defp product_name do
-    if Application.get_env(:pika, :runtime_mode, :stage0) == :serve,
+    if Application.get_env(:pika, :runtime_mode, :preview) == :serve,
       do: "Pika",
-      else: "Pika Stage0"
+      else: "Pika Preview"
   end
 
   defp product_subtitle do
-    if Application.get_env(:pika, :runtime_mode, :stage0) == :serve,
+    if Application.get_env(:pika, :runtime_mode, :preview) == :serve,
       do: "Alignment → GPU Baseline",
       else: "Alignment → GPU Baseline Preview"
   end

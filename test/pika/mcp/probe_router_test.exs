@@ -13,7 +13,7 @@ defmodule Pika.MCP.ProbeRouterTest do
   end
 
   test "implements initialize, tools/list and both probe tools", %{registration: registration} do
-    assert %{"result" => %{"serverInfo" => %{"name" => "pika-phase-0-probe"}}} =
+    assert %{"result" => %{"serverInfo" => %{"name" => "pika-backend-probe"}}} =
              rpc(registration.token, %{
                "jsonrpc" => "2.0",
                "id" => 1,

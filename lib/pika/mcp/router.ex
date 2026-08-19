@@ -44,7 +44,7 @@ defmodule Pika.MCP.Router do
       "tools" => [
         %{
           "name" => "get_server_status",
-          "description" => "Read the Phase 1 Pika Workspace and Campaign recovery status.",
+          "description" => "Read the Pika Workspace and Campaign recovery status.",
           "inputSchema" => %{
             "type" => "object",
             "properties" => %{},

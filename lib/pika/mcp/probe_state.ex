@@ -1,5 +1,5 @@
 defmodule Pika.MCP.ProbeState do
-  @moduledoc "In-memory Phase 0 MCP state. Raw bearer tokens are never retained."
+  @moduledoc "In-memory backend-conformance MCP state. Raw bearer tokens are never retained."
 
   use GenServer
 

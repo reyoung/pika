@@ -1,0 +1,469 @@
+defmodule Pika.AttemptLoopTest do
+  use ExUnit.Case, async: false
+
+  alias Pika.{AttemptCoordinator, AttemptStore, Git, Repo}
+  alias Pika.Test.{AttemptAgentBackend, OptimizationFixtures}
+
+  setup do
+    on_exit(fn -> OptimizationFixtures.stop_repo() end)
+    :ok
+  end
+
+  test "three fixed slots complete independent Attempts without advancing Best" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 3)
+    coordinator = start_coordinator(context, profiles(3, %{test_pid: self(), barrier: true}))
+
+    starts = receive_starts(3)
+    assert starts |> Enum.map(& &1.attempt_id) |> Enum.uniq() |> length() == 3
+
+    snapshot = AttemptCoordinator.snapshot(coordinator)
+    assert Enum.sort(Enum.map(snapshot.attempts, & &1.status)) == ~w(running running running)
+    assert Enum.sort(Enum.map(snapshot.attempts, & &1.slot_index)) == [0, 1, 2]
+    assert Enum.all?(snapshot.attempts, &(&1.base_sha == context.best_sha))
+
+    assert Git.run!(context.workspace.repo, ["rev-parse", "refs/heads/pika/best"]) ==
+             context.best_sha
+
+    assert Enum.all?(starts, fn start ->
+             String.contains?(start.instructions, "Attempt") and
+               String.contains?(start.instructions, context.best_sha)
+           end)
+
+    assert_attempt_mcp_gateway(hd(starts).token)
+    assert_mailbox_idempotency(coordinator, starts, context.campaign.id)
+    Enum.each(starts, &send(&1.task_pid, :release))
+
+    eventually(fn ->
+      attempts = AttemptStore.attempts(context.campaign.id, limit: 10)
+      length(attempts) == 3 and Enum.all?(attempts, &(&1.status == "ready_for_integration"))
+    end)
+
+    attempts = AttemptStore.attempts(context.campaign.id, limit: 10)
+
+    Enum.each(attempts, fn attempt ->
+      assert File.regular?(Path.join(context.workspace.root, "candidate-#{attempt.id}.txt")) ==
+               false
+
+      assert File.regular?(
+               Path.join(
+                 context.workspace.root,
+                 attempt.worktree_relative_path <> "/candidate-#{attempt.id}.txt"
+               )
+             )
+
+      assert attempt.patch_artifact_id
+      assert attempt.metrics_artifact_id
+      assert attempt.correctness_artifact_id
+      assert attempt.summary =~ "two percent improvement"
+
+      assert [%{pair_count: 30, valid_pair_count: 30, source: "iteration"}] =
+               AttemptStore.metrics_for_attempt(attempt.id)
+
+      assert [_ | _] =
+               Path.wildcard(
+                 Path.join(context.workspace.root, "artifacts/logs/#{attempt.id}/*.jsonl")
+               )
+    end)
+
+    assert Git.run!(context.workspace.repo, ["rev-parse", "refs/heads/pika/best"]) ==
+             context.best_sha
+
+    assert Pika.Persistence.current_campaign().best_sha == context.best_sha
+  end
+
+  test "a completed Backend turn with missing MCP work follows up in the same Session" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+
+    coordinator =
+      start_coordinator(
+        context,
+        profiles(1, %{test_pid: self(), mode: :followup, barrier: true})
+      )
+
+    [first] = receive_starts(1)
+    send(first.task_pid, :release)
+    [second] = receive_starts(1)
+    assert first.attempt_id == second.attempt_id
+    assert first.token == second.token
+    assert {:ok, %{status: "awaiting_report"}} = AttemptStore.attempt(first.attempt_id)
+
+    send(second.task_pid, :release)
+
+    eventually(fn ->
+      match?(
+        {:ok, %{status: "ready_for_integration"}},
+        AttemptStore.attempt(first.attempt_id)
+      )
+    end)
+
+    [[attempts_created]] =
+      Repo.query!("SELECT attempts_created FROM campaigns WHERE id = ?", [context.campaign.id]).rows
+
+    [[session_count, max_turns]] =
+      Repo.query!(
+        "SELECT COUNT(*), MAX(last_turn_sequence) FROM agent_sessions WHERE attempt_id = ?",
+        [first.attempt_id]
+      ).rows
+
+    assert attempts_created == 1
+    assert session_count == 1
+    assert max_turns >= 2
+    assert AttemptCoordinator.snapshot(coordinator).last_error == nil
+  end
+
+  test "repeated Backend crashes open new Sessions for the same budgeted Attempt" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+    {:ok, crash_counter} = Agent.start_link(fn -> 0 end)
+
+    coordinator =
+      start_coordinator(
+        context,
+        profiles(1, %{test_pid: self(), mode: :crash_twice, crash_counter: crash_counter})
+      )
+
+    starts = receive_starts(3)
+    assert starts |> Enum.map(& &1.attempt_id) |> Enum.uniq() == [hd(starts).attempt_id]
+    assert starts |> Enum.map(& &1.token) |> Enum.uniq() |> length() == 3
+
+    eventually(fn ->
+      match?(
+        {:ok, %{status: "ready_for_integration"}},
+        AttemptStore.attempt(hd(starts).attempt_id)
+      )
+    end)
+
+    [[attempts_created]] =
+      Repo.query!("SELECT attempts_created FROM campaigns WHERE id = ?", [context.campaign.id]).rows
+
+    [[session_count]] =
+      Repo.query!("SELECT COUNT(*) FROM agent_sessions WHERE attempt_id = ?", [
+        hd(starts).attempt_id
+      ]).rows
+
+    assert attempts_created == 1
+    assert session_count == 3
+    assert AttemptCoordinator.snapshot(coordinator).recovery_count[hd(starts).attempt_id] == 2
+  end
+
+  test "Coordinator restart recovers a plan-disabled Attempt as Iteration work" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+
+    first_coordinator =
+      start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
+
+    [first] = receive_starts(1)
+
+    GenServer.stop(first_coordinator)
+
+    second_coordinator =
+      start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
+
+    [recovered] = receive_starts(1)
+    assert recovered.attempt_id == first.attempt_id
+    refute recovered.token == first.token
+
+    assert {:ok, recovered_context} =
+             AttemptCoordinator.mcp_call(
+               recovered.token,
+               "get_context",
+               %{},
+               second_coordinator
+             )
+
+    assert recovered_context.identity.role == :iteration
+    assert recovered_context.attempt.status == "running"
+
+    [[attempts_created]] =
+      Repo.query!("SELECT attempts_created FROM campaigns WHERE id = ?", [context.campaign.id]).rows
+
+    assert attempts_created == 1
+    send(recovered.task_pid, :release)
+
+    eventually(fn ->
+      match?(
+        {:ok, %{status: "ready_for_integration"}},
+        AttemptStore.attempt(first.attempt_id)
+      )
+    end)
+  end
+
+  test "dispatch gate prevents new Attempts until it is cleared" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+
+    Repo.query!("UPDATE campaigns SET dispatch_gate = 'paused' WHERE id = ?", [
+      context.campaign.id
+    ])
+
+    coordinator = start_coordinator(context, profiles(1, %{test_pid: self()}))
+    assert AttemptCoordinator.snapshot(coordinator).attempts == []
+
+    Repo.query!("UPDATE campaigns SET dispatch_gate = NULL WHERE id = ?", [context.campaign.id])
+    assert :ok = AttemptCoordinator.dispatch(coordinator)
+    [start] = receive_starts(1)
+
+    eventually(fn ->
+      match?(
+        {:ok, %{status: "ready_for_integration"}},
+        AttemptStore.attempt(start.attempt_id)
+      )
+    end)
+  end
+
+  test "Attempt and Campaign Guidance keep their scopes" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 2)
+    coordinator = start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
+    [first] = receive_starts(1)
+
+    assert {:ok, current} =
+             AttemptCoordinator.create_btw(
+               first.attempt_id,
+               "inspect register pressure",
+               "current",
+               "current-1",
+               coordinator
+             )
+
+    assert current.kind == "attempt"
+
+    assert {:ok, ^current} =
+             AttemptCoordinator.create_btw(
+               first.attempt_id,
+               "inspect register pressure",
+               "current",
+               "current-1",
+               coordinator
+             )
+
+    assert {:ok, future} =
+             AttemptCoordinator.create_btw(
+               first.attempt_id,
+               "prefer a tiled alternative",
+               "future",
+               "future-1",
+               coordinator
+             )
+
+    assert future.kind == "campaign"
+
+    assert {:ok, side} =
+             AttemptCoordinator.create_btw(
+               first.attempt_id,
+               "explain the last benchmark",
+               "chat",
+               "chat-1",
+               coordinator
+             )
+
+    assert side.kind == "side"
+
+    assert {:ok, first_context} =
+             AttemptCoordinator.mcp_call(first.token, "get_context", %{}, coordinator)
+
+    assert Enum.map(first_context.guidance, & &1.body) == ["inspect register pressure"]
+    send(first.task_pid, :release)
+
+    [second] = receive_starts(1)
+    assert second.attempt_id != first.attempt_id
+
+    assert {:ok, second_context} =
+             AttemptCoordinator.mcp_call(second.token, "get_context", %{}, coordinator)
+
+    assert Enum.map(second_context.guidance, & &1.body) == ["prefer a tiled alternative"]
+    send(second.task_pid, :release)
+
+    eventually(fn ->
+      AttemptStore.attempts(context.campaign.id, limit: 10)
+      |> Enum.all?(&(&1.status == "ready_for_integration"))
+    end)
+  end
+
+  test "optional Plan Session writes one plan before Iteration without spending another Attempt" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1, plan_enabled: true)
+    coordinator = start_coordinator(context, profiles(1, %{test_pid: self()}))
+
+    starts = receive_starts(2)
+    assert starts |> Enum.map(& &1.attempt_id) |> Enum.uniq() == [hd(starts).attempt_id]
+
+    eventually(fn ->
+      match?(
+        {:ok, %{status: "ready_for_integration", plan_artifact_id: id}} when not is_nil(id),
+        AttemptStore.attempt(hd(starts).attempt_id)
+      )
+    end)
+
+    assert File.read!(
+             Path.join(
+               context.workspace.root,
+               "artifacts/plans/#{hd(starts).attempt_id}/plan.md"
+             )
+           ) =~ "Improve the candidate"
+
+    [[attempts_created, sessions]] =
+      Repo.query!(
+        "SELECT c.attempts_created, COUNT(s.id) FROM campaigns c JOIN agent_sessions s ON s.campaign_id = c.id WHERE c.id = ? GROUP BY c.id",
+        [context.campaign.id]
+      ).rows
+
+    assert attempts_created == 1
+    assert sessions == 2
+    assert AttemptCoordinator.snapshot(coordinator).last_error == nil
+  end
+
+  defp start_coordinator(context, profiles) do
+    {:ok, coordinator} =
+      AttemptCoordinator.start_link(
+        workspace: context.workspace,
+        campaign: context.campaign,
+        profiles: profiles,
+        backend_modules: %{codex_app_server: AttemptAgentBackend},
+        mcp_url: "http://127.0.0.1:18080/mcp"
+      )
+
+    Process.unlink(coordinator)
+
+    on_exit(fn ->
+      if Process.alive?(coordinator) do
+        try do
+          GenServer.stop(coordinator)
+        catch
+          :exit, _reason -> :ok
+        end
+      end
+    end)
+
+    coordinator
+  end
+
+  defp profiles(count, env) do
+    for index <- 1..count do
+      %{
+        "name" => "slot-#{index}",
+        "backend" => "codex_app_server",
+        "command" => ["codex", "app-server", "--listen", "stdio://"],
+        "reasoning_effort" => "high",
+        "env" => env,
+        "protocol_config" => %{}
+      }
+    end
+  end
+
+  defp receive_starts(count) do
+    for _ <- 1..count do
+      assert_receive {:attempt_started, attempt_id, task_pid, token, instructions}, 5_000
+
+      %{
+        attempt_id: attempt_id,
+        task_pid: task_pid,
+        token: token,
+        instructions: instructions
+      }
+    end
+  end
+
+  defp assert_mailbox_idempotency(coordinator, starts, campaign_id) do
+    [sender, receiver | _] = starts
+    {:ok, agents} = AttemptCoordinator.mcp_call(sender.token, "list_agents", %{}, coordinator)
+    target = Enum.find(agents, &(&1.attempt_id == receiver.attempt_id))
+
+    args = %{
+      "idempotency_key" => "message-once",
+      "target_session_id" => target.id,
+      "body" => "share occupancy findings",
+      "priority" => "high"
+    }
+
+    assert {:ok, sent} =
+             AttemptCoordinator.mcp_call(sender.token, "send_agent_message", args, coordinator)
+
+    assert {:ok, ^sent} =
+             AttemptCoordinator.mcp_call(sender.token, "send_agent_message", args, coordinator)
+
+    assert {:ok, [message]} =
+             AttemptCoordinator.mcp_call(
+               receiver.token,
+               "read_agent_messages",
+               %{"after_sequence" => 0},
+               coordinator
+             )
+
+    assert message.body == "share occupancy findings"
+
+    assert {:ok, [redelivered]} =
+             AttemptCoordinator.mcp_call(
+               receiver.token,
+               "read_agent_messages",
+               %{"after_sequence" => 0},
+               coordinator
+             )
+
+    assert redelivered.id == message.id
+
+    assert {:ok, %{count: 1}} =
+             AttemptCoordinator.mcp_call(
+               receiver.token,
+               "ack_agent_messages",
+               %{
+                 "idempotency_key" => "ack-once",
+                 "through_sequence" => message.sequence
+               },
+               coordinator
+             )
+
+    assert {:ok, []} =
+             AttemptCoordinator.mcp_call(
+               receiver.token,
+               "read_agent_messages",
+               %{"after_sequence" => 0},
+               coordinator
+             )
+
+    [[count]] =
+      Repo.query!("SELECT COUNT(*) FROM agent_messages WHERE campaign_id = ?", [campaign_id]).rows
+
+    assert count == 1
+  end
+
+  defp assert_attempt_mcp_gateway(token) do
+    initialize =
+      Plug.Test.conn(
+        :post,
+        "/mcp",
+        Jason.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "initialize"})
+      )
+      |> Plug.Conn.put_req_header("content-type", "application/json")
+      |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
+      |> PikaWeb.MCPGateway.call([])
+
+    assert %{"result" => %{"serverInfo" => %{"name" => "pika-optimization"}}} =
+             Jason.decode!(initialize.resp_body)
+
+    tools =
+      Plug.Test.conn(
+        :post,
+        "/mcp",
+        Jason.encode!(%{"jsonrpc" => "2.0", "id" => 2, "method" => "tools/list"})
+      )
+      |> Plug.Conn.put_req_header("content-type", "application/json")
+      |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
+      |> PikaWeb.MCPGateway.call([])
+      |> Map.fetch!(:resp_body)
+      |> Jason.decode!()
+
+    names = Enum.map(tools["result"]["tools"], & &1["name"])
+    assert "record_metrics" in names
+    refute "submit_plan" in names
+  end
+
+  defp eventually(fun, attempts \\ 100)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(25)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(fun, 0), do: flunk("condition did not become true: #{inspect(fun.())}")
+end

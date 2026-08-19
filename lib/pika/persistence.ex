@@ -41,7 +41,7 @@ defmodule Pika.Persistence do
             sql
             |> String.replace(
               ~r/CREATE TABLE\s+["`]?campaigns["`]?/i,
-              "CREATE TABLE campaigns_phase2"
+              "CREATE TABLE campaigns_status_upgrade"
             )
             |> String.replace(
               "'building_baseline','optimizing'",
@@ -60,11 +60,11 @@ defmodule Pika.Persistence do
               Repo.query!(replacement)
 
               Repo.query!(
-                "INSERT INTO campaigns_phase2 (#{columns}) SELECT #{columns} FROM campaigns"
+                "INSERT INTO campaigns_status_upgrade (#{columns}) SELECT #{columns} FROM campaigns"
               )
 
               Repo.query!("DROP TABLE campaigns")
-              Repo.query!("ALTER TABLE campaigns_phase2 RENAME TO campaigns")
+              Repo.query!("ALTER TABLE campaigns_status_upgrade RENAME TO campaigns")
 
               Repo.query!(
                 "CREATE UNIQUE INDEX campaigns_singleton_key_index ON campaigns(singleton_key)"
@@ -392,7 +392,7 @@ defmodule Pika.Persistence do
   end
 
   defp best_sha(workspace) do
-    case Pika.Stage0.Git.run(workspace.repo, ["rev-parse", "refs/heads/pika/best"]) do
+    case Pika.Git.run(workspace.repo, ["rev-parse", "refs/heads/pika/best"]) do
       {:ok, sha} -> sha
       {:error, _} -> workspace.base_sha
     end

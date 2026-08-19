@@ -1,0 +1,331 @@
+defmodule Pika.Test.IntegrationAgentBackend do
+  @behaviour Pika.AgentBackend
+
+  alias Pika.AgentBackend.{Event, Session}
+  alias Pika.{Git, IntegrationCoordinator}
+  alias Pika.Test.OptimizationFixtures
+
+  def start_link(profile, sink) do
+    Agent.start_link(fn ->
+      %{sink: sink, profile: profile, session: nil, cwd: nil, mcp: nil, turn: nil}
+    end)
+  end
+
+  def open_session(server, cwd, model, effort, mcp, _skill_roots, instructions) do
+    session = %Session{
+      id: Ecto.UUID.generate(),
+      backend: :fake,
+      backend_protocol: "integration-fake-v1",
+      backend_session_id: Ecto.UUID.generate(),
+      cwd: cwd,
+      model: model,
+      reasoning_effort: effort,
+      jsonl_path: "/dev/null"
+    }
+
+    Agent.update(
+      server,
+      &Map.merge(&1, %{session: session, cwd: cwd, mcp: mcp, instructions: instructions})
+    )
+
+    emit(server, :session_started)
+    {:ok, session}
+  end
+
+  def start_turn(server, _input) do
+    turn_id = Ecto.UUID.generate()
+
+    state =
+      Agent.get_and_update(server, fn state ->
+        {%{state | turn: turn_id}, %{state | turn: turn_id}}
+      end)
+
+    emit(server, :turn_started)
+    Task.start(fn -> run(server, state) end)
+    {:ok, turn_id}
+  end
+
+  def steer(server, _input), do: {:ok, Agent.get(server, & &1.turn)}
+  def interrupt(_server), do: :ok
+  def capabilities(_server), do: %{protocol: "integration-fake-v1", native_steer: true}
+
+  def close_session(server) do
+    if Process.alive?(server), do: Agent.stop(server)
+    :ok
+  end
+
+  defp run(server, state) do
+    notify(state)
+    maybe_wait(state)
+    {:ok, context} = mcp(state, "get_integration_context", %{})
+
+    {:ok, lease} =
+      mcp(state, "acquire_integration_lease", %{
+        "idempotency_key" => "lease-#{state.mcp.attempt_id}",
+        "expected_best_sha" => context.best_sha
+      })
+
+    if lease.stale_base, do: refresh(state, lease)
+
+    maybe_crash(server, state, :after_lease)
+    {:ok, context} = mcp(state, "get_integration_context", %{})
+    receipt = context.receipt || full_regression(server, state, context, lease)
+    if is_nil(context.receipt), do: maybe_crash(server, state, :after_receipt)
+
+    if receipt.status == "rejected" do
+      {:ok, _} =
+        mcp(state, "reject_attempt", %{
+          "idempotency_key" => "reject-#{state.mcp.attempt_id}",
+          "lease_id" => lease.id,
+          "receipt_id" => receipt.id,
+          "representative_case_ids" => receipt.regressed_case_ids
+        })
+    else
+      intent =
+        context.intent ||
+          then_create_intent(state, lease.id, receipt.id)
+
+      if is_nil(context.intent), do: maybe_crash(server, state, :after_intent)
+
+      current_best_head = Git.run!(context.best_worktree, ["rev-parse", "HEAD"])
+
+      new_sha =
+        if current_best_head == context.best_sha,
+          do: squash_merge(context, state.mcp.attempt_id),
+          else: current_best_head
+
+      if current_best_head == context.best_sha, do: maybe_crash(server, state, :after_squash)
+
+      maybe_crash(server, state, :before_sqlite_commit)
+
+      {:ok, _} =
+        mcp(state, "complete_merge", %{
+          "idempotency_key" => "complete-merge-#{state.mcp.attempt_id}",
+          "lease_id" => lease.id,
+          "receipt_id" => receipt.id,
+          "intent_id" => intent.id,
+          "new_sha" => new_sha
+        })
+
+      maybe_crash(server, state, :after_sqlite_commit)
+    end
+
+    complete_turn(server)
+  end
+
+  defp then_create_intent(state, lease_id, receipt_id) do
+    {:ok, intent} =
+      mcp(state, "create_merge_intent", %{
+        "idempotency_key" => "merge-intent-#{state.mcp.attempt_id}",
+        "lease_id" => lease_id,
+        "receipt_id" => receipt_id
+      })
+
+    intent
+  end
+
+  defp refresh(state, lease) do
+    {:ok, context} = mcp(state, "get_integration_context", %{})
+    Git.run!(state.cwd, ["rebase", context.best_sha])
+    candidate_sha = Git.run!(state.cwd, ["rev-parse", "HEAD"])
+    root = workspace_root(state.cwd)
+
+    {samples, correctness} =
+      OptimizationFixtures.write_iteration_artifacts(
+        root,
+        state.mcp.attempt_id,
+        context.best_sha,
+        candidate_sha
+      )
+
+    register(state, samples.relative_path, "iteration_measurement")
+    register(state, correctness.relative_path, "iteration_measurement")
+
+    patch =
+      Git.run!(state.cwd, [
+        "diff",
+        "--binary",
+        "--full-index",
+        "#{context.best_sha}...#{candidate_sha}",
+        "--",
+        "."
+      ])
+
+    patch_path = Path.join(root, "artifacts/patches/#{state.mcp.attempt_id}/candidate.patch")
+    File.write!(patch_path, patch <> if(patch == "", do: "", else: "\n"))
+    register(state, "artifacts/patches/#{state.mcp.attempt_id}/candidate.patch", "patch")
+
+    {:ok, _} =
+      mcp(state, "complete_refresh", %{
+        "idempotency_key" => "refresh-#{state.mcp.attempt_id}",
+        "lease_id" => lease.id,
+        "sampling_revision_id" => context.attempt.sampling_revision_id,
+        "new_base_sha" => context.best_sha,
+        "candidate_sha" => candidate_sha,
+        "harness_digest" => context.spec_revision.protected_digest,
+        "samples_artifact" => samples.relative_path,
+        "correctness_artifact" => correctness.relative_path
+      })
+  end
+
+  defp full_regression(server, state, context, lease) do
+    attempt_id = state.mcp.attempt_id
+    root = workspace_root(state.cwd)
+    regression? = context.attempt.ordinal in List.wrap(env(state)[:regress_ordinals])
+    screening_relative = "artifacts/logs/#{attempt_id}/integration/screening.jsonl"
+    full_relative = "artifacts/logs/#{attempt_id}/integration/full.jsonl"
+    correctness_relative = "artifacts/logs/#{attempt_id}/integration/correctness.json"
+    screening_path = Path.join(root, screening_relative)
+    full_path = Path.join(root, full_relative)
+    correctness_path = Path.join(root, correctness_relative)
+    File.mkdir_p!(Path.dirname(screening_path))
+
+    screening =
+      for benchmark_case <- context.cases,
+          metric <- context.metrics,
+          index <- 0..4 do
+        improvement =
+          if regression? and benchmark_case["id"] == "guard_case", do: -0.02, else: 0.02
+
+        pair(context, benchmark_case["id"], metric["id"], index, improvement)
+      end
+
+    File.write!(screening_path, encode_jsonl(screening))
+    maybe_crash(server, state, :during_screening)
+
+    full =
+      if regression? do
+        for index <- 0..29,
+            do: pair(context, "guard_case", "latency_us", index, -0.02)
+      else
+        []
+      end
+
+    if full != [], do: File.write!(full_path, encode_jsonl(full))
+    if full != [], do: maybe_crash(server, state, :during_escalation)
+
+    File.write!(
+      correctness_path,
+      Jason.encode!(%{
+        "candidate_sha" => context.attempt.candidate_sha,
+        "cases" => Enum.map(context.cases, &%{"case_id" => &1["id"], "passed" => true})
+      })
+    )
+
+    register(state, screening_relative, "full_regression_screening")
+    register(state, correctness_relative, "full_regression_correctness")
+    if full != [], do: register(state, full_relative, "full_regression_escalation")
+
+    {:ok, receipt} =
+      mcp(state, "submit_full_regression", %{
+        "idempotency_key" => "full-regression-#{attempt_id}",
+        "lease_id" => lease.id,
+        "base_sha" => context.best_sha,
+        "candidate_sha" => context.attempt.candidate_sha,
+        "harness_digest" => context.spec_revision.protected_digest,
+        "screening_artifact" => screening_relative,
+        "correctness_artifact" => correctness_relative,
+        "full_artifact" => if(full == [], do: nil, else: full_relative)
+      })
+
+    receipt
+  end
+
+  defp squash_merge(context, attempt_id) do
+    Git.run!(context.best_worktree, ["apply", "--index", context.patch_path])
+
+    message =
+      "Accept Pika Attempt #{attempt_id}\n\n" <>
+        "Pika-Attempt: #{attempt_id}\n" <>
+        "Pika-Spec-Revision: #{context.attempt.spec_revision_id}\n" <>
+        "Pika-Sampling-Revision: #{context.attempt.sampling_revision_id}"
+
+    Git.run!(context.best_worktree, ["commit", "-m", message])
+    Git.run!(context.best_worktree, ["rev-parse", "HEAD"])
+  end
+
+  defp register(state, relative_path, kind) do
+    root = workspace_root(state.cwd)
+    {:ok, artifact} = Pika.Alignment.ArtifactStore.register(root, relative_path)
+
+    {:ok, _} =
+      mcp(state, "register_artifact", %{
+        "idempotency_key" => "integration-artifact-#{relative_path}",
+        "kind" => kind,
+        "relative_path" => relative_path,
+        "sha256" => artifact.sha256,
+        "size" => artifact.size,
+        "mime" => artifact.mime,
+        "metadata" => %{}
+      })
+  end
+
+  defp pair(context, case_id, metric_id, index, improvement) do
+    baseline = 10.0 + index / 10_000
+
+    %{
+      "schema_version" => 1,
+      "base_sha" => context.best_sha,
+      "candidate_sha" => context.attempt.candidate_sha,
+      "case_id" => case_id,
+      "metric_id" => metric_id,
+      "pair_index" => index,
+      "order" => if(rem(index, 2) == 0, do: "bc", else: "cb"),
+      "baseline" => baseline,
+      "candidate" => baseline * (1.0 - improvement),
+      "valid" => true
+    }
+  end
+
+  defp maybe_crash(server, state, stage) do
+    if env(state)[:crash_stage] == stage do
+      counter = env(state)[:crash_counter]
+
+      if counter && Agent.get_and_update(counter, &{&1 + 1, &1 + 1}) == 1 do
+        Process.exit(server, :injected_integration_crash)
+        Process.exit(self(), :normal)
+      end
+    end
+  end
+
+  defp notify(state) do
+    if pid = env(state)[:test_pid],
+      do: send(pid, {:integration_started, state.mcp.attempt_id, self(), state.mcp.token})
+  end
+
+  defp maybe_wait(state) do
+    if env(state)[:barrier] do
+      receive do
+        :release -> :ok
+      after
+        5_000 -> :ok
+      end
+    end
+  end
+
+  defp complete_turn(server) do
+    if Process.alive?(server), do: emit(server, :turn_completed, %{status: "completed"})
+  end
+
+  defp mcp(state, tool, args),
+    do: IntegrationCoordinator.mcp_call(state.mcp.token, tool, args, state.mcp.coordinator)
+
+  defp workspace_root(cwd), do: cwd |> Path.dirname() |> Path.dirname()
+  defp encode_jsonl(records), do: Enum.map_join(records, "\n", &Jason.encode!/1) <> "\n"
+  defp env(state), do: state.profile.env || %{}
+
+  defp emit(server, type, data \\ %{}) do
+    state = Agent.get(server, & &1)
+
+    event =
+      Event.new(type, :fake, state.session.id, %{
+        backend_session_id: state.session.backend_session_id,
+        turn_id: state.turn,
+        data: data
+      })
+
+    send(state.sink, {:pika_backend_event, event})
+  catch
+    :exit, _ -> :ok
+  end
+end

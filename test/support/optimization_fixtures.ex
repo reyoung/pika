@@ -1,0 +1,267 @@
+defmodule Pika.Test.OptimizationFixtures do
+  alias Pika.{Git, Harness}
+  alias Pika.Alignment.ArtifactStore
+  alias Pika.Test.{AlignmentFixtures, CampaignFixtures}
+  alias Pika.{Config, Persistence, Repo, Workspace}
+
+  def setup_campaign(opts \\ []) do
+    max_attempts = Keyword.get(opts, :max_attempts, 3)
+    plan_enabled = Keyword.get(opts, :plan_enabled, false)
+    root = CampaignFixtures.workspace()
+    config_path = CampaignFixtures.config_file(config(max_attempts, plan_enabled))
+    {:ok, config} = Config.load(config_path, workspace: root)
+    {:ok, plan} = Workspace.plan(config)
+    {:ok, workspace} = Workspace.activate(plan)
+
+    AlignmentFixtures.create_harness(workspace.repo)
+    Git.run!(workspace.repo, ["add", "."])
+    Git.run!(workspace.repo, ["commit", "-m", "Baseline harness"])
+    best_sha = Git.run!(workspace.repo, ["rev-parse", "HEAD"])
+    workspace = %{workspace | base_sha: best_sha}
+
+    Application.put_env(:pika, Repo,
+      database: workspace.database,
+      pool_size: 1,
+      journal_mode: :wal,
+      synchronous: :full,
+      foreign_keys: :on,
+      busy_timeout: 5_000
+    )
+
+    {:ok, repo_pid} = Repo.start_link()
+    Process.unlink(repo_pid)
+    :ok = Persistence.migrate()
+    {:ok, campaign, :initialized} = Persistence.initialize_or_recover(workspace)
+    {:ok, harness} = Harness.validate(workspace.repo, harness_args())
+    ids = insert_alignment_state(campaign.id, best_sha, harness)
+    campaign = Persistence.current_campaign()
+
+    %{
+      workspace: workspace,
+      campaign: campaign,
+      best_sha: best_sha,
+      harness: harness,
+      spec_id: ids.spec_id,
+      case_id: ids.case_id,
+      metric_id: ids.metric_id,
+      sampling_id: ids.sampling_id
+    }
+  end
+
+  def stop_repo do
+    if pid = Process.whereis(Repo) do
+      try do
+        GenServer.stop(pid)
+      catch
+        :exit, _reason -> :ok
+      end
+    end
+  end
+
+  def write_iteration_artifacts(workspace_root, attempt_id, base_sha, candidate_sha, opts \\ []) do
+    improvement = Keyword.get(opts, :improvement, 0.02)
+    valid_count = Keyword.get(opts, :valid_count, 30)
+    samples_relative = "artifacts/logs/#{attempt_id}/pairs.jsonl"
+    correctness_relative = "artifacts/logs/#{attempt_id}/correctness.json"
+    samples_path = Path.join(workspace_root, samples_relative)
+    correctness_path = Path.join(workspace_root, correctness_relative)
+    File.mkdir_p!(Path.dirname(samples_path))
+
+    records =
+      for index <- 0..29 do
+        baseline = 10.0 + index / 10_000
+
+        %{
+          "schema_version" => 1,
+          "base_sha" => base_sha,
+          "candidate_sha" => candidate_sha,
+          "case_id" => "target_case",
+          "metric_id" => "latency_us",
+          "pair_index" => index,
+          "order" => if(rem(index, 2) == 0, do: "bc", else: "cb"),
+          "baseline" => baseline,
+          "candidate" => baseline * (1.0 - improvement),
+          "valid" => index < valid_count,
+          "error" => if(index < valid_count, do: nil, else: "fixture invalid")
+        }
+      end
+
+    File.write!(samples_path, Enum.map_join(records, "\n", &Jason.encode!/1) <> "\n")
+
+    File.write!(
+      correctness_path,
+      Jason.encode!(%{
+        "candidate_sha" => candidate_sha,
+        "cases" => [%{"case_id" => "target_case", "passed" => true}]
+      })
+    )
+
+    {:ok, samples} = ArtifactStore.register(workspace_root, samples_relative)
+    {:ok, correctness} = ArtifactStore.register(workspace_root, correctness_relative)
+    {samples, correctness}
+  end
+
+  def add_guard_case(context) do
+    case_id = Ecto.UUID.generate()
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      "INSERT INTO benchmark_cases(id, spec_revision_id, ordinal, name, kind, shape_json, dtype_json, layout_json, frequency_weight) VALUES (?, ?, 2, 'guard_case', 'guard', '{\"n\":2048}', '\"float16\"', '\"contiguous\"', 0.5)",
+      [case_id, context.spec_id]
+    )
+
+    [[best_revision_id]] =
+      Repo.query!(
+        "SELECT id FROM best_revisions WHERE campaign_id = ? ORDER BY sequence DESC LIMIT 1",
+        [context.campaign.id]
+      ).rows
+
+    Repo.query!(
+      "INSERT INTO best_metrics(best_revision_id, benchmark_case_id, metric_definition_id, measured_sha, value, baseline_value, improvement_ratio, mad, noise_tolerance, pair_count, valid_pair_count, source, measured_at) VALUES (?, ?, ?, ?, 10.0, 10.0, 0.0, 0.001, 0.005, 30, 30, 'baseline', ?)",
+      [best_revision_id, case_id, context.metric_id, context.best_sha, now]
+    )
+
+    Map.put(context, :guard_case_id, case_id)
+  end
+
+  def config(max_attempts, plan_enabled) do
+    """
+    server:
+      host: 127.0.0.1
+      port: 18080
+    backend:
+      type: codex_app_server
+      command: [codex, app-server, --listen, stdio://]
+      protocol_config: {}
+    campaign:
+      plan: #{plan_enabled}
+      max_attempts: #{max_attempts}
+      history_n: 10
+      iteration_agents:
+        - name: slot-1
+          backend: codex_app_server
+          reasoning_effort: high
+        - name: slot-2
+          backend: codex_app_server
+          reasoning_effort: high
+        - name: slot-3
+          backend: codex_app_server
+          reasoning_effort: high
+      reference_catalog: []
+      stop_conditions:
+        mode: all_goals
+    """
+  end
+
+  defp insert_alignment_state(campaign_id, best_sha, harness) do
+    now = System.system_time(:microsecond)
+    spec_id = Ecto.UUID.generate()
+    case_id = Ecto.UUID.generate()
+    metric_id = Ecto.UUID.generate()
+    sampling_id = Ecto.UUID.generate()
+    best_id = Ecto.UUID.generate()
+    spec = AlignmentFixtures.spec()
+
+    Repo.query!(
+      """
+      INSERT INTO spec_revisions(
+        id, campaign_id, revision, status, spec_json, protected_paths_json,
+        protected_digest, baseline_sha, reference_snapshot_json, skill_snapshot_json,
+        confirmed_at, inserted_at, updated_at
+      ) VALUES (?, ?, 1, 'confirmed', ?, ?, ?, ?, '[]', ?, ?, ?, ?)
+      """,
+      [
+        spec_id,
+        campaign_id,
+        Jason.encode!(spec),
+        Jason.encode!(harness.protected_paths),
+        harness.digest,
+        best_sha,
+        Jason.encode!(%{
+          name: "ncu-report-skill",
+          url: "https://example.invalid/ncu-report-skill.git",
+          branch: "main",
+          sha: String.duplicate("c", 40)
+        }),
+        now,
+        now,
+        now
+      ]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO benchmark_cases(
+        id, spec_revision_id, ordinal, name, kind, shape_json, dtype_json,
+        layout_json, frequency_weight
+      ) VALUES (?, ?, 1, 'target_case', 'target', '{"n":1024}', '"float16"', '"contiguous"', 1.0)
+      """,
+      [case_id, spec_id]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO metric_definitions(
+        id, spec_revision_id, name, unit, direction, role,
+        min_improvement_ratio, parser_json
+      ) VALUES (?, ?, 'latency_us', 'us', 'minimize', 'target', 0.01, '{}')
+      """,
+      [metric_id, spec_id]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO sampling_revisions(
+        id, campaign_id, spec_revision_id, sequence, cause, summary,
+        estimated_cost_json, created_at
+      ) VALUES (?, ?, ?, 1, 'baseline', 'initial sample', '{}', ?)
+      """,
+      [sampling_id, campaign_id, spec_id, now]
+    )
+
+    Repo.query!(
+      "INSERT INTO sampling_revision_cases(sampling_revision_id, benchmark_case_id, reason) VALUES (?, ?, 'target representative')",
+      [sampling_id, case_id]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO best_revisions(
+        id, campaign_id, sequence, sha, cause, spec_revision_id, summary, inserted_at
+      ) VALUES (?, ?, 1, ?, 'baseline', ?, 'fixture baseline', ?)
+      """,
+      [best_id, campaign_id, best_sha, spec_id, now]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO best_metrics(
+        best_revision_id, benchmark_case_id, metric_definition_id, measured_sha,
+        value, baseline_value, improvement_ratio, mad, noise_tolerance,
+        pair_count, valid_pair_count, source, measured_at
+      ) VALUES (?, ?, ?, ?, 10.0, 10.0, 0.0, 0.001, 0.005, 30, 30, 'baseline', ?)
+      """,
+      [best_id, case_id, metric_id, best_sha, now]
+    )
+
+    Repo.query!(
+      "UPDATE campaigns SET status = 'optimizing', best_sha = ?, current_spec_revision_id = ?, updated_at = ? WHERE id = ?",
+      [best_sha, spec_id, now, campaign_id]
+    )
+
+    %{spec_id: spec_id, case_id: case_id, metric_id: metric_id, sampling_id: sampling_id}
+  end
+
+  defp harness_args do
+    %{
+      "reference_path" => "kernel/reference.py",
+      "correctness_paths" => ["kernel/test_correctness.py"],
+      "benchmark_path" => "kernel/bench.py",
+      "protected_paths" => [
+        "kernel/reference.py",
+        "kernel/test_correctness.py",
+        "kernel/bench.py"
+      ]
+    }
+  end
+end

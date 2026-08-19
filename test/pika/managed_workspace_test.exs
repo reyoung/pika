@@ -1,14 +1,14 @@
 defmodule Pika.ManagedWorkspaceTest do
   use ExUnit.Case, async: false
 
-  alias Pika.Stage0.Git
-  alias Pika.Test.{Phase1Fixtures, Stage0Fixtures}
+  alias Pika.Git
+  alias Pika.Test.{AlignmentFixtures, CampaignFixtures}
   alias Pika.{Config, Workspace, WorkspaceLock}
 
   test "rejects a dirty Managed Repo before creating the Workspace" do
-    repo = Stage0Fixtures.git_repo(dirty: true)
+    repo = AlignmentFixtures.git_repo(dirty: true)
     root = missing_workspace()
-    config_path = Phase1Fixtures.config_file()
+    config_path = CampaignFixtures.config_file()
     {:ok, config} = Config.load(config_path, workspace: root, repo: repo)
 
     assert {:error, {:invalid_managed_repo, _, _}} = Workspace.plan(config)
@@ -16,10 +16,10 @@ defmodule Pika.ManagedWorkspaceTest do
   end
 
   test "holds an OS advisory lock with diagnostics and rejects a second owner without writes" do
-    repo = Stage0Fixtures.git_repo()
+    repo = AlignmentFixtures.git_repo()
     first_root = missing_workspace()
     second_root = missing_workspace()
-    config_path = Phase1Fixtures.config_file()
+    config_path = CampaignFixtures.config_file()
     {:ok, first_config} = Config.load(config_path, workspace: first_root, repo: repo)
     {:ok, second_config} = Config.load(config_path, workspace: second_root, repo: repo)
     {:ok, first_plan} = Workspace.plan(first_config)
@@ -83,9 +83,9 @@ defmodule Pika.ManagedWorkspaceTest do
   end
 
   defp initialized_managed_workspace do
-    repo = Stage0Fixtures.git_repo()
+    repo = AlignmentFixtures.git_repo()
     root = missing_workspace()
-    config_path = Phase1Fixtures.config_file()
+    config_path = CampaignFixtures.config_file()
     {:ok, config} = Config.load(config_path, workspace: root, repo: repo)
     {:ok, plan} = Workspace.plan(config)
     name = unique_name("identity")
@@ -113,7 +113,7 @@ defmodule Pika.ManagedWorkspaceTest do
   end
 
   defp missing_workspace do
-    root = Phase1Fixtures.workspace()
+    root = CampaignFixtures.workspace()
     File.rmdir!(root)
     root
   end
