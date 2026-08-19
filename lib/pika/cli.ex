@@ -3,6 +3,13 @@ defmodule Pika.CLI do
 
   alias Pika.Stage0.{Auth, Campaign, Workspace}
 
+  def main(["serve" | argv]) do
+    case parse_serve(argv) do
+      {:ok, opts} -> run_serve(opts)
+      {:error, message} -> abort(message)
+    end
+  end
+
   def main(["stage0-demo", repo | argv]) do
     case parse_stage0(argv) do
       {:ok, opts} -> run_stage0(repo, opts)
@@ -11,6 +18,31 @@ defmodule Pika.CLI do
   end
 
   def main(_argv), do: abort(usage())
+
+  def parse_serve(argv) do
+    {opts, args, invalid} =
+      OptionParser.parse(argv,
+        strict: [
+          workspace: :string,
+          repo: :string,
+          config: :string,
+          host: :string,
+          port: :integer
+        ]
+      )
+
+    errors =
+      []
+      |> maybe_cli_error(invalid != [], "invalid options: #{inspect(invalid)}")
+      |> maybe_cli_error(args != [], "unexpected arguments: #{inspect(args)}")
+      |> maybe_cli_error(is_nil(opts[:workspace]), "--workspace is required")
+      |> maybe_cli_error(is_nil(opts[:config]), "--config is required")
+
+    case errors do
+      [] -> {:ok, opts}
+      values -> {:error, Enum.join(values, "\n")}
+    end
+  end
 
   def parse_stage0(argv) do
     {opts, args, invalid} =
@@ -43,6 +75,50 @@ defmodule Pika.CLI do
 
       true ->
         {:ok, opts}
+    end
+  end
+
+  defp run_serve(opts) do
+    config_opts =
+      [workspace: opts[:workspace]]
+      |> put_if_present(:repo, opts[:repo])
+      |> put_if_present(:host, opts[:host])
+      |> put_if_present(:port, opts[:port])
+
+    with {:ok, config} <- Pika.Config.load(opts[:config], config_opts),
+         preflight <- Pika.Preflight.run(config.backend),
+         {:ok, plan} <- Pika.Workspace.plan(config),
+         :ok <- configure_serve(config, plan, preflight),
+         %{token: token} <- Pika.Auth.generate(),
+         {:ok, _apps} <- Application.ensure_all_started(:pika),
+         snapshot <- Pika.Runtime.snapshot() do
+      browser_host = if config.host in ["0.0.0.0", "::"], do: "127.0.0.1", else: config.host
+      IO.puts("Pika Workspace: #{snapshot.workspace.root}")
+      IO.puts("Pika Repo mode: #{snapshot.workspace.mode}")
+      IO.puts("Pika Campaign: #{snapshot.campaign.id} (#{snapshot.recovery |> recovery_label()})")
+      IO.puts("Pika URL: http://#{browser_host}:#{config.port}/?token=#{token}")
+      wait_forever()
+    else
+      {:error, reason} -> abort(format_error(reason))
+    end
+  end
+
+  defp configure_serve(config, plan, preflight) do
+    with :ok <- configure_endpoint(config.host, config.port) do
+      Application.put_env(:pika, :runtime_mode, :serve)
+      Application.put_env(:pika, :workspace_plan, plan)
+      Application.put_env(:pika, :preflight, preflight)
+
+      Application.put_env(:pika, Pika.Repo,
+        database: Path.join(config.workspace, "pika.sqlite3"),
+        pool_size: 1,
+        journal_mode: :wal,
+        synchronous: :full,
+        foreign_keys: :on,
+        busy_timeout: 5_000
+      )
+
+      :ok
     end
   end
 
@@ -116,6 +192,28 @@ defmodule Pika.CLI do
     end
   end
 
+  defp put_if_present(options, _key, nil), do: options
+  defp put_if_present(options, key, value), do: Keyword.put(options, key, value)
+
+  defp maybe_cli_error(errors, false, _message), do: errors
+  defp maybe_cli_error(errors, true, message), do: errors ++ [message]
+
+  defp recovery_label(:initialized), do: "initialized"
+  defp recovery_label(:recovered), do: "recovered"
+  defp recovery_label("initialized"), do: "initialized"
+  defp recovery_label("recovered"), do: "recovered"
+  defp recovery_label(%{"status" => "blocked"}), do: "blocked"
+  defp recovery_label({:blocked, _reason}), do: "blocked"
+  defp recovery_label(value), do: inspect(value)
+
+  defp format_error({:invalid_config, errors}),
+    do: "configuration validation failed:\n" <> Enum.map_join(errors, "\n", &"  - #{&1}")
+
+  defp format_error({:immutable_config_changed, errors}),
+    do: "immutable configuration changed:\n" <> Enum.map_join(errors, "\n", &"  - #{&1}")
+
+  defp format_error(reason), do: "pika serve failed: #{inspect(reason)}"
+
   defp parse_ip(host) do
     case :inet.parse_address(String.to_charlist(host)) do
       {:ok, ip} -> {:ok, ip}
@@ -140,6 +238,12 @@ defmodule Pika.CLI do
 
   defp usage do
     """
+    Usage: pika serve --workspace PATH --config PIKA_YAML [options]
+
+      --repo PATH        Manage an existing clean Git repository
+      --host IP          Override server.host (default 127.0.0.1)
+      --port PORT        Override server.port (default 8080)
+
     Usage: pika stage0-demo <repo> [options]
 
       --backend codex|cursor

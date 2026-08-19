@@ -189,3 +189,29 @@ code { color: #8ee8ff; }
   .conversation-panel { height: calc(100vh - 88px); min-height: 560px; }
   .spec-panel, .review-panel { max-height: none; }
 }
+
+.phase1-shell { min-height: 100vh; max-width: 1180px; margin: 0 auto; padding: 32px; }
+.diagnostic-hero { display: grid; grid-template-columns: 1fr 1.4fr; gap: 28px; padding: 26px; }
+.diagnostic-hero h1 { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 18px; overflow-wrap: anywhere; }
+.identity-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.identity-grid div, .sqlite-list div { padding: 11px; border-radius: 9px; background: #ffffff06; }
+.identity-grid dt, .sqlite-list dt { margin-bottom: 5px; color: #71838c; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.identity-grid dd, .sqlite-list dd { margin: 0; color: #c5d1d6; font-size: 12px; overflow-wrap: anywhere; }
+.diagnostic-grid { display: grid; grid-template-columns: 1.3fr .7fr; gap: 18px; margin-top: 18px; }
+.diagnostic-panel { min-height: 360px; }
+.diagnostic-list { padding: 10px 22px 20px; }
+.diagnostic-row { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 12px 0; border-bottom: 1px solid #1f3038; }
+.diagnostic-row strong, .diagnostic-row small { display: block; }
+.diagnostic-row small { margin-top: 3px; color: #71838c; font-size: 10px; overflow-wrap: anywhere; }
+.diagnostic-dot { width: 8px; height: 8px; border-radius: 50%; background: #71838c; }
+.diagnostic-ok { background: #a6d85e; box-shadow: 0 0 12px #a6d85e66; }
+.diagnostic-missing, .diagnostic-failed { background: #e28383; }
+.phase-label { color: #61737c; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.sqlite-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; padding: 12px 22px; margin: 0; }
+.diagnostic-note { padding: 12px 22px; color: #71838c; font-size: 11px; line-height: 1.6; }
+
+@media (max-width: 800px) {
+  .phase1-shell { padding: 16px; }
+  .diagnostic-hero, .diagnostic-grid { grid-template-columns: 1fr; }
+  .identity-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -10,7 +10,7 @@ Pika 是一个常驻的单租户 HTTP 服务，用多个 Coding Agent 并行完�
 
 ## 当前状态
 
-**v1 设计已冻结；Phase 0 Backend conformance 与 Stage0 Alignment → H20 Baseline Preview 均已实现并通过真实验收。**
+**v1 设计已冻结；Phase 0 Backend conformance、Phase 1 Workspace 持久化与 Stage0 Alignment → H20 Baseline Preview 均已实现并通过验收。**
 
 - 后端：Elixir/OTP、Phoenix、LiveView、SQLite WAL
 - Agent 协议：Codex App Server 原生协议、Cursor ACP v1
@@ -87,6 +87,49 @@ Alignment、setup merge 和 Baseline Prompt 是 `priv/prompts/stage0/*.md.eex` �
 确定性全流程、两个真实 Backend 的 Boundary MCP smoke 及实现边界见 [Stage0 Demo 文档](docs/v0/phases/00b-stage0-alignment-baseline-demo.md)。
 
 原始 Full Baseline H20 E2E 已在 WeLM v4.5 80A3 verify-attention 的固定 committed SHA 上通过：3 个 trace case、90/90 有效 Pair、3/3 correctness，以及 full/source NCU report。脱敏后的结构化结果位于 `artifacts/stage0-demo/welm-h20-gpu-e2e.json`；该历史证据早于 `submit_iteration_sample` 门禁，新的 Sampling 状态由单元/Fake Backend E2E 覆盖，完整 H20 流程需后续重新生成证据。
+
+## Phase 1 持久化 Server
+
+复制并编辑示例 YAML，然后以前台进程启动一个 Owned Repo Workspace：
+
+```bash
+cp config/pika.example.yaml /tmp/pika.yaml
+./bin/pika serve \
+  --workspace /absolute/path/to/pika-workspace \
+  --config /tmp/pika.yaml
+```
+
+显式管理一个已有且 clean 的本地 Git 仓库时增加：
+
+```text
+--repo /absolute/path/to/repository
+```
+
+此模式会在 Workspace 的 `repo/` 建立软链接，并在目标仓库 Git common directory 的 `.pika.lock` 上持续持有 OS advisory lock。第二个 Pika 进程不能同时接管该仓库。
+
+正式 Release 同样提供前台 `serve` 命令：
+
+```bash
+MIX_ENV=prod mix release
+_build/prod/rel/pika/bin/pika serve \
+  --workspace /absolute/path/to/pika-workspace \
+  --config /tmp/pika.yaml
+```
+
+每次启动只打印一次带 256-bit Token 的 URL。浏览器访问后 Token 会换成 `HttpOnly`、`SameSite=Strict` Cookie 并立即从地址栏移除；JSON API、SSE 和 `/mcp` 使用 Bearer Token。重启会使旧 Token 与 Cookie 失效。
+
+固定 Workspace 布局为：
+
+```text
+workspace/
+├── repo/
+├── attempts/
+├── artifacts/{plans,patches,profiles,prompts,logs}/
+├── pika.sqlite3
+└── config.json
+```
+
+`config.json` 是经过字段校验的有效配置快照；Workspace、Repo identity、监听地址和 Backend 协议配置不可变。Phase 1 故障验收证据见 [`artifacts/phase-1/recovery-report.md`](artifacts/phase-1/recovery-report.md)。
 
 ## v1 非目标
 

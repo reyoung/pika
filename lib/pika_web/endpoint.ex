@@ -5,8 +5,8 @@ defmodule PikaWeb.Endpoint do
 
   @session_options [
     store: :cookie,
-    key: "_pika_stage0",
-    signing_salt: "pika-stage0-cookie",
+    key: "_pika",
+    signing_salt: "pika-cookie",
     same_site: "Strict",
     http_only: true
   ]

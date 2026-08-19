@@ -5,6 +5,9 @@ config :logger, :console,
   metadata: [:request_id]
 
 config :phoenix, :json_library, Jason
+config :phoenix, :filter_parameters, ["password", "secret", "token", "authorization"]
+
+config :pika, ecto_repos: [Pika.Repo]
 
 config :esbuild,
   version: "0.25.9",

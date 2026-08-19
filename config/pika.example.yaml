@@ -1,0 +1,20 @@
+server:
+  host: 127.0.0.1
+  port: 8080
+
+backend:
+  type: codex_app_server
+  command:
+    - codex
+    - app-server
+    - --listen
+    - stdio://
+  protocol_config: {}
+
+campaign:
+  plan: true
+  max_attempts: null
+  history_n: 10
+  reference_catalog: []
+  stop_conditions:
+    mode: all_goals

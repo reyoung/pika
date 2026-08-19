@@ -11,10 +11,25 @@ defmodule PikaWeb.Router do
     plug PikaWeb.Stage0Auth
   end
 
-  scope "/" do
-    pipe_through :browser
-    live "/", PikaWeb.AlignmentLive, :index
+  pipeline :api do
+    plug :accepts, ["json"]
+    plug PikaWeb.APIAuth
   end
 
-  forward "/mcp", Pika.Stage0.MCP.Router
+  scope "/" do
+    pipe_through :browser
+    get "/", PikaWeb.RootController, :index
+  end
+
+  scope "/api", PikaWeb do
+    pipe_through :api
+    get "/status", StatusController, :show
+  end
+
+  scope "/", PikaWeb do
+    pipe_through :api
+    get "/events", StatusController, :events
+  end
+
+  forward "/mcp", PikaWeb.MCPGateway
 end

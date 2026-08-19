@@ -1,4 +1,4 @@
-defmodule PikaWeb.Stage0Auth do
+defmodule PikaWeb.Auth do
   @moduledoc false
 
   import Plug.Conn
@@ -7,30 +7,22 @@ defmodule PikaWeb.Stage0Auth do
   def init(opts), do: opts
 
   def call(conn, _opts) do
-    if Application.get_env(:pika, :runtime_mode, :stage0) == :serve do
-      PikaWeb.Auth.call(conn, [])
-    else
-      call_stage0(conn)
-    end
-  end
-
-  defp call_stage0(conn) do
     conn = fetch_query_params(conn)
 
     cond do
       is_binary(conn.query_params["token"]) -> exchange_token(conn, conn.query_params["token"])
-      Pika.Stage0.Auth.authenticated_marker?(get_session(conn, :stage0_auth)) -> conn
+      Pika.Auth.authenticated_marker?(get_session(conn, :pika_auth)) -> conn
       true -> unauthorized(conn)
     end
   end
 
   defp exchange_token(conn, token) do
-    case Pika.Stage0.Auth.authenticate(token) do
+    case Pika.Auth.authenticate(token) do
       {:ok, marker} ->
         conn
-        |> put_session(:stage0_auth, marker)
+        |> put_session(:pika_auth, marker)
         |> configure_session(renew: true)
-        |> Controller.redirect(to: "/")
+        |> Controller.redirect(to: conn.request_path)
         |> halt()
 
       _ ->
@@ -40,9 +32,9 @@ defmodule PikaWeb.Stage0Auth do
 
   defp unauthorized(conn) do
     body = """
-    <!doctype html><html><head><meta charset="utf-8"><title>Pika Stage0</title></head>
+    <!doctype html><html><head><meta charset="utf-8"><title>Pika</title></head>
     <body style="font-family:system-ui;background:#071015;color:#dfe8ec;padding:4rem">
-      <h1>Pika Stage0</h1><p>Use the tokenized URL printed by <code>pika stage0-demo</code>.</p>
+      <h1>Pika</h1><p>Use the tokenized URL printed by <code>pika serve</code>.</p>
     </body></html>
     """
 

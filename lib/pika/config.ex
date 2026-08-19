@@ -1,0 +1,331 @@
+defmodule Pika.Config do
+  @moduledoc false
+
+  alias Pika.Paths
+
+  @root_fields ~w(server backend campaign)
+  @server_fields ~w(host port)
+  @backend_fields ~w(type command protocol_config)
+  @campaign_fields ~w(plan max_attempts history_n reference_catalog stop_conditions)
+  @backend_types ~w(codex_app_server cursor_acp)
+
+  defstruct [
+    :source_path,
+    :workspace,
+    :repo,
+    :host,
+    :port,
+    :backend,
+    :campaign,
+    :snapshot,
+    :existing_snapshot
+  ]
+
+  def load(path, opts) when is_binary(path) and is_list(opts) do
+    with {:ok, workspace} <- required_workspace(opts),
+         {:ok, yaml} <- read_yaml(path),
+         {:ok, existing} <- read_existing(workspace),
+         {:ok, config} <- validate(path, workspace, yaml, existing, opts),
+         :ok <- compare_immutable(config) do
+      {:ok, config}
+    end
+  end
+
+  defp required_workspace(opts) do
+    case Keyword.get(opts, :workspace) do
+      value when is_binary(value) and value != "" -> Paths.canonical(value)
+      _ -> {:error, {:invalid_config, ["workspace: --workspace is required"]}}
+    end
+  end
+
+  defp read_yaml(path) do
+    with {:ok, source_path} <- canonical_file(path),
+         {:ok, value} <- YamlElixir.read_from_file(source_path) do
+      cond do
+        is_nil(value) -> {:ok, %{}}
+        is_map(value) -> {:ok, stringify_keys(value)}
+        true -> {:error, {:invalid_config, ["config: YAML document must be a mapping"]}}
+      end
+    else
+      {:error, %YamlElixir.ParsingError{} = error} ->
+        {:error, {:invalid_config, ["config: #{Exception.message(error)}"]}}
+
+      {:error, :enoent} ->
+        {:error, {:invalid_config, ["config: file does not exist: #{path}"]}}
+
+      {:error, reason} ->
+        {:error, {:invalid_config, ["config: #{inspect(reason)}"]}}
+    end
+  end
+
+  defp canonical_file(path) do
+    expanded = Path.expand(path)
+
+    if File.regular?(expanded) do
+      with {:ok, parent} <- Paths.canonical(Path.dirname(expanded)) do
+        {:ok, Path.join(parent, Path.basename(expanded))}
+      end
+    else
+      {:error, :enoent}
+    end
+  end
+
+  defp read_existing(workspace) do
+    path = Path.join(workspace, "config.json")
+
+    cond do
+      not File.exists?(path) ->
+        {:ok, nil}
+
+      not File.regular?(path) ->
+        {:error, {:invalid_workspace, "config.json is not a regular file"}}
+
+      true ->
+        case File.read(path) do
+          {:ok, contents} ->
+            case Jason.decode(contents) do
+              {:ok, %{"schema_version" => 1} = value} ->
+                {:ok, value}
+
+              {:ok, _} ->
+                {:error, {:invalid_workspace, "unsupported config.json schema"}}
+
+              {:error, error} ->
+                {:error, {:invalid_workspace, "invalid config.json: #{inspect(error)}"}}
+            end
+
+          {:error, reason} ->
+            {:error, {:invalid_workspace, "cannot read config.json: #{inspect(reason)}"}}
+        end
+    end
+  end
+
+  defp validate(path, workspace, yaml, existing, opts) do
+    errors =
+      unknown_fields(yaml, @root_fields, "config") ++
+        unknown_fields(map(yaml["server"]), @server_fields, "server") ++
+        unknown_fields(map(yaml["backend"]), @backend_fields, "backend") ++
+        unknown_fields(map(yaml["campaign"]), @campaign_fields, "campaign") ++
+        section_errors(yaml)
+
+    server = map(yaml["server"])
+    backend = map(yaml["backend"])
+    campaign = map(yaml["campaign"])
+
+    host = Keyword.get(opts, :host) || server["host"] || "127.0.0.1"
+    port = Keyword.get(opts, :port) || server["port"] || 8080
+    type = backend["type"] || "codex_app_server"
+    command = backend["command"] || default_command(type)
+    protocol_config = backend["protocol_config"] || %{}
+    plan = Map.get(campaign, "plan", true)
+    max_attempts = Map.get(campaign, "max_attempts")
+    history_n = Map.get(campaign, "history_n", 10)
+    reference_catalog = Map.get(campaign, "reference_catalog", [])
+    stop_conditions = Map.get(campaign, "stop_conditions", %{})
+
+    errors =
+      errors ++
+        validate_host(host) ++
+        validate_port(port) ++
+        validate_backend(type, command, protocol_config) ++
+        validate_campaign(plan, max_attempts, history_n, reference_catalog, stop_conditions)
+
+    with [] <- errors,
+         {:ok, repo} <- resolve_repo(Keyword.get(opts, :repo), existing),
+         {:ok, source_path} <- canonical_file(path) do
+      immutable = %{
+        "workspace" => workspace,
+        "repo_mode" => if(repo, do: "managed_repo", else: "owned_repo"),
+        "managed_repo" => if(repo, do: %{"canonical_path" => repo}, else: nil),
+        "listen" => %{"host" => host, "port" => port},
+        "backend" => %{
+          "type" => type,
+          "command" => normalize_command(command),
+          "protocol_config" => protocol_config
+        }
+      }
+
+      mutable = %{
+        "plan" => plan,
+        "max_attempts" => max_attempts,
+        "history_n" => history_n,
+        "reference_catalog" => reference_catalog,
+        "stop_conditions" => stop_conditions
+      }
+
+      {:ok,
+       %__MODULE__{
+         source_path: source_path,
+         workspace: workspace,
+         repo: repo,
+         host: host,
+         port: port,
+         backend: immutable["backend"],
+         campaign: mutable,
+         snapshot: %{
+           "schema_version" => 1,
+           "immutable" => immutable,
+           "mutable" => mutable
+         },
+         existing_snapshot: existing
+       }}
+    else
+      [_ | _] = errors -> {:error, {:invalid_config, errors}}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp resolve_repo(repo, _existing) when is_binary(repo) and repo != "",
+    do: Paths.canonical(repo)
+
+  defp resolve_repo(nil, %{
+         "immutable" => %{
+           "repo_mode" => "managed_repo",
+           "managed_repo" => %{"canonical_path" => path}
+         }
+       }),
+       do: {:ok, path}
+
+  defp resolve_repo(nil, _existing), do: {:ok, nil}
+
+  defp compare_immutable(%__MODULE__{existing_snapshot: nil}), do: :ok
+
+  defp compare_immutable(%__MODULE__{existing_snapshot: existing, snapshot: current}) do
+    old = immutable_comparison(existing["immutable"])
+    new = immutable_comparison(current["immutable"])
+
+    if old == new do
+      :ok
+    else
+      differences =
+        old
+        |> flattened()
+        |> Enum.reduce([], fn {path, value}, acc ->
+          case Map.fetch(flattened(new), path) do
+            {:ok, ^value} ->
+              acc
+
+            {:ok, new_value} ->
+              [
+                "#{path}: immutable value changed from #{inspect(value)} to #{inspect(new_value)}"
+                | acc
+              ]
+
+            :error ->
+              ["#{path}: immutable value is missing" | acc]
+          end
+        end)
+        |> Enum.reverse()
+
+      {:error, {:immutable_config_changed, differences}}
+    end
+  end
+
+  defp immutable_comparison(immutable) do
+    managed = immutable["managed_repo"]
+
+    %{
+      "workspace" => immutable["workspace"],
+      "repo_mode" => immutable["repo_mode"],
+      "managed_repo" => if(managed, do: Map.take(managed, ["canonical_path"]), else: nil),
+      "listen" => immutable["listen"],
+      "backend" => immutable["backend"]
+    }
+  end
+
+  defp section_errors(yaml) do
+    for field <- @root_fields,
+        value = yaml[field],
+        not is_nil(value) and not is_map(value),
+        do: "#{field}: must be a mapping"
+  end
+
+  defp validate_host(host) when is_binary(host) do
+    case :inet.parse_address(String.to_charlist(host)) do
+      {:ok, _} -> []
+      _ -> ["server.host: must be a numeric IPv4 or IPv6 address"]
+    end
+  end
+
+  defp validate_host(_), do: ["server.host: must be a string"]
+
+  defp validate_port(port) when is_integer(port) and port in 1..65_535, do: []
+  defp validate_port(_), do: ["server.port: must be an integer from 1 through 65535"]
+
+  defp validate_backend(type, command, protocol_config) do
+    []
+    |> maybe_error(
+      type not in @backend_types,
+      "backend.type: must be codex_app_server or cursor_acp"
+    )
+    |> maybe_error(
+      not valid_command?(command),
+      "backend.command: must be a command string or a non-empty list of strings"
+    )
+    |> maybe_error(not is_map(protocol_config), "backend.protocol_config: must be a mapping")
+  end
+
+  defp validate_campaign(plan, max_attempts, history_n, references, stop_conditions) do
+    stop_mode =
+      if is_map(stop_conditions), do: Map.get(stop_conditions, "mode", "all_goals"), else: nil
+
+    []
+    |> maybe_error(not is_boolean(plan), "campaign.plan: must be true or false")
+    |> maybe_error(
+      not (is_nil(max_attempts) or (is_integer(max_attempts) and max_attempts >= 0)),
+      "campaign.max_attempts: must be null or a non-negative integer"
+    )
+    |> maybe_error(
+      not (is_integer(history_n) and history_n >= 0),
+      "campaign.history_n: must be a non-negative integer"
+    )
+    |> maybe_error(not is_list(references), "campaign.reference_catalog: must be a list")
+    |> maybe_error(not is_map(stop_conditions), "campaign.stop_conditions: must be a mapping")
+    |> maybe_error(
+      stop_mode not in ["all_goals", "any_goal"],
+      "campaign.stop_conditions.mode: must be all_goals or any_goal"
+    )
+  end
+
+  defp maybe_error(errors, false, _message), do: errors
+  defp maybe_error(errors, true, message), do: errors ++ [message]
+
+  defp valid_command?(command) when is_binary(command), do: String.trim(command) != ""
+
+  defp valid_command?([first | rest]),
+    do: Enum.all?([first | rest], &(is_binary(&1) and &1 != ""))
+
+  defp valid_command?(_), do: false
+
+  defp normalize_command(command) when is_binary(command), do: [command]
+  defp normalize_command(command), do: command
+
+  defp default_command("cursor_acp"), do: ["cursor-agent", "acp"]
+  defp default_command(_), do: ["codex", "app-server", "--listen", "stdio://"]
+
+  defp unknown_fields(map, allowed, prefix) do
+    map
+    |> Map.keys()
+    |> Enum.reject(&(&1 in allowed))
+    |> Enum.sort()
+    |> Enum.map(&"#{prefix}.#{&1}: unknown field")
+  end
+
+  defp map(value) when is_map(value), do: value
+  defp map(_), do: %{}
+
+  defp stringify_keys(map) when is_map(map),
+    do: Map.new(map, fn {key, value} -> {to_string(key), stringify_keys(value)} end)
+
+  defp stringify_keys(list) when is_list(list), do: Enum.map(list, &stringify_keys/1)
+  defp stringify_keys(value), do: value
+
+  defp flattened(map), do: flatten(map, nil, %{})
+
+  defp flatten(map, prefix, acc) when is_map(map) do
+    Enum.reduce(map, acc, fn {key, value}, inner ->
+      path = if prefix, do: "#{prefix}.#{key}", else: key
+      if is_map(value), do: flatten(value, path, inner), else: Map.put(inner, path, value)
+    end)
+  end
+end

@@ -3,5 +3,6 @@ ExUnit.start(
 )
 
 Code.require_file("support/stage0_fixtures.ex", __DIR__)
+Code.require_file("support/phase1_fixtures.ex", __DIR__)
 Code.require_file("support/conn_case.ex", __DIR__)
 Code.require_file("support/stage0_agent_backend.ex", __DIR__)
