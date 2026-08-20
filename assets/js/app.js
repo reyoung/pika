@@ -5,8 +5,46 @@ import * as echarts from "echarts/core"
 import {LineChart} from "echarts/charts"
 import {GridComponent, LegendComponent, TooltipComponent} from "echarts/components"
 import {CanvasRenderer} from "echarts/renderers"
+import hljs from "highlight.js/lib/core"
+import bash from "highlight.js/lib/languages/bash"
+import c from "highlight.js/lib/languages/c"
+import cmake from "highlight.js/lib/languages/cmake"
+import cpp from "highlight.js/lib/languages/cpp"
+import elixir from "highlight.js/lib/languages/elixir"
+import go from "highlight.js/lib/languages/go"
+import ini from "highlight.js/lib/languages/ini"
+import java from "highlight.js/lib/languages/java"
+import javascript from "highlight.js/lib/languages/javascript"
+import json from "highlight.js/lib/languages/json"
+import makefile from "highlight.js/lib/languages/makefile"
+import plaintext from "highlight.js/lib/languages/plaintext"
+import python from "highlight.js/lib/languages/python"
+import rust from "highlight.js/lib/languages/rust"
+import toml from "highlight.js/lib/languages/ini"
+import typescript from "highlight.js/lib/languages/typescript"
+import yaml from "highlight.js/lib/languages/yaml"
 
 echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
+
+Object.entries({
+  bash,
+  c,
+  cmake,
+  cpp,
+  elixir,
+  go,
+  ini,
+  java,
+  javascript,
+  json,
+  makefile,
+  plaintext,
+  python,
+  rust,
+  toml,
+  typescript,
+  yaml
+}).forEach(([name, language]) => hljs.registerLanguage(name, language))
 
 const csrfToken = document.querySelector("meta[name='csrf-token']")?.getAttribute("content")
 
@@ -97,6 +135,34 @@ Hooks.CopyMarkdown = {
       this.el.textContent = this.defaultLabel
       this.el.classList.remove("copied")
     }, 1400)
+  }
+}
+
+Hooks.ReferenceSyntaxHighlight = {
+  mounted() {
+    this.highlightSource()
+  },
+  updated() {
+    this.highlightSource()
+  },
+  highlightSource() {
+    const code = this.el.querySelector("code")
+    if (!code) return
+
+    const source = code.textContent || ""
+    const language = this.el.dataset.language || "plaintext"
+    code.textContent = source
+    code.className = "hljs"
+
+    if (!hljs.getLanguage(language)) return
+
+    try {
+      const result = hljs.highlight(source, {language, ignoreIllegals: true})
+      code.innerHTML = result.value
+      code.classList.add(`language-${language}`)
+    } catch (_error) {
+      code.textContent = source
+    }
   }
 }
 

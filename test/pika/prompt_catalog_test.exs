@@ -15,7 +15,9 @@ defmodule Pika.PromptCatalogTest do
     assert {:ok, alignment} =
              PromptCatalog.render(:alignment, %{
                setup_worktree: "/tmp/setup",
-               source_sha: "abc"
+               source_sha: "abc",
+               revision: 1,
+               setup_branch: "pika/setup/1"
              })
 
     assert alignment =~ "latency"
@@ -31,9 +33,21 @@ defmodule Pika.PromptCatalogTest do
     assert alignment =~ "Case count × Metric count × pair_count"
     assert alignment =~ "never change pair_count when the user only corrects the number of Cases"
     assert alignment =~ "Never invent, infer or apply defaults for either"
+    assert alignment =~ "Reference Review Evidence"
+    assert alignment =~ "at least one of the submitted performance Metrics"
+    assert alignment =~ "register_artifact with kind `reference_review_evidence`"
+    assert alignment =~ "artifacts/reference-review/"
+    assert alignment =~ "submit_reference_review"
+    assert alignment =~ "not the full Baseline"
     refute alignment =~ "call ask_question with"
 
-    assert {:ok, setup} = PromptCatalog.render(:setup_merge, %{source_sha: "abc"})
+    assert {:ok, setup} =
+             PromptCatalog.render(:setup_merge, %{
+               source_sha: "abc",
+               revision: 1,
+               setup_branch: "pika/setup/1"
+             })
+
     assert setup =~ "complete_setup_merge"
 
     assert {:ok, baseline} =
@@ -52,6 +66,8 @@ defmodule Pika.PromptCatalogTest do
     assert baseline =~ "genuinely independent A/B execution"
     assert baseline =~ "Never duplicate, relabel, interpolate or"
     assert baseline =~ "do not manufacture a larger JSONL"
+    assert baseline =~ "call reopen_baseline_definition exactly once"
+    assert baseline =~ "do not ask for revision only in prose"
 
     benchmark = %{"pair_count" => 8, "min_valid_pairs" => 6}
 
@@ -102,6 +118,14 @@ defmodule Pika.PromptCatalogTest do
              })
 
     assert sync =~ "exactly 8 alternating Best metric pairs"
+
+    for execution_prompt <- [alignment, baseline, iteration, integration, sync] do
+      assert execution_prompt =~ "uv venv .venv"
+      assert execution_prompt =~ "uv pip install --python .venv/bin/python"
+      assert execution_prompt =~ "`uv pip install --system`"
+      assert execution_prompt =~ "global Python environment"
+      assert execution_prompt =~ "dependency manifests or"
+    end
   end
 
   test "supports absolute Config overrides and reports invalid templates" do

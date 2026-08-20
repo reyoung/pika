@@ -23,7 +23,8 @@ defmodule PikaWeb.RootController do
     )
   end
 
-  def control(conn, _params) do
-    Phoenix.LiveView.Controller.live_render(conn, PikaWeb.ControlLive, session: get_session(conn))
+  def control(conn, params) do
+    session = Map.put(get_session(conn), "control_tab", params["tab"])
+    Phoenix.LiveView.Controller.live_render(conn, PikaWeb.ControlLive, session: session)
   end
 end

@@ -20,7 +20,7 @@ defmodule Pika.CampaignProcessRecoveryTest do
     assert {:ok, 200, _headers, body} = bearer_get(port_number, "/api/status", first.token)
     first_status = Jason.decode!(body)
     campaign_id = first_status["campaign"]["id"]
-    refute sqlite_dump(root) =~ first.token
+    refute sqlite_storage_bytes(root) =~ first.token
 
     kill_9(first)
     first_port = first.port
@@ -45,12 +45,12 @@ defmodule Pika.CampaignProcessRecoveryTest do
     assert second_status["campaign"]["id"] == campaign_id
     assert second_status["recovery"] == "recovered"
     assert second_status["workspace"]["mode"] == "owned_repo"
-    refute sqlite_dump(root) =~ second.token
+    refute sqlite_storage_bytes(root) =~ second.token
 
     assert {:ok, 200, _headers, _body} = mcp_initialize(port_number, second.token)
     assert {:ok, 302, second_headers, _body} = http_get(second.url)
     second_cookie = response_cookie(second_headers)
-    assert {:ok, 200, _headers, html} = cookie_get(port_number, "/", second_cookie)
+    assert {:ok, 200, _headers, html} = cookie_get(port_number, "/alignment", second_cookie)
     assert html =~ "Alignment → GPU Baseline"
     assert html =~ campaign_id
 
@@ -123,6 +123,110 @@ defmodule Pika.CampaignProcessRecoveryTest do
     assert status["campaign"]["id"] == campaign_id
     assert status["campaign"]["status"] == "blocked"
     assert inspect(status["recovery"]) =~ "artifact_verification_failed"
+
+    Process.sleep(300)
+    assert campaign_status(root) == "blocked"
+
+    assert {:ok, 302, blocked_headers, _body} = http_get(blocked.url)
+    blocked_cookie = response_cookie(blocked_headers)
+    assert {:ok, 200, _headers, html} = cookie_get(port_number, "/alignment", blocked_cookie)
+    assert html =~ "Alignment Campaign 恢复已阻止"
+  end
+
+  test "a legacy setup Artifact is preserved under artifacts and recovery continues" do
+    root = missing_workspace()
+    port_number = Pika.MCP.ProbeServer.available_port()
+    first = start_server(root, port_number)
+    on_exit(fn -> stop_server(first) end)
+
+    assert {:ok, 200, _headers, body} = bearer_get(port_number, "/api/status", first.token)
+    campaign_id = Jason.decode!(body)["campaign"]["id"]
+    kill_9(first)
+    first_port = first.port
+    assert_receive {^first_port, {:exit_status, _status}}, 10_000
+
+    relative = "setup/1/reference_review_evidence.json"
+    source = Path.join(root, relative)
+    contents = "{\"latency_us\":12.5}\n"
+    File.write!(source, contents)
+    artifact_id = Ecto.UUID.generate()
+    sha256 = :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower)
+
+    insert_artifact(
+      root,
+      campaign_id,
+      artifact_id,
+      relative,
+      sha256,
+      byte_size(contents),
+      "reference_review_evidence",
+      "application/json"
+    )
+
+    recovered = start_server(root, port_number)
+    on_exit(fn -> stop_server(recovered) end)
+    assert recovered.output =~ "(recovered)"
+
+    migrated = "artifacts/recovered/#{artifact_id}/reference_review_evidence.json"
+    assert artifact_path(root, artifact_id) == migrated
+    assert File.read!(source) == contents
+    assert File.read!(Path.join(root, migrated)) == contents
+
+    assert {:ok, 200, _headers, recovered_body} =
+             bearer_get(port_number, "/api/status", recovered.token)
+
+    assert Jason.decode!(recovered_body)["recovery"] == "recovered"
+  end
+
+  test "recovery accepts an advanced Best descended from the historical Campaign Base" do
+    root = missing_workspace()
+    port_number = Pika.MCP.ProbeServer.available_port()
+    first = start_server(root, port_number)
+    on_exit(fn -> stop_server(first) end)
+
+    assert {:ok, 200, _headers, body} = bearer_get(port_number, "/api/status", first.token)
+    first_status = Jason.decode!(body)
+    campaign_id = first_status["campaign"]["id"]
+    historical_base = first_status["campaign"]["base_sha"]
+    kill_9(first)
+    first_port = first.port
+    assert_receive {^first_port, {:exit_status, _status}}, 10_000
+
+    repo = Path.join(root, "repo")
+    Pika.Git.run!(repo, ["config", "user.name", "Pika Test"])
+    Pika.Git.run!(repo, ["config", "user.email", "pika-test@example.invalid"])
+    File.write!(Path.join(repo, "accepted.txt"), "accepted\n")
+    Pika.Git.run!(repo, ["add", "accepted.txt"])
+    Pika.Git.run!(repo, ["commit", "-m", "advance best"])
+    advanced_best = Pika.Git.run!(repo, ["rev-parse", "HEAD"])
+
+    assert advanced_best != historical_base
+
+    assert {:ok, _} =
+             Pika.Git.run(repo, ["merge-base", "--is-ancestor", historical_base, advanced_best])
+
+    sqlite_execute(
+      root,
+      "UPDATE campaigns SET best_sha = ?, status = 'blocked', resume_state = 'optimizing' WHERE id = ?",
+      [advanced_best, campaign_id]
+    )
+
+    sqlite_execute(root, "DELETE FROM campaign_runtime_snapshots WHERE campaign_id = ?", [
+      campaign_id
+    ])
+
+    recovered = start_server(root, port_number)
+    on_exit(fn -> stop_server(recovered) end)
+    assert recovered.output =~ "(recovered)"
+
+    assert {:ok, 200, _headers, recovered_body} =
+             bearer_get(port_number, "/api/status", recovered.token)
+
+    recovered_status = Jason.decode!(recovered_body)
+    assert recovered_status["recovery"] == "recovered"
+    assert recovered_status["campaign"]["status"] == "optimizing"
+    assert recovered_status["campaign"]["base_sha"] == historical_base
+    assert recovered_status["campaign"]["best_sha"] == advanced_best
   end
 
   defp start_server(root, port_number, opts \\ []) do
@@ -284,31 +388,96 @@ defmodule Pika.CampaignProcessRecoveryTest do
   end
 
   defp singleton_count(root) do
-    database = Path.join(root, "pika.sqlite3")
-    {output, 0} = System.cmd("sqlite3", [database, "SELECT count(*) FROM campaigns;"])
-    output |> String.trim() |> String.to_integer()
+    sqlite_scalar(root, "SELECT count(*) FROM campaigns")
   end
 
-  defp sqlite_dump(root) do
-    database = Path.join(root, "pika.sqlite3")
-    {output, 0} = System.cmd("sqlite3", [database, ".dump"])
-    output
+  defp campaign_status(root) do
+    sqlite_scalar(root, "SELECT status FROM campaigns LIMIT 1")
+  end
+
+  defp sqlite_storage_bytes(root) do
+    ["pika.sqlite3", "pika.sqlite3-wal", "pika.sqlite3-shm"]
+    |> Enum.map(&Path.join(root, &1))
+    |> Enum.map_join(fn path ->
+      case File.read(path) do
+        {:ok, contents} -> contents
+        {:error, :enoent} -> ""
+      end
+    end)
   end
 
   defp insert_corrupt_artifact(root, campaign_id, relative) do
-    database = Path.join(root, "pika.sqlite3")
     artifact_id = Ecto.UUID.generate()
     wrong_hash = String.duplicate("0", 64)
+
+    insert_artifact(
+      root,
+      campaign_id,
+      artifact_id,
+      relative,
+      wrong_hash,
+      10,
+      "backend_log",
+      "application/x-ndjson"
+    )
+  end
+
+  defp insert_artifact(root, campaign_id, artifact_id, relative, sha256, size, kind, mime) do
     now = System.system_time(:microsecond)
 
-    sql = """
-    INSERT INTO artifacts
-      (id, campaign_id, owner_type, owner_id, kind, relative_path, sha256, byte_size, mime_type, metadata_json, created_at)
-    VALUES
-      ('#{artifact_id}', '#{campaign_id}', 'campaign', '#{campaign_id}', 'backend_log', '#{relative}', '#{wrong_hash}', 10, 'application/x-ndjson', '{}', #{now});
-    """
+    sqlite_execute(
+      root,
+      """
+      INSERT INTO artifacts
+        (id, campaign_id, owner_type, owner_id, kind, relative_path, sha256, byte_size, mime_type, metadata_json, created_at)
+      VALUES
+        (?, ?, 'campaign', ?, ?, ?, ?, ?, ?, '{}', ?)
+      """,
+      [artifact_id, campaign_id, campaign_id, kind, relative, sha256, size, mime, now]
+    )
+  end
 
-    {_output, 0} = System.cmd("sqlite3", [database, sql], stderr_to_stdout: true)
+  defp artifact_path(root, artifact_id) do
+    sqlite_scalar(root, "SELECT relative_path FROM artifacts WHERE id = ?", [artifact_id])
+  end
+
+  defp sqlite_scalar(root, sql, params \\ []) do
+    with_sqlite(root, :readonly, fn database ->
+      {:ok, statement} = Exqlite.Sqlite3.prepare(database, sql)
+
+      try do
+        :ok = Exqlite.Sqlite3.bind(statement, params)
+        {:row, [value]} = Exqlite.Sqlite3.step(database, statement)
+        value
+      after
+        :ok = Exqlite.Sqlite3.release(database, statement)
+      end
+    end)
+  end
+
+  defp sqlite_execute(root, sql, params) do
+    with_sqlite(root, :readwrite, fn database ->
+      {:ok, statement} = Exqlite.Sqlite3.prepare(database, sql)
+
+      try do
+        :ok = Exqlite.Sqlite3.bind(statement, params)
+        :done = Exqlite.Sqlite3.step(database, statement)
+        :ok
+      after
+        :ok = Exqlite.Sqlite3.release(database, statement)
+      end
+    end)
+  end
+
+  defp with_sqlite(root, mode, fun) do
+    path = Path.join(root, "pika.sqlite3")
+    {:ok, database} = Exqlite.Sqlite3.open(path, mode: mode)
+
+    try do
+      fun.(database)
+    after
+      :ok = Exqlite.Sqlite3.close(database)
+    end
   end
 
   defp url(port, path), do: "http://127.0.0.1:#{port}#{path}"

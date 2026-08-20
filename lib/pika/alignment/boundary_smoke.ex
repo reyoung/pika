@@ -94,7 +94,10 @@ defmodule Pika.Alignment.BoundarySmoke do
     The user-selected Harness contract is warmup=10, pair_count=#{pair_count},
     min_valid_pairs=#{min_valid_pairs}, retry_limit=1.
     Stop after max_attempts=10 with mode all_goals. Submit the full Campaign Spec v1 and Harness via MCP.
-    Do not run GPU, do not confirm for the user, do not commit, and do not push.
+    This protocol smoke must not use a GPU, but it must execute the Reference through the Harness on target_case,
+    collect a real CPU latency_us observation, register the small output as reference_review_evidence, and call
+    submit_reference_review with the actual CPU environment clearly disclosed. Do not confirm for the user,
+    do not commit, and do not push.
     """
   end
 

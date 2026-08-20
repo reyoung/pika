@@ -27,12 +27,21 @@ defmodule Pika.CampaignWorkspace do
   end
 
   defp ensure_artifact_directories(root) do
-    Enum.reduce_while(~w(inputs baseline profiles logs prompts), :ok, fn directory, :ok ->
-      case File.mkdir_p(Path.join([root, "artifacts", directory])) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, {:artifact_directory_failed, directory, reason}}}
-      end
-    end)
+    with :ok <- ensure_reference_directory(root) do
+      Enum.reduce_while(~w(inputs baseline profiles logs prompts), :ok, fn directory, :ok ->
+        case File.mkdir_p(Path.join([root, "artifacts", directory])) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, {:artifact_directory_failed, directory, reason}}}
+        end
+      end)
+    end
+  end
+
+  defp ensure_reference_directory(root) do
+    case File.mkdir_p(Path.join(root, "refs")) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:reference_directory_failed, reason}}
+    end
   end
 
   defp ensure_best_checkout(repo, branch) do

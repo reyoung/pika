@@ -33,6 +33,9 @@ defmodule Pika.CampaignBootstrap do
     {:noreply, %{state | status: :running}}
   end
 
+  def handle_info({:campaign_ready, {:blocked, reason}}, state),
+    do: {:noreply, %{state | status: {:blocked, reason}}}
+
   def handle_info({:campaign_ready, {:error, reason}}, state),
     do: {:noreply, %{state | status: {:error, reason}}}
 
@@ -40,16 +43,22 @@ defmodule Pika.CampaignBootstrap do
     do: {:noreply, %{state | status: {:error, {:campaign_exited, reason}}}}
 
   defp prepare_and_start do
-    workspace = Pika.WorkspaceLock.workspace()
-    campaign = Pika.Persistence.current_campaign()
+    case Pika.Runtime.snapshot().recovery do
+      %{"status" => "blocked", "reason" => reason} ->
+        {:blocked, reason}
 
-    with {:ok, durable} <- load_durable(campaign.id),
-         {:ok, stage_workspace} <- Workspace.prepare(workspace, campaign, revision(durable)),
-         {:ok, references} <- Registry.references(reference_config(workspace), durable),
-         {:ok, skill} <- Registry.skill(workspace.root, durable),
-         {:ok, pid} <-
-           start_campaign(workspace, campaign, stage_workspace, durable, references, skill) do
-      {:ok, pid}
+      _recovery ->
+        workspace = Pika.WorkspaceLock.workspace()
+        campaign = Pika.Persistence.current_campaign()
+
+        with {:ok, durable} <- load_durable(campaign.id),
+             {:ok, stage_workspace} <- Workspace.prepare(workspace, campaign, revision(durable)),
+             {:ok, references} <- Registry.references(reference_config(workspace), durable),
+             {:ok, skill} <- Registry.skill(workspace.root, durable),
+             {:ok, pid} <-
+               start_campaign(workspace, campaign, stage_workspace, durable, references, skill) do
+          {:ok, pid}
+        end
     end
   end
 
@@ -79,6 +88,8 @@ defmodule Pika.CampaignBootstrap do
       backend_profile: %{
         command: command,
         args: args,
+        approval_policy: backend["approval_policy"],
+        sandbox_policy: backend["sandbox_policy"],
         protocol_config: backend["protocol_config"]
       },
       start_backend: true,

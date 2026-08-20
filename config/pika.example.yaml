@@ -9,6 +9,8 @@ backend:
     - app-server
     - --listen
     - stdio://
+  approval_policy: never
+  sandbox_policy: danger_full_access
   protocol_config: {}
 
 campaign:
@@ -19,6 +21,8 @@ campaign:
     - name: codex-1
       backend: codex_app_server
       reasoning_effort: high
+      approval_policy: never
+      sandbox_policy: danger_full_access
   reference_catalog: []
   stop_conditions:
     mode: all_goals

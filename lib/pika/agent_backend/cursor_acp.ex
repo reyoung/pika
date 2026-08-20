@@ -4,7 +4,7 @@ defmodule Pika.AgentBackend.CursorACP do
   use GenServer
   @behaviour Pika.AgentBackend
 
-  alias Pika.AgentBackend.{Error, Event, Id, JSONLPort, Profile, Session}
+  alias Pika.AgentBackend.{Error, Event, Id, JSONLPort, PermissionPolicy, Profile, Session}
 
   @protocol "acp-v1"
   @default_command "cursor-agent"
@@ -149,7 +149,11 @@ defmodule Pika.AgentBackend.CursorACP do
     jsonl_path = Path.join(artifact_dir, "cursor-#{state.session_id}.jsonl")
     stderr_path = Path.join(artifact_dir, "cursor-#{state.session_id}.stderr.log")
     command = profile.command || @default_command
-    args = profile.args ++ ["--force", "--approve-mcps", "--trust", "acp"]
+
+    args =
+      profile.args ++
+        PermissionPolicy.cursor_cli_args(profile.approval_policy, profile.sandbox_policy) ++
+        ["--approve-mcps", "--trust", "acp"]
 
     case JSONLPort.start_link(
            owner: self(),
@@ -450,9 +454,7 @@ defmodule Pika.AgentBackend.CursorACP do
   defp handle_client_request(id, "session/request_permission", params, state) do
     options = params["options"] || []
 
-    selected =
-      Enum.find(options, &(Map.get(&1, "kind") in ["allow_always", "allow_once"])) ||
-        List.first(options)
+    selected = PermissionPolicy.cursor_permission_option(options, state.profile.approval_policy)
 
     result =
       if selected do

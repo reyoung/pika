@@ -10,7 +10,7 @@ defmodule Pika.AttemptWorkspace do
 
     with :ok <- ensure_attempt_directories(workspace.root, attempt_id),
          :ok <- ensure_worktree(workspace.repo, path, branch, best_sha),
-         :ok <- materialize_references(path, references),
+         :ok <- materialize_references(workspace.root, path, references),
          {:ok, head} <- Git.head(path),
          true <- head == best_sha do
       {:ok,
@@ -55,8 +55,7 @@ defmodule Pika.AttemptWorkspace do
       "#{attempt.base_sha}...#{candidate_sha}",
       "--",
       ".",
-      ":(exclude)ref/**",
-      ":(exclude).gitmodules"
+      ":(exclude)ref/**"
     ]
 
     with {:ok, patch} <- Git.run(workspace.repo, args),
@@ -79,18 +78,6 @@ defmodule Pika.AttemptWorkspace do
        branch: attempt.branch_name,
        base_sha: attempt.base_sha
      }}
-  end
-
-  def remove_injected_references(path) do
-    case Git.run(path, ["status", "--porcelain=v1", "--untracked-files=all"]) do
-      {:ok, status} ->
-        if Enum.any?(String.split(status, "\n", trim: true), &injected_status?/1),
-          do: {:error, :injected_references_must_be_removed},
-          else: :ok
-
-      {:error, _} = error ->
-        error
-    end
   end
 
   defp ensure_attempt_directories(root, attempt_id) do
@@ -133,9 +120,9 @@ defmodule Pika.AttemptWorkspace do
     end
   end
 
-  defp materialize_references(_path, []), do: :ok
+  defp materialize_references(_workspace_root, _path, []), do: :ok
 
-  defp materialize_references(path, references) do
+  defp materialize_references(workspace_root, path, references) do
     references =
       Enum.map(references, fn reference ->
         %{
@@ -149,7 +136,7 @@ defmodule Pika.AttemptWorkspace do
         }
       end)
 
-    case ReferenceCatalog.materialize_selected(path, references) do
+    case ReferenceCatalog.materialize_selected(workspace_root, references, link_into: path) do
       {:ok, _} -> :ok
       {:error, failures} -> {:error, {:reference_materialization_failed, failures}}
     end
@@ -167,11 +154,6 @@ defmodule Pika.AttemptWorkspace do
   end
 
   defp patch_contains_injected_paths?(patch) do
-    String.contains?(patch, [" a/ref/", " b/ref/", " a/.gitmodules", " b/.gitmodules"])
-  end
-
-  defp injected_status?(line) do
-    path = line |> String.slice(3..-1//1) |> String.trim()
-    path == ".gitmodules" or String.starts_with?(path, "ref/")
+    String.contains?(patch, [" a/ref/", " b/ref/"])
   end
 end

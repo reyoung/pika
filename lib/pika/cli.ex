@@ -3,6 +3,7 @@ defmodule Pika.CLI do
 
   alias Pika.PreviewAuth, as: Auth
   alias Pika.Alignment.{Campaign, Workspace}
+  alias Pika.AgentBackend.PermissionPolicy
 
   def main(["init" | argv]) do
     case parse_init(argv) do
@@ -51,9 +52,13 @@ defmodule Pika.CLI do
           alignment_backend: :string,
           alignment_model: :string,
           alignment_effort: :string,
+          alignment_approval_policy: :string,
+          alignment_sandbox_policy: :string,
           iteration_backend: :string,
           iteration_model: :string,
           iteration_effort: :string,
+          iteration_approval_policy: :string,
+          iteration_sandbox_policy: :string,
           model: :string,
           effort: :string,
           iteration_agents: :integer,
@@ -68,6 +73,8 @@ defmodule Pika.CLI do
       )
 
     positional_workspace = if length(args) == 1, do: List.first(args)
+    alignment_backend = opts[:alignment_backend] || opts[:backend] || "codex"
+    iteration_backend = opts[:iteration_backend] || opts[:backend] || alignment_backend
 
     errors =
       []
@@ -113,6 +120,38 @@ defmodule Pika.CLI do
         not is_nil(opts[:iteration_effort]) and
           opts[:iteration_effort] not in ~w(low medium high xhigh max ultra),
         "invalid --iteration-effort"
+      )
+      |> maybe_cli_error(
+        not valid_init_permission?(
+          alignment_backend,
+          :approval_policy,
+          opts[:alignment_approval_policy]
+        ),
+        "invalid --alignment-approval-policy for #{alignment_backend}"
+      )
+      |> maybe_cli_error(
+        not valid_init_permission?(
+          alignment_backend,
+          :sandbox_policy,
+          opts[:alignment_sandbox_policy]
+        ),
+        "invalid --alignment-sandbox-policy for #{alignment_backend}"
+      )
+      |> maybe_cli_error(
+        not valid_init_permission?(
+          iteration_backend,
+          :approval_policy,
+          opts[:iteration_approval_policy]
+        ),
+        "invalid --iteration-approval-policy for #{iteration_backend}"
+      )
+      |> maybe_cli_error(
+        not valid_init_permission?(
+          iteration_backend,
+          :sandbox_policy,
+          opts[:iteration_sandbox_policy]
+        ),
+        "invalid --iteration-sandbox-policy for #{iteration_backend}"
       )
       |> maybe_cli_error(
         not is_nil(opts[:port]) and opts[:port] not in 1..65_535,
@@ -452,9 +491,21 @@ defmodule Pika.CLI do
       --alignment-backend B    Alignment/Baseline backend: codex|cursor
       --alignment-model MODEL  Alignment/Baseline model (default: provider default)
       --alignment-effort E     Alignment/Baseline reasoning effort (default high)
+      --alignment-approval-policy P
+                               Backend-specific Alignment/Baseline approval policy
+      --alignment-sandbox-policy P
+                               Backend-specific Alignment/Baseline sandbox policy
       --iteration-backend B    Iteration Agent backend: codex|cursor
       --iteration-model MODEL  Iteration Agent model (default: provider default)
       --iteration-effort E     Iteration Agent reasoning effort (default high)
+      --iteration-approval-policy P
+                               Backend-specific Iteration approval policy
+      --iteration-sandbox-policy P
+                               Backend-specific Iteration sandbox policy
+      Codex approval P         never|on_request|untrusted
+      Codex sandbox P          danger_full_access|workspace_write|read_only
+      Cursor approval P        force|auto_review
+      Cursor sandbox P         disabled|enabled
       --backend codex|cursor   Set both backends (compatibility shorthand)
       --model MODEL            Compatibility alias for --iteration-model
       --effort EFFORT          Compatibility alias for --iteration-effort
@@ -466,5 +517,18 @@ defmodule Pika.CLI do
       -y, --yes                Accept defaults for unspecified settings
       -h, --help               Show this help
     """
+  end
+
+  defp valid_init_permission?(_backend, _kind, nil), do: true
+
+  defp valid_init_permission?(backend, kind, value) do
+    normalized_backend =
+      case backend do
+        "cursor" -> :cursor_acp
+        "cursor_acp" -> :cursor_acp
+        _ -> :codex_app_server
+      end
+
+    match?({:ok, _value}, PermissionPolicy.parse(normalized_backend, kind, value))
   end
 end

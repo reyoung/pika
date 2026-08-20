@@ -17,7 +17,7 @@ Completed (2026-08-19)
 - `attempts`、`attempt_metrics`、`agent_sessions`、`agent_messages`、`guidance` schema。
 - Attempt 固定 `sampling_revision_id`，正式 Metrics 只要求该 Revision 的 Case × Metric。
 - 显式 Iteration Slots 与 per-slot Agent Profile。
-- Attempt branch/worktree 与选中 Ref submodule 注入。
+- Attempt branch/worktree 与选中 Reference Checkout 软链接注入。
 - 最近 N 次历史、Agent Mailbox、BestAdvanced/SamplingAdvanced/Guidance 上下文。
 - 可选 Plan Agent 和 Artifact `plan.md`。
 - Iteration MCP：Metrics、Summary、Artifact、complete_attempt。

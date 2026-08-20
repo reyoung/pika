@@ -26,7 +26,7 @@ Stage0 Demo 是 Phase 0 Backend 之上的一次性内存纵切，不是 Phase 1 
 
 1. 从源 HEAD 创建独立 clone，在 clone 中建立 `pika/best` 和 `pika/setup/1` worktree；Pika 打开 Boundary Backend Session 并只注入系统级 Agent Instructions，此时不启动 Turn。
 2. 用户发送首条消息与可选 Artifact 完成 Campaign Kick-off；该用户输入原样成为 Session 的首个 Turn。Boundary Agent 随后访谈用户，创建 Reference、正确性测试与 Benchmark Harness。
-3. Agent 必须调用 `submit_spec` 和 `submit_harness`；两项通过后 UI 才允许用户确认。
+3. Agent 必须调用 `submit_spec`、`submit_harness`，实际运行至少一个 Case 并调用 `submit_reference_review`；三项通过后 UI 才允许用户同时审阅源码与性能证据并确认。
 4. 用户点击“确认并建立 Baseline”后，该确认动作作为用户授权驱动 Agent commit setup、squash merge 临时 `pika/best`，调用 `complete_setup_merge`；Pika 核验父 SHA、Diff 与 protected digest。
 5. Pika 为新 Baseline Session 注入系统级 Agent Instructions，并重用第 4 步的用户确认动作启动已获授权的 Baseline 工作；系统模板不会伪装成首条用户消息。Agent 在 Best SHA 上运行 Full Case Set 的所有正确性和 Campaign Spec 正式 Pair 自配对，生成 Pair JSONL、Profiler 与远程执行/清理 Artifact，并调用 `submit_baseline`。
 6. Pika 重算中位数、MAD、noise tolerance 和有效 Pair 数，进入 `SelectingIterationSample`。
@@ -60,7 +60,7 @@ Stage0 Demo 是 Phase 0 Backend 之上的一次性内存纵切，不是 Phase 1 
 - 单元与集成：Spec、Harness digest、Artifact path、Git clone/dirty 拒绝、Token、LiveView、上传、MCP 幂等、Baseline 统计与单次重跑。
 - Fake Backend E2E：`DraftingSpec → AwaitingConfirmation → BuildingBaseline → SelectingIterationSample → Optimizing`，所有状态推进均由正式 MCP 调用触发。
 - Kick-off 回归：Backend Session 打开后没有自动 Turn；Reference 选择也不会抢占首轮。用户首条消息原样启动 Alignment，用户确认动作启动 setup merge 并授权 Baseline Session；Codex/Cursor 协议测试分别核对 system-instruction 注入与首条用户输入。
-- 真实 Codex/Cursor Boundary smoke：两个 Backend 均创建 Harness、调用 `submit_spec`/`submit_harness`、到达 `AwaitingConfirmation`，且源 repo 未变化。证据在 `artifacts/stage0-demo/`。
+- 历史 Codex/Cursor Boundary smoke：两个 Backend 均创建 Harness、调用 `submit_spec`/`submit_harness`、到达当时的 `AwaitingConfirmation`，且源 repo 未变化。证据在 `artifacts/stage0-demo/`；它早于 `submit_reference_review` 门禁，不能证明当前完整确认流程。
 - dirty repo 的 committed-HEAD re-clone 已验证：未提交文件不会进入 Workspace；在无外部并发变化的集成测试中，源 repo 原始 SHA/status 前后完全一致。
 
 ## 真实 H20 结果

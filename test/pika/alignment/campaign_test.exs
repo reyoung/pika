@@ -57,6 +57,126 @@ defmodule Pika.Alignment.CampaignTest do
     %{workspace: workspace, skill: skill}
   end
 
+  test "adds and removes a user-owned Reference Project while the Spec is editable" do
+    initial = Campaign.snapshot()
+
+    assert {:ok, added} =
+             Campaign.add_reference_project(%{
+               "url" => "https://github.com/example/custom-kernels.git",
+               "description" => "Campaign-specific kernels"
+             })
+
+    assert added.id == "custom-kernels"
+    assert added.origin == :user
+    assert added.selected
+
+    snapshot = Campaign.snapshot()
+    assert length(snapshot.references) == length(initial.references) + 1
+    assert List.last(snapshot.references) == added
+    assert "custom-kernels" in snapshot.spec["reference_ids"]
+
+    assert snapshot.required_operations == [
+             "submit_harness",
+             "submit_reference_review",
+             "submit_spec"
+           ]
+
+    assert {:error, {:duplicate_reference_project, :url, _url}} =
+             Campaign.add_reference_project(%{
+               "id" => "another-id",
+               "url" => "https://github.com/example/custom-kernels.git/"
+             })
+
+    builtin_id = initial.references |> List.first() |> Map.fetch!(:id)
+
+    assert {:error, :builtin_reference_project_cannot_be_removed} =
+             Campaign.remove_reference_project(builtin_id)
+
+    assert :ok = Campaign.remove_reference_project("custom-kernels")
+    refute Enum.any?(Campaign.snapshot().references, &(&1.id == "custom-kernels"))
+    refute "custom-kernels" in Campaign.snapshot().spec["reference_ids"]
+  end
+
+  test "freezes Reference Project editing after confirmation starts" do
+    :sys.replace_state(Campaign, &%{&1 | status: :resolving_references})
+
+    assert {:error, :references_frozen} =
+             Campaign.add_reference_project(%{url: "https://example.com/repo.git"})
+
+    assert {:error, :references_frozen} = Campaign.remove_reference_project("cutlass")
+  end
+
+  test "resolves and materializes a user-added project even when startup References were pre-resolved",
+       %{
+         workspace: workspace,
+         skill: skill
+       } do
+    GenServer.stop(Process.whereis(Campaign))
+    source = Pika.Test.AlignmentFixtures.git_repo()
+
+    user_reference = %{
+      id: "campaign-reference",
+      url: source,
+      description: "Local Campaign Reference",
+      origin: :user,
+      selected: true,
+      status: :unresolved,
+      sha: nil,
+      branch: nil
+    }
+
+    {:ok, pid} =
+      Campaign.start_link(
+        workspace: workspace,
+        backend: :codex_app_server,
+        start_backend: false,
+        resolve_references: false,
+        materialize_references: true,
+        references: [user_reference],
+        mcp_url: "http://127.0.0.1:1/mcp",
+        mcp_token: @token,
+        skill: skill
+      )
+
+    on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
+    harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "user-reference-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "user-reference-harness")
+             )
+
+    assert {:ok, _} = submit_reference_review()
+    assert :ok = confirm_reviewed_spec()
+    assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
+
+    [resolved] = Campaign.snapshot().references
+    assert resolved.status == :resolved
+    assert resolved.sha == Git.run!(source, ["rev-parse", "HEAD"])
+
+    checkout = Path.join(workspace.root, "refs/campaign-reference")
+    link = Path.join(workspace.setup_worktree, "ref/campaign-reference")
+    assert Git.run!(checkout, ["rev-parse", "HEAD"]) == resolved.sha
+    assert File.lstat!(link).type == :symlink
+    assert File.read_link!(link) == checkout
+
+    assert Git.run!(link, ["rev-parse", "HEAD"]) == resolved.sha
+
+    status =
+      Git.run!(workspace.setup_worktree, ["status", "--porcelain=v1", "--untracked-files=all"])
+
+    refute status =~ "ref/campaign-reference"
+    refute File.exists?(Path.join(workspace.setup_worktree, ".gitmodules"))
+  end
+
   test "runs Alignment, explicit confirmation, setup merge and Baseline to Optimizing", %{
     workspace: workspace,
     skill: skill
@@ -77,8 +197,9 @@ defmodule Pika.Alignment.CampaignTest do
              )
 
     assert is_binary(digest)
-    assert Campaign.snapshot().status == :awaiting_confirmation
-    assert :ok = Campaign.confirm_spec()
+    assert Campaign.snapshot().status == :drafting_spec
+    assert Campaign.snapshot().required_operations == ["submit_reference_review"]
+    assert :ok = confirm_reviewed_spec()
     assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
 
     confirmed = Campaign.snapshot()
@@ -177,7 +298,7 @@ defmodule Pika.Alignment.CampaignTest do
   test "cannot build Baseline before confirmation and returns to DraftingSpec on user changes", %{
     workspace: workspace
   } do
-    assert {:error, :spec_not_confirmable} = Campaign.confirm_spec()
+    assert {:error, :spec_not_confirmable} = Campaign.confirm_spec(nil, nil)
     harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
 
     assert {:ok, %{ready: true}} =
@@ -193,12 +314,317 @@ defmodule Pika.Alignment.CampaignTest do
                Map.put(harness_args, "idempotency_key", "reject-harness")
              )
 
+    assert Campaign.snapshot().status == :drafting_spec
+    assert {:ok, _} = submit_reference_review()
     assert Campaign.snapshot().status == :awaiting_confirmation
+    assert {:ok, reference_review} = Campaign.reference_review()
+    assert reference_review.path == "kernel/reference.py"
+    assert reference_review.content == "def reference(x): return x\n"
+    assert {:error, :reference_not_reviewed} = Campaign.confirm_spec(nil, nil)
     assert :ok = Campaign.request_changes("目标 Case 需要改成 n=2048")
     snapshot = Campaign.snapshot()
     assert snapshot.status == :drafting_spec
-    assert snapshot.required_operations == ["submit_harness", "submit_spec"]
+
+    assert snapshot.required_operations == [
+             "submit_harness",
+             "submit_reference_review",
+             "submit_spec"
+           ]
+
     refute snapshot.status == :building_baseline
+  end
+
+  test "requires successful current Reference performance evidence before confirmation", %{
+    workspace: workspace
+  } do
+    harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "evidence-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "evidence-harness")
+             )
+
+    assert Campaign.snapshot().required_operations == ["submit_reference_review"]
+
+    assert {:error, "missing_required_data", _, %{reason: :reference_run_failed}} =
+             AlignmentFixtures.submit_reference_review(
+               @token,
+               workspace,
+               "failed-reference-review",
+               %{"exit_code" => 1}
+             )
+
+    assert {:error, "missing_required_data", _,
+            %{
+              reason: {:unknown_benchmark_case, "invented_case"}
+            }} =
+             AlignmentFixtures.submit_reference_review(
+               @token,
+               workspace,
+               "unknown-case-reference-review",
+               %{"case_id" => "invented_case"}
+             )
+
+    assert {:error, "missing_required_data", _,
+            %{
+              reason: {:metric_unit_mismatch, "latency_us", "ms", "us"}
+            }} =
+             AlignmentFixtures.submit_reference_review(
+               @token,
+               workspace,
+               "wrong-unit-reference-review",
+               %{
+                 "metrics" => [
+                   %{
+                     "metric_id" => "latency_us",
+                     "value" => 1.0,
+                     "unit" => "ms",
+                     "sample_count" => 3
+                   }
+                 ]
+               }
+             )
+
+    assert {:ok, %{case_id: "target_case", ready_for_user_review: true}} =
+             AlignmentFixtures.submit_reference_review(
+               @token,
+               workspace,
+               "valid-reference-review"
+             )
+
+    snapshot = Campaign.snapshot()
+    assert snapshot.status == :awaiting_confirmation
+
+    assert [%{metric_id: "latency_us", value: 12.5, unit: "us", sample_count: 3}] =
+             snapshot.reference_review_evidence.metrics
+
+    {:ok, reference} = Campaign.reference_review()
+
+    assert {:error, :reference_evidence_not_reviewed} =
+             Campaign.confirm_spec(reference.sha256, nil)
+
+    evidence = snapshot.reference_review_evidence
+    File.write!(Path.join(workspace.root, evidence.output_artifact), "changed after review\n")
+
+    assert {:error,
+            {:reference_review_failed,
+             {:artifact_verification_failed, artifact_path, :sha256_mismatch}}} =
+             Campaign.confirm_spec(reference.sha256, evidence.digest)
+
+    assert artifact_path == evidence.output_artifact
+    assert Campaign.snapshot().status == :awaiting_confirmation
+  end
+
+  test "reopens BuildingBaseline as a new Spec revision after setup merge", %{
+    workspace: workspace
+  } do
+    harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true, revision: 1}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "reopen-spec-1",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "reopen-harness-1")
+             )
+
+    assert :ok = confirm_reviewed_spec()
+    assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
+    {setup_sha, first_best_sha} = merge_setup(workspace)
+
+    assert {:ok, %{best_sha: ^first_best_sha}} =
+             Campaign.mcp_call(@token, "complete_setup_merge", %{
+               "idempotency_key" => "reopen-merge-1",
+               "base_sha" => workspace.source_sha,
+               "setup_sha" => setup_sha,
+               "best_sha" => first_best_sha
+             })
+
+    assert Campaign.snapshot().required_operations == ["submit_baseline"]
+    assert :ok = Campaign.request_changes("Reference 应改为 FlashAttention 4 / CuTeDSL")
+
+    reopened = Campaign.snapshot()
+    assert reopened.status == :drafting_spec
+    assert reopened.spec["revision"] == 2
+    assert reopened.best_sha == first_best_sha
+
+    assert reopened.required_operations == [
+             "submit_harness",
+             "submit_reference_review",
+             "submit_spec"
+           ]
+
+    assert reopened.baseline == nil
+
+    revision_workspace = :sys.get_state(Campaign).workspace
+    assert revision_workspace.setup_worktree == Path.join(workspace.root, "setup/2")
+
+    assert Git.run!(revision_workspace.setup_worktree, ["branch", "--show-current"]) ==
+             "pika/setup/2"
+
+    revised_spec =
+      AlignmentFixtures.spec()
+      |> Map.put("revision", 99)
+      |> Map.put("title", "Fixture kernel with FA4")
+
+    assert {:ok, %{ready: true, revision: 2}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "reopen-spec-2",
+               "spec" => revised_spec
+             })
+
+    revised_harness = AlignmentFixtures.create_harness(revision_workspace.setup_worktree)
+
+    File.write!(
+      Path.join(revision_workspace.setup_worktree, "kernel/reference.py"),
+      "def reference(x): return x + 0\n"
+    )
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(revised_harness, "idempotency_key", "reopen-harness-2")
+             )
+
+    assert Campaign.snapshot().status == :drafting_spec
+    assert Campaign.snapshot().spec["revision"] == 2
+    assert :ok = confirm_reviewed_spec()
+    assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
+
+    {second_setup_sha, second_best_sha} = merge_setup(revision_workspace)
+
+    assert {:ok, %{best_sha: ^second_best_sha}} =
+             Campaign.mcp_call(@token, "complete_setup_merge", %{
+               "idempotency_key" => "reopen-merge-2",
+               "base_sha" => first_best_sha,
+               "setup_sha" => second_setup_sha,
+               "best_sha" => second_best_sha
+             })
+
+    assert Campaign.snapshot().required_operations == ["submit_baseline"]
+    assert Campaign.snapshot().best_sha == second_best_sha
+  end
+
+  test "Baseline Agent can autonomously reopen a frozen Baseline definition through MCP", %{
+    workspace: workspace
+  } do
+    harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "agent-reopen-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "agent-reopen-harness")
+             )
+
+    assert :ok = confirm_reviewed_spec()
+    assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
+    {setup_sha, best_sha} = merge_setup(workspace)
+
+    assert {:ok, _} =
+             Campaign.mcp_call(@token, "complete_setup_merge", %{
+               "idempotency_key" => "agent-reopen-merge",
+               "base_sha" => workspace.source_sha,
+               "setup_sha" => setup_sha,
+               "best_sha" => best_sha
+             })
+
+    assert {:error, "missing_required_data", _, %{}} =
+             Campaign.mcp_call(@token, "reopen_baseline_definition", %{
+               "idempotency_key" => "agent-reopen-empty",
+               "reason" => "",
+               "requested_changes" => "use FA4"
+             })
+
+    user_message_count =
+      Campaign.snapshot().messages |> Enum.count(&(&1.role == :user))
+
+    test_process = self()
+
+    :sys.replace_state(Campaign, fn state ->
+      validation_pid = spawn(fn -> Process.sleep(:infinity) end)
+      monitor_ref = Process.monitor(validation_pid)
+      send(test_process, {:fake_baseline_validation, validation_pid})
+
+      %{
+        state
+        | baseline_submission: %{pid: validation_pid, monitor_ref: monitor_ref}
+      }
+    end)
+
+    assert_receive {:fake_baseline_validation, validation_pid}
+    assert Process.alive?(validation_pid)
+
+    assert {:ok,
+            %{
+              status: "drafting_spec",
+              revision: 2,
+              setup_branch: "pika/setup/2",
+              required_operations: ["submit_harness", "submit_reference_review", "submit_spec"]
+            }} =
+             Campaign.mcp_call(@token, "reopen_baseline_definition", %{
+               "idempotency_key" => "agent-reopen-fa4",
+               "reason" => "frozen Reference invokes the old implementation",
+               "requested_changes" => "replace it with the pinned FA4 CuTeDSL adapter"
+             })
+
+    assert eventually(fn -> not Process.alive?(validation_pid) end)
+
+    reopened = Campaign.snapshot()
+    assert reopened.status == :drafting_spec
+    assert reopened.spec["revision"] == 2
+    assert reopened.best_sha == best_sha
+
+    assert reopened.required_operations == [
+             "submit_harness",
+             "submit_reference_review",
+             "submit_spec"
+           ]
+
+    assert Enum.count(reopened.messages, &(&1.role == :user)) == user_message_count
+
+    assert Enum.any?(reopened.messages, fn message ->
+             message.role == :system and
+               String.contains?(message.content, "Baseline Agent 请求修订") and
+               String.contains?(message.content, "FA4 CuTeDSL")
+           end)
+
+    internal_state = :sys.get_state(Campaign)
+    revision_workspace = internal_state.workspace
+    assert revision_workspace.setup_worktree == Path.join(workspace.root, "setup/2")
+    assert internal_state.backend_workflow == :alignment
+    assert internal_state.workflow_kickoffs.alignment =~ "FA4 CuTeDSL"
+
+    assert Git.run!(revision_workspace.setup_worktree, ["branch", "--show-current"]) ==
+             "pika/setup/2"
+
+    assert {:error, "forbidden_role", "reopen_baseline_definition requires a baseline session",
+            %{}} =
+             Campaign.mcp_call(@token, "reopen_baseline_definition", %{
+               "idempotency_key" => "agent-reopen-again",
+               "reason" => "another issue",
+               "requested_changes" => "change it again"
+             })
   end
 
   test "completes a required setup merge from a confirmed legacy DraftingSpec", %{
@@ -219,7 +645,7 @@ defmodule Pika.Alignment.CampaignTest do
                Map.put(harness_args, "idempotency_key", "legacy-merge-harness")
              )
 
-    assert :ok = Campaign.confirm_spec()
+    assert :ok = confirm_reviewed_spec()
     assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
 
     :sys.replace_state(Campaign, &%{&1 | status: :drafting_spec})
@@ -566,7 +992,7 @@ defmodule Pika.Alignment.CampaignTest do
     {:ok, _} =
       Campaign.mcp_call(@token, "submit_harness", Map.put(harness_args, "idempotency_key", "h"))
 
-    :ok = Campaign.confirm_spec()
+    :ok = confirm_reviewed_spec()
     assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
     {setup_sha, best_sha} = merge_setup(workspace)
 
@@ -627,6 +1053,22 @@ defmodule Pika.Alignment.CampaignTest do
     Git.run!(workspace.repo, ["merge", "--squash", setup_sha])
     Git.run!(workspace.repo, ["commit", "-m", "Alignment setup"])
     {setup_sha, Git.run!(workspace.repo, ["rev-parse", "HEAD"])}
+  end
+
+  defp confirm_reviewed_spec do
+    if is_nil(Campaign.snapshot().reference_review_evidence) do
+      {:ok, _} = submit_reference_review()
+    end
+
+    {:ok, reference_review} = Campaign.reference_review()
+    evidence_digest = Campaign.snapshot().reference_review_evidence.digest
+    Campaign.confirm_spec(reference_review.sha256, evidence_digest)
+  end
+
+  defp submit_reference_review do
+    root = Campaign.snapshot().workspace.root
+    key = "campaign-review-#{System.unique_integer([:positive])}"
+    AlignmentFixtures.submit_reference_review(@token, %{root: root}, key)
   end
 
   defp register_artifact(relative, workspace) do

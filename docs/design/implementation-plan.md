@@ -52,7 +52,7 @@
 交付：
 
 - 显式 Iteration Slots 和 per-slot Agent Profile。
-- Attempt worktree、临时 Ref submodule、最近 10 次历史注入、Agent Mailbox。
+- Attempt worktree、Workspace Reference Checkout 与临时软链接、最近 10 次历史注入、Agent Mailbox。
 - Plan 可选且默认关闭；`plan.md` 位于 Artifact Workspace。
 - Iteration Role MCP、配对 Benchmark parser、Summary/Patch/Profiler 登记。
 - 缺失 MCP 操作的无限 follow-up 与新 Session 恢复。
@@ -115,7 +115,7 @@
 
 - SQLite 事务 + PubSub outbox 顺序。
 - Fake Agent Backend 的标准事件、权限、steer、interrupt、漏报和崩溃。
-- Git worktree、submodule 注入/移除、squash、rebase、merge 和冲突恢复。
+- Git worktree、Reference 软链接注入/移除、squash、rebase、merge 和冲突恢复。
 - Managed Repo advisory lock 与软链接替换检测。
 - HTTP Token 对 HTML、JSON、LiveView、SSE/WebSocket、MCP 的完整保护。
 

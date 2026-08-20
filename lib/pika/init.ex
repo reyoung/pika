@@ -2,6 +2,7 @@ defmodule Pika.Init do
   @moduledoc false
 
   alias Pika.{Config, FileSystem, ModelCatalog, Paths, Workspace, WorkspaceLock}
+  alias Pika.AgentBackend.PermissionPolicy
 
   @efforts ~w(low medium high xhigh max ultra)
   @model_display_limit 15
@@ -35,6 +36,21 @@ defmodule Pika.Init do
   end
 
   def render_config(settings) when is_map(settings) do
+    alignment_permissions = PermissionPolicy.defaults(settings.alignment_backend)
+    iteration_permissions = PermissionPolicy.defaults(settings.iteration_backend)
+
+    alignment_approval_policy =
+      Map.get(settings, :alignment_approval_policy, alignment_permissions.approval_policy)
+
+    alignment_sandbox_policy =
+      Map.get(settings, :alignment_sandbox_policy, alignment_permissions.sandbox_policy)
+
+    iteration_approval_policy =
+      Map.get(settings, :iteration_approval_policy, iteration_permissions.approval_policy)
+
+    iteration_sandbox_policy =
+      Map.get(settings, :iteration_sandbox_policy, iteration_permissions.sandbox_policy)
+
     agents =
       1..settings.iteration_agents
       |> Enum.map_join("\n", fn index ->
@@ -47,6 +63,8 @@ defmodule Pika.Init do
             - name: #{yaml_string("#{backend_label(settings.iteration_backend)}-#{index}")}
               backend: #{settings.iteration_backend}#{model}
               reasoning_effort: #{settings.iteration_effort}
+              approval_policy: #{iteration_approval_policy}
+              sandbox_policy: #{iteration_sandbox_policy}
         """
         |> String.trim_trailing()
       end)
@@ -86,6 +104,8 @@ defmodule Pika.Init do
     backend:
       type: #{settings.alignment_backend}#{alignment_model}
       reasoning_effort: #{settings.alignment_effort}
+      approval_policy: #{alignment_approval_policy}
+      sandbox_policy: #{alignment_sandbox_policy}
       protocol_config: {}
 
     prompts:
@@ -127,6 +147,22 @@ defmodule Pika.Init do
              "Alignment/Baseline Agent",
              "codex"
            ),
+         {:ok, alignment_approval_policy} <-
+           collect_permission(
+             opts,
+             :alignment_approval_policy,
+             alignment_backend,
+             "Alignment/Baseline Agent",
+             :approval_policy
+           ),
+         {:ok, alignment_sandbox_policy} <-
+           collect_permission(
+             opts,
+             :alignment_sandbox_policy,
+             alignment_backend,
+             "Alignment/Baseline Agent",
+             :sandbox_policy
+           ),
          {:ok, alignment_model, model_cache} <-
            collect_model(
              opts,
@@ -136,12 +172,11 @@ defmodule Pika.Init do
              %{}
            ),
          {:ok, alignment_effort} <-
-           choose(
+           collect_effort(
              opts,
              :alignment_effort,
-             "Alignment/Baseline Agent reasoning effort",
-             "high",
-             &parse_effort/1
+             "Alignment/Baseline Agent",
+             "high"
            ),
          {:ok, iteration_backend} <-
            collect_backend(
@@ -149,6 +184,22 @@ defmodule Pika.Init do
              :iteration_backend,
              "Iteration Agent",
              backend_label(alignment_backend)
+           ),
+         {:ok, iteration_approval_policy} <-
+           collect_permission(
+             opts,
+             :iteration_approval_policy,
+             iteration_backend,
+             "Iteration Agent",
+             :approval_policy
+           ),
+         {:ok, iteration_sandbox_policy} <-
+           collect_permission(
+             opts,
+             :iteration_sandbox_policy,
+             iteration_backend,
+             "Iteration Agent",
+             :sandbox_policy
            ),
          iteration_opts <- inherit_option(opts, :iteration_model, :model),
          {:ok, iteration_model, _model_cache} <-
@@ -161,12 +212,11 @@ defmodule Pika.Init do
            ),
          effort_opts <- inherit_option(opts, :iteration_effort, :effort),
          {:ok, iteration_effort} <-
-           choose(
+           collect_effort(
              effort_opts,
              :iteration_effort,
-             "Iteration Agent reasoning effort",
-             "high",
-             &parse_effort/1
+             "Iteration Agent",
+             "high"
            ),
          {:ok, iteration_agents} <-
            choose(
@@ -196,9 +246,13 @@ defmodule Pika.Init do
          alignment_backend: alignment_backend,
          alignment_model: alignment_model,
          alignment_effort: alignment_effort,
+         alignment_approval_policy: alignment_approval_policy,
+         alignment_sandbox_policy: alignment_sandbox_policy,
          iteration_backend: iteration_backend,
          iteration_model: iteration_model,
          iteration_effort: iteration_effort,
+         iteration_approval_policy: iteration_approval_policy,
+         iteration_sandbox_policy: iteration_sandbox_policy,
          iteration_agents: iteration_agents,
          max_attempts: max_attempts,
          sync: sync
@@ -286,6 +340,104 @@ defmodule Pika.Init do
       true -> ask_backend(agent, default)
     end
   end
+
+  defp collect_permission(opts, key, backend, agent, kind) do
+    default = Map.fetch!(PermissionPolicy.defaults(backend), kind)
+
+    cond do
+      Keyword.has_key?(opts, key) -> PermissionPolicy.parse(backend, kind, opts[key])
+      opts[:yes] -> {:ok, default}
+      true -> ask_permission(agent, backend, kind, default)
+    end
+  end
+
+  defp collect_effort(opts, key, agent, default) do
+    cond do
+      Keyword.has_key?(opts, key) -> parse_effort(opts[key])
+      opts[:yes] -> parse_effort(default)
+      true -> ask_effort(agent, default)
+    end
+  end
+
+  defp ask_effort(agent, default) do
+    default_index = Enum.find_index(@efforts, &(&1 == default)) + 1
+
+    IO.puts("\n#{agent} reasoning effort:")
+
+    Enum.with_index(@efforts, 1)
+    |> Enum.each(fn {effort, index} ->
+      IO.puts("  #{index}) #{effort} · #{effort_description(effort)}")
+    end)
+
+    value =
+      case IO.gets("Select #{agent} reasoning effort [#{default_index}]: ") do
+        nil -> Integer.to_string(default_index)
+        :eof -> Integer.to_string(default_index)
+        input -> input |> String.trim() |> use_default(Integer.to_string(default_index))
+      end
+
+    case Integer.parse(value) do
+      {index, ""} when index >= 1 and index <= length(@efforts) ->
+        {:ok, Enum.at(@efforts, index - 1)}
+
+      _ ->
+        IO.puts(:stderr, "Invalid value: choose a listed number")
+        ask_effort(agent, default)
+    end
+  end
+
+  defp effort_description("low"), do: "Fastest responses with minimal reasoning"
+  defp effort_description("medium"), do: "Balanced speed and reasoning"
+  defp effort_description("high"), do: "Thorough reasoning (recommended)"
+  defp effort_description("xhigh"), do: "More reasoning for difficult tasks"
+  defp effort_description("max"), do: "Maximum supported reasoning"
+  defp effort_description("ultra"), do: "Deepest supported reasoning"
+
+  defp ask_permission(agent, backend, kind, default) do
+    options = PermissionPolicy.options(backend, kind)
+    default_index = Enum.find_index(options, &(&1.value == default)) + 1
+    label = permission_label(kind)
+
+    IO.puts("\n#{agent} #{label}:")
+
+    Enum.with_index(options, 1)
+    |> Enum.each(fn {option, index} ->
+      IO.puts("  #{index}) #{option.label} · #{option.description}")
+    end)
+
+    value =
+      case IO.gets("Select #{agent} #{label} [#{default_index}]: ") do
+        nil ->
+          Integer.to_string(default_index)
+
+        input when is_binary(input) ->
+          input |> String.trim() |> use_default(Integer.to_string(default_index))
+
+        :eof ->
+          Integer.to_string(default_index)
+      end
+
+    selected =
+      case Integer.parse(value) do
+        {index, ""} when index >= 1 and index <= length(options) ->
+          Enum.at(options, index - 1).value
+
+        _ ->
+          value
+      end
+
+    case PermissionPolicy.parse(backend, kind, selected) do
+      {:ok, parsed} ->
+        {:ok, parsed}
+
+      {:error, message} ->
+        IO.puts(:stderr, "Invalid value: #{message}")
+        ask_permission(agent, backend, kind, default)
+    end
+  end
+
+  defp permission_label(:approval_policy), do: "approval policy"
+  defp permission_label(:sandbox_policy), do: "sandbox policy"
 
   defp ask_backend(agent, default) do
     default_index = if backend_label(default) == "cursor", do: "2", else: "1"

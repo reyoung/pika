@@ -1,4 +1,5 @@
 defmodule Pika.Test.AlignmentFixtures do
+  alias Pika.Alignment.Campaign
   alias Pika.Git
 
   @fixture_pair_count 7
@@ -92,6 +93,74 @@ defmodule Pika.Test.AlignmentFixtures do
         "kernel/bench.py"
       ]
     }
+  end
+
+  def submit_reference_review(
+        token,
+        workspace,
+        key \\ "fixture-reference-review",
+        overrides \\ %{}
+      ) do
+    snapshot = Campaign.snapshot()
+    {:ok, reference} = Campaign.reference_review()
+    case_definition = List.first(snapshot.spec["benchmark_cases"])
+    metric_definition = List.first(snapshot.spec["metrics"])
+    safe_key = String.replace(key, ~r/[^A-Za-z0-9._-]/, "-")
+    relative_path = "artifacts/reference-review/#{safe_key}.json"
+    absolute_path = Path.join(workspace.root, relative_path)
+    File.mkdir_p!(Path.dirname(absolute_path))
+
+    args =
+      %{
+        "idempotency_key" => key,
+        "schema_version" => 1,
+        "spec_revision" => snapshot.spec["revision"],
+        "reference_sha256" => reference.sha256,
+        "harness_digest" => snapshot.harness.digest,
+        "case_id" => case_definition["id"],
+        "command" => "python kernel/bench.py --case #{case_definition["id"]}",
+        "environment" => snapshot.spec["target_hardware"],
+        "exit_code" => 0,
+        "metrics" => [
+          %{
+            "metric_id" => metric_definition["id"],
+            "value" => 12.5,
+            "unit" => metric_definition["unit"],
+            "sample_count" => 3
+          }
+        ],
+        "summary" => "Fixture Reference smoke run passed."
+      }
+      |> Map.merge(overrides)
+
+    output =
+      Jason.encode!(%{
+        "case_id" => args["case_id"],
+        "command" => args["command"],
+        "environment" => args["environment"],
+        "exit_code" => args["exit_code"],
+        "metrics" => args["metrics"]
+      })
+
+    File.write!(absolute_path, output)
+    sha256 = output |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
+
+    {:ok, _artifact} =
+      Campaign.mcp_call(token, "register_artifact", %{
+        "idempotency_key" => "#{key}-artifact",
+        "kind" => "reference_review_evidence",
+        "relative_path" => relative_path,
+        "sha256" => sha256,
+        "size" => byte_size(output),
+        "mime" => "application/json",
+        "metadata" => %{"fixture" => true}
+      })
+
+    Campaign.mcp_call(
+      token,
+      "submit_reference_review",
+      Map.put(args, "output_artifact", relative_path)
+    )
   end
 
   def write_baseline_artifacts(

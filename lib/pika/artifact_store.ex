@@ -5,7 +5,7 @@ defmodule Pika.ArtifactStore do
 
   alias Pika.FileSystem
   alias Pika.Persistence.Artifact
-  alias Pika.{Repo, Workspace}
+  alias Pika.{CampaignStore, Repo, Workspace}
 
   def write(%Workspace{} = workspace, relative_path, contents, attrs)
       when is_binary(contents) and is_map(attrs) do
@@ -131,6 +131,29 @@ defmodule Pika.ArtifactStore do
     end
   end
 
+  def migrate_legacy_paths(%Workspace{} = workspace) do
+    Artifact
+    |> where([artifact], not like(artifact.relative_path, "artifacts/%"))
+    |> order_by([artifact], artifact.relative_path)
+    |> Repo.all()
+    |> Enum.reduce_while({:ok, []}, fn artifact, {:ok, migrations} ->
+      case prepare_legacy_migration(workspace, artifact) do
+        {:ok, migration} -> {:cont, {:ok, [migration | migrations]}}
+        {:error, reason} -> {:halt, {:error, {artifact.relative_path, reason}}}
+      end
+    end)
+    |> case do
+      {:ok, []} ->
+        :ok
+
+      {:ok, migrations} ->
+        persist_legacy_migrations(Enum.reverse(migrations))
+
+      {:error, reason} ->
+        {:error, {:legacy_artifact_migration_failed, reason}}
+    end
+  end
+
   def resolve(%Workspace{root: root}, relative_path) when is_binary(relative_path) do
     normalized = normalized_relative(relative_path)
 
@@ -176,6 +199,173 @@ defmodule Pika.ArtifactStore do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp prepare_legacy_migration(workspace, artifact) do
+    destination_relative =
+      Path.join([
+        "artifacts",
+        "recovered",
+        artifact.id,
+        Path.basename(artifact.relative_path)
+      ])
+
+    with {:ok, source} <- resolve_legacy(workspace, artifact.relative_path),
+         :ok <- verify_file_metadata(source, artifact),
+         {:ok, destination} <- resolve(workspace, destination_relative),
+         :ok <- File.mkdir_p(Path.dirname(destination)),
+         {:ok, ^destination} <- resolve(workspace, destination_relative),
+         :ok <- preserve_legacy_file(source, destination),
+         :ok <- verify_file_metadata(destination, artifact) do
+      {:ok,
+       %{
+         artifact_id: artifact.id,
+         old_path: artifact.relative_path,
+         new_path: destination_relative
+       }}
+    end
+  end
+
+  defp resolve_legacy(%Workspace{root: root}, relative_path) do
+    normalized = normalized_relative(relative_path)
+
+    cond do
+      relative_path == "" ->
+        {:error, :empty_artifact_path}
+
+      Path.type(relative_path) == :absolute ->
+        {:error, :absolute_artifact_path}
+
+      normalized != relative_path ->
+        {:error, :noncanonical_artifact_path}
+
+      Enum.any?(Path.split(relative_path), &(&1 in [".", "..", ""])) ->
+        {:error, :artifact_path_escape}
+
+      true ->
+        case reject_symlink_components(root, Path.split(relative_path)) do
+          :ok -> {:ok, Path.join(root, relative_path)}
+          {:error, _} = error -> error
+        end
+    end
+  end
+
+  defp preserve_legacy_file(source, destination) do
+    case File.stat(destination) do
+      {:ok, %{type: :regular}} ->
+        :ok
+
+      {:ok, stat} ->
+        {:error, {:migration_destination_not_regular, stat.type}}
+
+      {:error, :enoent} ->
+        copy_legacy_file(source, destination)
+
+      {:error, reason} ->
+        {:error, {:migration_destination_stat_failed, reason}}
+    end
+  end
+
+  defp copy_legacy_file(source, destination) do
+    temporary =
+      destination <>
+        ".migrating-#{System.unique_integer([:positive, :monotonic])}"
+
+    result =
+      with {:ok, _bytes} <- File.copy(source, temporary),
+           :ok <- File.rename(temporary, destination) do
+        :ok
+      end
+
+    if result != :ok, do: File.rm(temporary)
+    result
+  end
+
+  defp verify_file_metadata(path, artifact) do
+    with {:ok, %{type: :regular, size: size}} <- File.stat(path),
+         true <- size == artifact.byte_size,
+         {:ok, sha256} <- file_sha256(path),
+         true <- sha256 == artifact.sha256 do
+      :ok
+    else
+      false -> {:error, :metadata_mismatch}
+      {:ok, stat} -> {:error, {:not_regular, stat.type}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp persist_legacy_migrations(migrations) do
+    replacements = Map.new(migrations, &{&1.old_path, &1.new_path})
+    now = System.system_time(:microsecond)
+
+    Repo.transaction(fn ->
+      Enum.each(migrations, fn migration ->
+        {updated, _} =
+          Artifact
+          |> where(
+            [artifact],
+            artifact.id == ^migration.artifact_id and
+              artifact.relative_path == ^migration.old_path
+          )
+          |> Repo.update_all(set: [relative_path: migration.new_path])
+
+        if updated != 1,
+          do: Repo.rollback({:legacy_artifact_update_conflict, migration.artifact_id})
+      end)
+
+      rewrite_runtime_snapshots!(replacements, now)
+    end)
+    |> case do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, {:legacy_artifact_migration_failed, reason}}
+    end
+  rescue
+    error -> {:error, {:legacy_artifact_migration_failed, Exception.message(error)}}
+  end
+
+  defp rewrite_runtime_snapshots!(replacements, now) do
+    Repo.query!("SELECT campaign_id, state_blob FROM campaign_runtime_snapshots").rows
+    |> Enum.each(fn [campaign_id, blob] ->
+      case CampaignStore.decode_snapshot(blob) do
+        {:ok, durable} ->
+          rewritten = rewrite_paths(durable, replacements)
+
+          if rewritten != durable do
+            encoded = :erlang.term_to_binary(rewritten, compressed: 6)
+
+            Repo.query!(
+              "UPDATE campaign_runtime_snapshots SET state_blob = ?, updated_at = ? WHERE campaign_id = ?",
+              [{:blob, encoded}, now, campaign_id]
+            )
+          end
+
+        {:error, reason} ->
+          Repo.rollback(reason)
+      end
+    end)
+  end
+
+  defp rewrite_paths(value, replacements) when is_binary(value),
+    do: Map.get(replacements, value, value)
+
+  defp rewrite_paths(value, replacements) when is_map(value) do
+    value
+    |> Map.to_list()
+    |> Map.new(fn {key, item} ->
+      {rewrite_paths(key, replacements), rewrite_paths(item, replacements)}
+    end)
+  end
+
+  defp rewrite_paths(value, replacements) when is_list(value),
+    do: Enum.map(value, &rewrite_paths(&1, replacements))
+
+  defp rewrite_paths(value, replacements) when is_tuple(value) do
+    value
+    |> Tuple.to_list()
+    |> Enum.map(&rewrite_paths(&1, replacements))
+    |> List.to_tuple()
+  end
+
+  defp rewrite_paths(value, _replacements), do: value
 
   defp recover_tail_if_jsonl(workspace, artifact) do
     if artifact.mime_type == "application/x-ndjson" or

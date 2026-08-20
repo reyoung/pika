@@ -4,6 +4,8 @@ defmodule Pika.AgentBackend.Profile do
   defstruct [
     :backend,
     :command,
+    :approval_policy,
+    :sandbox_policy,
     args: [],
     env: %{},
     protocol_config: %{},
@@ -13,6 +15,8 @@ defmodule Pika.AgentBackend.Profile do
   @type t :: %__MODULE__{
           backend: atom(),
           command: String.t() | nil,
+          approval_policy: String.t() | atom() | nil,
+          sandbox_policy: String.t() | atom() | nil,
           args: [String.t()],
           env: map(),
           protocol_config: map(),

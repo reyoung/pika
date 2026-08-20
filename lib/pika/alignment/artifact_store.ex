@@ -83,13 +83,23 @@ defmodule Pika.Alignment.ArtifactStore do
 
   def resolve(workspace_root, relative_path) when is_binary(relative_path) do
     root = Path.expand(workspace_root)
+    normalized = relative_path |> Path.split() |> Path.join()
 
     cond do
+      relative_path == "" ->
+        {:error, :empty_artifact_path}
+
       Path.type(relative_path) == :absolute ->
         {:error, :absolute_path_forbidden}
 
+      normalized != relative_path ->
+        {:error, :noncanonical_artifact_path}
+
       Enum.any?(Path.split(relative_path), &(&1 == "..")) ->
         {:error, :path_escape}
+
+      not String.starts_with?(relative_path, "artifacts/") ->
+        {:error, :outside_artifact_root}
 
       true ->
         absolute = Path.expand(relative_path, root)

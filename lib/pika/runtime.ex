@@ -17,6 +17,7 @@ defmodule Pika.Runtime do
 
     with :ok <- Persistence.migrate(),
          current <- Persistence.current_campaign(),
+         :ok <- migrate_legacy_artifacts(workspace, current),
          :ok <- verify_git(workspace, current),
          :ok <- verify_artifacts(workspace, current),
          {:ok, campaign, recovery} <- Persistence.initialize_or_recover(workspace) do
@@ -61,6 +62,22 @@ defmodule Pika.Runtime do
     expected_head = if current, do: current.best_sha, else: workspace.base_sha
 
     case Workspace.verify_identity(workspace, expected_head) do
+      :ok ->
+        :ok
+
+      {:error, reason} when is_nil(current) ->
+        {:error, reason}
+
+      {:error, reason} ->
+        case Persistence.block_campaign(current, reason) do
+          {:ok, blocked, _recovery} -> {:blocked, blocked, reason}
+          {:error, block_reason} -> {:error, block_reason}
+        end
+    end
+  end
+
+  defp migrate_legacy_artifacts(workspace, current) do
+    case ArtifactStore.migrate_legacy_paths(workspace) do
       :ok ->
         :ok
 

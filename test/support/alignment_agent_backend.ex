@@ -71,7 +71,7 @@ defmodule Pika.Test.AlignmentAgentBackend do
   defp run(input, state) do
     cond do
       String.contains?(state.instructions, "Baseline Boundary Agent") -> baseline(state)
-      String.contains?(input, "确认 Campaign Spec v1") -> setup_merge(state)
+      String.contains?(input, "确认 Campaign Spec v") -> setup_merge(state)
       String.contains?(state.instructions, "You are the Boundary Agent") -> alignment(state)
       true -> :ok
     end
@@ -93,13 +93,23 @@ defmodule Pika.Test.AlignmentAgentBackend do
         "submit_harness",
         Map.put(attrs, "idempotency_key", "fake-harness")
       )
+
+    {:ok, _} =
+      AlignmentFixtures.submit_reference_review(
+        token,
+        %{root: workspace_root(state)},
+        "fake-review"
+      )
   end
+
+  defp workspace_root(state), do: state.cwd |> Path.dirname() |> Path.dirname()
 
   defp setup_merge(state) do
     snapshot = Campaign.snapshot()
     workspace = snapshot.workspace.root
     repo = Path.join(workspace, "repo")
-    setup = Path.join(workspace, "setup/1")
+    setup = state.cwd
+    base_sha = Git.run!(repo, ["rev-parse", "pika/best"])
     Git.run!(setup, ["add", "."])
     Git.run!(setup, ["commit", "-m", "fake setup"])
     setup_sha = Git.run!(setup, ["rev-parse", "HEAD"])
@@ -110,7 +120,7 @@ defmodule Pika.Test.AlignmentAgentBackend do
     {:ok, _} =
       Campaign.mcp_call(state.mcp.token, "complete_setup_merge", %{
         "idempotency_key" => "fake-merge",
-        "base_sha" => snapshot.workspace.source_sha,
+        "base_sha" => base_sha,
         "setup_sha" => setup_sha,
         "best_sha" => best_sha
       })

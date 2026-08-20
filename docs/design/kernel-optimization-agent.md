@@ -30,7 +30,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 5. 候选尝试只有在至少一个目标指标改善超过 1%，且其他指标没有下降时才被接受；否则拒绝。
 6. 已接受尝试 squash merge 回最佳已知版本；无论接受或拒绝都持久记录 Patch、描述、总结和 Metrics 变化。
 7. 新计划获得最近 N 次尝试的描述、总结和 Metrics 变化；完整历史通过 MCP 查询。
-8. 参考项目以 Git submodule 形式出现在候选工作区的 `ref/` 中，但不得归并到产品代码主线。
+8. 参考项目以 Workspace 独立 clone 存储，并通过软链接出现在候选工作区的 `ref/` 中，但不得归并到产品代码主线。
 
 ## 已确认的 Campaign Spec 生命周期
 
@@ -59,16 +59,16 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 - Pika 架构参考与 Attempt Reference Catalog 完全无关，不能作为 Kernel Ref 注入。
 - Reference Catalog 的初始集合与 Atrex Kernel Agent `reference-projects/` 一致，共 16 项：`cutlass`、`cutex`、`cuLA`、`flash-attention`、`flashinfer`、`FlyDSL`、`triton`、`DeepGEMM`、`LeetCUDA`、`FlashMLA`、`composable_kernel`、`cute-gemm`、`hpc-ops`、`aiter`、`quack`、`tilelang`。
-- Alignment UI 允许用户逐项选择 Ref，默认 16 项全部选中。
+- Alignment UI 允许用户逐项选择 Ref，默认 16 个内置项目全部选中；用户还可为当前 Campaign 添加 Git Repository，并在确认前删除自己添加的项目。
 - Campaign 的 Reference Catalog 为每个选中仓库记录 URL、版本、`ref/` 目录名和简介；这些信息会注入 Agent Prompt。
-- setup 和 Iteration worktree 使用 Git submodule 把所有选中仓库临时注入 `ref/<name>`。
-- Pika 注入的 `ref/**` 以及对应 `.gitmodules` 增量属于禁止交付区域；用户仓库原有 submodule 必须保持不变。
-- 进入归并队列后，编码 Agent 必须移除 Pika 注入的 submodule、恢复基础版本 `.gitmodules`，再重新运行正确性和 Benchmark。
+- Campaign Workspace 在 `refs/<name>` 维护固定 SHA 的独立 clone；setup 和 Iteration worktree 只用 Git 忽略的软链接把它暴露为 `ref/<name>`。
+- Pika 注入的 `ref/**` 软链接属于禁止交付区域；Pika 不修改 `.gitmodules`，用户仓库原有 submodule 按普通仓库内容处理。
+- 进入归并队列后，编码 Agent 必须移除 worktree 中的 Pika `ref/**` 软链接，再重新运行正确性和 Benchmark；Workspace Checkout 不删除。
 - 候选不得把参考仓库变成构建或运行依赖；移除参考仓库后不能通过验证的候选必须拒绝。
 
 ## 已确认的 Skill 注入
 
-- Skill Registry 与 Reference Catalog 分离；Skill 不是 `ref/` submodule。
+- Skill Registry 与 Reference Catalog 分离；Skill 不是 `ref/` Reference Checkout。
 - Pika Skill Registry 初始增加 `https://github.com/mit-han-lab/ncu-report-skill`。
 - `ncu-report-skill` 原样提供给 Agent，不添加 Pika 自定义硬件适用范围 Prompt；Agent 按 Skill 自身说明判断通用流程与 B200/sm_100 专属内容。
 - Skill 文件、helpers、reference docs 和生成的 Skill 安装入口不得进入候选 squash patch 或 Campaign Best Branch。
@@ -201,7 +201,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Agent Backend 在打开 Session 时配置 MCP URL 与 Token。Codex 通过 App Server 进程配置注入，Cursor 通过 ACP Session 配置注入；不能连接 HTTP MCP 的 Backend 不符合 conformance contract。
 - MCP Token 在服务端绑定 Campaign、Backend Session、Role 与可选 Attempt ID；Agent 不能通过工具参数切换身份。
 - Boundary、Plan、Iteration、Integration、Sync 与 Side Conversation 使用不同工具集合。跨 Attempt 读取只能通过显式历史查询工具，所有写操作必须携带 idempotency key。
-- 必需完成调用为：Boundary Drafting 的 `submit_spec`/`submit_harness`、用户确认后的 `complete_setup_merge`/`submit_baseline`/`submit_iteration_sample`，Plan 的 `submit_plan`，Iteration 的 `record_metrics`/`submit_attempt_summary`/`complete_attempt`，Integration 的 `submit_full_regression`、必要时的 `submit_sampling_feedback` 和通过后的 `complete_merge`，Sync 的 `complete_sync`。Side Conversation 没有完成门禁。
+- 必需完成调用为：Boundary Drafting 的 `submit_spec`/`submit_harness`/`submit_reference_review`、用户确认后的 `complete_setup_merge`/`submit_baseline`/`submit_iteration_sample`，Plan 的 `submit_plan`，Iteration 的 `record_metrics`/`submit_attempt_summary`/`complete_attempt`，Integration 的 `submit_full_regression`、必要时的 `submit_sampling_feedback` 和通过后的 `complete_merge`，Sync 的 `complete_sync`。Side Conversation 没有完成门禁。
 - Metrics 可以重复提交，后一次覆盖当前快照；缺少必需调用时继续采用无限 follow-up 规则。
 
 ## 已确认的 Agent Backend 与通信协议
@@ -330,7 +330,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Codex App Server adapter 直接实现官方 stdio JSON-RPC；Cursor ACP adapter 可使用通过 conformance spike 的 Elixir ACP 库。二者都隔离在 `Pika.AgentBackend` 后。
 - KernelAgent、Atrex Kernel Agent 和 Humanize/flowverse 不作为 Pika 状态机或持久化运行时依赖。
 - Pika 可以复用它们的 Benchmark、Profiler 解析、Prompt/Skill 和 conformance 思路；代码级复用必须单独检查 License，并封装在 adapter 内。
-- 参考 Kernel 仓库继续通过临时 `ref/` submodule 提供给 Agent，不成为构建或运行依赖。
+- 参考 Kernel 仓库通过 Workspace Checkout 与临时 `ref/` 软链接提供给 Agent，不成为构建或运行依赖。
 
 ## 已确认的 Campaign 状态
 

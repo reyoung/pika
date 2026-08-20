@@ -51,6 +51,51 @@ defmodule Pika.HarnessArtifactTest do
              })
   end
 
+  test "streams a hash-verified bounded Reference source preview" do
+    root = AlignmentFixtures.temp_dir("pika-reference-review")
+    attrs = AlignmentFixtures.create_harness(root)
+    content = "def reference(x):\n    return x\n" <> String.duplicate("# detail\n", 32)
+    File.write!(Path.join(root, "kernel/reference.py"), content)
+    assert {:ok, harness} = Harness.validate(root, attrs)
+
+    assert {:ok, review} = Harness.reference_review(root, harness, preview_bytes: 48)
+    assert review.path == "kernel/reference.py"
+    assert review.content == binary_part(content, 0, 48)
+    assert review.preview_bytes == 48
+    assert review.size == byte_size(content)
+    assert review.truncated
+
+    expected_sha = :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+    assert review.sha256 == expected_sha
+
+    File.write!(Path.join(root, "kernel/reference.py"), "changed\n")
+    assert {:error, :reference_sha_changed} = Harness.reference_review(root, harness)
+  end
+
+  test "keeps a valid UTF-8 preview when its byte limit splits a character" do
+    root = AlignmentFixtures.temp_dir("pika-reference-review-utf8")
+    attrs = AlignmentFixtures.create_harness(root)
+    content = String.duplicate("a", 47) <> "界\n"
+    File.write!(Path.join(root, "kernel/reference.py"), content)
+    assert {:ok, harness} = Harness.validate(root, attrs)
+
+    assert {:ok, review} = Harness.reference_review(root, harness, preview_bytes: 48)
+    assert review.content == String.duplicate("a", 47)
+    assert review.truncated
+  end
+
+  test "rejects a Reference reached through a symlinked directory" do
+    root = AlignmentFixtures.temp_dir("pika-reference-review-symlink")
+    attrs = AlignmentFixtures.create_harness(root)
+    external = AlignmentFixtures.temp_dir("pika-reference-review-external")
+    File.write!(Path.join(external, "reference.py"), "secret\n")
+    File.rm_rf!(Path.join(root, "kernel"))
+    File.ln_s!(external, Path.join(root, "kernel"))
+
+    assert {:error, {:invalid_harness_file, "kernel/reference.py"}} =
+             Harness.validate(root, attrs)
+  end
+
   test "rejects a candidate commit that changes a protected Harness path" do
     repo = AlignmentFixtures.git_repo()
     attrs = AlignmentFixtures.create_harness(repo)
@@ -75,6 +120,7 @@ defmodule Pika.HarnessArtifactTest do
 
     assert {:error, :absolute_path_forbidden} = ArtifactStore.register(root, "/tmp/a")
     assert {:error, :path_escape} = ArtifactStore.register(root, "../a")
+    assert {:error, :outside_artifact_root} = ArtifactStore.register(root, "setup/1/a.txt")
 
     assert {:error, :sha256_mismatch} =
              ArtifactStore.register(root, "artifacts/a.txt", %{sha256: "bad"})

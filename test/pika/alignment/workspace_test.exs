@@ -24,6 +24,7 @@ defmodule Pika.Alignment.WorkspaceTest do
     {:ok, workspace} = Workspace.prepare(repo)
     assert File.dir?(workspace.repo)
     assert File.dir?(workspace.setup_worktree)
+    assert File.dir?(Path.join(workspace.root, "refs"))
     assert Git.run!(workspace.repo, ["rev-parse", "pika/best"]) == workspace.source_sha
 
     assert Git.run!(workspace.setup_worktree, ["rev-parse", "--abbrev-ref", "HEAD"]) ==

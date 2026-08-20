@@ -1,15 +1,16 @@
 defmodule Pika.Config do
   @moduledoc false
 
+  alias Pika.AgentBackend.PermissionPolicy
   alias Pika.Paths
 
   @root_fields ~w(server backend campaign prompts sync)
   @server_fields ~w(host port)
-  @backend_fields ~w(type command model reasoning_effort protocol_config)
+  @backend_fields ~w(type command model reasoning_effort approval_policy sandbox_policy protocol_config)
   @campaign_fields ~w(plan max_attempts history_n iteration_agents reference_catalog stop_conditions)
   @prompt_fields ~w(alignment setup_merge baseline plan iteration integration sync)
   @sync_fields ~w(remote branch)
-  @iteration_agent_fields ~w(name backend command model reasoning_effort env protocol_config)
+  @iteration_agent_fields ~w(name backend command model reasoning_effort approval_policy sandbox_policy env protocol_config)
   @backend_types ~w(codex_app_server cursor_acp)
 
   defstruct [
@@ -127,6 +128,22 @@ defmodule Pika.Config do
     command = backend["command"] || default_command(type)
     model = backend["model"]
     reasoning_effort = backend["reasoning_effort"]
+    permission_defaults = PermissionPolicy.defaults(type)
+
+    approval_policy =
+      normalize_permission(
+        type,
+        :approval_policy,
+        backend["approval_policy"] || permission_defaults.approval_policy
+      )
+
+    sandbox_policy =
+      normalize_permission(
+        type,
+        :sandbox_policy,
+        backend["sandbox_policy"] || permission_defaults.sandbox_policy
+      )
+
     protocol_config = backend["protocol_config"] || %{}
     plan = Map.get(campaign, "plan", false)
     max_attempts = Map.get(campaign, "max_attempts")
@@ -139,14 +156,23 @@ defmodule Pika.Config do
       errors ++
         validate_host(host) ++
         validate_port(port) ++
-        validate_backend(type, command, model, reasoning_effort, protocol_config) ++
+        validate_backend(
+          type,
+          command,
+          model,
+          reasoning_effort,
+          approval_policy,
+          sandbox_policy,
+          protocol_config
+        ) ++
         validate_campaign(
           plan,
           max_attempts,
           history_n,
           iteration_agents,
           reference_catalog,
-          stop_conditions
+          stop_conditions,
+          type
         ) ++
         validate_prompts(prompts) ++
         validate_sync(sync)
@@ -160,6 +186,8 @@ defmodule Pika.Config do
         %{
           "type" => type,
           "command" => normalize_command(command),
+          "approval_policy" => approval_policy,
+          "sandbox_policy" => sandbox_policy,
           "protocol_config" => protocol_config
         }
         |> put_optional("model", model)
@@ -287,7 +315,15 @@ defmodule Pika.Config do
   defp validate_port(port) when is_integer(port) and port in 1..65_535, do: []
   defp validate_port(_), do: ["server.port: must be an integer from 1 through 65535"]
 
-  defp validate_backend(type, command, model, reasoning_effort, protocol_config) do
+  defp validate_backend(
+         type,
+         command,
+         model,
+         reasoning_effort,
+         approval_policy,
+         sandbox_policy,
+         protocol_config
+       ) do
     []
     |> maybe_error(
       type not in @backend_types,
@@ -299,6 +335,8 @@ defmodule Pika.Config do
     )
     |> Kernel.++(validate_optional_string(model, "backend.model"))
     |> Kernel.++(validate_effort(reasoning_effort, "backend"))
+    |> Kernel.++(validate_permission(type, :approval_policy, approval_policy, "backend"))
+    |> Kernel.++(validate_permission(type, :sandbox_policy, sandbox_policy, "backend"))
     |> maybe_error(not is_map(protocol_config), "backend.protocol_config: must be a mapping")
   end
 
@@ -308,7 +346,8 @@ defmodule Pika.Config do
          history_n,
          iteration_agents,
          references,
-         stop_conditions
+         stop_conditions,
+         default_backend
        ) do
     stop_mode =
       if is_map(stop_conditions), do: Map.get(stop_conditions, "mode", "all_goals"), else: nil
@@ -323,7 +362,7 @@ defmodule Pika.Config do
       not (is_integer(history_n) and history_n >= 0),
       "campaign.history_n: must be a non-negative integer"
     )
-    |> Kernel.++(validate_iteration_agents(iteration_agents))
+    |> Kernel.++(validate_iteration_agents(iteration_agents, default_backend))
     |> maybe_error(not is_list(references), "campaign.reference_catalog: must be a list")
     |> maybe_error(not is_map(stop_conditions), "campaign.stop_conditions: must be a mapping")
     |> maybe_error(
@@ -350,13 +389,14 @@ defmodule Pika.Config do
     end)
   end
 
-  defp validate_iteration_agents(agents) when is_list(agents) and agents != [] do
+  defp validate_iteration_agents(agents, default_backend) when is_list(agents) and agents != [] do
     agents
     |> Enum.with_index()
     |> Enum.flat_map(fn
       {agent, index} when is_map(agent) ->
         prefix = "campaign.iteration_agents[#{index}]"
         agent = stringify_keys(agent)
+        backend = agent["backend"] || default_backend
 
         unknown_fields(agent, @iteration_agent_fields, prefix) ++
           validate_optional_backend(agent["backend"], prefix) ++
@@ -364,6 +404,8 @@ defmodule Pika.Config do
           validate_optional_string(agent["name"], "#{prefix}.name") ++
           validate_optional_string(agent["model"], "#{prefix}.model") ++
           validate_effort(agent["reasoning_effort"], prefix) ++
+          validate_permission(backend, :approval_policy, agent["approval_policy"], prefix) ++
+          validate_permission(backend, :sandbox_policy, agent["sandbox_policy"], prefix) ++
           if(is_nil(agent["env"]) or is_map(agent["env"]),
             do: [],
             else: ["#{prefix}.env: must be a mapping"]
@@ -378,7 +420,7 @@ defmodule Pika.Config do
     end)
   end
 
-  defp validate_iteration_agents(_agents),
+  defp validate_iteration_agents(_agents, _default_backend),
     do: ["campaign.iteration_agents: must be a non-empty list"]
 
   defp validate_optional_backend(nil, _prefix), do: []
@@ -403,6 +445,15 @@ defmodule Pika.Config do
       else: ["#{prefix}.reasoning_effort: invalid effort"]
   end
 
+  defp validate_permission(_backend, _kind, nil, _prefix), do: []
+
+  defp validate_permission(backend, kind, value, prefix) do
+    case PermissionPolicy.parse(backend, kind, value) do
+      {:ok, _value} -> []
+      {:error, message} -> ["#{prefix}.#{kind}: #{message} for #{backend}"]
+    end
+  end
+
   defp default_iteration_agents(type),
     do: [%{"backend" => type, "reasoning_effort" => "high"}]
 
@@ -411,6 +462,7 @@ defmodule Pika.Config do
     |> Enum.map(fn {agent, index} ->
       agent = stringify_keys(agent)
       type = agent["backend"] || default_type
+      permissions = PermissionPolicy.defaults(type)
 
       %{
         "name" => agent["name"] || "slot-#{index + 1}",
@@ -419,6 +471,18 @@ defmodule Pika.Config do
           normalize_command(agent["command"] || command_for(type, default_type, default_command)),
         "model" => agent["model"],
         "reasoning_effort" => agent["reasoning_effort"] || "high",
+        "approval_policy" =>
+          normalize_permission(
+            type,
+            :approval_policy,
+            agent["approval_policy"] || permissions.approval_policy
+          ),
+        "sandbox_policy" =>
+          normalize_permission(
+            type,
+            :sandbox_policy,
+            agent["sandbox_policy"] || permissions.sandbox_policy
+          ),
         "env" => agent["env"] || %{},
         "protocol_config" => agent["protocol_config"] || %{}
       }
@@ -427,6 +491,13 @@ defmodule Pika.Config do
 
   defp command_for(type, type, default_command), do: default_command
   defp command_for(type, _default_type, _default_command), do: default_command(type)
+
+  defp normalize_permission(backend, kind, value) do
+    case PermissionPolicy.parse(backend, kind, value) do
+      {:ok, normalized} -> normalized
+      {:error, _message} -> value
+    end
+  end
 
   defp resolve_prompt_paths(prompts, source_path) do
     Map.new(prompts, fn {kind, path} ->

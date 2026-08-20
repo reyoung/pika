@@ -29,22 +29,23 @@ Pika 架构参考不属于 Campaign Reference Catalog，也不会进入 Attempt 
 
 ## 3. UI 选择
 
-- Alignment UI 显示 16 项清单，默认全部选中。
-- 用户可以在确认 Campaign Spec 前取消任意项目。
+- Alignment UI 初始显示 16 个内置项目，默认全部选中。
+- 用户可以在确认 Campaign Spec 前取消任意项目，也可以输入 Git URL 或本地绝对路径，为当前 Campaign 添加新项目。
+- 用户项目的 Project ID 可显式填写，也可由仓库名生成；ID 在 Campaign 内唯一，并且必须能安全映射到 `ref/<id>`。用户项目可在确认前删除，内置和配置项目只能取消选择。
 - Campaign Spec 保存选中项目 ID、URL、说明、解析分支和完整 commit SHA。
 - Prompt 只包含选中项目的说明及 `ref/<id>` 本地路径。
-- 未选项目不初始化 submodule，也不出现在 Agent Context。
+- 未选项目不创建 Reference Checkout 或 worktree 软链接，也不出现在 Agent Context。
 
 ## 4. 版本解析
 
-Pika Server 首次初始化 Campaign 时，对所有选中项目执行以下操作：
+确认 Campaign Spec 时，Pika 对所有已选但尚未冻结的项目执行以下操作；已经冻结的项目不重新查询远端：
 
 1. 查询 Registry URL 的默认分支。
 2. 获取默认分支最新 HEAD。
 3. 保存完整 commit SHA，不保存模糊 branch-only 版本。
-4. 用该 SHA 初始化 setup 和 Attempt worktree 中的临时 submodule。
+4. 用该 SHA 初始化 Campaign Workspace `refs/<id>` 中的独立 clone，并在 setup 和 Attempt worktree 的 `ref/<id>` 创建 Git 忽略的软链接。
 
-Campaign 生命周期内 SHA 不变。服务重启、普通 Sync、Spec Revision 和后续 Attempt 都不刷新；启动另一个 Pika Server 才重新解析最新 HEAD。若首次解析或 clone 失败，Campaign 停在初始化阶段并显示项目级错误，不能悄悄跳过默认选中的 Ref。
+每个已解析项目的 SHA 在 Campaign 生命周期内不变。服务重启、普通 Sync、Spec Revision 和后续 Attempt 都不刷新已有项目；Spec Revision 可以新增项目，新项目只解析一次并加入新的冻结 snapshot。若解析或 clone 失败，Campaign 返回确认阶段并显示项目级错误，不能悄悄跳过已选 Ref。
 
 ## 5. Skill Registry
 
@@ -58,8 +59,8 @@ Skill 与 Ref 使用同一版本生命周期：Campaign 初始化时获取默认
 
 ## 6. 注入方式
 
-- Reference 项目以 Git submodule 形式出现在 `ref/<id>`。
+- Reference Project 在 Workspace `refs/<id>` 中各自维护独立 clone，并以软链接形式出现在 worktree `ref/<id>`。
 - Skill 保存在 Workspace 的 Pika-owned Skill 目录，通过 Agent Backend 的 Skill 发现机制或明确路径提供给 Backend Session。
 - Codex App Server 使用 `skills/extraRoots/set`/`skills/list`，并通过系统级 `developerInstructions` 告知 Agent 固定 Skill 的路径；Cursor ACP 使用其 Backend discovery 配置。Backend-specific 入口可以不同，但必须指向同一份固定 SHA 内容。Skill 发现信息和 Pika Prompt 都不能成为或改写首条用户消息，Campaign kick-off 只能由用户发起。
-- `ref/**`、Skill 目录及 Pika 产生的 `.gitmodules` 增量都是禁止交付区域。
-- Integration Agent 在正式配对测量前移除它们并恢复基础 `.gitmodules`，验证候选没有运行时依赖。
+- `ref/**` 软链接和 Skill 目录都是禁止交付区域；Pika 不再为 Reference 修改 `.gitmodules`。
+- Integration Agent 在正式配对测量前移除 worktree 中的 `ref/**` 软链接，验证候选没有运行时依赖；Workspace `refs/**` Checkout 保留供其他 Attempt 复用。

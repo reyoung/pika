@@ -57,12 +57,20 @@ defmodule Pika.PreviewAuthCLITest do
                "cursor-test",
                "--alignment-effort",
                "xhigh",
+               "--alignment-approval-policy",
+               "auto_review",
+               "--alignment-sandbox-policy",
+               "enabled",
                "--iteration-backend",
                "codex",
                "--iteration-model",
                "codex-test",
                "--iteration-effort",
                "max",
+               "--iteration-approval-policy",
+               "untrusted",
+               "--iteration-sandbox-policy",
+               "workspace_write",
                "--iteration-agents",
                "3",
                "--max-attempts",
@@ -75,9 +83,13 @@ defmodule Pika.PreviewAuthCLITest do
     assert opts[:alignment_backend] == "cursor"
     assert opts[:alignment_model] == "cursor-test"
     assert opts[:alignment_effort] == "xhigh"
+    assert opts[:alignment_approval_policy] == "auto_review"
+    assert opts[:alignment_sandbox_policy] == "enabled"
     assert opts[:iteration_backend] == "codex"
     assert opts[:iteration_model] == "codex-test"
     assert opts[:iteration_effort] == "max"
+    assert opts[:iteration_approval_policy] == "untrusted"
+    assert opts[:iteration_sandbox_policy] == "workspace_write"
     assert opts[:iteration_agents] == 3
     assert opts[:max_attempts] == 12
     assert opts[:yes]
@@ -89,6 +101,23 @@ defmodule Pika.PreviewAuthCLITest do
     assert {:error, _message} = CLI.parse_init(["--iteration-backend", "unknown"])
     assert {:error, _message} = CLI.parse_init(["--alignment-effort", "infinite"])
     assert {:error, _message} = CLI.parse_init(["--iteration-effort", "infinite"])
+
+    assert {:error, _message} =
+             CLI.parse_init([
+               "--alignment-backend",
+               "cursor",
+               "--alignment-approval-policy",
+               "on_request"
+             ])
+
+    assert {:error, _message} =
+             CLI.parse_init([
+               "--iteration-backend",
+               "codex",
+               "--iteration-sandbox-policy",
+               "enabled"
+             ])
+
     assert {:ok, legacy} = CLI.parse_init(["--backend", "cursor", "--yes"])
     assert legacy[:backend] == "cursor"
     assert {:error, _message} = CLI.parse_init(["a", "b"])

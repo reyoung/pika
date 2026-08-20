@@ -165,13 +165,15 @@ defmodule Pika.IntegrationCoordinator do
     backend = backend_atom(profile["backend"] || profile[:backend])
     module = Map.get(state.backend_modules, backend, backend_module(backend))
     token = random_token()
-    effort = effort_atom(profile["reasoning_effort"] || profile[:reasoning_effort] || "high")
+    effort = profile["reasoning_effort"] || profile[:reasoning_effort] || "high"
     {command, args} = backend_command(backend, profile["command"] || profile[:command])
 
     backend_profile = %{
       backend: backend,
       command: command,
       args: args,
+      approval_policy: profile["approval_policy"] || profile[:approval_policy],
+      sandbox_policy: profile["sandbox_policy"] || profile[:sandbox_policy],
       env: profile["env"] || profile[:env] || %{},
       protocol_config: profile["protocol_config"] || profile[:protocol_config] || %{},
       artifact_dir: Path.join([state.workspace.artifacts, "logs", attempt.id, "integration"])
@@ -804,6 +806,8 @@ defmodule Pika.IntegrationCoordinator do
       "command" => backend["command"],
       "model" => nil,
       "reasoning_effort" => "high",
+      "approval_policy" => backend["approval_policy"],
+      "sandbox_policy" => backend["sandbox_policy"],
       "env" => %{},
       "protocol_config" => backend["protocol_config"] || %{}
     }
@@ -832,8 +836,6 @@ defmodule Pika.IntegrationCoordinator do
   defp backend_atom(_), do: :codex_app_server
   defp backend_module(:cursor_acp), do: Pika.AgentBackend.CursorACP
   defp backend_module(:codex_app_server), do: Pika.AgentBackend.CodexAppServer
-  defp effort_atom(value) when is_atom(value), do: value
-  defp effort_atom(value), do: String.to_existing_atom(value)
   defp random_token, do: :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
   defp token_hash(token), do: :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
 

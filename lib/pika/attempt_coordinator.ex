@@ -337,13 +337,15 @@ defmodule Pika.AttemptCoordinator do
     module = Map.get(state.backend_modules, backend, backend_module(backend))
     token = random_token()
     token_hash = token_hash(token)
-    effort = effort_atom(profile["reasoning_effort"] || profile[:reasoning_effort] || "high")
+    effort = profile["reasoning_effort"] || profile[:reasoning_effort] || "high"
     {command, args} = backend_command(backend, profile["command"] || profile[:command])
 
     backend_profile = %{
       backend: backend,
       command: command,
       args: args,
+      approval_policy: profile["approval_policy"] || profile[:approval_policy],
+      sandbox_policy: profile["sandbox_policy"] || profile[:sandbox_policy],
       env: profile["env"] || profile[:env] || %{},
       protocol_config: profile["protocol_config"] || profile[:protocol_config] || %{},
       artifact_dir: Path.join([state.workspace.artifacts, "logs", attempt.id])
@@ -1188,6 +1190,8 @@ defmodule Pika.AttemptCoordinator do
       "command" => backend["command"],
       "model" => nil,
       "reasoning_effort" => "high",
+      "approval_policy" => backend["approval_policy"],
+      "sandbox_policy" => backend["sandbox_policy"],
       "env" => %{},
       "protocol_config" => backend["protocol_config"] || %{}
     }
@@ -1219,9 +1223,6 @@ defmodule Pika.AttemptCoordinator do
 
   defp backend_module(:cursor_acp), do: Pika.AgentBackend.CursorACP
   defp backend_module(:codex_app_server), do: Pika.AgentBackend.CodexAppServer
-
-  defp effort_atom(value) when is_atom(value), do: value
-  defp effort_atom(value) when is_binary(value), do: String.to_existing_atom(value)
 
   defp public_identity(identity), do: Map.drop(identity, [:token_hash])
 

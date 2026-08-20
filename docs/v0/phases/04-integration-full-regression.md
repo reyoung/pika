@@ -50,7 +50,7 @@ Completed (2026-08-19)
 ### 4.4 Agent-owned Merge 与独立核验
 
 - [x] Full Regression 通过后持久化 merge Intent。
-- [x] 移除 Pika 注入的 `ref/**` 与对应 `.gitmodules` 增量，保留用户原有 submodule。
+- [x] 正式验证前移除 Pika 注入的 `ref/**` 软链接；Pika 不修改用户 `.gitmodules`。
 - [x] Agent squash merge 到最新 `pika/best`，commit trailers 包含 Attempt、Spec 和 Sampling Revision。
 - [x] `complete_merge` 引用 Full Regression Receipt。
 - [x] Pika 核验父提交、HEAD、Diff、protected paths、Receipt、trailers 和全量 Metric snapshot。

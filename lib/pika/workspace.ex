@@ -204,7 +204,12 @@ defmodule Pika.Workspace do
 
   defp make_layout(root) do
     Enum.reduce_while(
-      [root, Path.join(root, "attempts"), Path.join(root, "artifacts")] ++
+      [
+        root,
+        Path.join(root, "attempts"),
+        Path.join(root, "artifacts"),
+        Path.join(root, "refs")
+      ] ++
         Enum.map(@artifact_kinds, &Path.join([root, "artifacts", &1])),
       :ok,
       fn path, :ok ->

@@ -29,7 +29,7 @@ Completed — 2026-08-19
 - [x] migrations：`spec_revisions`、`benchmark_cases`、`metric_definitions`、`best_revisions`、`best_metrics`。
 - [x] migrations：`sampling_revisions`、`sampling_revision_cases`；初始 Sampling Revision 最多十个 Case。
 - [x] Campaign 状态：DraftingSpec、AwaitingConfirmation、BuildingBaseline、Optimizing、AwaitingSpecConfirmation。
-- [x] `submit_spec` 和 `submit_harness` MCP 实现。
+- [x] `submit_spec`、`submit_harness` 和 `submit_reference_review` MCP 实现。
 - [x] 用户确认是 UI 动作，不是 Agent MCP 工具。
 
 ### 2.2 Alignment Conversation
@@ -38,7 +38,7 @@ Completed — 2026-08-19
 - [x] Alignment/setup merge/Baseline Prompt 从 Config 指向的独立 EEx 资源加载；启动 Turn 前校验资源。
 - [x] Alignment Prompt 注入 repo 状态、目标硬件、已知输入与必需 MCP 操作，并提示用户选择合适而非固定的性能 Metrics。
 - [x] Composer 把文字与测试脚本、pickle dump、JSONL 等附件作为同一消息原子登记；允许纯附件。
-- [x] Backend Turn 缺少 `submit_spec`/`submit_harness` 时无限 follow-up。
+- [x] Backend Turn 缺少 `submit_spec`/`submit_harness`/`submit_reference_review` 时无限 follow-up。
 - [x] UI 展示对话、Artifact、Spec draft 和结构化缺失项。
 
 ### 2.3 Reference Registry
@@ -87,11 +87,14 @@ Completed — 2026-08-19
 
 - [x] 未确认 Spec 不能进入 BuildingBaseline。
 - [x] 用户拒绝/修改后回到 DraftingSpec。
+- [x] 用户在确认建立 Baseline 前审阅 Reference 源码与 SHA；内容或 Harness digest 变化会撤销审阅门禁。
+- [x] Reference 在交给用户审阅前必须针对至少一个 Spec Case 成功运行，并同时展示至少一个实际性能 Metric。
 - [x] Ref 默认全选、取消选择和失败报告。
 - [x] Campaign 内 Ref/Skill SHA 在重启后不变。
 - [x] protected digest 对增加、删除、重命名、内容修改都敏感。
 - [x] Metric direction、目标/保护/观察 Case 门禁。
 - [x] Baseline 采样不足时的单次重跑。
+- [x] Baseline Agent 可通过独立 MCP 自主返回下一版 Spec/Reference/Harness 定义，且不能绕过用户重新确认。
 - [x] 不同 Spec Revision 的 Metrics 不连成同一可比曲线。
 
 ## Exit Gate

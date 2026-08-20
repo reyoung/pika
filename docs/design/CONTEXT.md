@@ -20,6 +20,10 @@ _Avoid_: 只读源仓库、远端仓库、临时 worktree
 用户明确确认的调优边界，包括计算语义、输入契约、Fusion 范围、Shapes、正确性要求、Metrics、Benchmark 协议和停止条件。
 _Avoid_: 用户 Prompt、README、Plan
 
+**可确认 Campaign Spec（Confirmable Campaign Spec）**：
+内容与审阅证据均已完整，并且 Alignment Agent 当前 Turn 已结束、没有待回答问题的稳定 Campaign Spec；只有该状态可以由用户确认并冻结。
+_Avoid_: Agent 中间输出、仅显示 AwaitingConfirmation、待回答问题
+
 **Spec Revision**：
 Campaign Spec 在优化开始后的显式新版本；涉及语义、Shapes、Metrics、Benchmark 或正确性要求的变化都会产生新 Revision，并重新建立 Baseline。
 _Avoid_: 全局指导、配置热更新、Plan 变更
@@ -31,6 +35,10 @@ _Avoid_: Reference、第一版优化
 **参考实现（Reference Implementation）**：
 用 PyTorch 表达计算语义、输入约束和正确性标准的权威实现，不承诺性能。
 _Avoid_: Baseline、Oracle Kernel
+
+**Reference Review Evidence**：
+证明当前 Reference Implementation 能在受保护 Harness 中执行、并为当前 Campaign Spec 的至少一个 Benchmark Case 产生性能观测的审阅证据；它随 Reference、Harness 或 Spec 的变化而失效。
+_Avoid_: Baseline、完整 Benchmark、Agent 自述、未绑定源码的日志
 
 **受保护 Harness（Protected Harness）**：
 已随 Campaign Spec 确认的 Reference、正确性测试与 Benchmark Harness；候选尝试只能读取和执行，不能修改。
@@ -45,8 +53,16 @@ _Avoid_: Iteration、版本、分支
 _Avoid_: Campaign Spec、提交说明、最终 Summary
 
 **Reference Catalog**：
-Pika 可注入 Attempt `ref/` 的 Kernel 实现仓库清单，初始集合来自 Atrex Kernel Agent 的 `reference-projects/`；用户在 Alignment 中选择，默认全选。
+Pika 可注入 Attempt `ref/` 的 Kernel 实现仓库清单；它包含内置项目，也包含用户为当前 Campaign 添加的 Git 仓库。用户在 Alignment 中选择条目，确认 Campaign Spec 时，所有已选条目解析并冻结到具体 commit SHA。
 _Avoid_: Git submodule 状态、运行时依赖、包管理清单
+
+**Reference Checkout**：
+Campaign Workspace 拥有的、固定到 Reference Project commit SHA 的独立只读仓库副本；Agent 可从候选工作区读取它，但它不属于产品仓库内容或可交付 Patch。
+_Avoid_: Git submodule、产品源码、运行时依赖、候选修改
+
+**Campaign Reference Project**：
+用户添加到当前 Reference Catalog 的 Git 仓库；其项目 ID 在 Campaign 内唯一，确认前可选择或删除，确认后以已解析的 commit SHA 进入冻结 Reference snapshot。
+_Avoid_: 漂移的 branch、Reference Implementation、全局 Registry 配置
 
 **Skill Registry**：
 Pika 提供给 Backend Session 的外部 Skill 清单，与 `ref/` Kernel 仓库相互独立；Skill 不进入候选 Patch 或 Campaign Best Branch。
@@ -59,6 +75,10 @@ _Avoid_: GPU Worker、执行节点、统一 ACP Session
 **Agent Profile**：
 为一次 Agent 会话选择 Agent Backend、模型、reasoning effort、环境和权限行为的命名配置。
 _Avoid_: Benchmark Harness、Campaign Spec、Backend Session
+
+**Backend Permission Policy**：
+Agent Profile 中由具体 Agent Backend 解释的一对执行策略：Approval Policy 决定 provider 如何审查或请求批准操作，Sandbox Policy 决定 provider 对文件系统和网络施加的技术访问边界；它们可随 Agent Profile 修改，不产生 Spec Revision。Codex 自身不可配置的硬性执行规则不属于 Sandbox Policy。
+_Avoid_: Campaign Spec 权限、Protected Harness 门禁、主机安全边界、统一跨 provider 的权限等级
 
 **Agent Backend**：
 把 provider-specific 控制协议转换为 Pika 统一会话、Turn、steer、interrupt 与标准事件接口的适配器。

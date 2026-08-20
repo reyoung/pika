@@ -16,7 +16,8 @@ defmodule PikaWeb.ControlLive do
       end
 
       snapshot = Pika.Dashboard.snapshot(campaign_id)
-      tab = if(params["tab"] in @tabs, do: params["tab"], else: "attempts")
+      requested_tab = params["tab"] || session["control_tab"]
+      tab = if(requested_tab in @tabs, do: requested_tab, else: "attempts")
       selected = snapshot.attempts |> List.last() |> then(&(&1 && &1.id))
       {remote, branch} = sync_defaults()
 

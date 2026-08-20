@@ -6,11 +6,11 @@ defmodule Pika.Alignment.Campaign do
   alias Pika.AgentBackend
 
   alias Pika.{Baseline, Harness, PromptCatalog, ReferenceCatalog, Sampling}
-  alias Pika.Alignment.{ArtifactStore, BaselineManifest, Workspace}
+  alias Pika.Alignment.{ArtifactStore, BaselineManifest, ReferenceReviewEvidence, Workspace}
   alias Pika.CampaignSpec, as: Spec
 
   @topic "alignment:campaign"
-  @write_tools ~w(register_artifact submit_spec submit_harness complete_setup_merge submit_baseline submit_iteration_sample)
+  @write_tools ~w(register_artifact submit_spec submit_harness submit_reference_review complete_setup_merge reopen_baseline_definition submit_baseline submit_iteration_sample)
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -30,6 +30,10 @@ defmodule Pika.Alignment.Campaign do
     call_if_started(:snapshot, {:error, :not_started})
   end
 
+  def reference_review do
+    call_if_started(:reference_review, {:error, :not_started})
+  end
+
   def authorize(token), do: call_if_started({:authorize, token}, {:error, :not_started})
 
   def mcp_call(token, tool, args),
@@ -39,7 +43,19 @@ defmodule Pika.Alignment.Campaign do
     do: call_if_started({:send_message, body, artifacts}, {:error, :not_started})
 
   def toggle_reference(id), do: call_if_started({:toggle_reference, id}, {:error, :not_started})
-  def confirm_spec, do: call_if_started(:confirm_spec, {:error, :not_started})
+
+  def add_reference_project(attrs),
+    do: call_if_started({:add_reference_project, attrs}, {:error, :not_started})
+
+  def remove_reference_project(id),
+    do: call_if_started({:remove_reference_project, id}, {:error, :not_started})
+
+  def confirm_spec(reviewed_reference_sha, reviewed_evidence_digest),
+    do:
+      call_if_started(
+        {:confirm_spec, reviewed_reference_sha, reviewed_evidence_digest},
+        {:error, :not_started}
+      )
 
   def request_changes(body, artifacts \\ []),
     do: call_if_started({:request_changes, body, artifacts}, {:error, :not_started})
@@ -84,6 +100,7 @@ defmodule Pika.Alignment.Campaign do
       backend_enabled: Keyword.get(opts, :start_backend, true),
       backend: nil,
       backend_session: nil,
+      backend_open_generation: 0,
       provider_session_id: Keyword.get(opts, :resume_session_id),
       backend_token_hash: nil,
       closed_sessions: MapSet.new(),
@@ -109,7 +126,8 @@ defmodule Pika.Alignment.Campaign do
       spec_result: Spec.validate(%{}),
       spec_diff: nil,
       harness: nil,
-      required: MapSet.new(~w(submit_spec submit_harness)),
+      reference_review_evidence: nil,
+      required: draft_required_operations(),
       references: Keyword.get(opts, :references, ReferenceCatalog.entries()),
       reference_progress: nil,
       resolve_references: Keyword.get(opts, :resolve_references, true),
@@ -117,6 +135,7 @@ defmodule Pika.Alignment.Campaign do
       skill: Keyword.fetch!(opts, :skill),
       skill_roots: Keyword.get(opts, :skill_roots, []),
       best_sha: workspace.source_sha,
+      setup_base_sha: workspace.source_sha,
       setup_sha: nil,
       baseline: nil,
       baseline_retry_count: 0,
@@ -170,6 +189,10 @@ defmodule Pika.Alignment.Campaign do
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, public_snapshot(state), state}
 
+  def handle_call(:reference_review, _from, state) do
+    {:reply, load_reference_review(state), state}
+  end
+
   def handle_call({:authorize, token}, _from, state) do
     authorized = Map.has_key?(state.mcp_tokens, token_hash(token))
     {:reply, if(authorized, do: :ok, else: {:error, :unauthorized}), state}
@@ -195,60 +218,106 @@ defmodule Pika.Alignment.Campaign do
 
   def handle_call({:toggle_reference, id}, _from, state) do
     if state.status in [:drafting_spec, :awaiting_confirmation] do
-      references =
-        Enum.map(state.references, fn
-          %{id: ^id} = entry ->
-            %{entry | selected: not entry.selected}
+      case Enum.find_index(state.references, &(&1.id == id)) do
+        nil ->
+          {:reply, {:error, :reference_project_not_found}, state}
 
-          entry ->
-            entry
-        end)
-
-      selected_ids = for reference <- references, reference.selected, do: reference.id
-      spec_result = Spec.validate(Map.put(state.spec_result.spec, "reference_ids", selected_ids))
-
-      state = %{
-        state
-        | references: references,
-          spec_result: spec_result,
-          status: :drafting_spec,
-          required: MapSet.put(state.required, "submit_spec")
-      }
-
-      state =
-        if Map.has_key?(state.workflow_kickoffs, :alignment) do
-          dispatch_input(
-            state,
-            "Reference selection changed to #{Enum.join(selected_ids, ", ")}. Update and resubmit the Campaign Spec with submit_spec before asking for confirmation."
-          )
-        else
-          state
-        end
-
-      broadcast(state)
-      {:reply, :ok, state}
+        index ->
+          references = List.update_at(state.references, index, &%{&1 | selected: not &1.selected})
+          state = update_reference_projects(state, references, "Reference selection changed")
+          broadcast(state)
+          {:reply, :ok, state}
+      end
     else
       {:reply, {:error, :references_frozen}, state}
     end
   end
 
-  def handle_call(:confirm_spec, _from, state) do
-    if state.status == :awaiting_confirmation and state.spec_result.ready? and state.harness do
-      confirmation_input = "确认 Campaign Spec v1，并建立 Baseline。"
+  def handle_call({:add_reference_project, attrs}, _from, state) do
+    if state.status in [:drafting_spec, :awaiting_confirmation] do
+      case ReferenceCatalog.new_user_entry(attrs, state.references) do
+        {:ok, entry} ->
+          references = state.references ++ [entry]
 
-      state = %{
+          state =
+            update_reference_projects(
+              state,
+              references,
+              "User added Reference Project #{entry.id} from #{entry.url}"
+            )
+
+          broadcast(state)
+          {:reply, {:ok, entry}, state}
+
+        {:error, _reason} = error ->
+          {:reply, error, state}
+      end
+    else
+      {:reply, {:error, :references_frozen}, state}
+    end
+  end
+
+  def handle_call({:remove_reference_project, id}, _from, state) do
+    if state.status in [:drafting_spec, :awaiting_confirmation] do
+      case Enum.find(state.references, &(&1.id == id)) do
+        nil ->
+          {:reply, {:error, :reference_project_not_found}, state}
+
+        %{origin: :user} ->
+          references = Enum.reject(state.references, &(&1.id == id))
+
+          state =
+            update_reference_projects(
+              state,
+              references,
+              "User removed Reference Project #{id}"
+            )
+
+          broadcast(state)
+          {:reply, :ok, state}
+
+        _entry ->
+          {:reply, {:error, :builtin_reference_project_cannot_be_removed}, state}
+      end
+    else
+      {:reply, {:error, :references_frozen}, state}
+    end
+  end
+
+  def handle_call(
+        {:confirm_spec, reviewed_reference_sha, reviewed_evidence_digest},
+        _from,
         state
-        | status: :resolving_references,
-          last_error: nil,
-          pending_confirmation_input: confirmation_input,
-          workflow_kickoffs: Map.put(state.workflow_kickoffs, :baseline, confirmation_input),
-          messages: state.messages ++ [message(:user, confirmation_input)]
-      }
+      ) do
+    if state.status == :awaiting_confirmation and state.spec_result.ready? and state.harness do
+      with :ok <- require_confirmation_idle(state),
+           {:ok, reference} <- load_reference_review(state),
+           :ok <-
+             require_review_match(
+               reviewed_reference_sha,
+               reference.sha256,
+               :reference_not_reviewed
+             ),
+           :ok <-
+             require_review_match(
+               reviewed_evidence_digest,
+               state.reference_review_evidence && state.reference_review_evidence.digest,
+               :reference_evidence_not_reviewed
+             ),
+           :ok <- Harness.verify_digest(state.workspace.setup_worktree, state.harness),
+           :ok <- verify_reference_review_evidence(state, reference.sha256) do
+        advance_confirmed_spec(state)
+      else
+        {:error, reason} when reason in [:agent_still_responding, :questions_pending] ->
+          {:reply, {:error, reason}, state}
 
-      state = start_reference_resolution(state)
+        {:error, reason}
+        when reason in [:reference_not_reviewed, :reference_evidence_not_reviewed] ->
+          {:reply, {:error, reason}, state}
 
-      broadcast(state)
-      {:reply, :ok, state}
+        {:error, reason} ->
+          {:reply, {:error, {:reference_review_failed, reason}}, state}
+      end
     else
       {:reply, {:error, :spec_not_confirmable}, state}
     end
@@ -268,7 +337,8 @@ defmodule Pika.Alignment.Campaign do
         state = %{
           state
           | status: :drafting_spec,
-            required: MapSet.new(~w(submit_spec submit_harness)),
+            required: draft_required_operations(),
+            reference_review_evidence: nil,
             messages: state.messages ++ [message(:user, "修改要求：#{body}", artifacts)]
         }
 
@@ -280,6 +350,16 @@ defmodule Pika.Alignment.Campaign do
 
         broadcast(state)
         {:reply, :ok, state}
+
+      state.status == :building_baseline ->
+        case reopen_confirmed_spec(state, body, artifacts) do
+          {:ok, state} ->
+            broadcast(state)
+            {:reply, :ok, state}
+
+          {:error, reason} ->
+            {:reply, {:error, {:spec_reopen_failed, reason}}, state}
+        end
 
       true ->
         {:reply, {:error, :invalid_state}, state}
@@ -348,7 +428,12 @@ defmodule Pika.Alignment.Campaign do
         required: MapSet.new(["complete_setup_merge"]),
         messages:
           state.messages ++
-            [message(:system, "Campaign Spec v1 已由用户确认；等待 Agent 完成 setup squash merge。")]
+            [
+              message(
+                :system,
+                "Campaign Spec v#{spec_revision(state)} 已由用户确认；等待 Agent 完成 setup squash merge。"
+              )
+            ]
     }
 
     state =
@@ -380,7 +465,10 @@ defmodule Pika.Alignment.Campaign do
     {:noreply, state}
   end
 
-  def handle_info({:backend_opened, workflow, {:ok, handle, session}}, state) do
+  def handle_info(
+        {:backend_opened, generation, workflow, {:ok, handle, session}},
+        %{backend_open_generation: generation} = state
+      ) do
     mcp_tokens =
       if state.backend_token_hash do
         Map.update(state.mcp_tokens, state.backend_token_hash, nil, fn identity ->
@@ -412,7 +500,10 @@ defmodule Pika.Alignment.Campaign do
     {:noreply, state}
   end
 
-  def handle_info({:backend_opened, _workflow, {:error, reason}}, state) do
+  def handle_info(
+        {:backend_opened, generation, _workflow, {:error, reason}},
+        %{backend_open_generation: generation} = state
+      ) do
     state = %{
       state
       | last_error: "Backend Session 启动失败：#{inspect(reason)}",
@@ -424,7 +515,18 @@ defmodule Pika.Alignment.Campaign do
     {:noreply, state}
   end
 
-  def handle_info({:backend_turn_result, result}, state) do
+  def handle_info({:backend_opened, _generation, _workflow, {:ok, handle, _session}}, state) do
+    close_backend(handle)
+    {:noreply, state}
+  end
+
+  def handle_info({:backend_opened, _generation, _workflow, {:error, _reason}}, state),
+    do: {:noreply, state}
+
+  def handle_info(
+        {:backend_turn_result, generation, result},
+        %{backend_open_generation: generation} = state
+      ) do
     state =
       case result do
         {:ok, _turn_id} ->
@@ -437,6 +539,8 @@ defmodule Pika.Alignment.Campaign do
     broadcast(state)
     {:noreply, state}
   end
+
+  def handle_info({:backend_turn_result, _generation, _result}, state), do: {:noreply, state}
 
   def handle_info({:pika_backend_event, event}, state) do
     state =
@@ -740,8 +844,10 @@ defmodule Pika.Alignment.Campaign do
 
   defp perform_write("submit_spec", args, %{workflow: :alignment}, state)
        when state.status in [:drafting_spec, :awaiting_confirmation] do
+    state = invalidate_reference_review_evidence(state)
     selected_ids = for reference <- state.references, reference.selected, do: reference.id
     spec = args["spec"] |> map() |> Map.put("reference_ids", selected_ids)
+    spec = Map.put(spec, "revision", spec_revision(state))
     result = Spec.validate(spec)
 
     required =
@@ -759,7 +865,13 @@ defmodule Pika.Alignment.Campaign do
       |> maybe_awaiting_confirmation()
 
     response =
-      {:ok, %{ready: result.ready?, missing: result.missing, errors: result.errors, revision: 1}}
+      {:ok,
+       %{
+         ready: result.ready?,
+         missing: result.missing,
+         errors: result.errors,
+         revision: spec_revision(state)
+       }}
 
     {response, state}
   end
@@ -776,7 +888,10 @@ defmodule Pika.Alignment.Campaign do
     case Harness.validate(state.workspace.setup_worktree, args) do
       {:ok, harness} ->
         state =
-          %{state | harness: harness, required: MapSet.delete(state.required, "submit_harness")}
+          state
+          |> invalidate_reference_review_evidence()
+          |> Map.put(:harness, harness)
+          |> Map.update!(:required, &MapSet.delete(&1, "submit_harness"))
           |> maybe_awaiting_confirmation()
 
         {{:ok, %{digest: harness.digest, protected_paths: harness.protected_paths}}, state}
@@ -794,12 +909,78 @@ defmodule Pika.Alignment.Campaign do
          "submit_harness is only allowed before the Campaign Spec is confirmed"
        ), state}
 
+  defp perform_write("submit_reference_review", args, %{workflow: :alignment}, state)
+       when state.status in [:drafting_spec, :awaiting_confirmation] do
+    if state.spec_result.ready? and state.harness do
+      with {:ok, reference} <- load_reference_review(state),
+           :ok <- Harness.verify_digest(state.workspace.setup_worktree, state.harness),
+           {:ok, artifact} <-
+             verified_registered_artifact(
+               state,
+               args["output_artifact"],
+               "reference_review_evidence"
+             ),
+           {:ok, evidence} <-
+             ReferenceReviewEvidence.validate(
+               state.spec_result.spec,
+               state.harness,
+               reference.sha256,
+               args,
+               artifact
+             ) do
+        state =
+          %{
+            state
+            | reference_review_evidence: evidence,
+              required: MapSet.delete(state.required, "submit_reference_review")
+          }
+          |> maybe_awaiting_confirmation()
+
+        response = %{
+          digest: evidence.digest,
+          case_id: evidence.case_id,
+          metrics: evidence.metrics,
+          ready_for_user_review: state.status == :awaiting_confirmation
+        }
+
+        {{:ok, response}, state}
+      else
+        {:error, reason} ->
+          {mcp_error(
+             "missing_required_data",
+             "Reference review evidence validation failed",
+             %{reason: reason}
+           ), state}
+      end
+    else
+      {mcp_error(
+         "invalid_state",
+         "submit_reference_review requires a valid Campaign Spec and Harness"
+       ), state}
+    end
+  end
+
+  defp perform_write("submit_reference_review", _args, %{workflow: :alignment}, state),
+    do:
+      {mcp_error(
+         "invalid_state",
+         "submit_reference_review is only allowed before the Campaign Spec is confirmed"
+       ), state}
+
+  defp perform_write("submit_reference_review", _args, _identity, state),
+    do:
+      {mcp_error(
+         "forbidden_role",
+         "submit_reference_review requires an alignment session before Spec confirmation"
+       ), state}
+
   defp perform_write("complete_setup_merge", args, %{workflow: :alignment}, state) do
     if setup_merge_required?(state) do
       state = %{state | status: :building_baseline, last_error: nil}
 
       case Workspace.verify_setup_merge(
              state.workspace,
+             state.setup_base_sha,
              args["base_sha"],
              args["setup_sha"],
              args["best_sha"]
@@ -877,6 +1058,64 @@ defmodule Pika.Alignment.Campaign do
   defp perform_write("complete_setup_merge", _args, _identity, state),
     do: {mcp_error("forbidden_role", "complete_setup_merge requires alignment session"), state}
 
+  defp perform_write(
+         "reopen_baseline_definition",
+         args,
+         %{workflow: :baseline},
+         state
+       ) do
+    reason = trimmed_text(args["reason"])
+    requested_changes = trimmed_text(args["requested_changes"])
+
+    cond do
+      reason == "" or requested_changes == "" ->
+        {mcp_error(
+           "missing_required_data",
+           "reason and requested_changes must both be non-empty"
+         ), state}
+
+      baseline_definition_reopenable?(state) ->
+        handoff = "原因：#{reason}\n请求修改：#{requested_changes}"
+
+        case reopen_confirmed_spec(state, handoff, [], :baseline_agent) do
+          {:ok, next_state} ->
+            revision = spec_revision(next_state)
+
+            {{:ok,
+              %{
+                status: "drafting_spec",
+                revision: revision,
+                setup_branch: "pika/setup/#{revision}",
+                required_operations: ~w(submit_harness submit_reference_review submit_spec),
+                next_action:
+                  "the Baseline Session is closing; the Alignment Agent will revise the definition"
+              }}, next_state}
+
+          {:error, reopen_reason} ->
+            {mcp_error("invalid_state", "Baseline definition could not be reopened", %{
+               reason: reopen_reason
+             }), state}
+        end
+
+      true ->
+        {mcp_error(
+           "invalid_state",
+           "reopen_baseline_definition requires an active Baseline workflow before Optimizing",
+           %{
+             status: state.status,
+             required_operations: state.required |> MapSet.to_list() |> Enum.sort()
+           }
+         ), state}
+    end
+  end
+
+  defp perform_write("reopen_baseline_definition", _args, _identity, state),
+    do:
+      {mcp_error(
+         "forbidden_role",
+         "reopen_baseline_definition requires a baseline session"
+       ), state}
+
   defp perform_write("submit_iteration_sample", args, %{workflow: :baseline}, state) do
     if state.status == :selecting_iteration_sample and
          MapSet.member?(state.required, "submit_iteration_sample") do
@@ -922,6 +1161,11 @@ defmodule Pika.Alignment.Campaign do
   defp setup_merge_required?(state) do
     MapSet.member?(state.required, "complete_setup_merge") and
       (state.status == :building_baseline or confirmed_legacy_draft?(state))
+  end
+
+  defp baseline_definition_reopenable?(state) do
+    state.status in [:building_baseline, :selecting_iteration_sample] and
+      Enum.any?(~w(submit_baseline submit_iteration_sample), &MapSet.member?(state.required, &1))
   end
 
   defp confirmed_legacy_draft?(state) do
@@ -1312,11 +1556,277 @@ defmodule Pika.Alignment.Campaign do
     end
   end
 
+  defp draft_required_operations,
+    do: MapSet.new(~w(submit_spec submit_harness submit_reference_review))
+
+  defp invalidate_reference_review_evidence(state) do
+    %{
+      state
+      | reference_review_evidence: nil,
+        required: MapSet.put(state.required, "submit_reference_review"),
+        status: :drafting_spec
+    }
+  end
+
+  defp require_review_match(value, value, _error) when not is_nil(value), do: :ok
+  defp require_review_match(_reviewed, _current, error), do: {:error, error}
+
+  defp verify_reference_review_evidence(%{reference_review_evidence: nil}, _reference_sha),
+    do: {:error, :reference_review_evidence_missing}
+
+  defp verify_reference_review_evidence(state, reference_sha) do
+    evidence = state.reference_review_evidence
+
+    with {:ok, artifact} <-
+           verified_registered_artifact(
+             state,
+             evidence.output_artifact,
+             "reference_review_evidence"
+           ),
+         :ok <-
+           ReferenceReviewEvidence.verify(
+             state.spec_result.spec,
+             state.harness,
+             reference_sha,
+             evidence,
+             artifact
+           ) do
+      :ok
+    end
+  end
+
+  defp verified_registered_artifact(state, relative_path, kind) do
+    case Map.get(state.artifacts, relative_path) do
+      %{kind: ^kind} = artifact ->
+        case ArtifactStore.register(state.workspace.root, relative_path, %{
+               sha256: artifact.sha256,
+               size: artifact.size,
+               kind: artifact.kind,
+               mime: artifact.mime,
+               metadata: artifact.metadata
+             }) do
+          {:ok, _verified} -> {:ok, artifact}
+          {:error, reason} -> {:error, {:artifact_verification_failed, relative_path, reason}}
+        end
+
+      nil ->
+        {:error, {:artifact_not_registered, relative_path}}
+
+      _artifact ->
+        {:error, {:artifact_kind_mismatch, relative_path, kind}}
+    end
+  end
+
   defp maybe_awaiting_confirmation(state) do
     if (state.spec_result.ready? and state.harness) && MapSet.equal?(state.required, MapSet.new()) do
       %{state | status: :awaiting_confirmation}
     else
       %{state | status: :drafting_spec}
+    end
+  end
+
+  defp require_confirmation_idle(%{pending_questions: pending}) when not is_nil(pending),
+    do: {:error, :questions_pending}
+
+  defp require_confirmation_idle(%{agent_responding: true}),
+    do: {:error, :agent_still_responding}
+
+  defp require_confirmation_idle(%{active_turn_id: turn_id}) when is_binary(turn_id),
+    do: {:error, :agent_still_responding}
+
+  defp require_confirmation_idle(_state), do: :ok
+
+  defp load_reference_review(%{harness: nil}), do: {:error, :reference_not_ready}
+
+  defp load_reference_review(state) do
+    spec_path = get_in(state.spec_result.spec, ["computation", "reference_path"])
+    harness_path = state.harness.reference_path
+
+    if spec_path == harness_path do
+      state
+      |> reference_review_roots()
+      |> Enum.uniq()
+      |> Enum.reduce_while({:error, :reference_not_ready}, fn root, _last_error ->
+        case Harness.reference_review(root, state.harness) do
+          {:ok, review} -> {:halt, {:ok, review}}
+          {:error, reason} -> {:cont, {:error, reason}}
+        end
+      end)
+    else
+      {:error, {:reference_path_mismatch, spec_path, harness_path}}
+    end
+  end
+
+  defp reference_review_roots(%{status: status, workspace: workspace})
+       when status in [:drafting_spec, :awaiting_confirmation],
+       do: [workspace.setup_worktree]
+
+  defp reference_review_roots(%{workspace: workspace}),
+    do: [workspace.setup_worktree, workspace.repo]
+
+  defp advance_confirmed_spec(state) do
+    confirmation_input =
+      "确认 Campaign Spec v#{spec_revision(state)}，并建立 Baseline。"
+
+    state = %{
+      state
+      | status: :resolving_references,
+        last_error: nil,
+        pending_confirmation_input: confirmation_input,
+        workflow_kickoffs: Map.put(state.workflow_kickoffs, :baseline, confirmation_input),
+        messages: state.messages ++ [message(:user, confirmation_input)]
+    }
+
+    state = start_reference_resolution(state)
+
+    broadcast(state)
+    {:reply, :ok, state}
+  end
+
+  defp reopen_confirmed_spec(state, body, artifacts, requester \\ :user) do
+    with {:ok, workspace, revision, setup_base_sha} <- prepare_reopened_workspace(state) do
+      {input_body, request_messages, completion_message} =
+        reopen_handoff(requester, body, artifacts, revision)
+
+      input = user_input(input_body, artifacts)
+
+      stop_baseline_submission(state.baseline_submission)
+      close_backend(state.backend)
+
+      old_session_id = state.backend_session && state.backend_session.id
+      old_token_hash = state.backend_token_hash
+
+      spec =
+        state.spec_result.spec
+        |> Map.put("revision", revision)
+        |> Map.drop(["reference_snapshot", "skill_snapshot"])
+
+      state =
+        state
+        |> cancel_pending_questions(
+          "spec_reopened",
+          if(requester == :baseline_agent,
+            do: "the Baseline Agent reopened the Campaign definition",
+            else: "the user returned the Campaign to Spec drafting"
+          )
+        )
+        |> register_user_artifacts(artifacts)
+
+      mcp_tokens =
+        if state.backend_enabled do
+          if old_token_hash,
+            do: Map.delete(state.mcp_tokens, old_token_hash),
+            else: state.mcp_tokens
+        else
+          Map.new(state.mcp_tokens, fn {hash, identity} ->
+            {hash, %{identity | workflow: :alignment}}
+          end)
+        end
+
+      state = %{
+        state
+        | workspace: workspace,
+          status: :drafting_spec,
+          spec_result: Spec.validate(spec),
+          spec_diff: Spec.diff(state.spec_result.spec, spec),
+          harness: nil,
+          reference_review_evidence: nil,
+          required: draft_required_operations(),
+          setup_base_sha: setup_base_sha,
+          setup_sha: nil,
+          baseline: nil,
+          baseline_submission: nil,
+          baseline_progress: nil,
+          baseline_retry_count: 0,
+          baseline_error: nil,
+          iteration_sampling: nil,
+          sampling_revisions: [],
+          pending_confirmation_input: nil,
+          workflow_kickoffs:
+            state.workflow_kickoffs
+            |> Map.put(:alignment, input)
+            |> Map.delete(:baseline),
+          backend: nil,
+          backend_session: nil,
+          provider_session_id: nil,
+          backend_token_hash: nil,
+          backend_workflow: :alignment,
+          mcp_tokens: mcp_tokens,
+          closed_sessions:
+            if(old_session_id,
+              do: MapSet.put(state.closed_sessions, old_session_id),
+              else: state.closed_sessions
+            ),
+          active_turn_id: nil,
+          agent_responding: false,
+          stream_message_id: nil,
+          activity_message_id: nil,
+          kickoff_dispatched: false,
+          recovery_pending: false,
+          last_error: nil,
+          messages:
+            state.messages ++
+              request_messages ++ [message(:system, completion_message)]
+      }
+
+      state =
+        if state.backend_enabled,
+          do: begin_open_session(state, :alignment, workspace.setup_worktree),
+          else: state
+
+      {:ok, state}
+    end
+  end
+
+  defp reopen_handoff(:user, body, artifacts, revision) do
+    {
+      "用户要求停止当前 Baseline，返回 Campaign Spec v#{revision} 修改：#{body}",
+      [message(:user, "修改要求：#{body}", artifacts)],
+      "已停止当前 Baseline，并返回 Campaign Spec v#{revision} 草稿；需要重新提交 Spec、Harness 并由用户确认。"
+    }
+  end
+
+  defp reopen_handoff(:baseline_agent, body, _artifacts, revision) do
+    {
+      "Baseline Agent 通过 reopen_baseline_definition 判定冻结定义无法产生有效 Baseline，已返回 Campaign Spec v#{revision}。技术交接如下：\n#{body}\n请修改 Spec、Reference 与 Harness；仍需用户决定的边界必须使用 ask_questions 询问。",
+      [message(:system, "Baseline Agent 请求修订冻结的 Baseline 定义：\n#{body}")],
+      "Baseline Agent 已停止当前工作并自主返回 Campaign Spec v#{revision} 草稿；需要重新提交 Spec、Harness 并由用户确认。"
+    }
+  end
+
+  defp prepare_reopened_workspace(state) do
+    if setup_merge_completed?(state) do
+      revision = spec_revision(state) + 1
+
+      case Workspace.prepare_setup_revision(state.workspace, state.best_sha, revision) do
+        {:ok, workspace} -> {:ok, workspace, revision, state.best_sha}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:ok, state.workspace, spec_revision(state), state.setup_base_sha}
+    end
+  end
+
+  defp setup_merge_completed?(state) do
+    not is_nil(state.setup_sha) or MapSet.member?(state.required, "submit_baseline") or
+      state.best_sha != state.setup_base_sha
+  end
+
+  defp stop_baseline_submission(nil), do: :ok
+
+  defp stop_baseline_submission(submission) do
+    Process.demonitor(submission.monitor_ref, [:flush])
+    if Process.alive?(submission.pid), do: Process.exit(submission.pid, :shutdown)
+    :ok
+  end
+
+  defp close_backend(nil), do: :ok
+  defp close_backend(backend), do: Task.start(fn -> AgentBackend.close_session(backend) end)
+
+  defp spec_revision(state) do
+    case get_in(state, [:spec_result, :spec, "revision"]) do
+      revision when is_integer(revision) and revision > 0 -> revision
+      _ -> 1
     end
   end
 
@@ -1334,11 +1844,14 @@ defmodule Pika.Alignment.Campaign do
           session_key: Pika.AgentBackend.Id.new("alignment")
         }
 
+        generation = state.backend_open_generation + 1
+
         state = %{
           state
           | mcp_tokens: Map.put(state.mcp_tokens, token_hash, identity),
             backend_token_hash: token_hash,
             backend_workflow: workflow,
+            backend_open_generation: generation,
             kickoff_dispatched: false
         }
 
@@ -1375,7 +1888,7 @@ defmodule Pika.Alignment.Campaign do
               {:ok, handle, session}
             end
 
-          send(parent, {:backend_opened, workflow, result})
+          send(parent, {:backend_opened, generation, workflow, result})
         end)
 
         state
@@ -1390,6 +1903,7 @@ defmodule Pika.Alignment.Campaign do
     references = state.references
     resolve? = state.resolve_references
     materialize? = state.materialize_references
+    workspace_root = state.workspace.root
     setup_worktree = state.workspace.setup_worktree
     total = Enum.count(references, & &1.selected)
 
@@ -1399,13 +1913,20 @@ defmodule Pika.Alignment.Campaign do
     }
 
     Task.start(fn ->
+      resolve_missing? =
+        materialize? and
+          Enum.any?(references, &(&1.selected and not ReferenceCatalog.frozen?(&1)))
+
       resolved =
-        if resolve?, do: ReferenceCatalog.resolve_selected(references), else: {:ok, references}
+        if resolve? or resolve_missing?,
+          do: ReferenceCatalog.resolve_selected(references),
+          else: {:ok, references}
 
       result =
         case resolved do
           {:ok, entries} when materialize? ->
-            ReferenceCatalog.materialize_selected(setup_worktree, entries,
+            ReferenceCatalog.materialize_selected(workspace_root, entries,
+              link_into: setup_worktree,
               on_progress: fn progress ->
                 send(parent, {:reference_materialization_progress, progress})
               end
@@ -1419,6 +1940,33 @@ defmodule Pika.Alignment.Campaign do
     end)
 
     state
+  end
+
+  defp update_reference_projects(state, references, change) do
+    selected_ids = for reference <- references, reference.selected, do: reference.id
+    spec_result = Spec.validate(Map.put(state.spec_result.spec, "reference_ids", selected_ids))
+
+    state = %{
+      state
+      | references: references,
+        spec_result: spec_result,
+        status: :drafting_spec,
+        required:
+          state.required
+          |> MapSet.put("submit_spec")
+          |> MapSet.put("submit_reference_review"),
+        reference_review_evidence: nil,
+        last_error: nil
+    }
+
+    if Map.has_key?(state.workflow_kickoffs, :alignment) do
+      dispatch_input(
+        state,
+        "#{change}. Selected Reference Projects are now: #{Enum.join(selected_ids, ", ")}. Update and resubmit the Campaign Spec with submit_spec before asking for confirmation."
+      )
+    else
+      state
+    end
   end
 
   defp reference_failure_message(references) do
@@ -1439,6 +1987,7 @@ defmodule Pika.Alignment.Campaign do
     parent = self()
     backend = state.backend
     active? = is_binary(state.active_turn_id)
+    generation = state.backend_open_generation
 
     Task.start(fn ->
       result =
@@ -1446,7 +1995,7 @@ defmodule Pika.Alignment.Campaign do
           do: AgentBackend.steer(backend, input),
           else: AgentBackend.start_turn(backend, input)
 
-      send(parent, {:backend_turn_result, result})
+      send(parent, {:backend_turn_result, generation, result})
     end)
 
     %{state | agent_responding: true}
@@ -1601,11 +2150,19 @@ defmodule Pika.Alignment.Campaign do
   defp instruction_assigns(state, :alignment) do
     %{
       setup_worktree: state.workspace.setup_worktree,
-      source_sha: state.workspace.source_sha
+      source_sha: state.setup_base_sha,
+      revision: spec_revision(state),
+      setup_branch: "pika/setup/#{spec_revision(state)}"
     }
   end
 
-  defp instruction_assigns(state, :setup_merge), do: %{source_sha: state.workspace.source_sha}
+  defp instruction_assigns(state, :setup_merge) do
+    %{
+      source_sha: state.setup_base_sha,
+      revision: spec_revision(state),
+      setup_branch: "pika/setup/#{spec_revision(state)}"
+    }
+  end
 
   defp instruction_assigns(state, :baseline) do
     benchmark = Map.fetch!(state.spec_result.spec, "benchmark")
@@ -1680,6 +2237,7 @@ defmodule Pika.Alignment.Campaign do
       missing: state.spec_result.missing,
       spec_errors: state.spec_result.errors,
       harness: state.harness,
+      reference_review_evidence: state.reference_review_evidence,
       required_operations: state.required |> MapSet.to_list() |> Enum.sort(),
       references: state.references,
       reference_progress: state.reference_progress,
@@ -1906,6 +2464,8 @@ defmodule Pika.Alignment.Campaign do
 
   defp mcp_error(code, message, details \\ %{}), do: {:error, code, message, details}
   defp token_hash(token), do: :crypto.hash(:sha256, token)
+  defp trimmed_text(value) when is_binary(value), do: String.trim(value)
+  defp trimmed_text(_value), do: ""
   defp map(value) when is_map(value), do: value
   defp map(_), do: %{}
 
@@ -2162,6 +2722,7 @@ defmodule Pika.Alignment.Campaign do
       references: state.references
     })
     |> refresh_spec_validation()
+    |> ensure_reference_review_evidence_requirement()
     |> repair_post_confirmation_draft()
   end
 
@@ -2171,6 +2732,24 @@ defmodule Pika.Alignment.Campaign do
     do: %{state | spec_result: Spec.validate(spec)}
 
   defp refresh_spec_validation(state), do: state
+
+  defp ensure_reference_review_evidence_requirement(
+         %{status: status, reference_review_evidence: nil} = state
+       )
+       when status in [:drafting_spec, :awaiting_confirmation] do
+    %{
+      state
+      | status: :drafting_spec,
+        required: MapSet.put(state.required, "submit_reference_review"),
+        last_error:
+          if(status == :awaiting_confirmation,
+            do: "Reference 尚无可审阅的运行与性能证据；已退回 Agent 补充 smoke run。",
+            else: state.last_error
+          )
+    }
+  end
+
+  defp ensure_reference_review_evidence_requirement(state), do: state
 
   defp repair_post_confirmation_draft(
          %{

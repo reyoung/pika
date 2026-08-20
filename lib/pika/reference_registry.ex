@@ -35,6 +35,7 @@ defmodule Pika.ReferenceRegistry do
         id: entry["id"],
         url: entry["url"],
         description: entry["description"] || entry["id"],
+        origin: :configured,
         selected: Map.get(entry, "selected", true),
         status: :unresolved,
         sha: nil,

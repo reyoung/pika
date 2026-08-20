@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0031
 ---
 
 # 参考仓库以临时 submodule 注入但不得成为依赖

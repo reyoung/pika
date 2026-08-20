@@ -117,7 +117,7 @@ defmodule Pika.Alignment.MCP.Router do
       ),
       tool(
         "register_artifact",
-        "Register an existing file under the Alignment Workspace.",
+        "Register an existing file under the Alignment Workspace artifacts/ directory. relative_path must be Workspace-relative and start with artifacts/.",
         %{
           "idempotency_key" => string(),
           "kind" => string(),
@@ -131,7 +131,7 @@ defmodule Pika.Alignment.MCP.Router do
       ),
       tool(
         "submit_spec",
-        "Submit Campaign Spec v1. This never confirms the Spec for the user.",
+        "Submit the current Campaign Spec draft revision. This never confirms the Spec for the user.",
         %{
           "idempotency_key" => string(),
           "spec" => Pika.CampaignSpec.json_schema()
@@ -151,6 +151,39 @@ defmodule Pika.Alignment.MCP.Router do
         ~w(idempotency_key reference_path correctness_paths benchmark_path protected_paths)
       ),
       tool(
+        "submit_reference_review",
+        "Submit a successful smoke run of the current Reference on at least one Campaign Spec Benchmark Case, with reviewable performance Metrics and a registered local output Artifact. This is review evidence, not a Baseline.",
+        %{
+          "idempotency_key" => string(),
+          "schema_version" => %{"type" => "integer", "const" => 1},
+          "spec_revision" => %{"type" => "integer", "minimum" => 1},
+          "reference_sha256" => string(),
+          "harness_digest" => string(),
+          "case_id" => string(),
+          "command" => string(),
+          "environment" => string(),
+          "exit_code" => %{"type" => "integer", "const" => 0},
+          "metrics" => %{
+            "type" => "array",
+            "minItems" => 1,
+            "items" => %{
+              "type" => "object",
+              "properties" => %{
+                "metric_id" => string(),
+                "value" => %{"type" => "number"},
+                "unit" => string(),
+                "sample_count" => %{"type" => "integer", "minimum" => 1}
+              },
+              "required" => ~w(metric_id value unit sample_count),
+              "additionalProperties" => false
+            }
+          },
+          "output_artifact" => string(),
+          "summary" => string()
+        },
+        ~w(idempotency_key schema_version spec_revision reference_sha256 harness_digest case_id command environment exit_code metrics output_artifact summary)
+      ),
+      tool(
         "complete_setup_merge",
         "Report the Agent-owned squash merge into the temporary pika/best branch.",
         %{
@@ -160,6 +193,16 @@ defmodule Pika.Alignment.MCP.Router do
           "best_sha" => string()
         },
         ~w(idempotency_key base_sha setup_sha best_sha)
+      ),
+      tool(
+        "reopen_baseline_definition",
+        "Return an active Baseline workflow to a new editable Campaign Spec revision when the confirmed Reference, Harness or measurement definition cannot produce a valid Baseline. This stops the current Baseline work and hands the reason and requested changes to the Alignment Agent; it is not for transient execution failures.",
+        %{
+          "idempotency_key" => string(),
+          "reason" => string(),
+          "requested_changes" => string()
+        },
+        ~w(idempotency_key reason requested_changes)
       ),
       tool(
         "submit_baseline",

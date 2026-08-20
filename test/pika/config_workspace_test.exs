@@ -12,7 +12,13 @@ defmodule Pika.ConfigWorkspaceTest do
     assert config.host == "127.0.0.1"
     assert config.port == 8080
     assert config.backend["type"] == "codex_app_server"
+    assert config.backend["approval_policy"] == "never"
+    assert config.backend["sandbox_policy"] == "danger_full_access"
     assert config.campaign["history_n"] == 7
+
+    assert [iteration] = config.campaign["iteration_agents"]
+    assert iteration["approval_policy"] == "never"
+    assert iteration["sandbox_policy"] == "danger_full_access"
   end
 
   test "loads the Alignment/Baseline Agent model and reasoning effort" do
@@ -32,27 +38,69 @@ defmodule Pika.ConfigWorkspaceTest do
     assert config.backend["reasoning_effort"] == "xhigh"
   end
 
-  test "allows Alignment/Baseline model and effort changes when recovering a Workspace" do
+  test "allows Alignment/Baseline Agent Profile changes when recovering a Workspace" do
     workspace = CampaignFixtures.workspace()
 
-    with_profile = fn model, effort ->
+    with_profile = fn model, effort, approval_policy, sandbox_policy ->
       String.replace(
         CampaignFixtures.default_config(),
         "  type: codex_app_server\n",
-        "  type: codex_app_server\n  model: #{model}\n  reasoning_effort: #{effort}\n"
+        "  type: codex_app_server\n  model: #{model}\n  reasoning_effort: #{effort}\n  approval_policy: #{approval_policy}\n  sandbox_policy: #{sandbox_policy}\n"
       )
     end
 
-    config_path = CampaignFixtures.config_file(with_profile.("first-model", "high"))
+    config_path =
+      CampaignFixtures.config_file(
+        with_profile.("first-model", "high", "on_request", "read_only")
+      )
+
     assert {:ok, config} = Config.load(config_path, workspace: workspace)
     assert {:ok, plan} = Workspace.plan(config)
     assert {:ok, _workspace} = Workspace.activate(plan)
 
-    File.write!(config_path, with_profile.("second-model", "xhigh"))
+    File.write!(
+      config_path,
+      with_profile.("second-model", "xhigh", "untrusted", "workspace_write")
+    )
 
     assert {:ok, recovered} = Config.load(config_path, workspace: workspace)
     assert recovered.backend["model"] == "second-model"
     assert recovered.backend["reasoning_effort"] == "xhigh"
+    assert recovered.backend["approval_policy"] == "untrusted"
+    assert recovered.backend["sandbox_policy"] == "workspace_write"
+  end
+
+  test "validates permission policies against each Agent Backend" do
+    workspace = CampaignFixtures.workspace()
+
+    yaml = """
+    backend:
+      type: cursor_acp
+      approval_policy: on_request
+      sandbox_policy: danger_full_access
+    campaign:
+      iteration_agents:
+        - name: codex
+          backend: codex_app_server
+          approval_policy: force
+          sandbox_policy: enabled
+    """
+
+    assert {:error, {:invalid_config, errors}} =
+             Config.load(CampaignFixtures.config_file(yaml), workspace: workspace)
+
+    assert Enum.any?(errors, &String.contains?(&1, "backend.approval_policy"))
+    assert Enum.any?(errors, &String.contains?(&1, "backend.sandbox_policy"))
+
+    assert Enum.any?(
+             errors,
+             &String.contains?(&1, "campaign.iteration_agents[0].approval_policy")
+           )
+
+    assert Enum.any?(
+             errors,
+             &String.contains?(&1, "campaign.iteration_agents[0].sandbox_policy")
+           )
   end
 
   test "reports all field validation failures without guessing values" do
@@ -104,6 +152,7 @@ defmodule Pika.ConfigWorkspaceTest do
 
     assert File.dir?(first.repo)
     assert File.dir?(first.attempts)
+    assert File.dir?(Path.join(first.root, "refs"))
 
     for kind <- Workspace.artifact_directories() do
       assert File.dir?(Path.join(first.artifacts, kind))

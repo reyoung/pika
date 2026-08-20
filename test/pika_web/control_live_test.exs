@@ -100,6 +100,9 @@ defmodule PikaWeb.ControlLiveTest do
 
     conn = init_test_session(conn, %{pika_auth: marker})
 
+    assert {:ok, _routed_view, routed_html} = live(conn, "/control?tab=metrics")
+    assert routed_html =~ "Metrics Timeline"
+
     {:ok, view, html} =
       live_isolated(conn, PikaWeb.ControlLive, session: %{"pika_auth" => marker})
 

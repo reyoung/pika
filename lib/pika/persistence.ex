@@ -5,7 +5,7 @@ defmodule Pika.Persistence do
 
   alias Ecto.Multi
   alias Pika.Persistence.{AgentSession, Campaign, DomainEvent}
-  alias Pika.{Repo, Workspace}
+  alias Pika.{Git, Repo, Workspace}
 
   @topic_prefix "pika:campaign:"
 
@@ -213,7 +213,8 @@ defmodule Pika.Persistence do
   defp recover_campaign(campaign, workspace) do
     with :ok <- verify_campaign_identity(campaign, workspace),
          {:ok, campaign} <- apply_mutable_config(campaign, workspace),
-         {:ok, _events} <- recover_agent_sessions(campaign.id) do
+         {:ok, _events} <- recover_agent_sessions(campaign.id),
+         {:ok, campaign} <- resume_startup_block(campaign) do
       {:ok, campaign, :recovered}
     else
       {:error, {:identity_mismatch, _} = reason} -> block_campaign(campaign, reason)
@@ -248,29 +249,28 @@ defmodule Pika.Persistence do
             on_conflict: :nothing
           )
 
-        if inserted == 0 or campaign.status == "blocked" do
-          {:already_blocked, Repo.get!(Campaign, campaign.id)}
-        else
-          {:ok, blocked} =
-            campaign
-            |> Campaign.changeset(%{
-              status: "blocked",
-              resume_state: campaign.status,
-              updated_at: now
-            })
-            |> Repo.update()
+        cond do
+          campaign.status == "blocked" ->
+            {:already_blocked, Repo.get!(Campaign, campaign.id)}
 
-          {:ok, event} =
-            Repo.insert(
-              event_changeset(
-                campaign.id,
-                "campaign_blocked",
-                %{reason: reason_text, recovery_idempotency_key: idempotency_key},
-                now
+          inserted == 0 ->
+            {:ok, blocked} = persist_blocked_campaign(campaign, now)
+            {:reblocked, blocked}
+
+          true ->
+            {:ok, blocked} = persist_blocked_campaign(campaign, now)
+
+            {:ok, event} =
+              Repo.insert(
+                event_changeset(
+                  campaign.id,
+                  "campaign_blocked",
+                  %{reason: reason_text, recovery_idempotency_key: idempotency_key},
+                  now
+                )
               )
-            )
 
-          {:blocked, blocked, event}
+            {:blocked, blocked, event}
         end
       end)
 
@@ -282,32 +282,83 @@ defmodule Pika.Persistence do
       {:ok, {:already_blocked, blocked}} ->
         {:ok, blocked, {:blocked, reason}}
 
+      {:ok, {:reblocked, blocked}} ->
+        {:ok, blocked, {:blocked, reason}}
+
       {:error, error} ->
         {:error, {:block_campaign_failed, error}}
     end
   end
 
+  defp persist_blocked_campaign(campaign, now) do
+    campaign
+    |> Campaign.changeset(%{
+      status: "blocked",
+      resume_state: campaign.status,
+      updated_at: now
+    })
+    |> Repo.update()
+  end
+
   defp verify_campaign_identity(campaign, workspace) do
     expected = %{
-      workspace_mode: Atom.to_string(workspace.mode),
-      managed_repo: workspace.managed_repo,
-      git_common_dir: workspace.git_common_dir,
-      base_sha: campaign.base_sha,
+      workspace_mode: campaign.workspace_mode,
+      managed_repo: campaign.managed_repo_canonical_path,
+      git_common_dir: campaign.git_common_dir,
       best_sha: campaign.best_sha
     }
 
     actual = %{
-      workspace_mode: campaign.workspace_mode,
-      managed_repo: campaign.managed_repo_canonical_path,
-      git_common_dir: campaign.git_common_dir,
-      base_sha: workspace.base_sha,
+      workspace_mode: Atom.to_string(workspace.mode),
+      managed_repo: workspace.managed_repo,
+      git_common_dir: workspace.git_common_dir,
       best_sha: best_sha(workspace)
     }
 
-    if expected == actual,
-      do: :ok,
-      else: {:error, {:identity_mismatch, %{expected: expected, actual: actual}}}
+    with true <- expected == actual,
+         :ok <- verify_campaign_lineage(workspace.repo, campaign.base_sha, campaign.best_sha) do
+      :ok
+    else
+      false ->
+        {:error, {:identity_mismatch, %{expected: expected, actual: actual}}}
+
+      {:error, reason} ->
+        {:error,
+         {:identity_mismatch,
+          %{
+            expected: expected,
+            actual: actual,
+            base_sha: campaign.base_sha,
+            lineage: reason
+          }}}
+    end
   end
+
+  defp verify_campaign_lineage(repo, base_sha, best_sha) do
+    case Git.run(repo, ["merge-base", "--is-ancestor", base_sha, best_sha]) do
+      {:ok, _output} -> :ok
+      {:error, error} -> {:error, {:base_not_ancestor_of_best, error}}
+    end
+  end
+
+  defp resume_startup_block(%Campaign{status: "blocked", dispatch_gate: nil} = campaign) do
+    restored_status = campaign.resume_state || "optimizing"
+
+    case transition_campaign(
+           campaign,
+           %{status: restored_status, resume_state: nil},
+           "campaign_recovery_resumed",
+           %{status: restored_status}
+         ) do
+      {:ok, resumed, _event} ->
+        {:ok, resumed}
+
+      {:error, operation, reason} ->
+        {:error, {:campaign_recovery_resume_failed, operation, reason}}
+    end
+  end
+
+  defp resume_startup_block(%Campaign{} = campaign), do: {:ok, campaign}
 
   defp apply_mutable_config(campaign, workspace) do
     mutable = workspace.snapshot["mutable"]

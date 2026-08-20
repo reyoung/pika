@@ -37,7 +37,9 @@ defmodule Pika.Baseline.GPUE2E do
         )
 
       wait!(fn -> Campaign.snapshot().status == :awaiting_confirmation end, 900_000, :alignment)
-      :ok = Campaign.confirm_spec()
+      {:ok, reference_review} = Campaign.reference_review()
+      evidence_digest = Campaign.snapshot().reference_review_evidence.digest
+      :ok = Campaign.confirm_spec(reference_review.sha256, evidence_digest)
       wait!(fn -> Campaign.snapshot().status == :optimizing end, 10_800_000, :gpu_baseline)
       snapshot = Campaign.snapshot()
       best_worktree_clean = Pika.Git.clean?(workspace.repo)

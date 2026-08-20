@@ -4,7 +4,7 @@ defmodule Pika.CampaignStore do
   alias Pika.Repo
 
   @durable_fields ~w(
-    status messages artifacts spec_result spec_diff harness references skill best_sha setup_sha
+    status messages artifacts spec_result spec_diff harness reference_review_evidence references skill best_sha setup_base_sha setup_sha
     baseline baseline_retry_count baseline_error sampling_revisions iteration_sampling workflow_kickoffs
     pending_confirmation_input last_error backend_workflow required provider_session_id
   )a

@@ -13,6 +13,8 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
       command: System.find_executable("mix"),
       args: ["run", "--no-compile", "--no-start", fake_provider(), "--"],
       env: %{"PIKA_FAKE_PROTOCOL" => "codex"},
+      approval_policy: "on_request",
+      sandbox_policy: "read_only",
       artifact_dir: artifact_dir
     }
 
@@ -83,12 +85,19 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
              "Pika system instructions"
 
     assert get_in(thread_start, ["payload", "params", "ephemeral"]) == false
+    assert get_in(thread_start, ["payload", "params", "approvalPolicy"]) == "on-request"
+    assert get_in(thread_start, ["payload", "params", "approvalsReviewer"]) == "auto_review"
+    assert get_in(thread_start, ["payload", "params", "sandbox"]) == "read-only"
 
     first_turn = Enum.find(records, &(get_in(&1, ["payload", "method"]) == "turn/start"))
 
     assert get_in(first_turn, ["payload", "params", "input"]) == [
              %{"type" => "text", "text" => "complete"}
            ]
+
+    assert get_in(first_turn, ["payload", "params", "approvalPolicy"]) == "on-request"
+    assert get_in(first_turn, ["payload", "params", "approvalsReviewer"]) == "auto_review"
+    assert get_in(first_turn, ["payload", "params", "sandboxPolicy"]) == %{"type" => "readOnly"}
   end
 
   test "resumes a persisted Codex thread instead of starting a new one" do

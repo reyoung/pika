@@ -79,7 +79,9 @@ defmodule Pika.AttemptLoopTest do
         min_valid_pairs: 6
       )
 
-    coordinator = start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
+    coordinator =
+      start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}, "xhigh"))
+
     [start] = receive_starts(1)
     assert start.instructions =~ "exactly 8 alternating"
     assert start.instructions =~ "at least 6 valid Pairs"
@@ -419,7 +421,7 @@ defmodule Pika.AttemptLoopTest do
     send(start.task_pid, :release)
   end
 
-  test "selected Reference submodules and Skill roots never enter the candidate Patch" do
+  test "shared Reference symlinks and Skill roots never enter the candidate Patch" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 1)
     source = Pika.Test.AlignmentFixtures.git_repo()
     sha = Git.run!(source, ["rev-parse", "HEAD"])
@@ -444,7 +446,14 @@ defmodule Pika.AttemptLoopTest do
     [start] = receive_starts(1)
     {:ok, running} = AttemptStore.attempt(start.attempt_id)
     worktree = Path.join(context.workspace.root, running.worktree_relative_path)
-    assert Git.run!(Path.join(worktree, "ref/local-ref"), ["rev-parse", "HEAD"]) == sha
+    checkout = Path.join(context.workspace.root, "refs/local-ref")
+    link = Path.join(worktree, "ref/local-ref")
+    assert Git.run!(checkout, ["rev-parse", "HEAD"]) == sha
+    assert File.lstat!(link).type == :symlink
+    assert File.read_link!(link) == checkout
+    assert Git.run!(link, ["rev-parse", "HEAD"]) == sha
+    assert Git.clean?(worktree)
+    refute File.exists?(Path.join(worktree, ".gitmodules"))
     send(start.task_pid, :release)
 
     eventually(fn ->
@@ -454,6 +463,10 @@ defmodule Pika.AttemptLoopTest do
       )
     end)
 
+    {:ok, completed} = AttemptStore.attempt(start.attempt_id)
+    tree = Git.run!(worktree, ["ls-tree", "-r", "--name-only", completed.candidate_sha])
+    refute tree =~ "ref/local-ref"
+
     patch =
       File.read!(
         Path.join(context.workspace.root, "artifacts/patches/#{start.attempt_id}/candidate.patch")
@@ -462,6 +475,7 @@ defmodule Pika.AttemptLoopTest do
     refute patch =~ ".gitmodules"
     refute patch =~ "ref/local-ref"
     refute patch =~ ".pika/skills"
+    assert File.dir?(checkout)
     assert AttemptCoordinator.snapshot(coordinator).last_error == nil
   end
 
@@ -490,13 +504,13 @@ defmodule Pika.AttemptLoopTest do
     coordinator
   end
 
-  defp profiles(count, env) do
+  defp profiles(count, env, reasoning_effort \\ "high") do
     for index <- 1..count do
       %{
         "name" => "slot-#{index}",
         "backend" => "codex_app_server",
         "command" => ["codex", "app-server", "--listen", "stdio://"],
-        "reasoning_effort" => "high",
+        "reasoning_effort" => reasoning_effort,
         "env" => env,
         "protocol_config" => %{}
       }

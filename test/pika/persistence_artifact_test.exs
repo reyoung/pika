@@ -5,7 +5,7 @@ defmodule Pika.PersistenceArtifactTest do
 
   alias Pika.Persistence.{AgentSession, Campaign, DomainEvent}
   alias Pika.Test.CampaignFixtures
-  alias Pika.{ArtifactStore, Config, Persistence, Repo, Workspace}
+  alias Pika.{ArtifactStore, CampaignStore, Config, Git, Persistence, Repo, Workspace}
 
   setup do
     root = CampaignFixtures.workspace()
@@ -57,6 +57,35 @@ defmodule Pika.PersistenceArtifactTest do
           ~w(campaigns artifacts operation_intents domain_events agent_sessions idempotency_records) do
       assert table in tables
     end
+  end
+
+  test "recovers after Best advances while preserving the historical Campaign Base", %{
+    workspace: workspace,
+    campaign: campaign
+  } do
+    Git.run!(workspace.repo, ["config", "user.name", "Pika Test"])
+    Git.run!(workspace.repo, ["config", "user.email", "pika-test@example.invalid"])
+    File.write!(Path.join(workspace.repo, "candidate.txt"), "accepted\n")
+    Git.run!(workspace.repo, ["add", "candidate.txt"])
+    Git.run!(workspace.repo, ["commit", "-m", "advance best"])
+    advanced_best = Git.run!(workspace.repo, ["rev-parse", "HEAD"])
+
+    {1, _} =
+      Campaign
+      |> where([persisted], persisted.id == ^campaign.id)
+      |> Repo.update_all(
+        set: [best_sha: advanced_best, status: "blocked", resume_state: "optimizing"]
+      )
+
+    restarted_workspace = %{workspace | base_sha: advanced_best}
+
+    assert {:ok, recovered, :recovered} =
+             Persistence.initialize_or_recover(restarted_workspace)
+
+    assert recovered.base_sha == campaign.base_sha
+    assert recovered.best_sha == advanced_best
+    assert recovered.status == "optimizing"
+    assert is_nil(recovered.resume_state)
   end
 
   test "upgrades an existing Campaign status constraint without losing state", %{
@@ -211,6 +240,86 @@ defmodule Pika.PersistenceArtifactTest do
     assert :ok = ArtifactStore.verify_all(workspace)
   end
 
+  test "migrates legacy Workspace-local Artifacts and runtime references without deleting the source",
+       %{
+         workspace: workspace,
+         campaign: campaign
+       } do
+    artifact_id = Ecto.UUID.generate()
+    legacy_path = "setup/1/reference_review_evidence.json"
+    source = Path.join(workspace.root, legacy_path)
+    contents = "{\"latency_us\":12.5}\n"
+    sha256 = :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower)
+    now = System.system_time(:microsecond)
+    File.mkdir_p!(Path.dirname(source))
+    File.write!(source, contents)
+
+    {1, _} =
+      Repo.insert_all("artifacts", [
+        %{
+          id: artifact_id,
+          campaign_id: campaign.id,
+          owner_type: "campaign",
+          owner_id: campaign.id,
+          kind: "reference_review_evidence",
+          relative_path: legacy_path,
+          sha256: sha256,
+          byte_size: byte_size(contents),
+          mime_type: "application/json",
+          metadata_json: "{}",
+          created_at: now
+        }
+      ])
+
+    durable = %{
+      status: :optimizing,
+      artifacts: %{
+        legacy_path => %{
+          id: "legacy-runtime-artifact",
+          kind: "reference_review_evidence",
+          relative_path: legacy_path,
+          sha256: sha256,
+          size: byte_size(contents),
+          mime: "application/json",
+          metadata: %{}
+        }
+      },
+      reference_review_evidence: %{output_artifact: legacy_path},
+      messages: [%{at: DateTime.utc_now(), attachments: [%{relative_path: legacy_path}]}]
+    }
+
+    blob = :erlang.term_to_binary(durable, compressed: 6)
+
+    Repo.query!(
+      "INSERT INTO campaign_runtime_snapshots(campaign_id, state_blob, updated_at) VALUES (?, ?, ?)",
+      [campaign.id, {:blob, blob}, now]
+    )
+
+    assert :ok = ArtifactStore.migrate_legacy_paths(workspace)
+
+    [[recovered_path]] =
+      Repo.query!("SELECT relative_path FROM artifacts WHERE id = ?", [artifact_id]).rows
+
+    assert recovered_path ==
+             "artifacts/recovered/#{artifact_id}/reference_review_evidence.json"
+
+    assert File.read!(Path.join(workspace.root, recovered_path)) == contents
+    assert File.read!(source) == contents
+    assert :ok = ArtifactStore.verify_all(workspace)
+    assert :ok = ArtifactStore.migrate_legacy_paths(workspace)
+
+    assert {:ok, restored} = CampaignStore.load(campaign.id)
+    assert Map.has_key?(restored.artifacts, recovered_path)
+    refute Map.has_key?(restored.artifacts, legacy_path)
+    assert restored.artifacts[recovered_path].relative_path == recovered_path
+    assert restored.reference_review_evidence.output_artifact == recovered_path
+
+    assert get_in(restored, [:messages, Access.at(0), :attachments, Access.at(0), :relative_path]) ==
+             recovered_path
+
+    assert %DateTime{} = hd(restored.messages).at
+  end
+
   test "recovers lost Agent sessions once with a stable idempotency record", %{campaign: campaign} do
     session_id = Ecto.UUID.generate()
     now = System.system_time(:microsecond)
@@ -263,6 +372,28 @@ defmodule Pika.PersistenceArtifactTest do
 
     assert Repo.query!("SELECT kind, state, count(*) FROM operation_intents GROUP BY kind, state").rows ==
              [["recovery", "verified", 1]]
+
+    assert {:ok, resumed, _event} =
+             Persistence.transition_campaign(
+               blocked,
+               %{status: "optimizing", resume_state: nil},
+               "test_recovery_resumed",
+               %{}
+             )
+
+    assert {:ok, reblocked, {:blocked, ^reason}} =
+             Persistence.block_campaign(resumed, reason)
+
+    assert reblocked.status == "blocked"
+    assert reblocked.resume_state == "optimizing"
+
+    blocked_events =
+      Repo.aggregate(
+        from(event in DomainEvent, where: event.event_type == "campaign_blocked"),
+        :count
+      )
+
+    assert blocked_events == 1
   end
 
   defp artifact_attrs(campaign, overrides \\ %{}) do

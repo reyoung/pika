@@ -51,13 +51,18 @@ defmodule PikaWeb.AlignmentLiveTest do
     assert redirected_to(conn) == "/"
 
     conn = recycle(conn)
-    assert {:ok, _view, html} = live(conn, "/")
+    assert {:ok, view, html} = live(conn, "/")
     assert html =~ "Alignment → GPU Baseline Preview"
     assert html =~ "DraftingSpec"
     assert html =~ "未完成项不是错误"
     assert html =~ ~s(phx-hook="ConversationScroll")
     refute html =~ "at least one target Metric"
     assert length(String.split(html, "/assets/app.js")) - 1 == 1
+    assert has_element?(view, "#alignment-nav a.active[href='/alignment']", "目标对齐")
+    assert has_element?(view, "#alignment-nav a[href='/control?tab=attempts']", "Attempts")
+    assert has_element?(view, "#alignment-nav a[href='/control?tab=metrics']", "Metrics")
+    assert has_element?(view, "#alignment-nav a[href='/control?tab=sync']", "Sync")
+    assert has_element?(view, "#alignment-nav a[href='/control?tab=audit']", "Audit")
   end
 
   test "sends text and attachments through the unified Composer", %{
@@ -134,6 +139,7 @@ defmodule PikaWeb.AlignmentLiveTest do
     assert html =~ "Metrics"
     assert html =~ "Benchmark Cases"
     assert html =~ "测量与采样规则"
+    assert html =~ "Baseline Reference 源码"
     assert html =~ "Reference Projects"
     assert html =~ "全量 5 Pair · 异常升级 等待用户指定"
 
@@ -141,6 +147,59 @@ defmodule PikaWeb.AlignmentLiveTest do
     html = render(view)
     assert html =~ "请重新检查并修改 Metrics"
     assert html =~ ~s(value="request_changes")
+  end
+
+  test "lets the user add, validate, select, and remove a Git Reference Project", %{
+    conn: conn,
+    token: token
+  } do
+    conn = conn |> get("/?token=#{token}") |> recycle()
+    {:ok, view, html} = live(conn, "/")
+
+    assert html =~ "添加 Git Repository"
+    assert html =~ "冻结到具体 commit SHA"
+
+    html =
+      view
+      |> form("#reference-project-form",
+        reference_project: %{
+          url: "https://github.com/example/custom-kernels.git",
+          id: "",
+          description: "Campaign-specific kernels"
+        }
+      )
+      |> render_submit()
+
+    assert Enum.any?(Campaign.snapshot().references, &(&1.id == "custom-kernels"))
+    assert html =~ "custom-kernels"
+    assert html =~ "Campaign-specific kernels"
+    assert html =~ "https://github.com/example/custom-kernels.git"
+    assert html =~ "用户添加"
+    assert has_element?(view, "#reference-project-toggle-custom-kernels[checked]")
+
+    added = Enum.find(Campaign.snapshot().references, &(&1.id == "custom-kernels"))
+    assert added.origin == :user
+    assert added.status == :unresolved
+
+    html =
+      view
+      |> form("#reference-project-form",
+        reference_project: %{
+          url: "https://github.com/example/custom-kernels.git/",
+          id: "duplicate-id",
+          description: ""
+        }
+      )
+      |> render_submit()
+
+    assert html =~ "Git URL 已存在"
+
+    view
+    |> element(~s(button[aria-label="删除 Reference Project custom-kernels"]))
+    |> render_click()
+
+    refute render(view) =~ "reference-project-custom-kernels"
+    refute Enum.any?(Campaign.snapshot().references, &(&1.id == "custom-kernels"))
   end
 
   test "renders at most ten Benchmark Cases while preserving the full Spec count", %{
@@ -201,16 +260,258 @@ defmodule PikaWeb.AlignmentLiveTest do
                Map.put(harness_args, "idempotency_key", "confirm-harness")
              )
 
+    assert {:ok, _} =
+             AlignmentFixtures.submit_reference_review(
+               "mcp-test",
+               workspace,
+               "confirm-reference-review"
+             )
+
     conn = conn |> get("/?token=#{token}") |> recycle()
     {:ok, view, html} = live(conn, "/")
     assert html =~ "AwaitingConfirmation"
+    assert html =~ "Baseline Reference 源码"
+    assert html =~ "kernel/reference.py"
+    assert html =~ "def reference(x): return x"
+    assert html =~ ~s(phx-hook="ReferenceSyntaxHighlight")
+    assert html =~ ~s(data-language="python")
+    assert html =~ "Reference Review Evidence"
+    assert html =~ "target_case"
+    assert html =~ "12.5000 us"
+    assert html =~ "python kernel/bench.py --case target_case"
+    assert html =~ "要求 Agent 修改或重跑"
+    assert html =~ "请先审阅并确认 Baseline Reference 源码、运行命令与性能指标"
+    assert has_element?(view, ~s(button[phx-click="confirm_spec"][disabled]))
+
+    view
+    |> element("#reference-review-ack")
+    |> render_click()
+
+    assert has_element?(view, "#reference-review-ack[checked]")
+    assert has_element?(view, ~s|button[phx-click="confirm_spec"]:not([disabled])|)
+
+    send(
+      Process.whereis(Campaign),
+      {:pika_backend_event,
+       Pika.AgentBackend.Event.new(:turn_started, :fake, "confirm-session", %{
+         turn_id: "confirm-turn"
+       })}
+    )
+
+    assert eventually(fn ->
+             has_element?(view, ~s(button[phx-click="confirm_spec"][disabled])) and
+               render(view) =~ "Agent 仍在生成或执行本轮工作" and
+               render(view) =~ "等待 Agent 完成本轮…"
+           end)
+
+    {:ok, reference_review} = Campaign.reference_review()
+    evidence_digest = Campaign.snapshot().reference_review_evidence.digest
+
+    assert {:error, :agent_still_responding} =
+             Campaign.confirm_spec(reference_review.sha256, evidence_digest)
+
+    assert Campaign.snapshot().status == :awaiting_confirmation
+
+    send(
+      Process.whereis(Campaign),
+      {:pika_backend_event,
+       Pika.AgentBackend.Event.new(:turn_completed, :fake, "confirm-session", %{
+         turn_id: "confirm-turn"
+       })}
+    )
+
+    assert eventually(fn ->
+             has_element?(view, ~s|button[phx-click="confirm_spec"]:not([disabled])|)
+           end)
 
     view
     |> element(~s(button[phx-click="confirm_spec"]))
     |> render_click()
 
     assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
-    assert render(view) =~ "BuildingBaseline"
+    html = render(view)
+    assert html =~ "BuildingBaseline"
+    assert html =~ "Baseline 建立流程"
+    assert html =~ "已完成 1 / 5 · 还剩 4 步"
+    assert html =~ ~s(id="baseline-flow-step-setup_merge")
+    assert html =~ ~s(baseline-flow-step-current)
+    assert html =~ "返回修改 Baseline 定义"
+    assert html =~ ~s(phx-value-target="baseline")
+
+    view
+    |> element(~s(button[phx-value-target="baseline"]))
+    |> render_click()
+
+    assert render(view) =~ "请返回上一步并修改 Baseline 定义、Reference 或 Harness"
+
+    view
+    |> form("#message-form",
+      message: %{
+        body: "Reference 改为 FlashAttention 4 / CuTeDSL",
+        intent: "request_changes"
+      }
+    )
+    |> render_submit()
+
+    assert eventually(fn -> Campaign.snapshot().status == :drafting_spec end)
+
+    assert Campaign.snapshot().required_operations == [
+             "submit_harness",
+             "submit_reference_review",
+             "submit_spec"
+           ]
+  end
+
+  test "invalidates Reference review when the submitted source digest changes", %{
+    conn: conn,
+    token: token,
+    workspace: workspace
+  } do
+    harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call("mcp-test", "submit_spec", %{
+               "idempotency_key" => "review-reset-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               "mcp-test",
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "review-reset-harness-1")
+             )
+
+    assert {:ok, _} =
+             AlignmentFixtures.submit_reference_review(
+               "mcp-test",
+               workspace,
+               "review-reset-evidence"
+             )
+
+    conn = conn |> get("/?token=#{token}") |> recycle()
+    {:ok, view, _html} = live(conn, "/")
+    view |> element("#reference-review-ack") |> render_click()
+    assert has_element?(view, "#reference-review-ack[checked]")
+
+    File.write!(
+      Path.join(workspace.setup_worktree, "kernel/reference.py"),
+      "def reference(x): return x + 1\n"
+    )
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               "mcp-test",
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "review-reset-harness-2")
+             )
+
+    assert eventually(fn -> render(view) =~ "def reference(x): return x + 1" end)
+    refute has_element?(view, "#reference-review-ack[checked]")
+    assert has_element?(view, ~s(button[phx-click="confirm_spec"][disabled]))
+    assert render(view) =~ "等待 Agent 实际运行当前 Reference"
+    refute has_element?(view, "#reference-run-evidence")
+  end
+
+  test "invalidates user review when Reference performance evidence is replaced", %{
+    conn: conn,
+    token: token,
+    workspace: workspace
+  } do
+    harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call("mcp-test", "submit_spec", %{
+               "idempotency_key" => "metric-review-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               "mcp-test",
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "metric-review-harness")
+             )
+
+    assert {:ok, _} =
+             AlignmentFixtures.submit_reference_review(
+               "mcp-test",
+               workspace,
+               "metric-review-evidence-1"
+             )
+
+    conn = conn |> get("/?token=#{token}") |> recycle()
+    {:ok, view, _html} = live(conn, "/")
+    view |> element("#reference-review-ack") |> render_click()
+    assert has_element?(view, "#reference-review-ack[checked]")
+
+    assert {:ok, _} =
+             AlignmentFixtures.submit_reference_review(
+               "mcp-test",
+               workspace,
+               "metric-review-evidence-2",
+               %{
+                 "metrics" => [
+                   %{
+                     "metric_id" => "latency_us",
+                     "value" => 13.75,
+                     "unit" => "us",
+                     "sample_count" => 5
+                   }
+                 ],
+                 "summary" => "Replacement smoke measurement."
+               }
+             )
+
+    assert eventually(fn -> render(view) =~ "13.7500 us" end)
+    assert render(view) =~ "Replacement smoke measurement."
+    refute has_element?(view, "#reference-review-ack[checked]")
+    assert has_element?(view, ~s(button[phx-click="confirm_spec"][disabled]))
+  end
+
+  test "rejects confirmation if the reviewed Reference changes before the click", %{
+    conn: conn,
+    token: token,
+    workspace: workspace
+  } do
+    harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call("mcp-test", "submit_spec", %{
+               "idempotency_key" => "review-race-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               "mcp-test",
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "review-race-harness")
+             )
+
+    assert {:ok, _} =
+             AlignmentFixtures.submit_reference_review(
+               "mcp-test",
+               workspace,
+               "review-race-evidence"
+             )
+
+    conn = conn |> get("/?token=#{token}") |> recycle()
+    {:ok, view, _html} = live(conn, "/")
+    view |> element("#reference-review-ack") |> render_click()
+
+    File.write!(
+      Path.join(workspace.setup_worktree, "kernel/reference.py"),
+      "def reference(x): return :changed_after_review\n"
+    )
+
+    view
+    |> element(~s(button[phx-click="confirm_spec"]))
+    |> render_click()
+
+    assert Campaign.snapshot().status == :awaiting_confirmation
+    assert render(view) =~ "Reference 源码读取或哈希校验失败"
+    refute has_element?(view, "#reference-review-ack")
   end
 
   test "shows Reference preparation progress next to the confirmation action", %{
@@ -287,6 +588,9 @@ defmodule PikaWeb.AlignmentLiveTest do
 
     html = render(view)
     assert html =~ "41.7%"
+    assert html =~ "已完成 3 / 5 · 还剩 2 步"
+    assert html =~ ~s(id="baseline-flow-step-validate")
+    assert html =~ "流式校验 Pair JSONL · 41.7%"
     assert html =~ "125.0M / 300.0M Pair 记录"
     assert html =~ "160.0K 条/秒"
     assert html =~ "预计剩余 18分14秒"

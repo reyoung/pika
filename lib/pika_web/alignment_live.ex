@@ -2,6 +2,54 @@ defmodule PikaWeb.AlignmentLive do
   use PikaWeb, :live_view
 
   @benchmark_case_display_limit 10
+  @baseline_flow_steps [
+    {:references, "准备 References"},
+    {:setup_merge, "核验 Setup Merge"},
+    {:measure, "采集全量 Baseline"},
+    {:validate, "校验 Baseline"},
+    {:iteration_sample, "选择 Iteration Sample"}
+  ]
+  @reference_languages %{
+    ".bash" => "bash",
+    ".c" => "c",
+    ".cc" => "cpp",
+    ".cjs" => "javascript",
+    ".cmake" => "cmake",
+    ".cpp" => "cpp",
+    ".cts" => "typescript",
+    ".cu" => "cpp",
+    ".cuh" => "cpp",
+    ".cxx" => "cpp",
+    ".ex" => "elixir",
+    ".exs" => "elixir",
+    ".go" => "go",
+    ".h" => "c",
+    ".hpp" => "cpp",
+    ".hxx" => "cpp",
+    ".ini" => "ini",
+    ".java" => "java",
+    ".js" => "javascript",
+    ".json" => "json",
+    ".jsonl" => "json",
+    ".jsx" => "javascript",
+    ".mjs" => "javascript",
+    ".mts" => "typescript",
+    ".py" => "python",
+    ".pyw" => "python",
+    ".rs" => "rust",
+    ".sh" => "bash",
+    ".toml" => "toml",
+    ".ts" => "typescript",
+    ".tsx" => "typescript",
+    ".yaml" => "yaml",
+    ".yml" => "yaml",
+    ".zsh" => "bash"
+  }
+  @reference_language_filenames %{
+    "cmakelists.txt" => "cmake",
+    "dockerfile" => "bash",
+    "makefile" => "makefile"
+  }
 
   alias Pika.Alignment.{ArtifactStore, Campaign}
   alias PikaWeb.Markdown
@@ -26,10 +74,16 @@ defmodule PikaWeb.AlignmentLive do
 
     socket =
       socket
-      |> assign(:snapshot, snapshot)
       |> assign(:message_form, message_form())
+      |> assign(:reference_project_form, reference_project_form())
       |> assign(:show_diff, false)
       |> assign(:flash_message, nil)
+      |> assign(:reference_review, nil)
+      |> assign(:reference_review_error, nil)
+      |> assign(:reference_review_identity, nil)
+      |> assign(:reviewed_reference_sha, nil)
+      |> assign(:reviewed_reference_evidence_digest, nil)
+      |> assign_campaign_snapshot(snapshot)
       |> allow_upload(:inputs, accept: :any, max_entries: 5, max_file_size: 1_073_741_824)
 
     {:ok, socket}
@@ -37,7 +91,7 @@ defmodule PikaWeb.AlignmentLive do
 
   @impl true
   def handle_info({:campaign_updated, snapshot}, socket),
-    do: {:noreply, assign(socket, :snapshot, snapshot)}
+    do: {:noreply, assign_campaign_snapshot(socket, snapshot)}
 
   @impl true
   def handle_event("send_message", %{"message" => params}, socket) do
@@ -79,19 +133,85 @@ defmodule PikaWeb.AlignmentLive do
   end
 
   def handle_event("toggle_reference", %{"id" => id}, socket) do
-    {:noreply, assign_result(socket, Campaign.toggle_reference(id))}
+    result = Campaign.toggle_reference(id)
+
+    socket =
+      if result == :ok,
+        do: assign_campaign_snapshot(socket, Campaign.snapshot()),
+        else: socket
+
+    {:noreply, assign_result(socket, result)}
+  end
+
+  def handle_event("add_reference_project", %{"reference_project" => params}, socket) do
+    socket = assign(socket, :reference_project_form, reference_project_form(params))
+
+    case Campaign.add_reference_project(params) do
+      {:ok, _entry} ->
+        {:noreply,
+         socket
+         |> assign_campaign_snapshot(Campaign.snapshot())
+         |> assign(:reference_project_form, reference_project_form())
+         |> assign_result(:ok)}
+
+      error ->
+        {:noreply, assign_reference_project_result(socket, error)}
+    end
+  end
+
+  def handle_event("remove_reference_project", %{"id" => id}, socket) do
+    result = Campaign.remove_reference_project(id)
+
+    socket =
+      if result == :ok,
+        do: assign_campaign_snapshot(socket, Campaign.snapshot()),
+        else: socket
+
+    {:noreply, assign_reference_project_result(socket, result)}
   end
 
   def handle_event("confirm_spec", _params, socket) do
-    result = Campaign.confirm_spec()
+    result =
+      Campaign.confirm_spec(
+        socket.assigns.reviewed_reference_sha,
+        socket.assigns.reviewed_reference_evidence_digest
+      )
 
     socket =
       case result do
-        :ok -> assign(socket, :snapshot, Campaign.snapshot())
-        _error -> socket
+        :ok -> assign_campaign_snapshot(socket, Campaign.snapshot())
+        _error -> assign_campaign_snapshot(socket, Campaign.snapshot(), force_reference: true)
       end
 
     {:noreply, assign_result(socket, result)}
+  end
+
+  def handle_event("toggle_reference_review", _params, socket) do
+    {reviewed_reference_sha, reviewed_reference_evidence_digest} =
+      case {
+        socket.assigns.snapshot.status,
+        socket.assigns.reference_review,
+        socket.assigns.snapshot.reference_review_evidence
+      } do
+        {:awaiting_confirmation, %{sha256: sha256}, %{digest: evidence_digest}} ->
+          if socket.assigns.reviewed_reference_sha == sha256 and
+               socket.assigns.reviewed_reference_evidence_digest == evidence_digest do
+            {nil, nil}
+          else
+            {sha256, evidence_digest}
+          end
+
+        _ ->
+          {
+            socket.assigns.reviewed_reference_sha,
+            socket.assigns.reviewed_reference_evidence_digest
+          }
+      end
+
+    {:noreply,
+     socket
+     |> assign(:reviewed_reference_sha, reviewed_reference_sha)
+     |> assign(:reviewed_reference_evidence_digest, reviewed_reference_evidence_digest)}
   end
 
   def handle_event("toggle_diff", _params, socket) do
@@ -152,6 +272,40 @@ defmodule PikaWeb.AlignmentLive do
     end
   end
 
+  defp assign_campaign_snapshot(socket, snapshot, opts \\ []) do
+    identity = reference_review_identity(snapshot)
+    force? = Keyword.get(opts, :force_reference, false)
+
+    if not force? and socket.assigns.reference_review_identity == identity do
+      assign(socket, :snapshot, snapshot)
+    else
+      {reference_review, reference_review_error} =
+        if identity do
+          case Campaign.reference_review() do
+            {:ok, review} -> {review, nil}
+            {:error, reason} -> {nil, inspect(reason)}
+          end
+        else
+          {nil, nil}
+        end
+
+      socket
+      |> assign(:snapshot, snapshot)
+      |> assign(:reference_review, reference_review)
+      |> assign(:reference_review_error, reference_review_error)
+      |> assign(:reference_review_identity, identity)
+      |> assign(:reviewed_reference_sha, nil)
+      |> assign(:reviewed_reference_evidence_digest, nil)
+    end
+  end
+
+  defp reference_review_identity(%{harness: %{digest: digest, reference_path: path}} = snapshot),
+    do:
+      {digest, path, get_in(snapshot.spec, ["computation", "reference_path"]),
+       snapshot.reference_review_evidence && snapshot.reference_review_evidence.digest}
+
+  defp reference_review_identity(_snapshot), do: nil
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -161,6 +315,13 @@ defmodule PikaWeb.AlignmentLive do
           <div class="brand-mark">P</div>
           <div><strong>{product_name()}</strong><small>{product_subtitle()}</small></div>
         </div>
+        <nav id="alignment-nav" class="alignment-nav" aria-label="主导航">
+          <a class="active" href="/alignment" aria-current="page">目标对齐</a>
+          <a href="/control?tab=attempts">Attempts</a>
+          <a href="/control?tab=metrics">Metrics</a>
+          <a href="/control?tab=sync">Sync</a>
+          <a href="/control?tab=audit">Audit</a>
+        </nav>
         <div class="campaign-status">
           <.pill kind={status_kind(@snapshot.status)}>{status_label(@snapshot.status)}</.pill>
           <span class="muted"> · {@snapshot.backend}</span>
@@ -172,7 +333,7 @@ defmodule PikaWeb.AlignmentLive do
         <section class="conversation-panel panel">
           <div class="panel-heading">
             <div><p class="eyebrow">目标对齐对话</p><h1>{spec_title(@snapshot.spec)}</h1></div>
-            <.pill kind="active">Spec v1</.pill>
+            <.pill kind="active">Spec v{spec_revision(@snapshot)}</.pill>
           </div>
 
           <p :if={@snapshot.last_error || @flash_message} class="flash">
@@ -340,6 +501,47 @@ defmodule PikaWeb.AlignmentLive do
           </div>
 
           <div class="review-scroll">
+            <section
+              :if={baseline_flow_visible?(@snapshot)}
+              id="baseline-workflow"
+              class="baseline-workflow"
+              aria-label="Baseline 建立流程"
+            >
+              <div class="baseline-workflow-heading">
+                <div>
+                  <p class="eyebrow">执行进度</p>
+                  <strong>Baseline 建立流程</strong>
+                </div>
+                <span>{baseline_flow_summary(@snapshot)}</span>
+              </div>
+              <progress
+                max={length(baseline_flow_steps())}
+                value={baseline_flow_completed_steps(@snapshot)}
+                aria-label={baseline_flow_summary(@snapshot)}
+              >
+                {baseline_flow_completed_steps(@snapshot)} / {length(baseline_flow_steps())}
+              </progress>
+              <ol class="baseline-flow-steps">
+                <li
+                  :for={{{id, title}, index} <- Enum.with_index(baseline_flow_steps(), 1)}
+                  id={"baseline-flow-step-#{id}"}
+                  class={"baseline-flow-step baseline-flow-step-#{baseline_flow_step_state(@snapshot, index)}"}
+                  aria-current={if baseline_flow_step_state(@snapshot, index) == "current", do: "step"}
+                >
+                  <span class="baseline-flow-marker">
+                    {baseline_flow_step_mark(@snapshot, index)}
+                  </span>
+                  <span class="baseline-flow-copy">
+                    <strong>{title}</strong>
+                    <small>{baseline_flow_step_detail(id, @snapshot)}</small>
+                  </span>
+                  <span class="baseline-flow-state">
+                    {baseline_flow_step_state_label(@snapshot, index)}
+                  </span>
+                </li>
+              </ol>
+            </section>
+
             <details class="review-section" open>
               <summary>
                 <span class="review-step">1</span>
@@ -464,11 +666,6 @@ defmodule PikaWeb.AlignmentLive do
                   <div><dt>Retry</dt><dd>{nested(@snapshot.spec, ~w(benchmark retry_limit))}</dd></div>
                   <div><dt>Stopping</dt><dd>{stopping_summary(@snapshot.spec)}</dd></div>
                 </dl>
-                <div :if={@snapshot.status in [:building_baseline, :selecting_iteration_sample, :optimizing]} class="baseline-progress">
-                  <span class={progress_class(not is_nil(@snapshot.baseline))}>全量 Baseline</span>
-                  <span class={progress_class(@snapshot.status == :selecting_iteration_sample)}>Agent 选择采样</span>
-                  <span class={progress_class(@snapshot.status == :optimizing)}>Optimizing</span>
-                </div>
                 <div :if={@snapshot.baseline_progress} class="baseline-validation-progress">
                   <div>
                     <strong>{baseline_phase_label(@snapshot.baseline_progress.phase)}</strong>
@@ -508,26 +705,208 @@ defmodule PikaWeb.AlignmentLive do
               </div>
             </details>
 
-            <details class="review-section">
+            <details class="review-section" open>
               <summary>
                 <span class="review-step">5</span>
+                <span>
+                  <strong>Baseline Reference 源码与性能证据</strong>
+                  <small>{reference_review_path(@snapshot, @reference_review)}</small>
+                </span>
+                <span class="review-check">
+                  {progress_mark(reference_review_complete?(@snapshot, @reference_review, @snapshot.reference_review_evidence, @reviewed_reference_sha, @reviewed_reference_evidence_digest))}
+                </span>
+              </summary>
+              <div class="review-content">
+                <button
+                  :if={@snapshot.status in [:drafting_spec, :awaiting_confirmation]}
+                  class="text-action"
+                  phx-click="prepare_change"
+                  phx-value-target="reference_review"
+                >要求 Agent 修改或重跑</button>
+                <div :if={@reference_review} id="reference-source-review" class="reference-source-review">
+                  <div class="reference-source-meta">
+                    <code>{@reference_review.path}</code>
+                    <span>{format_bytes(@reference_review.size)}</span>
+                    <span>SHA-256 {short_sha(@reference_review.sha256)}</span>
+                  </div>
+                  <pre
+                    id="reference-source-code"
+                    phx-hook="ReferenceSyntaxHighlight"
+                    data-language={reference_language(@reference_review.path)}
+                  ><code>{@reference_review.content}</code></pre>
+                  <p :if={@reference_review.truncated} class="reference-source-warning">
+                    页面仅预览前 {format_bytes(@reference_review.preview_bytes)}；勾选前请在 Workspace 中审阅完整文件。
+                  </p>
+                  <section
+                    :if={@snapshot.reference_review_evidence}
+                    id="reference-run-evidence"
+                    class="reference-run-evidence"
+                  >
+                    <header>
+                      <div>
+                        <p class="eyebrow">Reference Review Evidence</p>
+                        <strong>{@snapshot.reference_review_evidence.case_name}</strong>
+                      </div>
+                      <span>
+                        exit {@snapshot.reference_review_evidence.exit_code} · {short_sha(@snapshot.reference_review_evidence.digest)}
+                      </span>
+                    </header>
+                    <dl>
+                      <div>
+                        <dt>Case</dt>
+                        <dd><code>{@snapshot.reference_review_evidence.case_id}</code></dd>
+                      </div>
+                      <div>
+                        <dt>Environment</dt>
+                        <dd>{@snapshot.reference_review_evidence.environment}</dd>
+                      </div>
+                      <div>
+                        <dt>Output</dt>
+                        <dd><code>{@snapshot.reference_review_evidence.output_artifact}</code></dd>
+                      </div>
+                    </dl>
+                    <div class="reference-run-command">
+                      <span>实际执行命令</span>
+                      <code>{@snapshot.reference_review_evidence.command}</code>
+                    </div>
+                    <table class="reference-run-metrics">
+                      <thead>
+                        <tr><th>Metric</th><th>Measured value</th><th>Samples</th></tr>
+                      </thead>
+                      <tbody>
+                        <tr :for={metric <- @snapshot.reference_review_evidence.metrics}>
+                          <td>
+                            <strong>{metric.name}</strong>
+                            <small><code>{metric.metric_id}</code> · {direction_label(metric.direction)}</small>
+                          </td>
+                          <td>{format_number(metric.value)} {metric.unit}</td>
+                          <td>{metric.sample_count}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <p>{@snapshot.reference_review_evidence.summary}</p>
+                  </section>
+                  <p
+                    :if={is_nil(@snapshot.reference_review_evidence)}
+                    id="reference-run-pending"
+                    class="reference-run-pending"
+                  >
+                    等待 Agent 实际运行当前 Reference，并提交至少一个 Benchmark Case 的性能 Metric。
+                  </p>
+                  <label
+                    :if={@snapshot.status == :awaiting_confirmation && @snapshot.reference_review_evidence}
+                    class="reference-review-ack"
+                  >
+                    <input
+                      id="reference-review-ack"
+                      type="checkbox"
+                      checked={reference_reviewed?(@reference_review, @snapshot.reference_review_evidence, @reviewed_reference_sha, @reviewed_reference_evidence_digest)}
+                      phx-click="toggle_reference_review"
+                    />
+                    <span>我已审阅该 SHA 对应的 Reference 源码、实际运行命令与性能指标，并同意用它建立 Baseline</span>
+                  </label>
+                  <p
+                    :if={@snapshot.reference_review_evidence && @snapshot.status in [:resolving_references, :building_baseline, :selecting_iteration_sample, :optimizing]}
+                    class="reference-reviewed-status"
+                  >Reference 与运行性能证据已随 Campaign Spec 确认并冻结。</p>
+                </div>
+                <p :if={@reference_review_error} class="missing">
+                  Reference 源码无法安全读取：{@reference_review_error}
+                </p>
+                <p :if={is_nil(@snapshot.harness)} class="empty-copy">
+                  等待 Agent 提交 Reference 与 Harness。
+                </p>
+              </div>
+            </details>
+
+            <details class="review-section">
+              <summary>
+                <span class="review-step">6</span>
                 <span><strong>Reference Projects</strong><small>{selected_reference_count(@snapshot)} / {length(@snapshot.references)} selected</small></span>
                 <span class="review-check">{progress_mark(selected_reference_count(@snapshot) > 0)}</span>
               </summary>
               <div class="review-content">
                 <div class="reference-list">
-                  <label :for={reference <- @snapshot.references} class="reference-row">
+                  <div
+                    :for={reference <- @snapshot.references}
+                    id={"reference-project-#{reference.id}"}
+                    class={["reference-row", user_reference_project?(reference) && "reference-row-user"]}
+                  >
                     <input
+                      id={"reference-project-toggle-#{reference.id}"}
                       type="checkbox"
                       checked={reference.selected}
                       phx-click="toggle_reference"
                       phx-value-id={reference.id}
                       disabled={@snapshot.status not in [:drafting_spec, :awaiting_confirmation]}
                     />
-                    <span><strong>{reference.id}</strong><small>{reference.description}</small></span>
-                    <code>{reference_status(reference)}</code>
-                  </label>
+                    <label for={"reference-project-toggle-#{reference.id}"}>
+                      <strong>
+                        {reference.id}
+                        <span :if={user_reference_project?(reference)} class="reference-user-badge">用户添加</span>
+                      </strong>
+                      <small>{reference.description}</small>
+                      <small :if={user_reference_project?(reference)} class="reference-repo-url" title={reference.url}>
+                        {reference.url}
+                      </small>
+                    </label>
+                    <span class="reference-row-actions">
+                      <code>{reference_status(reference)}</code>
+                      <button
+                        :if={user_reference_project?(reference) && @snapshot.status in [:drafting_spec, :awaiting_confirmation]}
+                        type="button"
+                        class="row-action danger"
+                        phx-click="remove_reference_project"
+                        phx-value-id={reference.id}
+                        aria-label={"删除 Reference Project #{reference.id}"}
+                      >删除</button>
+                    </span>
+                  </div>
                 </div>
+                <.form
+                  :if={@snapshot.status in [:drafting_spec, :awaiting_confirmation]}
+                  for={@reference_project_form}
+                  id="reference-project-form"
+                  phx-submit="add_reference_project"
+                  class="reference-project-form"
+                >
+                  <header>
+                    <strong>添加 Git Repository</strong>
+                    <small>确认 Campaign Spec 时会解析默认分支，并冻结到具体 commit SHA。</small>
+                  </header>
+                  <label class="wide">
+                    <span>Git URL 或绝对路径</span>
+                    <input
+                      type="text"
+                      name={@reference_project_form[:url].name}
+                      value={@reference_project_form[:url].value}
+                      placeholder="https://github.com/org/repo.git 或 git@host:org/repo.git"
+                      autocomplete="off"
+                      required
+                    />
+                  </label>
+                  <label>
+                    <span>Project ID（可选）</span>
+                    <input
+                      type="text"
+                      name={@reference_project_form[:id].name}
+                      value={@reference_project_form[:id].value}
+                      placeholder="留空则从仓库名生成"
+                      autocomplete="off"
+                    />
+                  </label>
+                  <label>
+                    <span>说明（可选）</span>
+                    <input
+                      type="text"
+                      name={@reference_project_form[:description].name}
+                      value={@reference_project_form[:description].value}
+                      placeholder="这个项目可提供什么参考"
+                      autocomplete="off"
+                    />
+                  </label>
+                  <button class="secondary" type="submit">添加并选中</button>
+                </.form>
               </div>
             </details>
 
@@ -543,8 +922,11 @@ defmodule PikaWeb.AlignmentLive do
               <strong>正在准备 Reference 仓库</strong>
               <span>{reference_progress_label(@snapshot)}</span>
             </div>
-            <div :if={confirmation_blocker(@snapshot)} class="review-action-error">
-              {confirmation_blocker(@snapshot)}
+            <div
+              :if={confirmation_blocker(@snapshot, @reference_review, @reference_review_error, @reviewed_reference_sha, @reviewed_reference_evidence_digest)}
+              class="review-action-error"
+            >
+              {confirmation_blocker(@snapshot, @reference_review, @reference_review_error, @reviewed_reference_sha, @reviewed_reference_evidence_digest)}
             </div>
             <div
               :if={@snapshot.status == :awaiting_confirmation && @snapshot.last_error}
@@ -556,9 +938,15 @@ defmodule PikaWeb.AlignmentLive do
               {if @show_diff, do: "收起 Spec diff", else: "查看 Spec diff"}
             </button>
             <button
+              :if={@snapshot.status == :building_baseline}
+              class="secondary"
+              phx-click="prepare_change"
+              phx-value-target="baseline"
+            >返回修改 Baseline 定义</button>
+            <button
               class="primary"
               phx-click="confirm_spec"
-              disabled={not confirmable?(@snapshot)}
+              disabled={not confirmable?(@snapshot, @reference_review, @reviewed_reference_sha, @reviewed_reference_evidence_digest)}
             >{confirmation_button_label(@snapshot)}</button>
           </div>
         </aside>
@@ -570,11 +958,35 @@ defmodule PikaWeb.AlignmentLive do
   defp message_form(body \\ "", intent \\ "conversation"),
     do: to_form(%{"body" => body, "intent" => intent}, as: :message)
 
+  defp reference_project_form(params \\ %{}) do
+    defaults = %{"id" => "", "url" => "", "description" => ""}
+    to_form(Map.merge(defaults, params), as: :reference_project)
+  end
+
   defp uploads_ready?(entries), do: Enum.all?(entries, &(&1.progress == 100))
 
   defp assign_result(socket, :ok), do: assign(socket, :flash_message, nil)
   defp assign_result(socket, {:ok, _}), do: assign(socket, :flash_message, nil)
   defp assign_result(socket, error), do: assign(socket, :flash_message, inspect(error))
+
+  defp assign_reference_project_result(socket, :ok), do: assign_result(socket, :ok)
+
+  defp assign_reference_project_result(
+         socket,
+         {:error, {:invalid_reference_project, field, reason}}
+       ) do
+    assign(socket, :flash_message, reference_project_error(field, reason))
+  end
+
+  defp assign_reference_project_result(
+         socket,
+         {:error, {:duplicate_reference_project, field, value}}
+       ) do
+    label = if field == :id, do: "Project ID", else: "Git URL"
+    assign(socket, :flash_message, "#{label} 已存在：#{value}")
+  end
+
+  defp assign_reference_project_result(socket, error), do: assign_result(socket, error)
 
   defp empty_snapshot do
     snapshot = %{
@@ -592,12 +1004,14 @@ defmodule PikaWeb.AlignmentLive do
       references: [],
       reference_progress: nil,
       harness: nil,
+      reference_review_evidence: nil,
       baseline: nil,
       baseline_retry_count: 0,
       baseline_error: nil,
       baseline_progress: nil,
       iteration_sampling: nil,
       sampling_revisions: [],
+      required_operations: [],
       best_sha: nil,
       last_error: "Alignment Campaign 尚未启动。",
       workspace: %{root: System.tmp_dir!()}
@@ -612,15 +1026,25 @@ defmodule PikaWeb.AlignmentLive do
           do: Pika.CampaignBootstrap.status(),
           else: :starting
 
-      message =
-        case bootstrap_status do
-          {:error, reason} -> "Alignment Campaign 初始化失败：#{inspect(reason)}"
-          _ -> "Alignment Campaign 正在解析固定的 Reference 与 Skill 版本。"
+      {status, message} =
+        case {runtime.recovery, bootstrap_status} do
+          {%{"status" => "blocked", "reason" => reason}, _} ->
+            {:blocked, "Alignment Campaign 恢复已阻止：#{reason}"}
+
+          {_, {:blocked, reason}} ->
+            {:blocked, "Alignment Campaign 恢复已阻止：#{reason}"}
+
+          {_, {:error, reason}} ->
+            {:initializing, "Alignment Campaign 初始化失败：#{inspect(reason)}"}
+
+          _ ->
+            {:initializing, "Alignment Campaign 正在解析固定的 Reference 与 Skill 版本。"}
         end
 
       %{
         snapshot
-        | campaign_id: runtime.campaign.id,
+        | status: status,
+          campaign_id: runtime.campaign.id,
           workspace: %{root: runtime.workspace.root},
           last_error: message
       }
@@ -653,6 +1077,11 @@ defmodule PikaWeb.AlignmentLive do
   defp change_prompt("metrics"), do: "请重新检查并修改 Metrics："
   defp change_prompt("cases"), do: "请重新检查并修改 Benchmark Cases："
   defp change_prompt("measurement"), do: "请修改测量、正确性或停止规则："
+  defp change_prompt("baseline"), do: "请返回上一步并修改 Baseline 定义、Reference 或 Harness："
+
+  defp change_prompt("reference_review"),
+    do: "请修改 Reference/Harness 或重新运行 Review Case，并提交新的实际性能证据："
+
   defp change_prompt("metric:" <> id), do: "请修改 Metric `#{id}`："
   defp change_prompt("case:" <> id), do: "请修改 Benchmark Case `#{id}`："
   defp change_prompt(_target), do: "请修改 Campaign Spec："
@@ -743,6 +1172,7 @@ defmodule PikaWeb.AlignmentLive do
   defp status_label(status) do
     %{
       initializing: "Initializing",
+      blocked: "Blocked",
       drafting_spec: "DraftingSpec",
       awaiting_confirmation: "AwaitingConfirmation",
       resolving_references: "Resolving References",
@@ -771,8 +1201,95 @@ defmodule PikaWeb.AlignmentLive do
 
   defp progress_mark(true), do: "✓"
   defp progress_mark(false), do: "○"
-  defp progress_class(true), do: "done"
-  defp progress_class(false), do: "pending"
+  defp baseline_flow_steps, do: @baseline_flow_steps
+
+  defp baseline_flow_visible?(snapshot) do
+    snapshot.status in [
+      :resolving_references,
+      :building_baseline,
+      :selecting_iteration_sample,
+      :optimizing
+    ]
+  end
+
+  defp baseline_flow_current_step(%{status: :resolving_references}), do: 1
+
+  defp baseline_flow_current_step(%{status: :building_baseline, baseline_progress: progress})
+       when not is_nil(progress),
+       do: 4
+
+  defp baseline_flow_current_step(%{status: :building_baseline} = snapshot) do
+    if "submit_baseline" in Map.get(snapshot, :required_operations, []), do: 3, else: 2
+  end
+
+  defp baseline_flow_current_step(%{status: :selecting_iteration_sample}), do: 5
+  defp baseline_flow_current_step(%{status: :optimizing}), do: length(@baseline_flow_steps) + 1
+  defp baseline_flow_current_step(_snapshot), do: 1
+
+  defp baseline_flow_completed_steps(snapshot) do
+    snapshot
+    |> baseline_flow_current_step()
+    |> Kernel.-(1)
+    |> max(0)
+    |> min(length(@baseline_flow_steps))
+  end
+
+  defp baseline_flow_summary(snapshot) do
+    completed = baseline_flow_completed_steps(snapshot)
+    total = length(@baseline_flow_steps)
+
+    if completed == total,
+      do: "全部 #{total} 步已完成",
+      else: "已完成 #{completed} / #{total} · 还剩 #{total - completed} 步"
+  end
+
+  defp baseline_flow_step_state(snapshot, index) do
+    current = baseline_flow_current_step(snapshot)
+
+    cond do
+      index < current -> "done"
+      index == current -> "current"
+      true -> "pending"
+    end
+  end
+
+  defp baseline_flow_step_state_label(snapshot, index) do
+    case baseline_flow_step_state(snapshot, index) do
+      "done" -> "已完成"
+      "current" -> "进行中"
+      "pending" -> "待执行"
+    end
+  end
+
+  defp baseline_flow_step_mark(snapshot, index) do
+    if baseline_flow_step_state(snapshot, index) == "done", do: "✓", else: index
+  end
+
+  defp baseline_flow_step_detail(:references, %{status: :resolving_references} = snapshot),
+    do: reference_progress_label(snapshot)
+
+  defp baseline_flow_step_detail(:references, _snapshot),
+    do: "解析固定版本，并发准备所选 Reference 仓库"
+
+  defp baseline_flow_step_detail(:setup_merge, _snapshot),
+    do: "核验 Harness 与 Reference 快照，并合入 pika/best"
+
+  defp baseline_flow_step_detail(:measure, %{baseline_error: error}) when is_binary(error),
+    do: "上次提交未通过；Agent 正在修正 Artifact 并重新测量"
+
+  defp baseline_flow_step_detail(:measure, _snapshot),
+    do: "执行全部 Cases × Metrics，并在本地生成 Pair Artifact"
+
+  defp baseline_flow_step_detail(:validate, %{baseline_progress: progress})
+       when not is_nil(progress) do
+    "#{baseline_phase_label(progress.phase)} · #{format_percent_number(baseline_progress_percent(progress))}"
+  end
+
+  defp baseline_flow_step_detail(:validate, _snapshot),
+    do: "流式读取 Pair，依次校验指标、Correctness 与 Profiler"
+
+  defp baseline_flow_step_detail(:iteration_sample, snapshot),
+    do: "从 #{length(cases(snapshot))} 个 Cases 中选择首轮优化样本"
 
   defp computation_ready?(spec) do
     is_binary(get_in(spec, ["computation", "reference_path"])) and
@@ -917,12 +1434,32 @@ defmodule PikaWeb.AlignmentLive do
   end
 
   defp selected_reference_count(snapshot), do: Enum.count(snapshot.references, & &1.selected)
-  defp spec_editable?(snapshot), do: snapshot.status in [:drafting_spec, :awaiting_confirmation]
 
-  defp confirmable?(snapshot),
-    do:
-      snapshot.status == :awaiting_confirmation and snapshot.spec_ready and
-        not is_nil(snapshot.harness)
+  defp spec_editable?(snapshot),
+    do: snapshot.status in [:drafting_spec, :awaiting_confirmation, :building_baseline]
+
+  defp spec_revision(snapshot) do
+    case get_in(snapshot, [:spec, "revision"]) do
+      revision when is_integer(revision) and revision > 0 -> revision
+      _ -> 1
+    end
+  end
+
+  defp confirmable?(
+         snapshot,
+         reference_review,
+         reviewed_reference_sha,
+         reviewed_evidence_digest
+       ),
+       do:
+         snapshot.status == :awaiting_confirmation and snapshot.spec_ready and
+           not is_nil(snapshot.harness) and alignment_idle?(snapshot) and
+           reference_reviewed?(
+             reference_review,
+             snapshot.reference_review_evidence,
+             reviewed_reference_sha,
+             reviewed_evidence_digest
+           )
 
   defp confirmation_button_label(%{status: :resolving_references}),
     do: "正在准备 References…"
@@ -931,15 +1468,113 @@ defmodule PikaWeb.AlignmentLive do
        when status in [:building_baseline, :selecting_iteration_sample, :optimizing],
        do: "已确认，正在建立 Baseline"
 
+  defp confirmation_button_label(%{status: :awaiting_confirmation} = snapshot) do
+    if alignment_idle?(snapshot), do: "确认并建立 Baseline", else: "等待 Agent 完成本轮…"
+  end
+
   defp confirmation_button_label(_snapshot), do: "确认并建立 Baseline"
 
-  defp confirmation_blocker(%{status: :awaiting_confirmation, spec_ready: false}),
-    do: "Campaign Spec 尚未通过校验，修正右侧未完成项后才能确认。"
+  defp confirmation_blocker(
+         snapshot,
+         reference_review,
+         reference_review_error,
+         reviewed_sha,
+         reviewed_evidence_digest
+       ) do
+    cond do
+      snapshot.status != :awaiting_confirmation ->
+        nil
 
-  defp confirmation_blocker(%{status: :awaiting_confirmation, harness: nil}),
-    do: "Benchmark Harness 尚未就绪，暂时不能建立 Baseline。"
+      not is_nil(snapshot.pending_question) ->
+        "Agent 正在等待你的回答；完成当前问题后才能确认 Campaign Spec。"
 
-  defp confirmation_blocker(_snapshot), do: nil
+      snapshot.agent_responding or is_binary(snapshot.active_turn_id) ->
+        "Agent 仍在生成或执行本轮工作；请等待本轮结束，再审阅最终内容并确认。"
+
+      not snapshot.spec_ready ->
+        "Campaign Spec 尚未通过校验，修正右侧未完成项后才能确认。"
+
+      is_nil(snapshot.harness) ->
+        "Benchmark Harness 尚未就绪，暂时不能建立 Baseline。"
+
+      is_binary(reference_review_error) ->
+        "Reference 源码读取或哈希校验失败，修复并重新提交 Harness 后才能确认。"
+
+      is_nil(reference_review) ->
+        "Reference 源码尚未加载，暂时不能建立 Baseline。"
+
+      is_nil(snapshot.reference_review_evidence) ->
+        "Reference 尚未成功运行并提交性能证据，暂时不能建立 Baseline。"
+
+      not reference_reviewed?(
+        reference_review,
+        snapshot.reference_review_evidence,
+        reviewed_sha,
+        reviewed_evidence_digest
+      ) ->
+        "请先审阅并确认 Baseline Reference 源码、运行命令与性能指标。"
+
+      true ->
+        nil
+    end
+  end
+
+  defp alignment_idle?(snapshot) do
+    not snapshot.agent_responding and is_nil(snapshot.active_turn_id) and
+      is_nil(snapshot.pending_question)
+  end
+
+  defp reference_review_path(snapshot, nil),
+    do: get_in(snapshot.spec, ["computation", "reference_path"]) || "等待 Reference"
+
+  defp reference_review_path(_snapshot, review), do: review.path
+
+  defp reference_language(path) when is_binary(path) do
+    filename = path |> Path.basename() |> String.downcase()
+
+    Map.get(@reference_language_filenames, filename) ||
+      Map.get(@reference_languages, path |> Path.extname() |> String.downcase(), "plaintext")
+  end
+
+  defp reference_language(_path), do: "plaintext"
+
+  defp reference_reviewed?(
+         %{sha256: sha256},
+         %{digest: evidence_digest},
+         sha256,
+         evidence_digest
+       ),
+       do: true
+
+  defp reference_reviewed?(_review, _evidence, _reviewed_sha, _reviewed_evidence_digest),
+    do: false
+
+  defp reference_review_complete?(
+         snapshot,
+         reference_review,
+         evidence,
+         reviewed_sha,
+         reviewed_evidence_digest
+       ) do
+    if snapshot.status in [
+         :resolving_references,
+         :building_baseline,
+         :selecting_iteration_sample,
+         :optimizing
+       ] do
+      not is_nil(reference_review) and not is_nil(evidence)
+    else
+      reference_reviewed?(
+        reference_review,
+        evidence,
+        reviewed_sha,
+        reviewed_evidence_digest
+      )
+    end
+  end
+
+  defp short_sha(sha256) when is_binary(sha256), do: String.slice(sha256, 0, 16) <> "…"
+  defp short_sha(_sha256), do: "—"
 
   defp reference_progress_label(%{
          reference_progress: %{id: id, completed: completed, total: total}
@@ -958,4 +1593,27 @@ defmodule PikaWeb.AlignmentLive do
     do: String.slice(sha, 0, 8)
 
   defp reference_status(%{status: status}), do: to_string(status)
+
+  defp user_reference_project?(reference), do: Map.get(reference, :origin) == :user
+
+  defp reference_project_error(field, :required),
+    do: "#{reference_project_field(field)} 不能为空。"
+
+  defp reference_project_error(field, :too_long),
+    do: "#{reference_project_field(field)} 太长。"
+
+  defp reference_project_error(:id, :cannot_derive),
+    do: "无法从 Git URL 生成 Project ID，请手动填写。"
+
+  defp reference_project_error(field, :invalid_format),
+    do: "#{reference_project_field(field)} 格式无效。"
+
+  defp reference_project_error(field, reason),
+    do: "#{reference_project_field(field)} 无效：#{reason}"
+
+  defp reference_project_field(:id), do: "Project ID"
+  defp reference_project_field(:url), do: "Git URL"
+  defp reference_project_field(:description), do: "说明"
+  defp reference_project_field(:repository), do: "Git Repository"
+  defp reference_project_field(field), do: to_string(field)
 end

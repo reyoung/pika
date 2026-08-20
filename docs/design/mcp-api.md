@@ -66,7 +66,7 @@ Backend-specific 注入方式：
 
 ### `register_artifact`
 
-参数：`kind`、Workspace 相对路径、SHA-256、大小、MIME、metadata。Pika 使用有界内存流式校验路径、文件存在性和哈希后登记。Baseline 使用下面的单 Manifest 流程，不需要逐个调用本工具。
+参数：`kind`、以 `artifacts/` 开头的 Workspace 相对路径、SHA-256、大小、MIME、metadata。Pika 使用有界内存流式校验路径、文件存在性和哈希后登记；Workspace 中其他目录不能登记为 Artifact。Baseline 使用下面的单 Manifest 流程，不需要逐个调用本工具。
 
 ## 3. Boundary Role
 
@@ -76,11 +76,19 @@ Backend-specific 注入方式：
 
 ### `submit_harness`
 
-登记 Reference、正确性测试、Benchmark Harness 路径与 digest。Pika 验证 protected paths 后将 Spec 置为 `awaiting_confirmation`。
+登记 Reference、正确性测试、Benchmark Harness 路径与 digest。Pika 验证 protected paths；只有 Reference Review Evidence 也已提交后，Spec 才进入 `awaiting_confirmation`。
+
+### `submit_reference_review`
+
+登记当前 Reference 在当前 Harness 中针对至少一个 Spec Benchmark Case 的成功 smoke run。提交必须绑定 Spec revision、Harness digest 与 Reference SHA-256，包含实际命令、执行环境、退出码 0、至少一个与 Spec ID/单位一致的性能 Metric，以及 kind 为 `reference_review_evidence` 的已登记本地输出 Artifact。这份证据只用于确认前证明 Reference 可运行并向用户展示性能观测，不是 Baseline，也不要求完整 Case 集或配对测量；Spec、Harness、Reference 或 Artifact 变化都会使其失效。
 
 ### `complete_setup_merge`
 
 用户在 UI 确认 Campaign Spec 后，Boundary Agent 提交 `base_sha`、setup commit SHA 和 squash 后 `best_sha`。Pika 独立核验 `pika/best` 的父提交、Diff 和 protected digest；自然语言或 Git 命令退出码不能代替该工具。
+
+### `reopen_baseline_definition`
+
+Baseline Agent 在冻结的 Reference、Harness、Case/Metric 契约或测量协议无法产生有效 Baseline 时，提交 `idempotency_key`、具体 `reason` 和 `requested_changes`。这是 Baseline Role 独有的逃生转换，不是完成门禁，也不能用于可原地重试的临时命令、依赖、GPU 或网络故障。Pika 会终止正在进行的 Baseline 校验和旧 Backend Session；setup 已合并时从当前 Best 创建下一条 `pika/setup/<revision>`，将技术交接发送给新的 Alignment Agent，并回到 `DraftingSpec`。修订后的 Spec、Harness 和 Reference Review Evidence 仍必须重新提交并由用户确认，Agent 不能借此绕过确认边界。
 
 ### `submit_baseline`
 
@@ -92,7 +100,9 @@ Pair JSONL 按 Spec 的 Case 顺序、Metric 顺序和递增 `pair_index` 分组
 
 只在全量 Baseline 已接受后可用。参数包含最多十个初始 Case IDs、逐项选择理由、预计 Iteration/Full 测量秒数、节省比例和 Summary。Pika 校验它是 Full Case Set 的非空子集、至少包含一个 Target Case，并创建首个 Sampling Revision。该调用完成前 Campaign 停留在 `SelectingIterationSample`，不能进入 Optimizing。
 
-Boundary 在 DraftingSpec 的完成门禁要求 `submit_spec` 与 `submit_harness` 都成功，且 UI 已出现可确认 Spec diff。用户确认不是 MCP Agent 工具。确认后依次要求 `complete_setup_merge`、`submit_baseline` 和 `submit_iteration_sample`；缺少调用时继续使用同 Session 无限 follow-up，Backend 失效则创建新 Session 重建上下文。
+Boundary 在 DraftingSpec 的完成门禁要求 `submit_spec`、`submit_harness` 与 `submit_reference_review` 都成功，且 UI 已出现可确认 Spec diff、Reference 源码和运行性能证据。用户确认不是 MCP Agent 工具。确认后依次要求 `complete_setup_merge`、`submit_baseline` 和 `submit_iteration_sample`；缺少调用时继续使用同 Session 无限 follow-up，Backend 失效则创建新 Session 重建上下文。
+
+用户确认还必须绑定到 Harness manifest 中当前 Reference 文件的 SHA-256。UI 在有界源码预览中显示路径、大小、内容和哈希，并要求用户显式确认已审阅；Pika 接受确认前重新流式计算 Reference 哈希并校验完整 Harness digest。Reference 路径、内容或 Harness digest 变化后，旧审阅确认不能复用。
 
 ## 4. Plan Role
 
@@ -144,7 +154,7 @@ Backend Turn 结束但缺少任一必需工具时，Pika 向同一 Backend Sessi
 
 - 父提交等于 Lease Best。
 - squash commit trailer 完整。
-- protected paths、`ref/**` 和 Pika `.gitmodules` 增量不存在。
+- protected paths 和 `ref/**` 软链接不存在；用户自己的 `.gitmodules` 只按普通候选变更处理。
 - Receipt 与 Lease/Base/Candidate 完全匹配，且在 Git mutation 前签发。
 
 事务提交 Accepted/Rejected、Best Revision、Metrics、BestAdvanced 和 Lease 释放。
@@ -166,7 +176,7 @@ Backend Turn 结束但缺少任一必需工具时，Pika 向同一 Backend Sessi
 | Context/history | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Mailbox | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Artifact | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Spec/Harness/Baseline/Sample | ✓ |  |  |  |  |  |
+| Spec/Harness/Reference Review/Baseline/Sample | ✓ |  |  |  |  |  |
 | Plan |  | ✓ |  |  |  |  |
 | Metrics/Summary/Attempt complete |  |  | ✓ |  |  |  |
 | Full Regression/Sampling Feedback/Merge |  |  |  | ✓ |  |  |

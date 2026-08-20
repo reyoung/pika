@@ -4,7 +4,15 @@ defmodule Pika.AgentBackend.CodexAppServer do
   use GenServer
   @behaviour Pika.AgentBackend
 
-  alias Pika.AgentBackend.{CodexExecutable, Error, Event, JSONLPort, Profile, Session}
+  alias Pika.AgentBackend.{
+    CodexExecutable,
+    Error,
+    Event,
+    JSONLPort,
+    PermissionPolicy,
+    Profile,
+    Session
+  }
 
   @protocol "codex-app-server-v2"
   @rpc_timeout 60_000
@@ -21,6 +29,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
          {:ok, _} <- rpc(server, "initialize", initialize_params()),
          :ok <- notify(server, "initialized", %{}),
          :ok <- configure_skills(server, cwd, skill_roots),
+         {:ok, profile} <- GenServer.call(server, :profile),
          {:ok, response, resumed, resume_error} <-
            open_thread(
              server,
@@ -28,7 +37,8 @@ defmodule Pika.AgentBackend.CodexAppServer do
              cwd,
              model,
              reasoning_effort,
-             instructions
+             instructions,
+             profile
            ),
          {:ok, backend_session_id} <- fetch_id(response, ["thread", "id"]),
          {:ok, session} <-
@@ -50,8 +60,12 @@ defmodule Pika.AgentBackend.CodexAppServer do
              "threadId" => state.backend_session_id,
              "input" => items,
              "effort" => normalize_effort(state.reasoning_effort),
-             "approvalPolicy" => "never",
-             "sandboxPolicy" => %{"type" => "dangerFullAccess"}
+             "approvalPolicy" =>
+               PermissionPolicy.codex_approval_policy(state.profile.approval_policy),
+             "approvalsReviewer" =>
+               PermissionPolicy.codex_approvals_reviewer(state.profile.approval_policy),
+             "sandboxPolicy" =>
+               PermissionPolicy.codex_sandbox_policy(state.profile.sandbox_policy)
            }),
          {:ok, response} <- rpc(server, "turn/start", params),
          {:ok, turn_id} <- fetch_id(response, ["turn", "id"]) do
@@ -219,6 +233,8 @@ defmodule Pika.AgentBackend.CodexAppServer do
     end
   end
 
+  def handle_call(:profile, _from, state), do: {:reply, {:ok, state.profile}, state}
+
   def handle_call(:capabilities, _from, state) do
     {:reply,
      %{
@@ -327,7 +343,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
   end
 
   defp handle_server_request(%{"id" => id, "method" => method}, state) do
-    result = approval_response(method)
+    result = approval_response(method, state.profile.approval_policy)
 
     response =
       if result do
@@ -340,15 +356,15 @@ defmodule Pika.AgentBackend.CodexAppServer do
     {:noreply, state}
   end
 
-  defp approval_response(method)
-       when method in ["execCommandApproval", "item/commandExecution/requestApproval"],
-       do: %{"decision" => "acceptForSession"}
+  defp approval_response(method, approval_policy)
+       when method in ["execCommandApproval", "applyPatchApproval"],
+       do: %{"decision" => PermissionPolicy.codex_legacy_approval_decision(approval_policy)}
 
-  defp approval_response(method)
-       when method in ["applyPatchApproval", "item/fileChange/requestApproval"],
-       do: %{"decision" => "acceptForSession"}
+  defp approval_response(method, approval_policy)
+       when method in ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"],
+       do: %{"decision" => PermissionPolicy.codex_approval_decision(approval_policy)}
 
-  defp approval_response(_), do: nil
+  defp approval_response(_, _approval_policy), do: nil
 
   defp map_notification("turn/started", params, state) do
     turn_id = get_in(params, ["turn", "id"]) || params["turnId"]
@@ -464,51 +480,61 @@ defmodule Pika.AgentBackend.CodexAppServer do
     end
   end
 
-  defp open_thread(server, resume_session_id, cwd, model, effort, instructions)
+  defp open_thread(server, resume_session_id, cwd, model, effort, instructions, profile)
        when is_binary(resume_session_id) and resume_session_id != "" do
     case rpc(
            server,
            "thread/resume",
-           thread_resume_params(resume_session_id, cwd, model, effort, instructions)
+           thread_resume_params(resume_session_id, cwd, model, effort, instructions, profile)
          ) do
       {:ok, response} ->
         {:ok, response, true, nil}
 
       {:error, resume_error} ->
         with {:ok, response} <-
-               rpc(server, "thread/start", thread_start_params(cwd, model, effort, instructions)) do
+               rpc(
+                 server,
+                 "thread/start",
+                 thread_start_params(cwd, model, effort, instructions, profile)
+               ) do
           {:ok, response, false, resume_error}
         end
     end
   end
 
-  defp open_thread(server, _resume_session_id, cwd, model, effort, instructions) do
+  defp open_thread(server, _resume_session_id, cwd, model, effort, instructions, profile) do
     with {:ok, response} <-
-           rpc(server, "thread/start", thread_start_params(cwd, model, effort, instructions)) do
+           rpc(
+             server,
+             "thread/start",
+             thread_start_params(cwd, model, effort, instructions, profile)
+           ) do
       {:ok, response, false, nil}
     end
   end
 
-  defp thread_start_params(cwd, model, reasoning_effort, instructions) do
+  defp thread_start_params(cwd, model, reasoning_effort, instructions, profile) do
     compact(%{
       "cwd" => cwd,
       "model" => model,
       "developerInstructions" => instructions,
-      "approvalPolicy" => "never",
-      "sandbox" => "danger-full-access",
+      "approvalPolicy" => PermissionPolicy.codex_approval_policy(profile.approval_policy),
+      "approvalsReviewer" => PermissionPolicy.codex_approvals_reviewer(profile.approval_policy),
+      "sandbox" => PermissionPolicy.codex_sandbox_mode(profile.sandbox_policy),
       "ephemeral" => false,
       "config" => compact(%{"model_reasoning_effort" => normalize_effort(reasoning_effort)})
     })
   end
 
-  defp thread_resume_params(thread_id, cwd, model, reasoning_effort, instructions) do
+  defp thread_resume_params(thread_id, cwd, model, reasoning_effort, instructions, profile) do
     compact(%{
       "threadId" => thread_id,
       "cwd" => cwd,
       "model" => model,
       "developerInstructions" => instructions,
-      "approvalPolicy" => "never",
-      "sandbox" => "danger-full-access",
+      "approvalPolicy" => PermissionPolicy.codex_approval_policy(profile.approval_policy),
+      "approvalsReviewer" => PermissionPolicy.codex_approvals_reviewer(profile.approval_policy),
+      "sandbox" => PermissionPolicy.codex_sandbox_mode(profile.sandbox_policy),
       "config" => compact(%{"model_reasoning_effort" => normalize_effort(reasoning_effort)})
     })
   end

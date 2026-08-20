@@ -36,7 +36,9 @@ Pika 是一个常驻的单租户 HTTP 服务，用多个 Coding Agent 并行完�
 
 ## Reference 与 Skill
 
-Campaign Reference Catalog 采用 Atrex Kernel Agent `reference-projects/` 的 16 项 Kernel 仓库，Alignment UI 默认全选。Pika Server 初始化 Campaign 时获取这些 Ref 的最新默认分支 HEAD，随后在整个 Campaign 内固定 commit SHA。
+Campaign Reference Catalog 内置 Atrex Kernel Agent `reference-projects/` 的 16 项 Kernel 仓库，Alignment UI 默认全选；用户也可以为当前 Campaign 添加自己的 Git Repository。确认 Campaign Spec 时，Pika 获取所有尚未解析的已选 Ref 默认分支 HEAD，并固定到具体 commit SHA。
+
+固定版本以独立 clone 保存在 Campaign Workspace `refs/<id>`；setup 和 Attempt worktree 仅通过 Git 忽略的 `ref/<id>` 软链接读取它们。Pika 不为 Reference 修改 `.gitmodules`，这些软链接也不会进入候选或最终 squash Patch。
 
 Skill Registry 初始包含 [`mit-han-lab/ncu-report-skill`](https://github.com/mit-han-lab/ncu-report-skill)，并与 Kernel Ref 分开管理。
 
@@ -84,13 +86,17 @@ Preview 使用统一 Agent Backend 打通内存态目标对齐、Campaign Spec/H
 
 Alignment、setup merge 和 Baseline Agent Instructions 是 `priv/prompts/alignment/*.md.eex` 独立资源；`config :pika, Pika.PromptCatalog` 可以分别改为绝对路径。它们作为 Backend 系统级上下文注入，不占用首条用户 Prompt，也不自动 Kick-off；Campaign 由用户首条消息启动，用户确认 Spec 的动作继续驱动 setup merge 与 Baseline。配置缺失或模板无法编译时，服务在打开 Backend Session 前失败。
 
+`BuildingBaseline` 不是不可逆状态。用户可从对齐页面返回修改 Spec、Reference 或 Harness；Baseline Agent 发现冻结定义无法产生有效结果时，也可自主调用 `reopen_baseline_definition` MCP 并把原因与修改方向交接给 Alignment Agent。尚未完成 setup merge 时复用当前 setup worktree；已经合入 `pika/best` 时保留旧 revision，并从当前 Best 创建下一条 `pika/setup/<revision>` 分支，重新提交、确认和建立 Baseline。正在运行的 Baseline 校验与旧 Backend Session 会被终止，旧 MCP 凭据不会带入新 revision。
+
+建立 Baseline 前，Boundary Agent 必须先让当前 Reference 在受保护 Harness 中针对至少一个 Spec Benchmark Case 成功执行，并提交至少一项实际性能 Metric。Review 面板会同时展示 Harness 登记的 Reference 源码、文件大小、SHA-256、smoke 命令、执行环境、Case 和 Metrics；用户必须显式确认已经审阅当前源码与运行证据，确认按钮才会启用。服务端在状态推进前重新流式核对 Reference 哈希、完整 Harness digest 和运行输出 Artifact。Reference、Spec、Harness、Metric 证据或 Artifact 变化后，已有审阅确认立即失效。
+
 确定性全流程、两个真实 Backend 的 Boundary MCP smoke 及实现边界见 [Stage0 Demo 文档](docs/v0/phases/00b-stage0-alignment-baseline-demo.md)。
 
 原始 Full Baseline H20 E2E 已在 WeLM v4.5 80A3 verify-attention 的固定 committed SHA 上通过：3 个 trace case、90/90 有效 Pair、3/3 correctness，以及 full/source NCU report。脱敏后的结构化结果位于 `artifacts/stage0-demo/welm-h20-gpu-e2e.json`；该历史证据早于 `submit_iteration_sample` 门禁和用户拥有 Campaign Kick-off 的新语义，新的 Sampling/Kick-off 状态由协议测试与 Fake Backend E2E 覆盖，完整 H20 流程需后续重新生成证据。
 
 ## 初始化持久化 Workspace
 
-`pika init` 提供交互式向导，分别询问 Alignment/Baseline Agent 与 Iteration Agent 的 Backend、模型和推理强度，以及 Repo 模式、Workspace 路径、监听地址、Iteration Agent 并发数、最大 Attempt 数和可选 Git Sync。两个阶段可以独立选择 Codex 或 Cursor。初始化会生成 `pika.yaml`、可编辑的完整 Prompt 模板、固定 Workspace 布局与 Git `pika/best` 分支，但不会启动 Server：
+`pika init` 提供交互式向导，分别询问 Alignment/Baseline Agent 与 Iteration Agent 的 Backend、模型、推理强度、Approval Policy 和 Sandbox Policy，以及 Repo 模式、Workspace 路径、监听地址、Iteration Agent 并发数、最大 Attempt 数和可选 Git Sync。两个阶段可以独立选择 Codex 或 Cursor；权限选项会随 Backend 改变，只展示 provider 实际支持的值。初始化会生成 `pika.yaml`、可编辑的完整 Prompt 模板、固定 Workspace 布局与 Git `pika/best` 分支，但不会启动 Server：
 
 选择两个阶段的模型时，向导会分别从当前已登录的 Codex App Server 或 Cursor CLI 动态读取模型列表，显示常用候选、provider 默认值和自定义 model id 入口。使用 `--alignment-model` 与 `--iteration-model` 可直接进行非交互选择；兼容参数 `--model` 仍表示 Iteration Agent 模型，`--yes` 则保留 provider 默认值。
 
@@ -106,15 +112,21 @@ pika init /absolute/path/to/pika-workspace \
   --alignment-backend cursor \
   --alignment-model cursor-model-id \
   --alignment-effort high \
+  --alignment-approval-policy auto_review \
+  --alignment-sandbox-policy enabled \
   --iteration-backend codex \
   --iteration-model codex-model-id \
   --iteration-effort high \
+  --iteration-approval-policy never \
+  --iteration-sandbox-policy danger_full_access \
   --iteration-agents 2 \
   --no-sync \
   --yes
 ```
 
 兼容参数 `--backend codex|cursor` 会同时设置两类 Backend；任一专用参数都可以覆盖对应阶段。
+
+Codex 支持 `never | on_request | untrusted` 和 `danger_full_access | workspace_write | read_only`；Cursor 支持 `force | auto_review` 和 `disabled | enabled`。为兼容已有 Workspace，未配置时仍默认为 Codex `never + danger_full_access`、Cursor `force + disabled`。Codex 的 `danger_full_access` 只关闭 sandbox，并不会关闭 Codex 内建的 exec-policy 硬性规则。
 
 Managed Repo 的默认 Workspace 位于目标仓库旁的 `.pika-workspaces/<repo-name>`，避免 Pika 状态污染目标仓库。初始化结束后进入 Workspace，直接运行 `pika serve` 即可；用 `pika init --help` 查看全部参数。
 

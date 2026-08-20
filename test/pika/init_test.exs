@@ -31,9 +31,13 @@ defmodule Pika.InitTest do
                    alignment_backend: "cursor",
                    alignment_model: "alignment-test-model",
                    alignment_effort: "max",
+                   alignment_approval_policy: "auto_review",
+                   alignment_sandbox_policy: "enabled",
                    iteration_backend: "codex",
                    iteration_model: "iteration-test-model",
                    iteration_effort: "xhigh",
+                   iteration_approval_policy: "untrusted",
+                   iteration_sandbox_policy: "workspace_write",
                    iteration_agents: 2,
                    max_attempts: 7,
                    sync_remote: "origin",
@@ -60,6 +64,8 @@ defmodule Pika.InitTest do
     assert config.backend["type"] == "cursor_acp"
     assert config.backend["model"] == "alignment-test-model"
     assert config.backend["reasoning_effort"] == "max"
+    assert config.backend["approval_policy"] == "auto_review"
+    assert config.backend["sandbox_policy"] == "enabled"
     assert config.campaign["max_attempts"] == 7
 
     assert Enum.map(config.campaign["iteration_agents"], & &1["name"]) ==
@@ -68,7 +74,9 @@ defmodule Pika.InitTest do
     assert Enum.all?(config.campaign["iteration_agents"], fn profile ->
              profile["backend"] == "codex_app_server" and
                profile["model"] == "iteration-test-model" and
-               profile["reasoning_effort"] == "xhigh"
+               profile["reasoning_effort"] == "xhigh" and
+               profile["approval_policy"] == "untrusted" and
+               profile["sandbox_policy"] == "workspace_write"
            end)
 
     assert config.sync == %{"remote" => "origin", "branch" => "main"}
@@ -94,10 +102,14 @@ defmodule Pika.InitTest do
         "18082",
         "2",
         "2",
-        "xhigh",
+        "2",
+        "2",
+        "4",
         "1",
         "2",
-        "high",
+        "2",
+        "2",
+        "3",
         "2",
         "",
         "n"
@@ -140,8 +152,17 @@ defmodule Pika.InitTest do
     assert output =~ "Workspace path"
     assert output =~ "Alignment/Baseline Agent backend type:"
     assert output =~ "Select Alignment/Baseline Agent backend [1]:"
+    assert output =~ "Select Alignment/Baseline Agent approval policy [1]:"
+    assert output =~ "Select Alignment/Baseline Agent sandbox policy [1]:"
+    assert output =~ "Alignment/Baseline Agent reasoning effort:"
+    assert output =~ "Select Alignment/Baseline Agent reasoning effort [3]:"
     assert output =~ "Iteration Agent backend type:"
     assert output =~ "Select Iteration Agent backend [2]:"
+    assert output =~ "Select Iteration Agent approval policy [1]:"
+    assert output =~ "Select Iteration Agent sandbox policy [1]:"
+    assert output =~ "Iteration Agent reasoning effort:"
+    assert output =~ "Select Iteration Agent reasoning effort [3]:"
+    assert output =~ "4) xhigh · More reasoning for difficult tasks"
     refute output =~ "[codex_app_server]"
     refute output =~ "[cursor_acp]"
     assert output =~ "Available Alignment/Baseline Agent models (cursor)"
@@ -158,8 +179,21 @@ defmodule Pika.InitTest do
     assert config.backend["type"] == "cursor_acp"
     assert config.backend["model"] == "cursor-test-model"
     assert config.backend["reasoning_effort"] == "xhigh"
+    assert config.backend["approval_policy"] == "auto_review"
+    assert config.backend["sandbox_policy"] == "enabled"
     assert Enum.all?(config.campaign["iteration_agents"], &(&1["backend"] == "codex_app_server"))
     assert Enum.all?(config.campaign["iteration_agents"], &(&1["model"] == "codex-test-model"))
+
+    assert Enum.all?(
+             config.campaign["iteration_agents"],
+             &(&1["approval_policy"] == "on_request")
+           )
+
+    assert Enum.all?(
+             config.campaign["iteration_agents"],
+             &(&1["sandbox_policy"] == "workspace_write")
+           )
+
     assert length(config.campaign["iteration_agents"]) == 2
     assert Git.run!(Path.join(workspace, "repo"), ["branch", "--show-current"]) == "pika/best"
   end
@@ -182,6 +216,8 @@ defmodule Pika.InitTest do
              Config.load(Path.join(workspace, "pika.yaml"), workspace: workspace)
 
     assert config.backend["type"] == "cursor_acp"
+    assert config.backend["approval_policy"] == "force"
+    assert config.backend["sandbox_policy"] == "disabled"
     assert Enum.all?(config.campaign["iteration_agents"], &(&1["backend"] == "cursor_acp"))
   end
 

@@ -50,7 +50,9 @@ defmodule Pika.Alignment.FakeE2ETest do
              Campaign.send_message("请帮我定义并优化这个 Kernel；先和我对齐计算边界、Shapes 与 Metrics。")
 
     assert eventually(fn -> Campaign.snapshot().status == :awaiting_confirmation end)
-    assert :ok = Campaign.confirm_spec()
+    assert {:ok, reference_review} = Campaign.reference_review()
+    evidence_digest = Campaign.snapshot().reference_review_evidence.digest
+    assert :ok = Campaign.confirm_spec(reference_review.sha256, evidence_digest)
 
     assert Enum.any?(Campaign.snapshot().messages, fn message ->
              message.role == :user and message.content == "确认 Campaign Spec v1，并建立 Baseline。"
