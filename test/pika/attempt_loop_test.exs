@@ -100,6 +100,58 @@ defmodule Pika.AttemptLoopTest do
     assert AttemptCoordinator.snapshot(coordinator).last_error == nil
   end
 
+  test "MCP authentication is available while the Backend Session is opening" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+
+    coordinator =
+      start_coordinator(
+        context,
+        profiles(1, %{test_pid: self(), barrier: true, authorize_during_open: true})
+      )
+
+    [start] = receive_starts(1)
+    assert :ok = AttemptCoordinator.authorize(start.token, coordinator)
+    assert_attempt_mcp_gateway(start.token)
+    send(start.task_pid, :release)
+
+    eventually(fn ->
+      match?(
+        {:ok, %{status: "ready_for_integration"}},
+        AttemptStore.attempt(start.attempt_id)
+      )
+    end)
+  end
+
+  test "active Attempts emit bounded work snapshots while waiting for a summary" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+
+    log =
+      ExUnit.CaptureLog.capture_log([level: :info], fn ->
+        _coordinator =
+          start_coordinator(
+            context,
+            profiles(1, %{test_pid: self(), barrier: true}),
+            progress_log_interval_ms: 10,
+            progress_log_level: :warning
+          )
+
+        [start] = receive_starts(1)
+        Process.sleep(30)
+        send(start.task_pid, :release)
+
+        eventually(fn ->
+          match?(
+            {:ok, %{status: "ready_for_integration"}},
+            AttemptStore.attempt(start.attempt_id)
+          )
+        end)
+      end)
+
+    assert log =~ "Pika attempt work snapshot"
+    assert log =~ "awaiting_agent_summary"
+    assert log =~ "required_operations"
+  end
+
   test "UI Spec overview reuses the snapshot and dispatch checks stay lightweight" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 1)
 
@@ -199,6 +251,69 @@ defmodule Pika.AttemptLoopTest do
     assert attempts_created == 1
     assert session_count == 3
     assert AttemptCoordinator.snapshot(coordinator).recovery_count[hd(starts).attempt_id] == 2
+  end
+
+  test "recovery context excludes provider wire records and keeps concise Agent events" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+    {:ok, crash_counter} = Agent.start_link(fn -> 0 end)
+
+    _coordinator =
+      start_coordinator(
+        context,
+        profiles(1, %{
+          test_pid: self(),
+          mode: :crash_twice,
+          crash_counter: crash_counter,
+          barrier: true
+        })
+      )
+
+    [first] = receive_starts(1)
+    log_dir = Path.join([context.workspace.root, "artifacts", "logs", first.attempt_id])
+    legacy_log = Path.join(log_dir, "legacy-mixed.jsonl")
+    File.mkdir_p!(log_dir)
+
+    raw_marker = "raw recursive prompt must not be recovered"
+    kept_marker = "concise Agent progress survives recovery"
+
+    File.write!(
+      legacy_log,
+      Jason.encode!(%{
+        "at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+        "direction" => "out",
+        "payload" => %{
+          "method" => "thread/start",
+          "params" => %{
+            "developerInstructions" => raw_marker <> String.duplicate("x", 300_000)
+          }
+        }
+      }) <>
+        "\n" <>
+        Jason.encode!(%{
+          "at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+          "type" => "message_delta",
+          "data" => %{"delta" => kept_marker}
+        }) <>
+        "\n"
+    )
+
+    send(first.task_pid, :release)
+    [second] = receive_starts(1)
+    assert second.instructions =~ kept_marker
+    refute second.instructions =~ raw_marker
+    assert byte_size(second.instructions) < 200_000
+
+    send(second.task_pid, :release)
+    [third] = receive_starts(1)
+    refute third.instructions =~ raw_marker
+    send(third.task_pid, :release)
+
+    eventually(fn ->
+      match?(
+        {:ok, %{status: "ready_for_integration"}},
+        AttemptStore.attempt(third.attempt_id)
+      )
+    end)
   end
 
   test "Coordinator restart recovers a plan-disabled Attempt as Iteration work" do
@@ -479,15 +594,19 @@ defmodule Pika.AttemptLoopTest do
     assert AttemptCoordinator.snapshot(coordinator).last_error == nil
   end
 
-  defp start_coordinator(context, profiles) do
-    {:ok, coordinator} =
-      AttemptCoordinator.start_link(
+  defp start_coordinator(context, profiles, opts \\ []) do
+    coordinator_opts =
+      [
         workspace: context.workspace,
         campaign: context.campaign,
         profiles: profiles,
         backend_modules: %{codex_app_server: AttemptAgentBackend},
         mcp_url: "http://127.0.0.1:18080/mcp"
-      )
+      ]
+      |> Keyword.merge(opts)
+
+    {:ok, coordinator} =
+      AttemptCoordinator.start_link(coordinator_opts)
 
     Process.unlink(coordinator)
 
@@ -622,6 +741,34 @@ defmodule Pika.AttemptLoopTest do
     names = Enum.map(tools["result"]["tools"], & &1["name"])
     assert "record_metrics" in names
     refute "submit_plan" in names
+
+    context =
+      Plug.Test.conn(
+        :post,
+        "/mcp",
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 3,
+          "method" => "tools/call",
+          "params" => %{"name" => "get_context", "arguments" => %{}}
+        })
+      )
+      |> Plug.Conn.put_req_header("content-type", "application/json")
+      |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
+      |> PikaWeb.MCPGateway.call([])
+
+    assert context.status == 200
+
+    assert %{
+             "result" => %{
+               "structuredContent" => %{
+                 "campaign" => %{"best_metrics" => best_metrics},
+                 "identity" => %{"role" => "iteration"}
+               }
+             }
+           } = Jason.decode!(context.resp_body)
+
+    assert map_size(best_metrics) == 1
   end
 
   defp capture_repo_queries(fun) do

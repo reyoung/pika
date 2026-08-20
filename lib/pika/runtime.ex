@@ -58,6 +58,8 @@ defmodule Pika.Runtime do
     {:noreply, %{state | campaign: campaign}}
   end
 
+  def handle_info(_message, state), do: {:noreply, state}
+
   defp verify_git(workspace, current) do
     expected_head = if current, do: current.best_sha, else: workspace.base_sha
 

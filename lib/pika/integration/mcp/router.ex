@@ -81,7 +81,7 @@ defmodule Pika.Integration.MCP.Router do
     do: json(conn, 400, error(nil, -32_600, "invalid request", %{}))
 
   defp tool_result(conn, id, value) do
-    value = stringify(value)
+    value = Pika.JSONSafe.json_safe(value)
 
     result(conn, id, %{
       "content" => [%{"type" => "text", "text" => Jason.encode!(value)}],
@@ -97,20 +97,14 @@ defmodule Pika.Integration.MCP.Router do
     do: %{
       "jsonrpc" => "2.0",
       "id" => id,
-      "error" => %{"code" => code, "message" => message, "data" => stringify(details)}
+      "error" => %{
+        "code" => code,
+        "message" => message,
+        "data" => Pika.JSONSafe.json_safe(details)
+      }
     }
 
   defp json(conn, status, value),
     do:
       conn |> put_resp_content_type("application/json") |> send_resp(status, Jason.encode!(value))
-
-  defp stringify(%_{} = value), do: value |> Map.from_struct() |> stringify()
-
-  defp stringify(map) when is_map(map),
-    do: Map.new(map, fn {key, value} -> {to_string(key), stringify(value)} end)
-
-  defp stringify(list) when is_list(list), do: Enum.map(list, &stringify/1)
-  defp stringify(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> stringify()
-  defp stringify(value) when is_atom(value), do: Atom.to_string(value)
-  defp stringify(value), do: value
 end

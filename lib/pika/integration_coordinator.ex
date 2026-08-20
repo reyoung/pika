@@ -5,6 +5,7 @@ defmodule Pika.IntegrationCoordinator do
 
   alias Pika.AgentBackend
   alias Pika.Alignment.ArtifactStore, as: AlignmentArtifactStore
+  alias Pika.IntegrationTokenRegistry, as: TokenRegistry
   alias Pika.{AttemptStore, IntegrationPrompt, IntegrationStore, IntegrationWorkspace}
 
   @read_tools ~w(get_integration_context)
@@ -17,13 +18,14 @@ defmodule Pika.IntegrationCoordinator do
   def snapshot(server \\ __MODULE__), do: call(server, :snapshot)
   def stop_now(server \\ __MODULE__), do: call(server, :stop_now)
   def resume(server \\ __MODULE__), do: call(server, :resume)
-  def authorize(token, server \\ __MODULE__), do: call(server, {:authorize, token})
+  def authorize(token, _server \\ __MODULE__), do: TokenRegistry.authorize(token)
 
   def mcp_call(token, tool, args, server \\ __MODULE__),
     do: call(server, {:mcp, token, tool, args})
 
   @impl true
   def init(opts) do
+    :ok = TokenRegistry.init_owner()
     workspace = Keyword.get_lazy(opts, :workspace, &Pika.WorkspaceLock.workspace/0)
     campaign = Keyword.get_lazy(opts, :campaign, &Pika.Persistence.current_campaign/0)
 
@@ -68,6 +70,7 @@ defmodule Pika.IntegrationCoordinator do
     do: {:reply, :ok, %{state | recovery_enabled: false}}
 
   def handle_call(:stop_now, _from, state) do
+    TokenRegistry.delete_hash(state.token_hash)
     _ = AgentBackend.interrupt(state.session.handle)
     _ = AttemptStore.update_session(state.session.session.id, "stopped", required(state))
     safe_close(state.session.handle)
@@ -86,11 +89,6 @@ defmodule Pika.IntegrationCoordinator do
   def handle_call(:resume, _from, state) do
     send(self(), :scan)
     {:reply, :ok, %{state | recovery_enabled: true}}
-  end
-
-  def handle_call({:authorize, token}, _from, state) do
-    {:reply, if(state.token_hash == token_hash(token), do: :ok, else: {:error, :unauthorized}),
-     state}
   end
 
   def handle_call({:mcp, token, tool, args}, _from, state) do
@@ -143,8 +141,11 @@ defmodule Pika.IntegrationCoordinator do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %{session: nil}), do: :ok
-  def terminate(_reason, state), do: safe_close(state.session.handle)
+  def terminate(_reason, state) do
+    TokenRegistry.delete_hash(state.token_hash)
+    if state.session, do: safe_close(state.session.handle)
+    :ok
+  end
 
   defp maybe_start(%{session: nil, start_backends: true, recovery_enabled: true} = state) do
     if Pika.Persistence.current_campaign().status in ~w(stopped blocked completed) do
@@ -179,10 +180,17 @@ defmodule Pika.IntegrationCoordinator do
       artifact_dir: Path.join([state.workspace.artifacts, "logs", attempt.id, "integration"])
     }
 
+    registry_identity = %{
+      campaign_id: state.campaign_id,
+      attempt_id: attempt.id,
+      role: :integration
+    }
+
     with :ok <- ensure_recoverable_best(state, attempt),
          :ok <- Pika.PromptCatalog.validate([:integration]),
          {:ok, context} <- IntegrationStore.integration_context(state.campaign_id, attempt.id),
          {:ok, instructions} <- IntegrationPrompt.render(attempt, context, state.workspace),
+         :ok <- TokenRegistry.put(token, registry_identity),
          {:ok, handle} <- AgentBackend.start_link(module, backend_profile, self()),
          {:ok, session} <-
            AgentBackend.open_session(
@@ -247,6 +255,7 @@ defmodule Pika.IntegrationCoordinator do
       end
     else
       {:error, {:unexplained_best_state, _details} = reason} ->
+        TokenRegistry.delete(token)
         _ = IntegrationStore.block(state.campaign_id, attempt.id, reason)
 
         %{
@@ -259,6 +268,7 @@ defmodule Pika.IntegrationCoordinator do
         }
 
       {:error, reason} ->
+        TokenRegistry.delete(token)
         Process.send_after(self(), {:restart, attempt.id}, 250)
         %{state | last_error: inspect(reason)}
     end
@@ -653,6 +663,7 @@ defmodule Pika.IntegrationCoordinator do
 
   defp finish(state) do
     attempt_id = state.session.identity.attempt_id
+    TokenRegistry.delete_hash(state.token_hash)
     _ = AttemptStore.update_session(state.session.session.id, "completed", [])
     safe_close(state.session.handle)
     Process.demonitor(state.monitor, [:flush])
@@ -673,6 +684,7 @@ defmodule Pika.IntegrationCoordinator do
 
   defp recover(state, reason) do
     attempt_id = state.session.identity.attempt_id
+    TokenRegistry.delete_hash(state.token_hash)
     _ = AttemptStore.update_session(state.session.session.id, "interrupted", required(state))
     safe_close(state.session.handle)
     if state.monitor, do: Process.demonitor(state.monitor, [:flush])

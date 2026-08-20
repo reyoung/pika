@@ -3,6 +3,8 @@ defmodule Pika.Optimization.MCP.Router do
 
   use Plug.Router
 
+  alias Pika.AttemptTokenRegistry, as: TokenRegistry
+
   plug Plug.Parsers, parsers: [:json], pass: ["application/json"], json_decoder: Jason
   plug :authenticate
   plug :match
@@ -43,8 +45,8 @@ defmodule Pika.Optimization.MCP.Router do
     do: rpc_result(conn, id, %{})
 
   defp dispatch_rpc(conn, token, %{"method" => "tools/list", "id" => id}) do
-    case Pika.AttemptCoordinator.mcp_call(token, "get_context", %{}) do
-      {:ok, %{identity: %{role: role}}} -> rpc_result(conn, id, %{"tools" => tools(role)})
+    case TokenRegistry.lookup(token) do
+      {:ok, %{role: role}} -> rpc_result(conn, id, %{"tools" => tools(role)})
       error -> mcp_response(conn, id, error)
     end
   end
@@ -62,23 +64,23 @@ defmodule Pika.Optimization.MCP.Router do
   end
 
   defp dispatch_rpc(conn, token, %{"method" => "resources/list", "id" => id}) do
-    case Pika.AttemptCoordinator.mcp_call(token, "get_context", %{}) do
-      {:ok, %{attempt: attempt}} ->
-        resources =
-          if attempt.plan_artifact_id do
-            [
-              %{
-                "uri" => plan_uri(attempt.id),
-                "name" => "Attempt optimization plan",
-                "mimeType" => "text/markdown"
-              }
-            ]
-          else
-            []
-          end
+    with {:ok, %{attempt_id: attempt_id}} <- TokenRegistry.lookup(token),
+         {:ok, attempt} <- Pika.AttemptStore.attempt(attempt_id) do
+      resources =
+        if attempt.plan_artifact_id do
+          [
+            %{
+              "uri" => plan_uri(attempt.id),
+              "name" => "Attempt optimization plan",
+              "mimeType" => "text/markdown"
+            }
+          ]
+        else
+          []
+        end
 
-        rpc_result(conn, id, %{"resources" => resources})
-
+      rpc_result(conn, id, %{"resources" => resources})
+    else
       error ->
         mcp_response(conn, id, error)
     end
@@ -175,7 +177,7 @@ defmodule Pika.Optimization.MCP.Router do
     do: rpc_error(conn, id, -32_602, inspect(reason), %{}, 409)
 
   defp tool_result(conn, id, value) do
-    value = stringify(value)
+    value = Pika.JSONSafe.json_safe(value)
 
     rpc_result(conn, id, %{
       "content" => [%{"type" => "text", "text" => Jason.encode!(value)}],
@@ -192,7 +194,11 @@ defmodule Pika.Optimization.MCP.Router do
       json(conn, status, %{
         "jsonrpc" => "2.0",
         "id" => id,
-        "error" => %{"code" => code, "message" => message, "data" => stringify(details)}
+        "error" => %{
+          "code" => code,
+          "message" => message,
+          "data" => Pika.JSONSafe.json_safe(details)
+        }
       })
 
   defp json(conn, status, value) do
@@ -200,14 +206,4 @@ defmodule Pika.Optimization.MCP.Router do
     |> put_resp_content_type("application/json")
     |> send_resp(status, Jason.encode!(value))
   end
-
-  defp stringify(%_{} = struct), do: struct |> Map.from_struct() |> stringify()
-
-  defp stringify(map) when is_map(map),
-    do: Map.new(map, fn {key, value} -> {to_string(key), stringify(value)} end)
-
-  defp stringify(list) when is_list(list), do: Enum.map(list, &stringify/1)
-  defp stringify(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> stringify()
-  defp stringify(value) when is_atom(value), do: Atom.to_string(value)
-  defp stringify(value), do: value
 end

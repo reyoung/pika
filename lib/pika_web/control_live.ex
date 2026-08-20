@@ -1,8 +1,11 @@
 defmodule PikaWeb.ControlLive do
   use PikaWeb, :live_view
 
+  alias PikaWeb.Markdown
+
   @tabs ~w(attempts metrics sync audit)
   @refresh_debounce_ms 50
+  @agent_refresh_debounce_ms 250
   @spec_refresh_events ~w(best_advanced sampling_advanced spec_revision_advanced)
 
   @impl true
@@ -13,6 +16,7 @@ defmodule PikaWeb.ControlLive do
 
       if connected?(socket) do
         Phoenix.PubSub.subscribe(Pika.PubSub, Pika.Persistence.topic(campaign_id))
+        Phoenix.PubSub.subscribe(Pika.PubSub, Pika.AttemptCoordinator.progress_topic(campaign_id))
       end
 
       snapshot = Pika.Dashboard.snapshot(campaign_id)
@@ -32,7 +36,7 @@ defmodule PikaWeb.ControlLive do
        |> assign(:case_filter, "all")
        |> assign(:spec_filter, "all")
        |> assign(:btw_open, false)
-       |> assign(:btw_form, to_form(%{"body" => "", "mode" => "chat"}, as: :btw))
+       |> assign(:btw_form, to_form(%{"body" => "", "mode" => "current"}, as: :btw))
        |> assign(:sync_form, to_form(%{"remote" => remote, "branch" => branch}, as: :sync))
        |> assign(:sync_preview, nil)
        |> assign(:stop_armed, false)
@@ -48,6 +52,14 @@ defmodule PikaWeb.ControlLive do
   @impl true
   def handle_info({:domain_event, event}, socket),
     do: {:noreply, schedule_refresh(socket, spec_refresh_event?(event))}
+
+  def handle_info({:attempt_progress, attempt_id}, socket) do
+    if attempt_id == socket.assigns.selected_attempt_id do
+      {:noreply, schedule_refresh(socket, false, @agent_refresh_debounce_ms)}
+    else
+      {:noreply, socket}
+    end
+  end
 
   def handle_info(:refresh_snapshot, socket) do
     refresh_spec = socket.assigns.refresh_spec
@@ -97,7 +109,9 @@ defmodule PikaWeb.ControlLive do
          socket
          |> refresh()
          |> assign(:btw_form, to_form(%{"body" => "", "mode" => params["mode"]}, as: :btw))
+         |> assign(:btw_open, false)
          |> rotate_key(:btw)
+         |> push_event("composer:clear", %{})
          |> assign(:flash_message, "BTW 已记录并按所选作用域处理。")}
 
       {:error, reason} ->
@@ -196,9 +210,12 @@ defmodule PikaWeb.ControlLive do
 
   @impl true
   def render(assigns) do
+    selected_attempt = selected_attempt(assigns)
+
     assigns =
       assigns
-      |> assign(:selected_attempt, selected_attempt(assigns))
+      |> assign(:selected_attempt, selected_attempt)
+      |> assign(:attempt_conversation, attempt_conversation(selected_attempt))
       |> assign(:filtered_metrics, filtered_metrics(assigns))
       |> then(&assign(&1, :metric_json, Jason.encode!(&1.filtered_metrics)))
 
@@ -241,7 +258,7 @@ defmodule PikaWeb.ControlLive do
           <div class="attempt-list">
             <button :for={attempt <- @snapshot.attempts} class={"attempt-list-item #{if @selected_attempt_id == attempt.id, do: "selected"}"} phx-click="select_attempt" phx-value-id={attempt.id}>
               <span class="attempt-ordinal">#{attempt.ordinal}</span>
-              <span><strong>{attempt.summary || attempt.description || "等待摘要"}</strong><small>Slot {attempt.slot_index + 1} · {attempt.status}</small></span>
+              <span><strong>{attempt_title(attempt)}</strong><small>Slot {attempt.slot_index + 1} · {attempt.status}</small></span>
               <b>{best_delta(attempt.metrics)}</b>
             </button>
             <p :if={@snapshot.attempts == []} class="empty-copy">尚未创建 Attempt。</p>
@@ -251,8 +268,8 @@ defmodule PikaWeb.ControlLive do
         <section class="attempt-main panel">
           <div :if={@selected_attempt} class="attempt-detail">
             <div class="attempt-title">
-              <div><p class="eyebrow">Attempt #{@selected_attempt.ordinal}</p><h1>{@selected_attempt.summary || @selected_attempt.description || "运行中"}</h1></div>
-              <button :if={btw_allowed?(@selected_attempt)} class="primary" phx-click="open_btw">By the way</button>
+              <div><p class="eyebrow">Attempt #{@selected_attempt.ordinal}</p><h1>{attempt_title(@selected_attempt)}</h1></div>
+              <button :if={btw_allowed?(@selected_attempt)} class="secondary" phx-click="open_btw">发送范围…</button>
             </div>
             <div class="context-strip">
               <div><span>Status</span><strong>{@selected_attempt.status}</strong></div>
@@ -264,13 +281,93 @@ defmodule PikaWeb.ControlLive do
               <article :for={event <- @selected_attempt.sessions} class="backend-card">
                 <span>{event.role}</span><strong>{event.backend} · {event.model || "default"}</strong><small>{event.backend_protocol} · {event.reasoning_effort || "default"} · {event.status}</small>
               </article>
-              <section class="agent-event-stream">
-                <div class="stream-heading"><p class="eyebrow">Agent events</p><span>{length(@selected_attempt.agent_events)} events</span></div>
-                <article :for={event <- @selected_attempt.agent_events} class={"agent-event event-#{event["type"] || "unknown"}"}>
-                  <div><strong>{event_type_label(event["type"])}</strong><time>{event["at"] || "—"}</time></div>
-                  <pre>{event_summary(event)}</pre>
-                </article>
-                <p :if={@selected_attempt.agent_events == []} class="empty-copy">Agent JSONL 到达后，文本、Plan、Tool、Diff 与 Terminal 事件会按顺序显示。</p>
+              <section class="attempt-conversation">
+                <div class="stream-heading">
+                  <div><p class="eyebrow">Agent 对话</p><span>回复以 Markdown 显示；工具活动可展开查看</span></div>
+                  <b>{length(@attempt_conversation)} 条</b>
+                </div>
+                <div
+                  id={"attempt-conversation-#{@selected_attempt.id}"}
+                  class="conversation-scroll attempt-conversation-scroll"
+                  phx-hook="ConversationScroll"
+                >
+                  <%= for entry <- @attempt_conversation do %>
+                    <details :if={entry.kind == :activity} id={entry.id} class="activity-row">
+                      <summary>
+                        <span class="activity-icon" aria-hidden="true">⌘</span>
+                        <span class="activity-summary">{entry.summary}</span>
+                        <span :if={entry.running} class="activity-running">运行中</span>
+                        <time>{format_time(entry.at)}</time>
+                        <span class="activity-chevron" aria-hidden="true">›</span>
+                      </summary>
+                      <div class="activity-details">
+                        <div :for={detail <- entry.details} class="activity-detail">
+                          <span class={"activity-status activity-status-#{detail.status}"}>
+                            {activity_status_icon(detail.status)}
+                          </span>
+                          <div>
+                            <strong>{detail.label}</strong>
+                            <code :if={detail.detail not in [nil, ""]}>{detail.detail}</code>
+                          </div>
+                        </div>
+                      </div>
+                    </details>
+
+                    <article
+                      :if={entry.kind != :activity}
+                      id={entry.id}
+                      class={"message message-#{entry.kind}"}
+                    >
+                      <div class="message-meta">
+                        <div class="message-label">{entry.label} · {format_time(entry.at)}</div>
+                        <button
+                          :if={entry.kind == :agent}
+                          id={"copy-#{entry.id}"}
+                          type="button"
+                          class="copy-markdown"
+                          phx-hook="CopyMarkdown"
+                          data-markdown={entry.content}
+                          aria-label="复制 Markdown"
+                          title="复制 Markdown"
+                        >复制 Markdown</button>
+                      </div>
+                      <div :if={entry.kind == :agent} class="message-body markdown-body">
+                        {Markdown.render(entry.content)}
+                      </div>
+                      <div :if={entry.kind != :agent} class="message-body">{entry.content}</div>
+                    </article>
+                  <% end %>
+
+                  <p :if={@attempt_conversation == []} class="empty-copy">
+                    Agent Session 启动后，回复会以对话形式显示；命令、工具调用和文件修改会折叠在时间线中。
+                  </p>
+                  <div
+                    :if={attempt_agent_responding?(@selected_attempt)}
+                    id={"attempt-agent-typing-#{@selected_attempt.id}"}
+                    class="agent-typing"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <span>Agent 正在处理 Attempt</span>
+                  </div>
+                </div>
+                <.form
+                  :if={btw_allowed?(@selected_attempt) && !@btw_open}
+                  for={@btw_form}
+                  id="attempt-message-form"
+                  phx-submit="send_btw"
+                  phx-hook="Composer"
+                  class="attempt-conversation-composer"
+                >
+                  <input type="hidden" name={@btw_form[:mode].name} value="current" />
+                  <.input
+                    field={@btw_form[:body]}
+                    type="textarea"
+                    placeholder="向当前 Agent 补充信息或提问…"
+                  />
+                  <button type="submit" class="primary">发送</button>
+                </.form>
               </section>
               <article class="summary-card">
                 <p class="eyebrow">Summary</p>
@@ -297,14 +394,13 @@ defmodule PikaWeb.ControlLive do
         </section>
 
         <aside :if={@btw_open && @selected_attempt} class="btw-drawer panel" role="dialog" aria-modal="true">
-          <div class="panel-heading"><div><p class="eyebrow">Forked context</p><h2>BTW · Attempt #{@selected_attempt.ordinal}</h2></div><button class="icon-button" phx-click="close_btw">×</button></div>
-          <p>只允许从当前运行中的 Attempt 建立 BTW。选择作用域后才会注入。</p>
+          <div class="panel-heading"><div><p class="eyebrow">消息作用域</p><h2>Attempt #{@selected_attempt.ordinal}</h2></div><button class="icon-button" phx-click="close_btw">×</button></div>
+          <p>选择消息只发送给当前 Agent，还是作为后续 Attempt 的 Campaign 指引。</p>
           <.form for={@btw_form} phx-submit="send_btw" class="btw-form">
             <.input field={@btw_form[:body]} type="textarea" placeholder="补充信息或询问当前 Agent…" />
             <select id={@btw_form[:mode].id} name={@btw_form[:mode].name}>
-              <option value="chat" selected={@btw_form[:mode].value == "chat"}>仅对话</option>
-              <option value="current" selected={@btw_form[:mode].value == "current"}>注入当前 Attempt</option>
-              <option value="future" selected={@btw_form[:mode].value == "future"}>注入后续 Attempts</option>
+              <option value="current" selected={@btw_form[:mode].value == "current"}>发送给当前 Agent</option>
+              <option value="future" selected={@btw_form[:mode].value == "future"}>用于后续 Attempts</option>
             </select>
             <button class="primary">发送</button>
           </.form>
@@ -420,7 +516,10 @@ defmodule PikaWeb.ControlLive do
     )
   end
 
-  defp schedule_refresh(socket, refresh_spec) do
+  defp schedule_refresh(socket, refresh_spec),
+    do: schedule_refresh(socket, refresh_spec, @refresh_debounce_ms)
+
+  defp schedule_refresh(socket, refresh_spec, delay_ms) do
     socket = assign(socket, :refresh_spec, socket.assigns.refresh_spec or refresh_spec)
 
     if socket.assigns.refresh_timer do
@@ -429,7 +528,7 @@ defmodule PikaWeb.ControlLive do
       assign(
         socket,
         :refresh_timer,
-        Process.send_after(self(), :refresh_snapshot, @refresh_debounce_ms)
+        Process.send_after(self(), :refresh_snapshot, delay_ms)
       )
     end
   end
@@ -475,6 +574,207 @@ defmodule PikaWeb.ControlLive do
     end)
   end
 
+  defp attempt_conversation(nil), do: []
+
+  defp attempt_conversation(attempt) do
+    started_at = attempt.started_at || attempt.created_at
+
+    initial = %{
+      id: "attempt-context-#{attempt.id}",
+      kind: :system,
+      label: "Pika",
+      content:
+        "Attempt ##{attempt.ordinal} 已从固定 Best #{short_sha(attempt.base_sha)} 启动；Agent 只在独立 worktree 中工作。",
+      at: started_at
+    }
+
+    timeline =
+      Enum.map(attempt.agent_events, &{:event, &1}) ++
+        Enum.map(Map.get(attempt, :guidance, []), &{:guidance, &1})
+
+    entries =
+      timeline
+      |> Enum.sort_by(&conversation_sort_key/1)
+      |> Enum.with_index()
+      |> Enum.reduce([], fn
+        {{:guidance, guidance}, index}, acc ->
+          [guidance_entry(guidance, index) | acc]
+
+        {{:event, event}, index}, acc ->
+          reduce_conversation_event(event, index, acc)
+      end)
+      |> Enum.reverse()
+
+    [initial | entries]
+  end
+
+  defp conversation_sort_key({:event, event}), do: time_sort_key(event["at"])
+  defp conversation_sort_key({:guidance, guidance}), do: time_sort_key(guidance.created_at)
+
+  defp time_sort_key(value) when is_integer(value), do: value
+
+  defp time_sort_key(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> DateTime.to_unix(datetime, :microsecond)
+      _other -> 0
+    end
+  end
+
+  defp time_sort_key(_value), do: 0
+
+  defp guidance_entry(guidance, index) do
+    %{
+      id: "attempt-guidance-#{guidance.id}-#{index}",
+      kind: :user,
+      label: guidance_label(guidance.kind),
+      content: guidance.body,
+      at: guidance.created_at
+    }
+  end
+
+  defp guidance_label("attempt"), do: "User · 当前 Agent"
+  defp guidance_label("campaign"), do: "User · 后续 Attempts"
+  defp guidance_label(_kind), do: "User"
+
+  defp reduce_conversation_event(%{"type" => "usage_updated"}, _index, acc), do: acc
+
+  defp reduce_conversation_event(%{"type" => "message_delta"} = event, index, acc) do
+    delta = get_in(event, ["data", "delta"]) || ""
+    merge_key = message_merge_key(event)
+
+    cond do
+      delta == "" ->
+        acc
+
+      match?([%{kind: :agent, merge_key: ^merge_key} | _rest], acc) ->
+        [entry | rest] = acc
+        [%{entry | content: entry.content <> delta, at: event["at"] || entry.at} | rest]
+
+      true ->
+        [
+          %{
+            id: "attempt-agent-#{event["session_id"] || "session"}-#{index}",
+            kind: :agent,
+            label: "Iteration Agent",
+            content: delta,
+            at: event["at"],
+            merge_key: merge_key
+          }
+          | acc
+        ]
+    end
+  end
+
+  defp reduce_conversation_event(event, index, acc) do
+    entry = activity_entry(event, index)
+
+    case {entry.merge_key, acc} do
+      {key, [%{kind: :activity, merge_key: key} = previous | rest]} when not is_nil(key) ->
+        [
+          %{
+            previous
+            | at: entry.at || previous.at,
+              summary: prefer_activity_summary(previous.summary, entry.summary),
+              running: entry.running,
+              details: Enum.take(previous.details ++ entry.details, -12)
+          }
+          | rest
+        ]
+
+      _other ->
+        [entry | acc]
+    end
+  end
+
+  defp message_merge_key(event) do
+    data = event["data"] || %{}
+
+    {event["session_id"], event["turn_id"], data["item_id"] || data["itemId"]}
+  end
+
+  defp activity_entry(event, index) do
+    status = activity_event_status(event)
+
+    %{
+      id: "attempt-activity-#{event["session_id"] || "campaign"}-#{index}",
+      kind: :activity,
+      summary: activity_event_summary(event),
+      running: status == :running,
+      at: event["at"],
+      merge_key: activity_merge_key(event),
+      details: [
+        %{
+          label: event_type_label(event["type"]),
+          detail: event_summary(event),
+          status: status
+        }
+      ]
+    }
+  end
+
+  defp activity_merge_key(event) do
+    data = event["data"] || %{}
+    item = data["item"] || %{}
+    item_id = item["id"] || data["itemId"] || data["item_id"]
+
+    if item_id,
+      do: {event["session_id"], event["turn_id"], item_id},
+      else: nil
+  end
+
+  defp activity_event_status(%{"type" => type, "data" => data})
+       when type in ["backend_error", "process_exited"] do
+    if type == "process_exited" and (data["expected"] || data[:expected]),
+      do: :completed,
+      else: :failed
+  end
+
+  defp activity_event_status(%{"type" => type})
+       when type in ["tool_started", "tool_updated", "command_output"],
+       do: :running
+
+  defp activity_event_status(_event), do: :completed
+
+  defp activity_event_summary(event) do
+    data = event["data"] || %{}
+    item = data["item"] || %{}
+
+    value =
+      first_present(item, ~w(title command path name text type)) ||
+        first_present(data, ~w(title command path name message summary)) ||
+        event_type_label(event["type"])
+
+    value
+    |> case do
+      value when is_binary(value) -> value
+      value -> value |> Pika.JSONSafe.json_safe() |> Jason.encode!()
+    end
+    |> String.slice(0, 240)
+  end
+
+  defp prefer_activity_summary(previous, current) do
+    if current in [nil, "", "Tool Call", "Event"], do: previous, else: current
+  end
+
+  defp activity_status_icon(:running), do: "●"
+  defp activity_status_icon(:failed), do: "!"
+  defp activity_status_icon(_status), do: "✓"
+
+  defp attempt_agent_responding?(attempt) do
+    attempt.status in ~w(running awaiting_report) and
+      Enum.any?(attempt.sessions, &(&1.status == "running"))
+  end
+
+  defp attempt_title(attempt) do
+    attempt.summary || attempt.description ||
+      case attempt.status do
+        status when status in ~w(running awaiting_report) -> "Agent 调优中"
+        "queued" -> "等待调度"
+        "interrupted" -> "等待恢复"
+        _other -> "等待摘要"
+      end
+  end
+
   defp metric_ids(points), do: points |> Enum.map(& &1.metric_id) |> Enum.uniq() |> Enum.sort()
   defp case_ids(points), do: points |> Enum.map(& &1.case_id) |> Enum.uniq() |> Enum.sort()
 
@@ -513,12 +813,17 @@ defmodule PikaWeb.ControlLive do
 
   defp event_summary(event) do
     data = event["data"] || %{}
+    item = data["item"] || %{}
 
     value =
       first_present(
         data,
         ~w(delta text content output title command path diff message error summary)
       ) ||
+        first_present(
+          item,
+          ~w(delta text content output title command path diff message error summary name type status)
+        ) ||
         if(data == %{}, do: Map.drop(event, ~w(data at)), else: data)
 
     value
@@ -566,7 +871,7 @@ defmodule PikaWeb.ControlLive do
   end
 
   defp btw_allowed?(attempt),
-    do: attempt.status in ~w(running awaiting_report refreshing integrating interrupted)
+    do: attempt.status in ~w(running awaiting_report)
 
   defp tab_label("attempts"), do: "Attempts"
   defp tab_label("metrics"), do: "Metrics"
@@ -593,6 +898,15 @@ defmodule PikaWeb.ControlLive do
   defp format_time(value) when is_integer(value) do
     value |> DateTime.from_unix!(:microsecond) |> Calendar.strftime("%m-%d %H:%M:%S")
   end
+
+  defp format_time(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> Calendar.strftime(datetime, "%m-%d %H:%M:%S")
+      _other -> value
+    end
+  end
+
+  defp format_time(_value), do: "—"
 
   defp compact_payload(payload), do: payload |> Jason.encode!() |> String.slice(0, 180)
 end

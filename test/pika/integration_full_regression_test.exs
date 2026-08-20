@@ -130,15 +130,18 @@ defmodule Pika.IntegrationFullRegressionTest do
     assert best_notifications >= 2
     assert sampling_notifications >= 1
 
-    Enum.each(final, fn attempt ->
-      refute File.exists?(Path.join(context.workspace.root, attempt.worktree_relative_path))
-
-      assert {:error, _} =
-               Git.run(context.workspace.repo, [
-                 "show-ref",
-                 "--verify",
-                 "refs/heads/#{attempt.branch_name}"
-               ])
+    eventually(fn ->
+      Enum.all?(final, fn attempt ->
+        not File.exists?(Path.join(context.workspace.root, attempt.worktree_relative_path)) and
+          match?(
+            {:error, _},
+            Git.run(context.workspace.repo, [
+              "show-ref",
+              "--verify",
+              "refs/heads/#{attempt.branch_name}"
+            ])
+          )
+      end)
     end)
 
     assert IntegrationCoordinator.snapshot(coordinator).last_error == nil
@@ -180,6 +183,29 @@ defmodule Pika.IntegrationFullRegressionTest do
     assert Agent.get(measurement_counter, & &1) == %{screening: 1}
     assert IntegrationCoordinator.snapshot(coordinator).recovery_count == 1
     assert {:error, :integration_lease_missing} = IntegrationStore.lease(context.campaign.id)
+  end
+
+  test "MCP authentication is available while the Integration Session is opening" do
+    context = ready_attempts(1)
+
+    coordinator =
+      start_integration(
+        context,
+        integration_profile(%{
+          test_pid: self(),
+          barrier: true,
+          authorize_during_open: true
+        })
+      )
+
+    [start] = receive_integrations(1)
+    assert :ok = IntegrationCoordinator.authorize(start.token, coordinator)
+    assert_integration_mcp_gateway(start.token)
+    send(start.task_pid, :release)
+
+    eventually(fn ->
+      match?({:ok, %{status: "accepted"}}, AttemptStore.attempt(start.attempt_id))
+    end)
   end
 
   for crash_stage <- [
@@ -420,6 +446,28 @@ defmodule Pika.IntegrationFullRegressionTest do
 
     assert %{"result" => %{"serverInfo" => %{"name" => "pika-integration"}}} =
              Jason.decode!(conn.resp_body)
+
+    context =
+      Plug.Test.conn(
+        :post,
+        "/mcp",
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 2,
+          "method" => "tools/call",
+          "params" => %{"name" => "get_integration_context", "arguments" => %{}}
+        })
+      )
+      |> Plug.Conn.put_req_header("content-type", "application/json")
+      |> Plug.Conn.put_req_header("authorization", "Bearer #{token}")
+      |> PikaWeb.MCPGateway.call([])
+
+    assert context.status == 200
+
+    assert %{"result" => %{"structuredContent" => %{"best_metrics" => best_metrics}}} =
+             Jason.decode!(context.resp_body)
+
+    assert map_size(best_metrics) >= 1
   end
 
   defp eventually(fun, attempts \\ 160)

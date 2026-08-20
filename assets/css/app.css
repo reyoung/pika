@@ -414,6 +414,19 @@ code { color: #8ee8ff; }
 .stream-heading { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #203139; }
 .stream-heading .eyebrow { margin: 0; }
 .stream-heading span { color: #61747d; font-size: 9px; }
+.stream-heading b { color: #71858e; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
+.attempt-conversation { display: grid; grid-column: 1 / -1; grid-template-rows: auto minmax(320px, 1fr) auto; min-height: 460px; max-height: min(680px, calc(100vh - 150px)); overflow: hidden; border: 1px solid #263a42; border-radius: 12px; background: #07101599; }
+.attempt-conversation .stream-heading > div span { display: block; margin-top: 3px; }
+.attempt-conversation-scroll { padding: 18px 20px; scroll-behavior: smooth; }
+.attempt-conversation-scroll .message-agent { padding-right: 6px; }
+.attempt-conversation-scroll .message-user { max-width: min(78%, 640px); }
+.attempt-conversation-scroll .message-system { margin-right: auto; }
+.attempt-conversation-composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: end; padding: 12px 14px; border-top: 1px solid #203139; background: #0b151be8; }
+.attempt-conversation-composer > div { min-width: 0; margin: 0; }
+.attempt-conversation-composer label { display: none; }
+.attempt-conversation-composer textarea { width: 100%; min-height: 42px; max-height: 110px; resize: vertical; padding: 10px 11px; border: 1px solid #30434d; border-radius: 9px; color: #dce6e9; background: #071015; line-height: 1.45; }
+.attempt-conversation-composer textarea:focus { border-color: #607a67; outline: 1px solid #607a67; }
+.attempt-conversation-composer button { min-height: 42px; }
 .agent-event { padding: 10px 14px; border-bottom: 1px solid #1c2b32; }
 .agent-event:last-child { border-bottom: 0; }
 .agent-event > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -492,6 +505,8 @@ code { color: #8ee8ff; }
   .attempt-workspace, .sync-grid { grid-template-columns: 1fr; }
   .attempt-sidebar { max-height: 320px; }
   .attempt-stream, .summary-card dl, .metric-point-card, .sync-preview dl, .sync-status dl { grid-template-columns: 1fr; }
+  .attempt-conversation { min-height: 520px; max-height: none; }
+  .attempt-conversation-composer { grid-template-columns: 1fr; }
   .metric-filters { align-items: stretch; flex-direction: column; }
   .metric-filters label { min-width: 0; }
   .metric-filters > span { margin-left: 0; padding: 0; }

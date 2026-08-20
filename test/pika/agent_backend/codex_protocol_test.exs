@@ -33,6 +33,8 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
              )
 
     assert session.backend_session_id == "fake-thread"
+    assert Path.basename(session.jsonl_path) =~ ".wire.jsonl"
+    assert Path.basename(Path.dirname(session.jsonl_path)) == "transport"
     assert_receive {:pika_backend_event, %{type: :session_started}}
 
     refute Enum.any?(

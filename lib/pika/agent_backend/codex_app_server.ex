@@ -147,8 +147,9 @@ defmodule Pika.AgentBackend.CodexAppServer do
   def handle_call({:start_transport, mcp}, _from, %{transport: nil} = state) do
     profile = state.profile
     artifact_dir = Path.expand(profile.artifact_dir)
-    jsonl_path = Path.join(artifact_dir, "codex-#{state.session_id}.jsonl")
-    stderr_path = Path.join(artifact_dir, "codex-#{state.session_id}.stderr.log")
+    transport_dir = Path.join(artifact_dir, "transport")
+    jsonl_path = Path.join(transport_dir, "codex-#{state.session_id}.wire.jsonl")
+    stderr_path = Path.join(transport_dir, "codex-#{state.session_id}.stderr.log")
     command = CodexExecutable.resolve(profile.command)
 
     args =

@@ -2,14 +2,20 @@ defmodule Pika.AttemptCoordinator do
   @moduledoc false
 
   use GenServer
+  require Logger
 
   alias Pika.AgentBackend
+  alias Pika.AttemptTokenRegistry, as: TokenRegistry
   alias Pika.AttemptPrompt, as: Prompt
   alias Pika.AttemptStore, as: Store
   alias Pika.AttemptWorkspace, as: Workspace
   alias Pika.Alignment.ArtifactStore, as: StageArtifactStore
 
   @recovery_retry_ms 250
+  @progress_log_interval_ms 30_000
+  @recovery_tail_records 50
+  @recovery_line_max_bytes 262_144
+  @recovery_data_max_bytes 4_000
   @read_tools ~w(get_context query_attempt_history get_attempt list_agents read_agent_messages)
   @write_tools ~w(ack_agent_messages send_agent_message register_artifact submit_plan record_metrics submit_attempt_summary complete_attempt)
 
@@ -21,7 +27,8 @@ defmodule Pika.AttemptCoordinator do
   def dispatch(server \\ __MODULE__), do: call(server, :dispatch)
   def stop_now(server \\ __MODULE__), do: call(server, :stop_now)
   def resume(server \\ __MODULE__), do: call(server, :resume)
-  def authorize(token, server \\ __MODULE__), do: call(server, {:authorize, token})
+  def progress_topic(campaign_id), do: "pika:attempt-progress:#{campaign_id}"
+  def authorize(token, _server \\ __MODULE__), do: TokenRegistry.authorize(token)
   def read_plan(token, server \\ __MODULE__), do: call(server, {:read_plan, token})
 
   def mcp_call(token, tool, args, server \\ __MODULE__),
@@ -32,6 +39,7 @@ defmodule Pika.AttemptCoordinator do
 
   @impl true
   def init(opts) do
+    :ok = TokenRegistry.init_owner()
     workspace = Keyword.get_lazy(opts, :workspace, &Pika.WorkspaceLock.workspace/0)
     campaign = Keyword.get_lazy(opts, :campaign, &Pika.Persistence.current_campaign/0)
     campaign_id = Keyword.get(opts, :campaign_id, campaign.id)
@@ -56,10 +64,14 @@ defmodule Pika.AttemptCoordinator do
       tokens: %{},
       monitors: %{},
       recovery_count: %{},
-      last_error: nil
+      last_error: nil,
+      progress_log_interval_ms:
+        Keyword.get(opts, :progress_log_interval_ms, @progress_log_interval_ms),
+      progress_log_level: Keyword.get(opts, :progress_log_level, :info)
     }
 
     send(self(), :recover)
+    schedule_progress_log(state.progress_log_interval_ms)
     {:ok, state}
   end
 
@@ -77,12 +89,6 @@ defmodule Pika.AttemptCoordinator do
   def handle_call(:resume, _from, state) do
     send(self(), :recover)
     {:reply, :ok, %{state | recovery_enabled: true}}
-  end
-
-  def handle_call({:authorize, token}, _from, state) do
-    {:reply,
-     if(Map.has_key?(state.tokens, token_hash(token)), do: :ok, else: {:error, :unauthorized}),
-     state}
   end
 
   def handle_call({:read_plan, token}, _from, state) do
@@ -179,10 +185,18 @@ defmodule Pika.AttemptCoordinator do
         {:noreply, state}
 
       {:ok, session_state} ->
+        session_state = note_backend_event(session_state, event)
+        state = put_session(state, event.session_id, session_state)
         state = persist_backend_event(state, session_state, event)
         state = apply_backend_event(state, session_state, event)
         {:noreply, state}
     end
+  end
+
+  def handle_info(:log_work_snapshot, state) do
+    log_work_snapshot(state)
+    schedule_progress_log(state.progress_log_interval_ms)
+    {:noreply, state}
   end
 
   def handle_info({:DOWN, monitor, :process, _pid, reason}, state) do
@@ -229,6 +243,7 @@ defmodule Pika.AttemptCoordinator do
   @impl true
   def terminate(_reason, state) do
     Enum.each(state.sessions, fn {_id, session_state} ->
+      TokenRegistry.delete_hash(session_state.identity.token_hash)
       safe_close(session_state.handle)
     end)
 
@@ -247,6 +262,7 @@ defmodule Pika.AttemptCoordinator do
 
   defp stop_sessions(state) do
     Enum.each(state.sessions, fn {_session_id, session_state} ->
+      TokenRegistry.delete_hash(session_state.identity.token_hash)
       _ = AgentBackend.interrupt(session_state.handle)
 
       _ =
@@ -351,88 +367,158 @@ defmodule Pika.AttemptCoordinator do
       artifact_dir: Path.join([state.workspace.artifacts, "logs", attempt.id])
     }
 
+    registry_identity = %{
+      campaign_id: state.campaign_id,
+      attempt_id: attempt.id,
+      role: role,
+      slot_index: attempt.slot_index
+    }
+
     with :ok <- Pika.PromptCatalog.validate([role]),
          {:ok, context} <- Store.campaign_context(state.campaign_id),
          {:ok, instructions} <- Prompt.render(role, attempt, context),
-         {:ok, handle} <- AgentBackend.start_link(module, backend_profile, self()),
-         {:ok, session} <-
-           AgentBackend.open_session(
-             handle,
-             Path.join(state.workspace.root, attempt.worktree_relative_path),
-             profile["model"] || profile[:model],
-             effort,
-             %{
-               url: state.mcp_url,
-               token: token,
-               role: role,
-               attempt_id: attempt.id,
-               coordinator: self()
-             },
-             skill_roots(state.workspace),
-             recovery_instructions(
-               instructions,
-               recovering?,
-               required,
-               state.workspace,
-               attempt
-             )
-           ) do
-      identity = %{
-        session_id: session.id,
+         :ok <- TokenRegistry.put(token, registry_identity),
+         {:ok, handle} <- AgentBackend.start_link(module, backend_profile, self()) do
+      log_session_opening(state, attempt, role, required, recovering?)
+
+      open_result =
+        AgentBackend.open_session(
+          handle,
+          Path.join(state.workspace.root, attempt.worktree_relative_path),
+          profile["model"] || profile[:model],
+          effort,
+          %{
+            url: state.mcp_url,
+            token: token,
+            role: role,
+            attempt_id: attempt.id,
+            coordinator: self()
+          },
+          skill_roots(state.workspace),
+          recovery_instructions(
+            instructions,
+            recovering?,
+            required,
+            state.workspace,
+            attempt
+          )
+        )
+
+      case open_result do
+        {:ok, session} ->
+          establish_attempt_session(
+            state,
+            attempt,
+            role,
+            required,
+            recovering?,
+            handle,
+            session,
+            backend_profile,
+            token,
+            token_hash
+          )
+
+        {:error, reason} ->
+          safe_close(handle)
+          session_open_failed(state, attempt, role, required, token, reason)
+      end
+    else
+      {:error, reason} ->
+        session_open_failed(state, attempt, role, required, token, reason)
+    end
+  end
+
+  defp establish_attempt_session(
+         state,
+         attempt,
+         role,
+         required,
+         recovering?,
+         handle,
+         session,
+         backend_profile,
+         token,
+         token_hash
+       ) do
+    identity = %{
+      session_id: session.id,
+      campaign_id: state.campaign_id,
+      attempt_id: attempt.id,
+      role: role,
+      slot_index: attempt.slot_index,
+      token_hash: token_hash
+    }
+
+    :ok =
+      TokenRegistry.put(token, %{
         campaign_id: state.campaign_id,
         attempt_id: attempt.id,
         role: role,
         slot_index: attempt.slot_index,
-        token_hash: token_hash
-      }
+        session_id: session.id
+      })
 
-      :ok = Store.insert_session(state.campaign_id, identity, session, backend_profile, required)
-      monitor = Process.monitor(handle.pid)
+    :ok = Store.insert_session(state.campaign_id, identity, session, backend_profile, required)
+    monitor = Process.monitor(handle.pid)
 
-      session_state = %{
-        handle: handle,
-        session: session,
-        identity: identity,
-        required: MapSet.new(required),
-        active_turn_id: nil,
-        closing: false,
-        log_path: "artifacts/logs/#{attempt.id}/#{session.id}.jsonl"
-      }
+    session_state = %{
+      handle: handle,
+      session: session,
+      identity: identity,
+      required: MapSet.new(required),
+      active_turn_id: nil,
+      closing: false,
+      last_event_type: :session_opened,
+      last_event_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+      last_event_summary: "Backend session opened",
+      log_path: "artifacts/logs/#{attempt.id}/#{session.id}.jsonl"
+    }
 
-      state = %{
-        state
-        | sessions: Map.put(state.sessions, session.id, session_state),
-          tokens: Map.put(state.tokens, token_hash, session.id),
-          monitors: Map.put(state.monitors, monitor, session.id),
-          recovery_count:
-            if(recovering?,
-              do: Map.update(state.recovery_count, attempt.id, 1, &(&1 + 1)),
-              else: state.recovery_count
-            )
-      }
+    state = %{
+      state
+      | sessions: Map.put(state.sessions, session.id, session_state),
+        tokens: Map.put(state.tokens, token_hash, session.id),
+        monitors: Map.put(state.monitors, monitor, session.id),
+        recovery_count:
+          if(recovering?,
+            do: Map.update(state.recovery_count, attempt.id, 1, &(&1 + 1)),
+            else: state.recovery_count
+          ),
+        last_error: nil
+    }
 
-      state = ensure_session_log(state, session_state)
-      kickoff = kickoff(role, attempt, recovering?, required)
+    state = ensure_session_log(state, session_state)
+    kickoff = kickoff(role, attempt, recovering?, required)
 
-      case AgentBackend.start_turn(handle, kickoff) do
-        {:ok, turn_id} ->
-          put_session(state, session.id, %{session_state | active_turn_id: turn_id})
+    case AgentBackend.start_turn(handle, kickoff) do
+      {:ok, turn_id} ->
+        put_session(state, session.id, %{
+          session_state
+          | active_turn_id: turn_id,
+            last_event_type: :turn_start_requested,
+            last_event_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+            last_event_summary: kickoff
+        })
 
-        {:error, reason} ->
-          recover_session(state, session_state, {:start_turn_failed, reason})
-      end
-    else
       {:error, reason} ->
-        _ = Store.mark_interrupted(attempt.id, reason)
-
-        Process.send_after(
-          self(),
-          {:recover_session, attempt.id, role, required},
-          @recovery_retry_ms
-        )
-
-        %{state | last_error: inspect(reason)}
+        recover_session(state, session_state, {:start_turn_failed, reason})
     end
+  end
+
+  defp session_open_failed(state, attempt, role, required, token, reason) do
+    TokenRegistry.delete(token)
+    _ = Store.mark_interrupted(attempt.id, reason)
+
+    log_session_open_failure(state, attempt, role, required, reason)
+
+    Process.send_after(
+      self(),
+      {:recover_session, attempt.id, role, required},
+      @recovery_retry_ms
+    )
+
+    %{state | last_error: inspect(reason)}
   end
 
   defp execute_mcp(tool, args, session_state, state) when tool in @read_tools do
@@ -878,6 +964,8 @@ defmodule Pika.AttemptCoordinator do
         %{state | sessions: sessions}
 
       {session_state, sessions} ->
+        TokenRegistry.delete_hash(session_state.identity.token_hash)
+
         monitors =
           Enum.reduce(state.monitors, state.monitors, fn
             {monitor, ^session_id}, acc ->
@@ -906,6 +994,169 @@ defmodule Pika.AttemptCoordinator do
 
   defp put_session(state, session_id, session_state),
     do: %{state | sessions: Map.put(state.sessions, session_id, session_state)}
+
+  defp note_backend_event(session_state, event) do
+    %{
+      session_state
+      | last_event_type: event.type,
+        last_event_at: DateTime.utc_now() |> DateTime.to_iso8601(),
+        last_event_summary: backend_event_summary(event)
+    }
+  end
+
+  defp backend_event_summary(event) do
+    data = Pika.JSONSafe.json_safe(event.data || %{})
+
+    value =
+      first_progress_value(data) ||
+        if(data == %{}, do: to_string(event.type), else: Jason.encode!(data))
+
+    value
+    |> to_string()
+    |> String.slice(0, 500)
+  rescue
+    _error -> to_string(event.type)
+  end
+
+  defp first_progress_value(data) when is_map(data) do
+    Enum.find_value(
+      ~w(delta text content output title command path diff message error summary),
+      fn key ->
+        case Map.get(data, key) do
+          value when value in [nil, "", []] -> nil
+          value when is_binary(value) -> value
+          value -> Jason.encode!(Pika.JSONSafe.json_safe(value))
+        end
+      end
+    ) ||
+      case Map.get(data, "item") do
+        item when is_map(item) -> first_progress_value(item)
+        _other -> nil
+      end
+  end
+
+  defp first_progress_value(_data), do: nil
+
+  defp schedule_progress_log(interval) when is_integer(interval) and interval > 0,
+    do: Process.send_after(self(), :log_work_snapshot, interval)
+
+  defp schedule_progress_log(_interval), do: :ok
+
+  defp log_work_snapshot(state) do
+    attempts =
+      state.campaign_id
+      |> Store.active_attempts()
+      |> Enum.reject(&(&1.status == "ready_for_integration"))
+
+    if attempts != [] or map_size(state.sessions) > 0 or not is_nil(state.last_error) do
+      snapshot = %{
+        campaign_id: state.campaign_id,
+        attempts: Enum.map(attempts, &attempt_progress(state.workspace, &1)),
+        sessions: Enum.map(state.sessions, fn {_id, session} -> session_progress(session) end),
+        recovery_count: state.recovery_count,
+        last_error: truncate(state.last_error, 1_000)
+      }
+
+      Logger.log(
+        state.progress_log_level,
+        "Pika attempt work snapshot " <> Jason.encode!(snapshot)
+      )
+    end
+  rescue
+    error -> Logger.warning("Pika attempt work snapshot failed: #{Exception.message(error)}")
+  end
+
+  defp attempt_progress(workspace, attempt) do
+    %{
+      attempt_id: attempt.id,
+      ordinal: attempt.ordinal,
+      slot_index: attempt.slot_index,
+      status: attempt.status,
+      current_work: attempt.summary || attempt.description || "awaiting_agent_summary",
+      base_sha: short_sha(attempt.base_sha),
+      candidate_sha: short_sha(attempt.candidate_sha),
+      worktree: attempt.worktree_relative_path,
+      git: worktree_git_progress(workspace, attempt)
+    }
+  end
+
+  defp session_progress(session) do
+    %{
+      session_id: session.session.id,
+      attempt_id: session.identity.attempt_id,
+      role: session.identity.role,
+      backend: session.session.backend,
+      provider_session_id: session.session.backend_session_id,
+      process_alive: Process.alive?(session.handle.pid),
+      active_turn_id: session.active_turn_id,
+      required_operations: session.required |> MapSet.to_list() |> Enum.sort(),
+      last_event: session.last_event_type,
+      last_event_at: session.last_event_at,
+      last_event_summary: session.last_event_summary
+    }
+  end
+
+  defp worktree_git_progress(workspace, attempt) do
+    path = Path.join(workspace.root, attempt.worktree_relative_path)
+
+    with true <- File.dir?(path),
+         {:ok, head} <- Pika.Git.run(path, ["rev-parse", "HEAD"]),
+         {:ok, status} <-
+           Pika.Git.run(path, ["status", "--porcelain=v1", "--untracked-files=normal"]) do
+      changes = String.split(status, "\n", trim: true)
+
+      %{
+        head: short_sha(head),
+        dirty: changes != [],
+        changed_path_count: length(changes),
+        changed_paths:
+          changes
+          |> Enum.take(8)
+          |> Enum.map(&String.slice(&1, 0, 160)),
+        changed_paths_truncated: length(changes) > 8
+      }
+    else
+      false -> %{available: false, reason: "worktree_missing"}
+      {:error, reason} -> %{available: false, reason: truncate(inspect(reason), 500)}
+    end
+  end
+
+  defp log_session_opening(state, attempt, role, required, recovering?) do
+    Logger.info(
+      "Pika backend session opening " <>
+        Jason.encode!(%{
+          campaign_id: state.campaign_id,
+          attempt_id: attempt.id,
+          ordinal: attempt.ordinal,
+          slot_index: attempt.slot_index,
+          role: role,
+          recovery: recovering?,
+          required_operations: Enum.sort(required),
+          worktree: attempt.worktree_relative_path
+        })
+    )
+  end
+
+  defp log_session_open_failure(state, attempt, role, required, reason) do
+    Logger.warning(
+      "Pika backend session open failed " <>
+        Jason.encode!(%{
+          campaign_id: state.campaign_id,
+          attempt_id: attempt.id,
+          ordinal: attempt.ordinal,
+          slot_index: attempt.slot_index,
+          role: role,
+          required_operations: Enum.sort(required),
+          retry_in_ms: @recovery_retry_ms,
+          reason: truncate(inspect(reason), 2_000)
+        })
+    )
+  end
+
+  defp short_sha(nil), do: nil
+  defp short_sha(sha), do: String.slice(sha, 0, 12)
+  defp truncate(nil, _max), do: nil
+  defp truncate(value, max), do: value |> to_string() |> String.slice(0, max)
 
   defp validate_attempt_identity(args, attempt, context) do
     cond do
@@ -1048,6 +1299,7 @@ defmodule Pika.AttemptCoordinator do
     case Pika.ArtifactStore.append_jsonl(state.workspace, session_state.log_path, record, attrs) do
       {:ok, artifact} ->
         _ = Store.attach_session_log(session_state.session.id, artifact.id)
+        broadcast_attempt_progress(state.campaign_id, session_state.identity.attempt_id)
         state
 
       {:error, reason} ->
@@ -1079,6 +1331,18 @@ defmodule Pika.AttemptCoordinator do
       {:error, reason} ->
         %{state | last_error: inspect(reason)}
     end
+  end
+
+  defp broadcast_attempt_progress(campaign_id, attempt_id) do
+    if Process.whereis(Pika.PubSub) do
+      Phoenix.PubSub.broadcast(
+        Pika.PubSub,
+        progress_topic(campaign_id),
+        {:attempt_progress, attempt_id}
+      )
+    end
+
+    :ok
   end
 
   defp public_snapshot(state) do
@@ -1157,14 +1421,50 @@ defmodule Pika.AttemptCoordinator do
 
       path
       |> File.stream!(:line)
+      |> Stream.filter(&recovery_event_line?/1)
       |> Stream.map(&Jason.decode/1)
-      |> Stream.filter(&match?({:ok, _}, &1))
-      |> Stream.map(fn {:ok, record} -> %{"artifact" => relative, "record" => record} end)
+      |> Stream.filter(fn
+        {:ok, %{"type" => type}} when is_binary(type) -> true
+        _other -> false
+      end)
+      |> Stream.map(fn {:ok, record} ->
+        %{"artifact" => relative, "record" => compact_recovery_record(record)}
+      end)
       |> Enum.to_list()
     end)
-    |> Enum.take(-50)
+    |> Enum.take(-@recovery_tail_records)
   rescue
     _error -> []
+  end
+
+  defp recovery_event_line?(line) do
+    byte_size(line) <= @recovery_line_max_bytes and
+      not String.contains?(binary_part(line, 0, min(byte_size(line), 256)), "\"direction\":")
+  end
+
+  defp compact_recovery_record(record) do
+    compact = Map.take(record, ~w(at session_id turn_id type backend role))
+    data = Map.get(record, "data")
+
+    if data in [nil, %{}, "", []] do
+      compact
+    else
+      Map.put(compact, "data", compact_recovery_data(data))
+    end
+  end
+
+  defp compact_recovery_data(data) do
+    encoded = data |> Pika.JSONSafe.json_safe() |> Jason.encode!()
+
+    if byte_size(encoded) <= @recovery_data_max_bytes do
+      data
+    else
+      %{
+        "truncated" => true,
+        "preview" => String.slice(encoded, 0, @recovery_data_max_bytes),
+        "original_bytes" => byte_size(encoded)
+      }
+    end
   end
 
   defp kickoff(:plan, attempt, false, _required),

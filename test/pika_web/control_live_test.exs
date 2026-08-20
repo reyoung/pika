@@ -30,6 +30,7 @@ defmodule PikaWeb.ControlLiveTest do
          context: context
        } do
     {:ok, attempt} = Pika.AttemptStore.create_attempt(context.campaign.id, 0)
+    {:ok, attempt} = Pika.AttemptStore.mark_running(attempt.id)
 
     assert {:ok, _event} =
              Pika.AttemptStore.record_metrics(
@@ -79,14 +80,60 @@ defmodule PikaWeb.ControlLiveTest do
 
     log_path = "artifacts/logs/#{attempt.id}/#{session.id}.jsonl"
 
-    assert {:ok, artifact} =
+    assert {:ok, _artifact} =
              Pika.ArtifactStore.append_jsonl(
                context.workspace,
                log_path,
                %{
                  at: DateTime.utc_now() |> DateTime.to_iso8601(),
                  type: "message_delta",
-                 data: %{delta: "Inspecting the kernel"}
+                 session_id: session.id,
+                 turn_id: "turn-1",
+                 data: %{delta: "Inspecting ", item_id: "reply-1"}
+               },
+               %{
+                 campaign_id: context.campaign.id,
+                 owner_type: "attempt",
+                 owner_id: attempt.id,
+                 kind: "agent_jsonl"
+               }
+             )
+
+    assert {:ok, _artifact} =
+             Pika.ArtifactStore.append_jsonl(
+               context.workspace,
+               log_path,
+               %{
+                 at: DateTime.utc_now() |> DateTime.to_iso8601(),
+                 type: "message_delta",
+                 session_id: session.id,
+                 turn_id: "turn-1",
+                 data: %{delta: "the kernel\n\n**Profiling now.**", item_id: "reply-1"}
+               },
+               %{
+                 campaign_id: context.campaign.id,
+                 owner_type: "attempt",
+                 owner_id: attempt.id,
+                 kind: "agent_jsonl"
+               }
+             )
+
+    assert {:ok, artifact} =
+             Pika.ArtifactStore.append_jsonl(
+               context.workspace,
+               log_path,
+               %{
+                 at: DateTime.utc_now() |> DateTime.to_iso8601(),
+                 type: "tool_started",
+                 session_id: session.id,
+                 turn_id: "turn-1",
+                 data: %{
+                   item: %{
+                     id: "tool-1",
+                     type: "commandExecution",
+                     command: "python benchmark.py"
+                   }
+                 }
                },
                %{
                  campaign_id: context.campaign.id,
@@ -98,6 +145,15 @@ defmodule PikaWeb.ControlLiveTest do
 
     assert :ok = Pika.AttemptStore.attach_session_log(session.id, artifact.id)
 
+    assert {:ok, _guidance} =
+             Pika.AttemptStore.create_guidance(
+               context.campaign.id,
+               attempt.id,
+               session.id,
+               "attempt",
+               "Try block size 128 next."
+             )
+
     conn = init_test_session(conn, %{pika_auth: marker})
 
     assert {:ok, _routed_view, routed_html} = live(conn, "/control?tab=metrics")
@@ -108,8 +164,17 @@ defmodule PikaWeb.ControlLiveTest do
 
     assert html =~ "Attempts"
     assert html =~ "Stop Now"
-    assert html =~ "Agent events"
+    assert html =~ "Agent 对话"
     assert html =~ "Inspecting the kernel"
+    assert html =~ "Profiling now."
+    assert html =~ "Try block size 128 next."
+    assert html =~ "python benchmark.py"
+    assert html =~ ~s(phx-hook="CopyMarkdown")
+    assert html =~ ~s(class="message message-agent")
+    assert html =~ ~s(class="message message-user")
+    assert html =~ "activity-row"
+    assert html =~ "Agent 正在处理 Attempt"
+    assert html =~ ~s(id="attempt-message-form")
     assert html =~ log_path
     metrics_html = view |> element("button[phx-value-tab='metrics']") |> render_click()
     assert metrics_html =~ "Metrics Timeline"
@@ -141,6 +206,36 @@ defmodule PikaWeb.ControlLiveTest do
 
     assert reconnected_html =~ "Inspecting the kernel"
     assert reconnected_html =~ log_path
+
+    view |> element("button[phx-value-tab='attempts']") |> render_click()
+
+    assert {:ok, _artifact} =
+             Pika.ArtifactStore.append_jsonl(
+               context.workspace,
+               log_path,
+               %{
+                 at: DateTime.utc_now() |> DateTime.to_iso8601(),
+                 type: "message_delta",
+                 session_id: session.id,
+                 turn_id: "turn-2",
+                 data: %{delta: "Live progress arrived.", item_id: "reply-2"}
+               },
+               %{
+                 campaign_id: context.campaign.id,
+                 owner_type: "attempt",
+                 owner_id: attempt.id,
+                 kind: "agent_jsonl"
+               }
+             )
+
+    Phoenix.PubSub.broadcast(
+      Pika.PubSub,
+      Pika.AttemptCoordinator.progress_topic(context.campaign.id),
+      {:attempt_progress, attempt.id}
+    )
+
+    Process.sleep(300)
+    assert render(view) =~ "Live progress arrived."
   end
 
   test "JSON API is bearer protected, idempotent, and excludes MCP credentials", %{

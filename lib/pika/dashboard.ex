@@ -7,6 +7,7 @@ defmodule Pika.Dashboard do
     attempts = AttemptStore.attempts(campaign_id, limit: 1_000) |> Enum.sort_by(& &1.ordinal)
     sessions = AttemptStore.sessions(campaign_id)
     revisions = spec_revisions(campaign_id)
+    guidance = guidance_by_attempt(campaign_id)
 
     spec =
       Keyword.get_lazy(opts, :spec, fn ->
@@ -20,6 +21,7 @@ defmodule Pika.Dashboard do
           metrics: AttemptStore.metrics_for_attempt(attempt.id),
           sessions: Enum.filter(sessions, &(&1.attempt_id == attempt.id)),
           agent_events: agent_events(attempt.id),
+          guidance: Map.get(guidance, attempt.id, []),
           artifacts: artifacts("attempt", attempt.id)
         })
       end)
@@ -44,6 +46,7 @@ defmodule Pika.Dashboard do
          metrics: AttemptStore.metrics_for_attempt(attempt_id),
          sessions:
            Enum.filter(AttemptStore.sessions(campaign_id), &(&1.attempt_id == attempt_id)),
+         guidance: Map.get(guidance_by_attempt(campaign_id), attempt_id, []),
          events: events_for("attempt", attempt_id),
          agent_events: agent_events(attempt_id),
          artifacts: artifacts("attempt", attempt_id)
@@ -178,6 +181,25 @@ defmodule Pika.Dashboard do
     (backend_events ++ campaign_events)
     |> Enum.sort_by(&(&1["at"] || ""))
     |> Enum.take(-500)
+  end
+
+  defp guidance_by_attempt(campaign_id) do
+    Repo.query!(
+      "SELECT id, attempt_id, kind, body, status, created_at FROM guidance WHERE campaign_id = ? AND attempt_id IS NOT NULL ORDER BY sequence",
+      [campaign_id]
+    ).rows
+    |> Enum.group_by(
+      fn [_id, attempt_id, _kind, _body, _status, _created_at] -> attempt_id end,
+      fn [id, _attempt_id, kind, body, status, created_at] ->
+        %{
+          id: id,
+          kind: kind,
+          body: body,
+          status: status,
+          created_at: created_at
+        }
+      end
+    )
   end
 
   defp sync_snapshot do

@@ -23,6 +23,10 @@ defmodule Pika.Test.AttemptAgentBackend do
   end
 
   def open_session(server, cwd, model, effort, mcp, _skill_roots, instructions) do
+    if Agent.get(server, &env(&1)[:authorize_during_open]) do
+      assert_mcp_handshake(mcp)
+    end
+
     session = %Session{
       id: Ecto.UUID.generate(),
       backend: :fake,
@@ -236,6 +240,24 @@ defmodule Pika.Test.AttemptAgentBackend do
 
   defp mcp(state, tool, args),
     do: Coordinator.mcp_call(state.mcp.token, tool, args, state.mcp.coordinator)
+
+  defp assert_mcp_handshake(mcp) do
+    Enum.each(["initialize", "tools/list", "resources/list"], fn method ->
+      request = %{"jsonrpc" => "2.0", "id" => method, "method" => method}
+
+      response =
+        Plug.Test.conn(:post, "/mcp", Jason.encode!(request))
+        |> Plug.Conn.put_req_header("content-type", "application/json")
+        |> Plug.Conn.put_req_header("authorization", "Bearer #{mcp.token}")
+        |> PikaWeb.MCPGateway.call([])
+
+      decoded = Jason.decode!(response.resp_body)
+
+      if response.status != 200 or Map.has_key?(decoded, "error") do
+        raise "MCP handshake failed during Session open: #{inspect(decoded)}"
+      end
+    end)
+  end
 
   defp complete_turn(server) do
     if Process.alive?(server) do
