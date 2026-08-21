@@ -14,6 +14,14 @@ an isolated worktree-local environment with `uv venv .venv`, install only the re
 do not include them in the candidate Patch or register them as Artifacts, do not change dependency manifests or
 lockfiles merely to create the environment, and remove untracked environment files before completion.
 
+Validation throughput is important. For a multi-Case Python Harness, use one long-lived batch driver that loads
+Python dependencies, fixtures, CUDA contexts and kernels once, then executes all Cases and Pair indexes in a
+for-loop. Never start a fresh Python process for each Case, Pair, Target run or Candidate run. If Target and
+Candidate cannot safely coexist in one interpreter, use at most one persistent worker process per implementation
+and stream all jobs to those workers; do not fall back to per-Case subprocesses. Preserve genuinely independent
+alternating measurements by resetting Case inputs/state and synchronizing the device between jobs, not by
+restarting Python. A subprocess may wrap the entire batch or remote container, but not each individual sample.
+
 Attempt ID: <%= @attempt.id %>
 Slot: <%= @attempt.slot_index %>
 Base SHA: <%= @attempt.base_sha %>
@@ -47,8 +55,11 @@ Each JSONL record contains case_id, metric_id, pair_index, order=tc|ct, numeric 
 do not repeat SHA identity in every record. Correctness JSON must bind schema_version=2,
 target_snapshot_id=<%= @context.target_snapshot.id %>, the exact candidate_sha, and report target_passed=true plus
 candidate_passed=true for each Case under the configured Oracle. Register the raw JSONL and correctness Artifacts,
-call `record_metrics`, call `submit_attempt_summary`, leave a clean committed worktree, then call
-`complete_attempt`. Pika computes both relative-to-Target and relative-to-current-Best values and only moves the
-Attempt to `ready_for_integration`; you cannot mark it Accepted.
+call `record_metrics` and call `submit_attempt_summary`. If correctness fails, a clear bad case is found, or the
+formal measurements show no worthwhile improvement, set recommended_outcome to `skip` or `reject` and call
+`reject_attempt` with a concrete reason; this terminates the Attempt without Integration. Otherwise leave a clean
+committed worktree and call `complete_attempt`. Pika computes both relative-to-Target and relative-to-current-Best
+values. Only Integration can mark an Attempt Accepted.
 
-Required MCP operations: record_metrics, submit_attempt_summary, complete_attempt.
+Completion paths: `record_metrics` + `submit_attempt_summary` + `complete_attempt`, or
+`submit_attempt_summary` + `reject_attempt` when further measurement/Integration is clearly wasteful.

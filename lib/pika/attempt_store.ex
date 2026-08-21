@@ -665,6 +665,45 @@ defmodule Pika.AttemptStore do
     error -> {:error, {:attempt_complete_failed, Exception.message(error)}}
   end
 
+  def reject_from_iteration(attempt_id, reason) do
+    now = now_us()
+
+    transaction =
+      Repo.transaction(fn ->
+        attempt = attempt_row!(attempt_id)
+
+        cond do
+          attempt.status not in ~w(running awaiting_report interrupted) ->
+            Repo.rollback({:invalid_attempt_state, attempt.status})
+
+          is_nil(attempt.summary) or String.trim(attempt.summary) == "" ->
+            Repo.rollback(:missing_summary)
+
+          attempt.recommended_outcome not in ~w(skip reject) ->
+            Repo.rollback({:invalid_recommended_outcome, attempt.recommended_outcome})
+
+          true ->
+            Repo.query!(
+              "UPDATE attempts SET status = 'rejected', outcome_reason = ?, completed_at = ? WHERE id = ?",
+              [reason, now, attempt_id]
+            )
+
+            event =
+              insert_event!(attempt.campaign_id, "attempt", attempt_id, "attempt_rejected", %{
+                ordinal: attempt.ordinal,
+                source: "iteration",
+                reason: reason
+              })
+
+            {attempt_row!(attempt_id), event}
+        end
+      end)
+
+    publish_transaction(transaction)
+  rescue
+    error -> {:error, {:attempt_reject_failed, Exception.message(error)}}
+  end
+
   def terminal_history(campaign_id, limit) do
     query_terminal_history(campaign_id, limit: limit)
   end
@@ -1062,16 +1101,17 @@ defmodule Pika.AttemptStore do
 
   defp metrics(spec_id) do
     Repo.query!(
-      "SELECT name, unit, direction, role, min_improvement_ratio, parser_json FROM metric_definitions WHERE spec_revision_id = ? ORDER BY name",
+      "SELECT name, unit, direction, role, min_improvement_ratio, max_regression_ratio, parser_json FROM metric_definitions WHERE spec_revision_id = ? ORDER BY name",
       [spec_id]
     ).rows
-    |> Enum.map(fn [id, unit, direction, role, threshold, parser] ->
+    |> Enum.map(fn [id, unit, direction, role, threshold, max_regression, parser] ->
       %{
         "id" => id,
         "unit" => unit,
         "direction" => direction,
         "role" => role,
         "min_improvement_ratio" => threshold,
+        "max_regression_ratio" => max_regression,
         "parser" => Jason.decode!(parser)
       }
     end)

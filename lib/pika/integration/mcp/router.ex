@@ -3,7 +3,7 @@ defmodule Pika.Integration.MCP.Router do
 
   use Plug.Router
 
-  @tools ~w(get_integration_context register_artifact acquire_integration_lease complete_refresh submit_full_regression reject_attempt create_merge_intent complete_merge)
+  @tools ~w(get_integration_context register_artifact acquire_integration_lease complete_refresh submit_fast_rejection submit_full_regression reject_attempt create_merge_intent complete_merge)
 
   plug Plug.Parsers, parsers: [:json], pass: ["application/json"], json_decoder: Jason
   plug :authenticate

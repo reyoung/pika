@@ -64,6 +64,11 @@ defmodule Pika.CLI do
           integration_effort: :string,
           integration_approval_policy: :string,
           integration_sandbox_policy: :string,
+          progress_summary: :boolean,
+          summary_backend: :string,
+          summary_model: :string,
+          summary_effort: :string,
+          summary_interval_minutes: :integer,
           model: :string,
           effort: :string,
           iteration_agents: :integer,
@@ -120,6 +125,10 @@ defmodule Pika.CLI do
         "--integration-backend must be codex or cursor"
       )
       |> maybe_cli_error(
+        not is_nil(opts[:summary_backend]) and opts[:summary_backend] not in ~w(codex cursor),
+        "--summary-backend must be codex or cursor"
+      )
+      |> maybe_cli_error(
         not is_nil(opts[:effort]) and opts[:effort] not in ~w(low medium high xhigh max ultra),
         "invalid --effort"
       )
@@ -137,6 +146,11 @@ defmodule Pika.CLI do
         not is_nil(opts[:integration_effort]) and
           opts[:integration_effort] not in ~w(low medium high xhigh max ultra),
         "invalid --integration-effort"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:summary_effort]) and
+          opts[:summary_effort] not in ~w(low medium high xhigh max ultra),
+        "invalid --summary-effort"
       )
       |> maybe_cli_error(
         not valid_init_permission?(
@@ -201,6 +215,10 @@ defmodule Pika.CLI do
       |> maybe_cli_error(
         not is_nil(opts[:max_unverified_attempts]) and opts[:max_unverified_attempts] < 0,
         "--max-unverified-attempts must be non-negative"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:summary_interval_minutes]) and opts[:summary_interval_minutes] < 1,
+        "--summary-interval-minutes must be positive"
       )
 
     case errors do
@@ -550,6 +568,12 @@ defmodule Pika.CLI do
       --model MODEL            Compatibility alias for --iteration-model
       --effort EFFORT          Compatibility alias for --iteration-effort
       --iteration-agents N     Concurrent Iteration Agents (default 1)
+      --progress-summary       Enable periodic AI progress summaries (default off)
+      --summary-backend B      Summary backend: codex|cursor
+      --summary-model MODEL    Summary model (default: provider default)
+      --summary-effort E       Summary reasoning effort (default medium)
+      --summary-interval-minutes N
+                               Summary interval (default 10)
       --max-attempts N         Campaign attempt limit (default unlimited)
       --sync-remote NAME       Configure a Git sync remote
       --sync-branch NAME       Configure a Git sync branch

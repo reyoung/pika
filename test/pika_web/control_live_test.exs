@@ -44,7 +44,8 @@ defmodule PikaWeb.ControlLiveTest do
                    improvement_ratio: 0.02,
                    target_value: 10.0,
                    target_relative_improvement: 0.02,
-                   best_relative_improvement: 0.02,
+                   # SQLite may return an exact zero as an integer for rejected Attempts.
+                   best_relative_improvement: 0,
                    mad: 0.001,
                    noise_tolerance: 0.005,
                    pair_count: 7,

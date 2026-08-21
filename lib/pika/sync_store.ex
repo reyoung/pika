@@ -218,7 +218,11 @@ defmodule Pika.SyncStore do
           Enum.filter(metrics, fn metric ->
             improvement = metric[:improvement_ratio] || metric["improvement_ratio"]
             tolerance = metric[:noise_tolerance] || metric["noise_tolerance"] || 0.005
-            is_nil(improvement) or improvement < -tolerance
+
+            max_regression =
+              metric[:max_regression_ratio] || metric["max_regression_ratio"] || 0.0
+
+            is_nil(improvement) or improvement < -max(tolerance, max_regression)
           end)
 
         if regressions != [], do: Repo.rollback({:sync_regression, regressions})
@@ -593,7 +597,7 @@ defmodule Pika.SyncStore do
     )
 
     Repo.query!(
-      "INSERT INTO metric_definitions(id, spec_revision_id, name, unit, direction, role, min_improvement_ratio, parser_json) SELECT lower(hex(randomblob(16))), ?, name, unit, direction, role, min_improvement_ratio, parser_json FROM metric_definitions WHERE spec_revision_id = ?",
+      "INSERT INTO metric_definitions(id, spec_revision_id, name, unit, direction, role, min_improvement_ratio, max_regression_ratio, parser_json) SELECT lower(hex(randomblob(16))), ?, name, unit, direction, role, min_improvement_ratio, max_regression_ratio, parser_json FROM metric_definitions WHERE spec_revision_id = ?",
       [new_spec_id, old_spec_id]
     )
   end

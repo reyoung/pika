@@ -2177,7 +2177,8 @@ code {
 }
 .context-strip span,
 .context-strip strong,
-.context-strip code {
+.context-strip code,
+.context-strip small {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2194,6 +2195,11 @@ code {
 .context-strip code {
   color: #a9b8be;
   font-size: 10px;
+}
+.context-strip small {
+  margin-top: 4px;
+  color: #7f9562;
+  font-size: 9px;
 }
 .attempt-stream {
   display: grid;
@@ -2496,6 +2502,160 @@ code {
   background: transparent;
   font-size: 20px;
 }
+.console-open {
+  margin-top: 7px;
+  padding: 4px 8px;
+  border: 1px solid #3b535d;
+  border-radius: 6px;
+  color: #9fc8d8;
+  background: #12232b;
+  font-size: 9px;
+}
+.console-open:hover {
+  border-color: #6a8a96;
+  background: #18303a;
+}
+.command-console {
+  position: fixed;
+  z-index: 50;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: grid;
+  grid-template-rows: 5px auto minmax(0, 1fr);
+  height: 40vh;
+  min-height: 160px;
+  max-height: 85vh;
+  border-top: 1px solid #3b535d;
+  background: #050b0f;
+  box-shadow: 0 -20px 70px #000b;
+}
+.command-console-resize {
+  cursor: ns-resize;
+  background: #263a42;
+}
+.command-console-resize:hover,
+.command-console-resize:focus {
+  background: #73905e;
+  outline: 0;
+}
+.command-console > header {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(200px, auto) auto;
+  gap: 16px;
+  align-items: center;
+  min-height: 54px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #203139;
+  background: #0b151b;
+}
+.command-console-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+.command-console-title > div,
+.command-console-title strong,
+.command-console-title code {
+  display: block;
+  min-width: 0;
+}
+.command-console-title strong {
+  color: #b8f35a;
+  font:
+    9px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  text-transform: uppercase;
+}
+.command-console-title code {
+  margin-top: 4px;
+  overflow: hidden;
+  color: #c5d2d7;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.command-console-state {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #b8f35a;
+  box-shadow: 0 0 10px #b8f35a77;
+}
+.command-console-state.state-failed,
+.command-console-state.state-error {
+  background: #e58e8e;
+  box-shadow: 0 0 10px #e58e8e77;
+}
+.command-console-state.state-completed {
+  background: #65d9ff;
+  box-shadow: none;
+}
+.command-console-meta {
+  display: flex;
+  min-width: 0;
+  gap: 10px;
+  color: #6f828b;
+  font:
+    9px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.command-console-meta span {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.command-console-actions {
+  display: flex;
+  gap: 5px;
+}
+.command-console-actions button {
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid #30434d;
+  border-radius: 6px;
+  color: #94a6ad;
+  background: #101d23;
+}
+.command-console [data-console-latest] {
+  visibility: hidden;
+}
+.command-console.console-paused [data-console-latest] {
+  visibility: visible;
+  color: #b8f35a;
+}
+.command-console > pre {
+  min-height: 0;
+  margin: 0;
+  padding: 14px 18px 28px;
+  overflow: auto;
+  color: #c6d3d8;
+  background: #050b0f;
+  font:
+    11px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  tab-size: 4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.command-console.collapsed {
+  height: 59px !important;
+  min-height: 59px;
+}
+.command-console.collapsed > pre {
+  display: none;
+}
 .metrics-workspace,
 .sync-workspace {
   padding: 22px;
@@ -2787,5 +2947,12 @@ code {
   }
   .metric-points {
     grid-template-columns: 1fr;
+  }
+  .command-console > header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+  .command-console-meta {
+    display: none;
   }
 }

@@ -41,6 +41,7 @@ defmodule PikaWeb.ControlLive do
        |> assign(:sync_preview, nil)
        |> assign(:stop_armed, false)
        |> assign(:flash_message, nil)
+       |> assign(:command_console, nil)
        |> assign(:refresh_timer, nil)
        |> assign(:agent_refresh_timer, nil)
        |> assign(:refresh_spec, false)
@@ -61,6 +62,16 @@ defmodule PikaWeb.ControlLive do
       {:noreply, socket}
     end
   end
+
+  def handle_info(
+        {:command_console_event, ref, record},
+        %{assigns: %{command_console: %{ref: ref}}} = socket
+      ),
+      do:
+        {:noreply,
+         update(socket, :command_console, &Pika.CommandConsole.apply_record(&1, record))}
+
+  def handle_info({:command_console_event, _ref, _record}, socket), do: {:noreply, socket}
 
   def handle_info({:refresh_attempt, attempt_id}, socket) do
     socket = assign(socket, :agent_refresh_timer, nil)
@@ -86,7 +97,15 @@ defmodule PikaWeb.ControlLive do
     do: {:noreply, assign(socket, :tab, tab)}
 
   def handle_event("select_attempt", %{"id" => id}, socket),
-    do: {:noreply, assign(socket, selected_attempt_id: id, btw_open: false)}
+    do:
+      {:noreply,
+       socket |> close_command_console() |> assign(selected_attempt_id: id, btw_open: false)}
+
+  def handle_event("open_command_console", %{"ref" => ref}, socket),
+    do: {:noreply, open_command_console(socket, ref)}
+
+  def handle_event("close_command_console", _params, socket),
+    do: {:noreply, close_command_console(socket)}
 
   def handle_event("filter_metrics", params, socket) do
     {:noreply,
@@ -260,6 +279,22 @@ defmodule PikaWeb.ControlLive do
 
       <p :if={@flash_message} class="control-flash">{@flash_message}</p>
 
+      <section :if={@snapshot.progress_summaries != []} class="panel progress-summary-panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">Periodic Progress Summary</p><h2>AI 进展摘要</h2></div>
+          <span>{length(@snapshot.progress_summaries)} 条</span>
+        </div>
+        <details :for={summary <- Enum.take(@snapshot.progress_summaries, 5)} class="activity-row">
+          <summary>
+            <span class="activity-icon" aria-hidden="true">◎</span>
+            <span class="activity-summary">{summary.phase} · {summary.backend} · {summary.model || "default"}</span>
+            <time>{format_time(summary.created_at)}</time>
+            <span class="activity-chevron" aria-hidden="true">›</span>
+          </summary>
+          <div class="message-body markdown-body">{Markdown.render(summary.content)}</div>
+        </details>
+      </section>
+
       <section :if={@tab == "attempts"} class="attempt-workspace">
         <aside class="attempt-sidebar panel">
           <div class="panel-heading">
@@ -319,6 +354,7 @@ defmodule PikaWeb.ControlLive do
                           <div>
                             <strong>{detail.label}</strong>
                             <code :if={detail.detail not in [nil, ""]}>{detail.detail}</code>
+                            <button :if={entry.console_ref} type="button" class="console-open" phx-click="open_command_console" phx-value-ref={entry.console_ref}>打开 Console</button>
                           </div>
                         </div>
                       </div>
@@ -507,9 +543,40 @@ defmodule PikaWeb.ControlLive do
         <div class="panel-heading"><div><p class="eyebrow">Domain Events</p><h1>用户动作与状态变更审计</h1></div><span>{length(@snapshot.events)} events</span></div>
         <table class="audit-table"><thead><tr><th>Seq</th><th>Time</th><th>Aggregate</th><th>Event</th><th>Payload</th></tr></thead><tbody><tr :for={event <- @snapshot.events}><td>{event.sequence}</td><td>{format_time(event.created_at)}</td><td>{event.aggregate_type}</td><td>{event.event_type}</td><td><code>{compact_payload(event.payload)}</code></td></tr></tbody></table>
       </section>
+      <.command_console console={@command_console} />
     </main>
     """
   end
+
+  defp open_command_console(socket, ref) do
+    socket = close_command_console(socket)
+
+    allowed? =
+      socket.assigns
+      |> selected_attempt()
+      |> attempt_conversation()
+      |> Enum.any?(&(&1.kind == :activity and &1.console_ref == ref))
+
+    case allowed? && Pika.CommandConsole.load(ref) do
+      {:ok, console} ->
+        if connected?(socket),
+          do: Phoenix.PubSub.subscribe(Pika.PubSub, Pika.CommandConsole.topic(ref))
+
+        assign(socket, :command_console, console)
+
+      _ ->
+        assign(socket, :flash_message, "无法读取该命令的 Console 输出。")
+    end
+  end
+
+  defp close_command_console(%{assigns: %{command_console: %{ref: ref}}} = socket) do
+    if connected?(socket),
+      do: Phoenix.PubSub.unsubscribe(Pika.PubSub, Pika.CommandConsole.topic(ref))
+
+    assign(socket, :command_console, nil)
+  end
+
+  defp close_command_console(socket), do: socket
 
   defp refresh(socket, refresh_spec \\ false) do
     refresh_spec = refresh_spec or socket.assigns.refresh_spec
@@ -724,7 +791,8 @@ defmodule PikaWeb.ControlLive do
             | at: entry.at || previous.at,
               summary: prefer_activity_summary(previous.summary, entry.summary),
               running: entry.running,
-              details: Enum.take(previous.details ++ entry.details, -12)
+              details: Enum.take(previous.details ++ entry.details, -12),
+              console_ref: entry.console_ref || previous.console_ref
           }
           | rest
         ]
@@ -754,6 +822,7 @@ defmodule PikaWeb.ControlLive do
       running: status == :running,
       at: event["at"],
       merge_key: activity_merge_key(event),
+      console_ref: activity_console_ref(event),
       details: [
         %{
           label: event_type_label(event["type"]),
@@ -771,6 +840,23 @@ defmodule PikaWeb.ControlLive do
 
     if item_id,
       do: {event["session_id"], event["turn_id"], item_id},
+      else: nil
+  end
+
+  defp activity_console_ref(event) do
+    data = event["data"] || %{}
+    item = data["item"] || %{}
+
+    command_id =
+      data["command_id"] || item["id"] || data["itemId"] || data["item_id"] || data["toolCallId"] ||
+        data["terminalId"]
+
+    command? =
+      item["type"] == "commandExecution" or event["type"] == "command_output" or
+        (event["backend"] == "cursor_acp" and event["type"] in ~w(tool_started tool_completed))
+
+    if command? and command_id,
+      do: Pika.CommandConsole.ref(event["session_id"], event["turn_id"], command_id),
       else: nil
   end
 
@@ -932,7 +1018,11 @@ defmodule PikaWeb.ControlLive do
   defp short_sha(nil), do: "—"
   defp short_sha(value), do: String.slice(value, 0, 10)
   defp format_ratio(nil), do: "—"
-  defp format_ratio(value), do: :erlang.float_to_binary(value * 100, decimals: 2) <> "%"
+
+  defp format_ratio(value) when is_number(value),
+    do: :erlang.float_to_binary(value * 100.0, decimals: 2) <> "%"
+
+  defp format_ratio(_value), do: "—"
   defp format_value(nil, _unit), do: "—"
 
   defp format_value(value, unit),

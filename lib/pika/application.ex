@@ -26,6 +26,7 @@ defmodule Pika.Application do
       Pika.AttemptCoordinator,
       Pika.IntegrationCoordinator,
       Pika.SyncCoordinator,
+      Pika.ProgressSummaryCoordinator,
       PikaWeb.Endpoint
     ]
   end

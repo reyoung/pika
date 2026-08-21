@@ -18,7 +18,7 @@ defmodule Pika.AttemptCoordinator do
   @recovery_line_max_bytes 262_144
   @recovery_data_max_bytes 4_000
   @read_tools ~w(get_context query_attempt_history get_attempt list_agents read_agent_messages)
-  @write_tools ~w(ack_agent_messages send_agent_message register_artifact submit_plan record_metrics submit_attempt_summary complete_attempt)
+  @write_tools ~w(ack_agent_messages send_agent_message register_artifact submit_plan record_metrics submit_attempt_summary reject_attempt complete_attempt)
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -56,6 +56,7 @@ defmodule Pika.AttemptCoordinator do
       workspace: workspace,
       campaign_id: campaign_id,
       profiles: profiles,
+      reload_profiles: not Keyword.has_key?(opts, :profiles),
       backend_modules: Keyword.get(opts, :backend_modules, %{}),
       mcp_url: Keyword.get(opts, :mcp_url, mcp_url(workspace)),
       start_backends: Keyword.get(opts, :start_backends, true),
@@ -345,7 +346,7 @@ defmodule Pika.AttemptCoordinator do
       _ = Store.interrupt_active_sessions_for_attempt(attempt.id)
 
       cond do
-        attempt.status == "ready_for_integration" ->
+        integration_owned_attempt?(attempt) ->
           acc
 
         Enum.any?(acc.sessions, fn {_id, session} -> session.identity.attempt_id == attempt.id end) ->
@@ -374,7 +375,8 @@ defmodule Pika.AttemptCoordinator do
   end
 
   defp open_attempt_session(state, attempt, role, required, recovering?) do
-    profile = Enum.at(state.profiles, attempt.slot_index)
+    state = reload_profiles(state)
+    profile = Enum.at(state.profiles, attempt.slot_index) || List.first(state.profiles)
     backend = backend_atom(profile["backend"] || profile[:backend])
     module = Map.get(state.backend_modules, backend, backend_module(backend))
     token = random_token()
@@ -452,6 +454,22 @@ defmodule Pika.AttemptCoordinator do
     else
       {:error, reason} ->
         session_open_failed(state, attempt, role, required, token, reason)
+    end
+  end
+
+  defp reload_profiles(%{reload_profiles: false} = state), do: state
+
+  defp reload_profiles(state) do
+    case Pika.RuntimeConfig.mutable(state.workspace) do
+      {:ok, mutable} ->
+        profiles = mutable["iteration_agents"]
+
+        if is_list(profiles) and profiles != [],
+          do: %{state | profiles: profiles, last_error: nil},
+          else: state
+
+      {:error, reason} ->
+        %{state | last_error: inspect(reason)}
     end
   end
 
@@ -844,6 +862,35 @@ defmodule Pika.AttemptCoordinator do
 
   defp perform_write("submit_attempt_summary", _args, _session_state, state),
     do: {mcp_error("forbidden_role", "submit_attempt_summary requires Iteration role"), state}
+
+  defp perform_write(
+         "reject_attempt",
+         args,
+         %{identity: %{role: :iteration}} = session_state,
+         state
+       ) do
+    reason = String.trim(args["reason"] || "")
+
+    if reason == "" do
+      {mcp_error("missing_required_data", "rejection reason is required"), state}
+    else
+      case Store.reject_from_iteration(session_state.identity.attempt_id, reason) do
+        {:ok, rejected} ->
+          session_state = %{session_state | required: MapSet.new()}
+          _ = Store.update_session(session_state.session.id, "running", [])
+
+          {{:ok, enrich_attempt(rejected)},
+           put_session(state, session_state.session.id, session_state)}
+
+        {:error, reason} ->
+          {mcp_error("missing_required_data", "Attempt rejection gate is open", %{reason: reason}),
+           state}
+      end
+    end
+  end
+
+  defp perform_write("reject_attempt", _args, _session_state, state),
+    do: {mcp_error("forbidden_role", "reject_attempt requires Iteration role"), state}
 
   defp perform_write(
          "complete_attempt",
@@ -1455,10 +1502,14 @@ defmodule Pika.AttemptCoordinator do
     do: if(attempt.plan_artifact_id, do: [], else: required_for(:plan))
 
   defp recovery_required(attempt, :iteration) do
-    []
-    |> maybe_required(Store.metrics_for_attempt(attempt.id) == [], "record_metrics")
-    |> maybe_required(is_nil(attempt.summary), "submit_attempt_summary")
-    |> maybe_required(attempt.status != "ready_for_integration", "complete_attempt")
+    if attempt.recommended_outcome in ~w(skip reject) and not is_nil(attempt.summary) do
+      ["reject_attempt"]
+    else
+      []
+      |> maybe_required(Store.metrics_for_attempt(attempt.id) == [], "record_metrics")
+      |> maybe_required(is_nil(attempt.summary), "submit_attempt_summary")
+      |> maybe_required(attempt.status != "ready_for_integration", "complete_attempt")
+    end
   end
 
   defp maybe_required(required, true, operation), do: required ++ [operation]
@@ -1649,4 +1700,9 @@ defmodule Pika.AttemptCoordinator do
 
   defp active_attempt_statuses,
     do: ~w(queued running awaiting_report refreshing integrating interrupted)
+
+  # Integration owns these states. Recovering them as iteration work races the
+  # IntegrationCoordinator after a server restart and rewinds the Attempt.
+  defp integration_owned_attempt?(%{status: status}),
+    do: status in ~w(ready_for_integration refreshing integrating)
 end

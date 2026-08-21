@@ -507,9 +507,22 @@ defmodule Pika.AgentBackend.CursorACP do
 
     Enum.each(update["content"] || [], fn content ->
       case content do
-        %{"type" => "terminal", "terminalId" => _} -> emit(state, :command_output, data: content)
-        %{"type" => "diff"} -> emit(state, :file_changed, data: content)
-        _ -> :ok
+        %{"type" => "terminal", "terminalId" => _} ->
+          emit(state, :command_output,
+            data:
+              content
+              |> Map.put(
+                "command_id",
+                update["toolCallId"] || update["id"] || content["terminalId"]
+              )
+              |> Map.put("update_mode", "replace")
+          )
+
+        %{"type" => "diff"} ->
+          emit(state, :file_changed, data: content)
+
+        _ ->
+          :ok
       end
     end)
 
@@ -739,6 +752,8 @@ defmodule Pika.AgentBackend.CursorACP do
         turn_id: Keyword.get(attrs, :turn_id, state.active_turn_id),
         data: Keyword.get(attrs, :data, %{})
       })
+
+    _ = Pika.CommandConsole.capture(event, state.profile.artifact_dir, state.cwd)
 
     case state.event_sink do
       sink when is_pid(sink) -> send(sink, {:pika_backend_event, event})

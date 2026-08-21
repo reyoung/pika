@@ -98,6 +98,8 @@ Alignment、setup merge 和 Baseline Agent Instructions 是 `priv/prompts/alignm
 
 `pika init` 提供交互式向导，分别询问 Alignment/Baseline Agent 与 Iteration Agent 的 Backend、模型、推理强度、Approval Policy 和 Sandbox Policy，以及 Repo 模式、Workspace 路径、监听地址、Iteration Agent 并发数、最大 Attempt 数和可选 Git Sync。两个阶段可以独立选择 Codex 或 Cursor；权限选项会随 Backend 改变，只展示 provider 实际支持的值。初始化会生成 `pika.yaml`、可编辑的完整 Prompt 模板、固定 Workspace 布局与 Git `pika/best` 分支，但不会启动 Server：
 
+可选的周期进展摘要默认关闭。传入 `--progress-summary` 后，可用 `--summary-backend`、`--summary-model`、`--summary-effort` 和 `--summary-interval-minutes` 配置一个独立只读 Agent；它仅在 Baseline 或 Attempt 活跃时生成摘要，默认每 10 分钟一次，并在 Control UI 中保留历史记录。
+
 选择两个阶段的模型时，向导会分别从当前已登录的 Codex App Server 或 Cursor CLI 动态读取模型列表，显示常用候选、provider 默认值和自定义 model id 入口。使用 `--alignment-model` 与 `--iteration-model` 可直接进行非交互选择；兼容参数 `--model` 仍表示 Iteration Agent 模型，`--yes` 则保留 provider 默认值。
 
 ```bash

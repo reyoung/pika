@@ -145,7 +145,8 @@ defmodule Pika.IntegrationStore do
         attempt_id,
         receipt_id,
         representative_case_ids,
-        representative_case_reasons
+        representative_case_reasons,
+        rejection_reason \\ nil
       ) do
     transaction =
       Repo.transaction(fn ->
@@ -169,7 +170,7 @@ defmodule Pika.IntegrationStore do
         Repo.query!(
           "UPDATE attempts SET status = 'rejected', outcome_reason = ?, completed_at = ? WHERE id = ?",
           [
-            "full regression confirmed: #{Enum.join(receipt.regressed_case_ids, ", ")}",
+            rejection_outcome(receipt.regressed_case_ids, rejection_reason),
             now,
             attempt_id
           ]
@@ -191,6 +192,12 @@ defmodule Pika.IntegrationStore do
   rescue
     error -> {:error, {:attempt_reject_failed, Exception.message(error)}}
   end
+
+  defp rejection_outcome([_ | _] = case_ids, _reason),
+    do: "full regression confirmed: #{Enum.join(case_ids, ", ")}"
+
+  defp rejection_outcome([], reason) when is_binary(reason) and reason != "", do: reason
+  defp rejection_outcome([], _reason), do: "no meaningful target improvement"
 
   def complete_merge(lease_id, session_id, attempt_id, receipt_id, intent_id, new_sha) do
     transaction =
@@ -402,7 +409,10 @@ defmodule Pika.IntegrationStore do
 
       {:error, :receipt_missing} ->
         id = Ecto.UUID.generate()
-        status = if(attrs.regressions == [], do: "passed", else: "rejected")
+
+        status =
+          if(attrs[:force_reject] || attrs.regressions != [], do: "rejected", else: "passed")
+
         regressed_case_ids = attrs.regressions |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
         now = now_us()
 

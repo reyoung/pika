@@ -9,7 +9,7 @@ defmodule Pika.IntegrationCoordinator do
   alias Pika.{AttemptStore, IntegrationPrompt, IntegrationStore, IntegrationWorkspace}
 
   @read_tools ~w(get_integration_context)
-  @write_tools ~w(register_artifact acquire_integration_lease complete_refresh submit_full_regression reject_attempt create_merge_intent complete_merge)
+  @write_tools ~w(register_artifact acquire_integration_lease complete_refresh submit_fast_rejection submit_full_regression reject_attempt create_merge_intent complete_merge)
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -38,6 +38,7 @@ defmodule Pika.IntegrationCoordinator do
       workspace: workspace,
       campaign_id: campaign.id,
       profile: Keyword.get(opts, :profile, profile(workspace)),
+      reload_profile: not Keyword.has_key?(opts, :profile),
       backend_modules: Keyword.get(opts, :backend_modules, %{}),
       mcp_url: Keyword.get(opts, :mcp_url, mcp_url(workspace)),
       start_backends: Keyword.get(opts, :start_backends, true),
@@ -167,7 +168,7 @@ defmodule Pika.IntegrationCoordinator do
   defp maybe_start(state), do: state
 
   defp open_session(state, attempt, recovering?) do
-    profile = state.profile
+    {state, profile} = current_profile(state)
     backend = backend_atom(profile["backend"] || profile[:backend])
     module = Map.get(state.backend_modules, backend, backend_module(backend))
     token = random_token()
@@ -276,6 +277,15 @@ defmodule Pika.IntegrationCoordinator do
         TokenRegistry.delete(token)
         Process.send_after(self(), {:restart, attempt.id}, 250)
         %{state | last_error: inspect(reason)}
+    end
+  end
+
+  defp current_profile(%{reload_profile: false} = state), do: {state, state.profile}
+
+  defp current_profile(state) do
+    case Pika.RuntimeConfig.profile(state.workspace, "integration_agent") do
+      {:ok, profile} -> {%{state | profile: profile, last_error: nil}, profile}
+      {:error, reason} -> {%{state | last_error: inspect(reason)}, state.profile}
     end
   end
 
@@ -516,6 +526,7 @@ defmodule Pika.IntegrationCoordinator do
                harness_digest: context.spec_revision.protected_digest,
                metrics: result.metrics,
                regressions: result.regressions,
+               force_reject: not result.target_improvement?,
                correctness_artifact_id: correctness.id,
                screening_artifact_id: screening.id,
                full_artifact_id: full && full.id
@@ -532,6 +543,65 @@ defmodule Pika.IntegrationCoordinator do
     end
   end
 
+  defp perform_write("submit_fast_rejection", args, state) do
+    attempt_id = state.session.identity.attempt_id
+
+    with {:ok, context} <- AttemptStore.campaign_context(state.campaign_id),
+         {:ok, attempt} <- AttemptStore.attempt(attempt_id),
+         true <- args["base_sha"] == context.best_sha and args["base_sha"] == attempt.base_sha,
+         true <- args["candidate_sha"] == attempt.candidate_sha,
+         true <- args["harness_digest"] == context.spec_revision.protected_digest,
+         {:ok, samples} <- registered_artifact(state, args["samples_artifact"], attempt_id),
+         {:ok, correctness} <-
+           registered_artifact(state, args["correctness_artifact"], attempt_id),
+         {:ok, samples_path} <- Pika.ArtifactStore.resolve(state.workspace, samples.relative_path),
+         {:ok, correctness_path} <-
+           Pika.ArtifactStore.resolve(state.workspace, correctness.relative_path),
+         {:ok, result} <-
+           Pika.Measurement.evaluate_fast_rejection(
+             samples_path,
+             correctness_path,
+             %{
+               base_sha: attempt.base_sha,
+               candidate_sha: attempt.candidate_sha,
+               target_snapshot_id: context.target_snapshot.id,
+               case_ids: Enum.map(context.cases, & &1["id"]),
+               target_case_ids:
+                 for(case_ <- context.cases, case_["kind"] == "target", do: case_["id"]),
+               metrics: context.metrics,
+               benchmark: context.spec["benchmark"]
+             },
+             context.best_metrics
+           ),
+         {:ok, receipt} <-
+           IntegrationStore.issue_receipt(
+             args["lease_id"],
+             state.session.session.id,
+             attempt_id,
+             %{
+               candidate_sha: attempt.candidate_sha,
+               harness_digest: context.spec_revision.protected_digest,
+               metrics: result.metrics,
+               regressions: result.regressions,
+               force_reject: true,
+               rejection_reason: result.reason,
+               correctness_artifact_id: correctness.id,
+               screening_artifact_id: samples.id,
+               full_artifact_id: samples.id
+             }
+           ) do
+      {{:ok, Map.put(receipt, :fast_rejection_reason, result.reason)},
+       set_required(state, ["reject_attempt"])}
+    else
+      false ->
+        {mcp_error("identity_mismatch", "Fast rejection identity mismatch"), state}
+
+      {:error, reason} ->
+        {mcp_error("missing_required_data", "Fast rejection not proven", %{reason: reason}),
+         state}
+    end
+  end
+
   defp perform_write("reject_attempt", args, state) do
     attempt_id = state.session.identity.attempt_id
 
@@ -541,7 +611,8 @@ defmodule Pika.IntegrationCoordinator do
            attempt_id,
            args["receipt_id"],
            List.wrap(args["representative_case_ids"]),
-           args["representative_case_reasons"] || %{}
+           args["representative_case_reasons"] || %{},
+           args["reason"]
          ) do
       {:ok, attempt} -> {{:ok, attempt}, set_required(state, [])}
       {:error, reason} -> {mcp_error("missing_required_data", inspect(reason)), state}

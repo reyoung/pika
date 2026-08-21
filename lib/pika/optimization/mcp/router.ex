@@ -136,6 +136,7 @@ defmodule Pika.Optimization.MCP.Router do
           [
             write_tool("record_metrics", "Submit formal alternating-pair measurements."),
             write_tool("submit_attempt_summary", "Submit the structured Attempt summary."),
+            write_tool("reject_attempt", "Reject this Attempt directly and skip Integration."),
             write_tool("complete_attempt", "Run the completion gate for this Attempt.")
           ]
       end

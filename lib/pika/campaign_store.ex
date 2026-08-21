@@ -351,8 +351,8 @@ defmodule Pika.CampaignStore do
           """
           INSERT INTO metric_definitions(
             id, spec_revision_id, name, unit, direction, role,
-            min_improvement_ratio, parser_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            min_improvement_ratio, max_regression_ratio, parser_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           """,
           [
             Ecto.UUID.generate(),
@@ -362,6 +362,7 @@ defmodule Pika.CampaignStore do
             metric["direction"],
             metric["role"],
             metric["min_improvement_ratio"] || 0.01,
+            metric["max_regression_ratio"] || 0.0,
             Jason.encode!(metric["parser"] || %{})
           ]
         )

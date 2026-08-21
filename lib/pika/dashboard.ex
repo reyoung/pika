@@ -1,7 +1,7 @@
 defmodule Pika.Dashboard do
   @moduledoc false
 
-  alias Pika.{AttemptStore, Control, Repo, SyncCoordinator}
+  alias Pika.{AttemptStore, Control, ProgressSummaryStore, Repo, SyncCoordinator}
 
   @agent_event_limit 500
 
@@ -36,6 +36,7 @@ defmodule Pika.Dashboard do
       sessions: sessions,
       metrics: metric_points(attempts),
       events: AttemptStore.events(campaign_id, 0, 2_000),
+      progress_summaries: ProgressSummaryStore.list(campaign_id),
       sync: sync_snapshot(),
       spec: spec
     }

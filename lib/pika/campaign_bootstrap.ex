@@ -92,6 +92,7 @@ defmodule Pika.CampaignBootstrap do
         sandbox_policy: backend["sandbox_policy"],
         protocol_config: backend["protocol_config"]
       },
+      reload_backend_profile: true,
       start_backend: true,
       resolve_references: false,
       materialize_references: true,

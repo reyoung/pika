@@ -45,6 +45,7 @@ defmodule Pika.SyncCoordinator do
       workspace: workspace,
       campaign_id: campaign.id,
       profile: Keyword.get(opts, :profile, profile(workspace)),
+      reload_profile: not Keyword.has_key?(opts, :profile),
       backend_modules: Keyword.get(opts, :backend_modules, %{}),
       mcp_url: Keyword.get(opts, :mcp_url, mcp_url(workspace)),
       start_backends: Keyword.get(opts, :start_backends, true),
@@ -214,7 +215,7 @@ defmodule Pika.SyncCoordinator do
   defp open_session(%{start_backends: false} = state, _run, _recovering), do: state
 
   defp open_session(state, run, recovering) do
-    profile = state.profile
+    {state, profile} = current_profile(state)
     backend = backend_atom(profile["backend"] || profile[:backend])
     module = Map.get(state.backend_modules, backend, backend_module(backend))
     token = random_token()
@@ -293,6 +294,19 @@ defmodule Pika.SyncCoordinator do
       end
     else
       {:error, reason} -> %{state | last_error: inspect(reason)}
+    end
+  end
+
+  defp current_profile(%{reload_profile: false} = state), do: {state, state.profile}
+
+  defp current_profile(state) do
+    case Pika.RuntimeConfig.mutable(state.workspace) do
+      {:ok, mutable} ->
+        profile = mutable["sync_agent"] || mutable["integration_agent"]
+        {%{state | profile: profile, last_error: nil}, profile}
+
+      {:error, reason} ->
+        {%{state | last_error: inspect(reason)}, state.profile}
     end
   end
 

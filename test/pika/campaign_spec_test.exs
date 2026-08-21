@@ -14,6 +14,7 @@ defmodule Pika.CampaignSpecTest do
     assert result.missing == []
     assert result.errors == []
     assert hd(result.spec["metrics"])["min_improvement_ratio"] == 0.01
+    assert hd(result.spec["metrics"])["max_regression_ratio"] == 0.0
     assert result.spec["iteration_sampling"] == %{"max_initial_cases" => 10}
   end
 
@@ -139,7 +140,8 @@ defmodule Pika.CampaignSpecTest do
       "unit" => 42,
       "direction" => "sideways",
       "role" => "optional",
-      "min_improvement_ratio" => 0.001
+      "min_improvement_ratio" => 0.001,
+      "max_regression_ratio" => 1.01
     }
 
     result = Spec.validate(%{spec | "metrics" => [invalid_metric, "not-an-object"]})
@@ -152,6 +154,8 @@ defmodule Pika.CampaignSpecTest do
     assert "metrics[0].role: must be one of target, guard, informational" in result.errors
 
     assert "metrics[0].min_improvement_ratio: must be a number greater than or equal to 0.01" in result.errors
+
+    assert "metrics[0].max_regression_ratio: must be a number from 0.0 through 1.0" in result.errors
 
     assert "metrics[1]: must be an object" in result.errors
     refute "Metrics have invalid fields" in result.errors

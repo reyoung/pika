@@ -152,11 +152,12 @@ defmodule Pika.AgentBackend.CodexAppServer do
     stderr_path = Path.join(transport_dir, "codex-#{state.session_id}.stderr.log")
     command = CodexExecutable.resolve(profile.command)
 
-    args =
-      profile.args ++
-        ["app-server", "--listen", "stdio://"] ++ codex_mcp_args(mcp)
+    args = profile.args ++ ["app-server", "--listen", "stdio://"] ++ codex_mcp_args(mcp)
 
-    env = Map.merge(profile.env, %{"PIKA_MCP_TOKEN" => Map.fetch!(mcp, :token)})
+    env =
+      if Map.get(mcp, :enabled, true),
+        do: Map.merge(profile.env, %{"PIKA_MCP_TOKEN" => Map.fetch!(mcp, :token)}),
+        else: profile.env
 
     case JSONLPort.start_link(
            owner: self(),
@@ -459,6 +460,8 @@ defmodule Pika.AgentBackend.CodexAppServer do
         data: Keyword.get(attrs, :data, %{})
       })
 
+    _ = Pika.CommandConsole.capture(event, state.profile.artifact_dir, state.cwd)
+
     case state.event_sink do
       sink when is_pid(sink) -> send(sink, {:pika_backend_event, event})
       sink when is_function(sink, 1) -> sink.(event)
@@ -542,6 +545,8 @@ defmodule Pika.AgentBackend.CodexAppServer do
 
   defp normalize_input(text) when is_binary(text), do: [%{"type" => "text", "text" => text}]
   defp normalize_input(items) when is_list(items), do: items
+
+  defp codex_mcp_args(%{enabled: false}), do: []
 
   defp codex_mcp_args(mcp) do
     url = Map.fetch!(mcp, :url)

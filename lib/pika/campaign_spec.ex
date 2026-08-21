@@ -62,14 +62,20 @@ defmodule Pika.CampaignSpec do
           "minItems" => 1,
           "items" => %{
             "type" => "object",
-            "required" => ~w(id name unit direction role min_improvement_ratio),
+            "required" =>
+              ~w(id name unit direction role min_improvement_ratio max_regression_ratio),
             "properties" => %{
               "id" => slug_schema(),
               "name" => string_schema(),
               "unit" => string_schema(),
               "direction" => %{"type" => "string", "enum" => @directions},
               "role" => %{"type" => "string", "enum" => @metric_roles},
-              "min_improvement_ratio" => %{"type" => "number", "minimum" => 0.01}
+              "min_improvement_ratio" => %{"type" => "number", "minimum" => 0.01},
+              "max_regression_ratio" => %{
+                "type" => "number",
+                "minimum" => 0.0,
+                "maximum" => 1.0
+              }
             }
           }
         },
@@ -134,8 +140,13 @@ defmodule Pika.CampaignSpec do
   defp defaults(spec) do
     metrics =
       Enum.map(list(spec["metrics"]), fn
-        metric when is_map(metric) -> Map.put_new(metric, "min_improvement_ratio", 0.01)
-        metric -> metric
+        metric when is_map(metric) ->
+          metric
+          |> Map.put_new("min_improvement_ratio", 0.01)
+          |> Map.put_new("max_regression_ratio", 0.0)
+
+        metric ->
+          metric
       end)
 
     supplied_benchmark = map(spec["benchmark"])
@@ -367,7 +378,11 @@ defmodule Pika.CampaignSpec do
            metric["role"] in @metric_roles},
           {"#{prefix}.min_improvement_ratio: must be a number greater than or equal to 0.01",
            number?(metric["min_improvement_ratio"]) and
-             metric["min_improvement_ratio"] >= 0.01}
+             metric["min_improvement_ratio"] >= 0.01},
+          {"#{prefix}.max_regression_ratio: must be a number from 0.0 through 1.0",
+           number?(metric["max_regression_ratio"]) and
+             metric["max_regression_ratio"] >= 0.0 and
+             metric["max_regression_ratio"] <= 1.0}
         ]
         |> for_failed_checks()
 

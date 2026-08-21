@@ -43,6 +43,11 @@ defmodule Pika.InitTest do
                    integration_effort: "max",
                    integration_approval_policy: "on_request",
                    integration_sandbox_policy: "workspace_write",
+                   progress_summary: true,
+                   summary_backend: "cursor",
+                   summary_model: "summary-test-model",
+                   summary_effort: "low",
+                   summary_interval_minutes: 12,
                    iteration_agents: 2,
                    max_attempts: 7,
                    max_unverified_attempts: 3,
@@ -97,6 +102,13 @@ defmodule Pika.InitTest do
              "env" => %{},
              "protocol_config" => %{}
            }
+
+    assert config.campaign["progress_summary"]["enabled"]
+    assert config.campaign["progress_summary"]["interval_minutes"] == 12
+    assert config.campaign["progress_summary"]["backend"] == "cursor_acp"
+    assert config.campaign["progress_summary"]["model"] == "summary-test-model"
+    assert config.campaign["progress_summary"]["reasoning_effort"] == "low"
+    assert config.campaign["progress_summary"]["sandbox_policy"] == "enabled"
 
     assert config.sync == %{"remote" => "origin", "branch" => "main"}
 

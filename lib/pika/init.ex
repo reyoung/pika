@@ -59,6 +59,13 @@ defmodule Pika.Init do
     integration_sandbox_policy =
       Map.get(settings, :integration_sandbox_policy, integration_permissions.sandbox_policy)
 
+    summary_permissions = PermissionPolicy.defaults(settings.summary_backend)
+
+    summary_model =
+      if settings.summary_model,
+        do: "\n    model: #{yaml_string(settings.summary_model)}",
+        else: ""
+
     agents =
       1..settings.iteration_agents
       |> Enum.map_join("\n", fn index ->
@@ -137,6 +144,14 @@ defmodule Pika.Init do
         reasoning_effort: #{settings.integration_effort}
         approval_policy: #{integration_approval_policy}
         sandbox_policy: #{integration_sandbox_policy}
+      progress_summary:
+        enabled: #{settings.progress_summary}
+        interval_minutes: #{settings.summary_interval_minutes}
+        name: progress-summary
+        backend: #{settings.summary_backend}#{summary_model}
+        reasoning_effort: #{settings.summary_effort}
+        approval_policy: #{summary_permissions.approval_policy}
+        sandbox_policy: #{summary_sandbox_policy(settings.summary_backend)}
       reference_catalog: []
       stop_conditions:
         mode: all_goals
@@ -262,7 +277,7 @@ defmodule Pika.Init do
              :sandbox_policy
            ),
          integration_opts <- inherit_option(opts, :integration_model, :model),
-         {:ok, integration_model, _model_cache} <-
+         {:ok, integration_model, model_cache} <-
            collect_model(
              integration_opts,
              :integration_model,
@@ -277,6 +292,48 @@ defmodule Pika.Init do
              :integration_effort,
              "Integration Agent",
              "high"
+           ),
+         progress_summary <- Keyword.get(opts, :progress_summary, false),
+         {:ok, summary_backend} <-
+           if(progress_summary,
+             do:
+               collect_backend(
+                 inherit_backend(opts, :summary_backend),
+                 :summary_backend,
+                 "Progress Summary Agent",
+                 backend_label(alignment_backend)
+               ),
+             else: {:ok, alignment_backend}
+           ),
+         summary_opts <- inherit_option(opts, :summary_model, :model),
+         {:ok, summary_model, _model_cache} <-
+           if(progress_summary,
+             do:
+               collect_model(
+                 summary_opts,
+                 :summary_model,
+                 summary_backend,
+                 "Progress Summary Agent",
+                 model_cache
+               ),
+             else: {:ok, nil, model_cache}
+           ),
+         {:ok, summary_effort} <-
+           if(progress_summary,
+             do: collect_effort(opts, :summary_effort, "Progress Summary Agent", "medium"),
+             else: {:ok, "medium"}
+           ),
+         {:ok, summary_interval_minutes} <-
+           if(progress_summary,
+             do:
+               choose(
+                 opts,
+                 :summary_interval_minutes,
+                 "Progress summary interval in minutes",
+                 10,
+                 &parse_positive_integer/1
+               ),
+             else: {:ok, 10}
            ),
          {:ok, iteration_agents} <-
            choose(
@@ -326,6 +383,11 @@ defmodule Pika.Init do
          integration_effort: integration_effort,
          integration_approval_policy: integration_approval_policy,
          integration_sandbox_policy: integration_sandbox_policy,
+         progress_summary: progress_summary,
+         summary_backend: summary_backend,
+         summary_model: summary_model,
+         summary_effort: summary_effort,
+         summary_interval_minutes: summary_interval_minutes,
          iteration_agents: iteration_agents,
          max_attempts: max_attempts,
          max_unverified_attempts: max_unverified_attempts,
@@ -970,6 +1032,9 @@ defmodule Pika.Init do
 
   defp backend_label(backend) when backend in ["cursor", "cursor_acp"], do: "cursor"
   defp backend_label(_backend), do: "codex"
+
+  defp summary_sandbox_policy(backend) when backend in ["cursor", "cursor_acp"], do: "enabled"
+  defp summary_sandbox_policy(_backend), do: "read_only"
 
   defp yaml_string(value), do: Jason.encode!(value)
 

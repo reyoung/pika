@@ -18,6 +18,14 @@ an isolated worktree-local environment with `uv venv .venv`, install only the re
 do not commit or register them as Artifacts, do not change dependency manifests or lockfiles merely to create the
 environment, and remove untracked environment files before verifying the required clean worktree.
 
+Validation throughput is important. For a multi-Case Python Harness, use one long-lived batch driver that loads
+Python dependencies, fixtures, CUDA contexts and kernels once, then executes all Cases and Pair indexes in a
+for-loop. Never start a fresh Python process for each Case, Pair, Target run or Candidate run. If Target and
+Candidate cannot safely coexist in one interpreter, use at most one persistent worker process per implementation
+and stream all jobs to those workers; do not fall back to per-Case subprocesses. Preserve genuinely independent
+alternating measurements by resetting Case inputs/state and synchronizing the device between jobs, not by
+restarting Python. A subprocess may wrap the entire batch or remote container, but not each individual sample.
+
 Each Pair JSONL line must contain only case_id, metric_id, pair_index 0..<%= @pair_count - 1 %>,
 order=tc|ct, numeric target/candidate, valid and error. Produce exactly <%= @pair_count %> genuinely
 independent alternating Target/Candidate pairs

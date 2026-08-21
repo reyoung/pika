@@ -75,6 +75,82 @@ Hooks.ConversationScroll = {
   }
 }
 
+Hooks.CommandConsole = {
+  mounted() {
+    this.output = this.el.querySelector("[data-console-output]")
+    this.resizeHandle = this.el.querySelector("[data-console-resize]")
+    this.collapseButton = this.el.querySelector("[data-console-collapse]")
+    this.latestButton = this.el.querySelector("[data-console-latest]")
+    this.shouldStick = true
+    this.scrollToLatest()
+
+    this.onScroll = () => {
+      this.shouldStick = this.distanceFromBottom() < 80
+      this.el.classList.toggle("console-paused", !this.shouldStick)
+    }
+    this.onLatest = () => {
+      this.shouldStick = true
+      this.el.classList.remove("console-paused")
+      this.scrollToLatest()
+    }
+    this.onCollapse = () => this.el.classList.toggle("collapsed")
+    this.onKeydown = event => {
+      if (event.key === "Escape") this.pushEvent("close_command_console", {})
+      if (event.target === this.resizeHandle && ["ArrowUp", "ArrowDown"].includes(event.key)) {
+        event.preventDefault()
+        this.setHeight(this.el.getBoundingClientRect().height + (event.key === "ArrowUp" ? 24 : -24))
+      }
+    }
+    this.onPointerDown = event => {
+      event.preventDefault()
+      const startY = event.clientY
+      const startHeight = this.el.getBoundingClientRect().height
+      const move = moveEvent => this.setHeight(startHeight + startY - moveEvent.clientY)
+      const up = () => {
+        window.removeEventListener("pointermove", move)
+        window.removeEventListener("pointerup", up)
+      }
+      window.addEventListener("pointermove", move)
+      window.addEventListener("pointerup", up)
+    }
+
+    this.output?.addEventListener("scroll", this.onScroll)
+    this.latestButton?.addEventListener("click", this.onLatest)
+    this.collapseButton?.addEventListener("click", this.onCollapse)
+    this.resizeHandle?.addEventListener("pointerdown", this.onPointerDown)
+    window.addEventListener("keydown", this.onKeydown)
+  },
+  beforeUpdate() {
+    this.shouldStick = this.distanceFromBottom() < 80
+    this.wasCollapsed = this.el.classList.contains("collapsed")
+  },
+  updated() {
+    this.output = this.el.querySelector("[data-console-output]")
+    this.el.classList.toggle("collapsed", this.wasCollapsed)
+    if (this.shouldStick) this.scrollToLatest()
+  },
+  destroyed() {
+    this.output?.removeEventListener("scroll", this.onScroll)
+    this.latestButton?.removeEventListener("click", this.onLatest)
+    this.collapseButton?.removeEventListener("click", this.onCollapse)
+    this.resizeHandle?.removeEventListener("pointerdown", this.onPointerDown)
+    window.removeEventListener("keydown", this.onKeydown)
+  },
+  distanceFromBottom() {
+    if (!this.output) return 0
+    return this.output.scrollHeight - this.output.scrollTop - this.output.clientHeight
+  },
+  scrollToLatest() {
+    if (!this.output) return
+    this.output.scrollTop = this.output.scrollHeight
+    window.requestAnimationFrame(() => { this.output.scrollTop = this.output.scrollHeight })
+  },
+  setHeight(height) {
+    const bounded = Math.max(160, Math.min(window.innerHeight * 0.85, height))
+    this.el.style.height = `${bounded}px`
+  }
+}
+
 Hooks.Composer = {
   mounted() {
     this.textarea = this.el.querySelector("textarea")

@@ -7,6 +7,22 @@ an isolated worktree-local environment with `uv venv .venv`, install only the re
 do not include them in the candidate Patch or register them as Artifacts, do not change dependency manifests or
 lockfiles merely to create the environment, and remove untracked environment files before any clean-worktree gate.
 
+Validation throughput is important, especially for the Full Case Set. Use one long-lived batch driver that loads
+Python dependencies, fixtures, CUDA contexts and kernels once, then executes all Cases and Pair indexes in a
+for-loop. Never start a fresh Python process for each Case, Pair, Target run or Candidate run. If Target and
+Candidate cannot safely coexist in one interpreter, use at most one persistent worker process per implementation
+and stream all jobs to those workers; do not fall back to per-Case subprocesses. Preserve genuinely independent
+alternating measurements by resetting Case inputs/state and synchronizing the device between jobs, not by
+restarting Python. A subprocess may wrap the entire batch or remote container, but not each individual sample.
+
+Use an asymmetric gate and fail fast. Acceptance still requires complete Full Case Set coverage, but rejection
+does not. As soon as a Case × Metric has the formal Pair count and valid-Pair minimum and proves a regression
+beyond its configured tolerance, stop unrelated Cases, register the partial formal samples and matching partial
+correctness evidence, call `submit_fast_rejection`, then call `reject_attempt`. You may also fast-reject for no
+meaningful improvement once every Target Case × target-role Metric has formal coverage and none reaches its
+configured minimum improvement. Never continue the full suite merely to collect more evidence after rejection is
+proven. Screening-only evidence is not sufficient for fast rejection.
+
 The fixed Optimization Target is <%= @context.target_snapshot.id %> and is exposed through the Git-ignored
 `target` symlink. Never mutate or include it in the candidate Patch. Before any validation or Git mutation,
 unlink only the injected, Git-ignored `ref/<id>` symlinks listed in the Campaign context; preserve user-owned
@@ -17,7 +33,7 @@ schema_version=2, target_snapshot_id, candidate_sha, and target_passed/candidate
 regressed, or potentially goal-satisfying combinations to an independent
 <%= @context.spec["benchmark"]["pair_count"] %> Pair run requiring at least
 <%= @context.spec["benchmark"]["min_valid_pairs"] %> valid Pairs. A merge is allowed only when no full-set
-regression is confirmed and at least one Target Case × target-role Metric improves over the fixed Target by both
+regression beyond the Metric's configured max_regression_ratio and combined noise tolerance is confirmed, and at least one Target Case × target-role Metric improves over the fixed Target by both
 its configured min_improvement_ratio and the combined noise tolerance. Informational Metrics still have the same
 no-regression gate. Call `submit_full_regression`; a passed, identity-bound Receipt is required before a merge
 Intent can exist.

@@ -55,6 +55,76 @@ defmodule Pika.Measurement do
     end
   end
 
+  def evaluate_fast_rejection(samples_path, correctness_path, context, best_metrics) do
+    {pair_count, min_valid_pairs} = formal_protocol(context)
+
+    with {:ok, correctness} <- validate_fast_rejection_correctness(correctness_path, context),
+         {:ok, records} <- read_jsonl(samples_path),
+         observed_cases when observed_cases != [] <-
+           records |> Enum.map(& &1["case_id"]) |> Enum.uniq(),
+         observed_keys <- records |> Enum.map(&{&1["case_id"], &1["metric_id"]}) |> Enum.uniq(),
+         partial_context <- %{context | case_ids: observed_cases},
+         :ok <- validate_fast_rejection_coverage(correctness, partial_context),
+         {:ok, metrics} <-
+           evaluate_records(records, partial_context,
+             expected_pairs: pair_count,
+             min_valid: min_valid_pairs,
+             source: "integration_fast_reject",
+             allow_insufficient: false,
+             best_metrics: best_metrics,
+             expected_keys: observed_keys
+           ) do
+      candidate_badcases =
+        for case_ <- correctness["cases"], case_["candidate_passed"] != true, do: case_["case_id"]
+
+      regressions =
+        metrics
+        |> Enum.filter(&confirmed_regression?(&1, best_metrics))
+        |> Enum.map(&{&1.case_id, &1.metric_id})
+
+      target_metric_ids =
+        for metric <- context.metrics, metric["role"] == "target", do: metric["id"]
+
+      required_target_keys =
+        for case_id <- context.target_case_ids,
+            metric_id <- target_metric_ids,
+            do: {case_id, metric_id}
+
+      target_coverage? =
+        MapSet.subset?(MapSet.new(required_target_keys), MapSet.new(observed_keys))
+
+      meaningful_improvement? =
+        Enum.any?(metrics, fn metric ->
+          metric.role == "target" and metric.case_id in context.target_case_ids and
+            is_number(metric.target_relative_improvement) and
+            metric.target_relative_improvement >=
+              max(metric.min_improvement_ratio, metric.noise_tolerance)
+        end)
+
+      cond do
+        candidate_badcases != [] ->
+          {:ok,
+           %{
+             metrics: metrics,
+             regressions: [],
+             reason: "candidate correctness failed: #{Enum.join(candidate_badcases, ", ")}"
+           }}
+
+        regressions != [] ->
+          {:ok, %{metrics: metrics, regressions: regressions, reason: "confirmed regression"}}
+
+        target_coverage? and not meaningful_improvement? ->
+          {:ok, %{metrics: metrics, regressions: [], reason: "no meaningful target improvement"}}
+
+        true ->
+          {:error, :fast_rejection_not_proven}
+      end
+    else
+      [] -> {:error, :fast_rejection_samples_empty}
+      {:error, _} = error -> error
+    end
+  end
+
   def evaluate_records(records, context, opts) when is_list(records) and is_map(context) do
     expected_pairs = Keyword.fetch!(opts, :expected_pairs)
     min_valid = Keyword.fetch!(opts, :min_valid)
@@ -174,7 +244,7 @@ defmodule Pika.Measurement do
   end
 
   defp confirmed_regression?(metric, _best_metrics) do
-    tolerance = metric.noise_tolerance || 0.005
+    tolerance = max(metric.max_regression_ratio || 0.0, metric.noise_tolerance || 0.005)
 
     is_nil(metric.best_relative_improvement) or metric.best_relative_improvement < -tolerance
   end
@@ -266,6 +336,7 @@ defmodule Pika.Measurement do
       direction: definition["direction"],
       role: definition["role"],
       min_improvement_ratio: definition["min_improvement_ratio"] || 0.01,
+      max_regression_ratio: definition["max_regression_ratio"] || 0.0,
       value: value,
       target_value: target_value,
       target_relative_improvement: target_relative_improvement,
@@ -349,6 +420,28 @@ defmodule Pika.Measurement do
     else
       _ -> {:error, :correctness_failed}
     end
+  end
+
+  defp validate_fast_rejection_correctness(path, context) do
+    with {:ok, body} <- File.read(path),
+         {:ok, report} <- Jason.decode(body),
+         true <- report["schema_version"] == 2,
+         true <- report["target_snapshot_id"] == context.target_snapshot_id,
+         true <- report["candidate_sha"] == context.candidate_sha,
+         cases when is_list(cases) and cases != [] <- report["cases"],
+         true <- Enum.all?(cases, &(&1["target_passed"] == true)) do
+      {:ok, report}
+    else
+      _ -> {:error, :correctness_failed}
+    end
+  end
+
+  defp validate_fast_rejection_coverage(report, context) do
+    case_ids = Enum.map(report["cases"], & &1["case_id"])
+
+    if Enum.sort(case_ids) == Enum.sort(context.case_ids),
+      do: :ok,
+      else: {:error, :correctness_failed}
   end
 
   defp alternating_orders?(records) do

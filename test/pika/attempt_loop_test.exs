@@ -1,7 +1,7 @@
 defmodule Pika.AttemptLoopTest do
   use ExUnit.Case, async: false
 
-  alias Pika.{AttemptCoordinator, AttemptStore, Git, Repo}
+  alias Pika.{AttemptCoordinator, AttemptStore, Git, IntegrationStore, Repo}
   alias Pika.Test.{AttemptAgentBackend, OptimizationFixtures}
 
   setup do
@@ -125,6 +125,30 @@ defmodule Pika.AttemptLoopTest do
     assert attempt.status == "ready_for_integration"
   end
 
+  test "restart recovery leaves Integration-owned Attempts for IntegrationCoordinator" do
+    for status <- ~w(refreshing integrating) do
+      context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+      assert {:ok, attempt} = AttemptStore.create_attempt(context.campaign.id, 0)
+      Repo.query!("UPDATE attempts SET status = ? WHERE id = ?", [status, attempt.id])
+
+      coordinator =
+        start_coordinator(
+          context,
+          profiles(1, %{test_pid: self(), barrier: true}),
+          auto_dispatch: false
+        )
+
+      Process.sleep(50)
+      refute_receive {:attempt_started, _, _, _, _}, 50
+      assert {:ok, recovered} = AttemptStore.attempt(attempt.id)
+      assert recovered.status == status
+      assert AttemptCoordinator.snapshot(coordinator).sessions == []
+
+      GenServer.stop(coordinator)
+      OptimizationFixtures.stop_repo()
+    end
+  end
+
   test "MCP authentication is available while the Backend Session is opening" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 1)
 
@@ -145,6 +169,86 @@ defmodule Pika.AttemptLoopTest do
         AttemptStore.attempt(start.attempt_id)
       )
     end)
+  end
+
+  test "Iteration Agent can reject an unpromising Attempt without Integration" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+    coordinator = start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
+    [start] = receive_starts(1)
+
+    assert {:ok, _summary} =
+             AttemptCoordinator.mcp_call(
+               start.token,
+               "submit_attempt_summary",
+               %{
+                 "idempotency_key" => "summary-skip",
+                 "description" => "No useful candidate",
+                 "summary" => "A correctness bad case makes further validation wasteful.",
+                 "modification_scope" => [],
+                 "risks" => ["candidate correctness failure"],
+                 "recommended_outcome" => "reject"
+               },
+               coordinator
+             )
+
+    assert {:ok, %{status: "rejected", outcome_reason: reason}} =
+             AttemptCoordinator.mcp_call(
+               start.token,
+               "reject_attempt",
+               %{
+                 "idempotency_key" => "reject-badcase",
+                 "reason" => "candidate fails target_case correctness"
+               },
+               coordinator
+             )
+
+    assert reason == "candidate fails target_case correctness"
+    send(start.task_pid, :release)
+
+    eventually(fn ->
+      match?({:ok, %{status: "rejected"}}, AttemptStore.attempt(start.attempt_id))
+    end)
+
+    assert IntegrationStore.queue_head(context.campaign.id) == {:error, :integration_queue_empty}
+  end
+
+  test "recovery directs a skipped Attempt to reject instead of Integration" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+    assert {:ok, attempt} = AttemptStore.create_attempt(context.campaign.id, 0)
+
+    assert {:ok, _event} =
+             AttemptStore.submit_summary(attempt.id, %{
+               description: "No useful candidate",
+               summary: "Formal results are not worth integrating.",
+               modification_scope: [],
+               risks: [],
+               profiler_summary: nil,
+               recommended_outcome: "skip"
+             })
+
+    Repo.query!(
+      "UPDATE attempts SET status = 'interrupted', resume_state = 'running' WHERE id = ?",
+      [
+        attempt.id
+      ]
+    )
+
+    coordinator = start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
+    [start] = receive_starts(1)
+
+    assert start.attempt_id == attempt.id
+    assert start.instructions =~ "reject_attempt"
+    refute start.instructions =~ "complete only the missing operations: complete_attempt"
+
+    assert {:ok, %{status: "rejected"}} =
+             AttemptCoordinator.mcp_call(
+               start.token,
+               "reject_attempt",
+               %{"idempotency_key" => "recovered-reject", "reason" => "no useful improvement"},
+               coordinator
+             )
+
+    send(start.task_pid, :release)
   end
 
   test "active Attempts emit bounded work snapshots while waiting for a summary" do

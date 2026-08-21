@@ -32,6 +32,15 @@ campaign:
     reasoning_effort: high
     approval_policy: never
     sandbox_policy: danger_full_access
+  # Optional read-only AI progress report. Disabled by default.
+  progress_summary:
+    enabled: false
+    interval_minutes: 10
+    name: progress-summary
+    backend: codex_app_server
+    reasoning_effort: medium
+    approval_policy: never
+    sandbox_policy: read_only
   reference_catalog: []
   stop_conditions:
     mode: all_goals

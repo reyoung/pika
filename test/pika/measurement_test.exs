@@ -229,6 +229,102 @@ defmodule Pika.MeasurementTest do
     assert [%{role: "informational", source: "integration_full"}] = result.metrics
   end
 
+  test "formal partial evidence can prove an early regression rejection", context do
+    write_pairs(context.samples, context.context, 7, fn _index -> {10.0, 10.2, true} end)
+
+    assert {:ok, result} =
+             Measurement.evaluate_fast_rejection(
+               context.samples,
+               context.correctness,
+               context.context,
+               context.context.best_metrics
+             )
+
+    assert result.reason == "confirmed regression"
+    assert result.regressions == [{"target_case", "latency_us"}]
+  end
+
+  test "formal target coverage can prove no meaningful improvement", context do
+    write_pairs(context.samples, context.context, 7, fn _index -> {10.0, 9.95, true} end)
+
+    assert {:ok, result} =
+             Measurement.evaluate_fast_rejection(
+               context.samples,
+               context.correctness,
+               context.context,
+               context.context.best_metrics
+             )
+
+    assert result.reason == "no meaningful target improvement"
+    assert result.regressions == []
+  end
+
+  test "candidate correctness badcase can prove an early rejection", context do
+    write_pairs(context.samples, context.context, 7, fn _index -> {10.0, 9.8, true} end)
+
+    File.write!(
+      context.correctness,
+      Jason.encode!(%{
+        "schema_version" => 2,
+        "target_snapshot_id" => "target-fixture",
+        "candidate_sha" => context.context.candidate_sha,
+        "cases" => [
+          %{
+            "case_id" => "target_case",
+            "target_passed" => true,
+            "candidate_passed" => false
+          }
+        ]
+      })
+    )
+
+    assert {:ok, result} =
+             Measurement.evaluate_fast_rejection(
+               context.samples,
+               context.correctness,
+               context.context,
+               context.context.best_metrics
+             )
+
+    assert result.reason == "candidate correctness failed: target_case"
+  end
+
+  test "allows a per-metric regression up to max_regression_ratio", context do
+    configured = %{
+      context.context
+      | metrics: put_in(context.context.metrics, [Access.at(0), "max_regression_ratio"], 0.03)
+    }
+
+    write_pairs(context.samples, configured, 5, fn _index -> {10.0, 10.02, true} end)
+
+    assert {:ok, accepted} =
+             Measurement.evaluate_integration(
+               context.samples,
+               nil,
+               context.correctness,
+               configured,
+               configured.best_metrics
+             )
+
+    assert accepted.regressions == []
+    assert [%{max_regression_ratio: 0.03}] = accepted.metrics
+
+    full = Path.join(context.root, "full-regression.jsonl")
+    write_pairs(context.samples, configured, 5, fn _index -> {10.0, 10.4, true} end)
+    write_pairs(full, configured, 7, fn _index -> {10.0, 10.4, true} end)
+
+    assert {:ok, rejected} =
+             Measurement.evaluate_integration(
+               context.samples,
+               full,
+               context.correctness,
+               configured,
+               configured.best_metrics
+             )
+
+    assert rejected.regressions == [{"target_case", "latency_us"}]
+  end
+
   test "accepts a Best improvement even when Development remains behind the Optimization Target",
        context do
     write_pairs(context.samples, context.context, 5, fn _index -> {1.0, 9.0, true} end)

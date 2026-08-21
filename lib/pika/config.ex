@@ -7,7 +7,7 @@ defmodule Pika.Config do
   @root_fields ~w(server backend campaign prompts sync)
   @server_fields ~w(host port)
   @backend_fields ~w(type command model reasoning_effort approval_policy sandbox_policy protocol_config)
-  @campaign_fields ~w(plan max_attempts max_unverified_attempts history_n iteration_agents integration_agent reference_catalog stop_conditions)
+  @campaign_fields ~w(plan max_attempts max_unverified_attempts history_n iteration_agents integration_agent progress_summary reference_catalog stop_conditions)
   @prompt_fields ~w(alignment setup_merge baseline plan iteration integration sync)
   @sync_fields ~w(remote branch)
   @agent_profile_fields ~w(name backend command model reasoning_effort approval_policy sandbox_policy env protocol_config)
@@ -151,6 +151,7 @@ defmodule Pika.Config do
     history_n = Map.get(campaign, "history_n", 10)
     iteration_agents = Map.get(campaign, "iteration_agents", default_iteration_agents(type))
     integration_agent = Map.get(campaign, "integration_agent", default_integration_agent(type))
+    progress_summary = Map.get(campaign, "progress_summary", %{"enabled" => false})
     reference_catalog = Map.get(campaign, "reference_catalog", [])
     stop_conditions = Map.get(campaign, "stop_conditions", %{})
 
@@ -174,6 +175,7 @@ defmodule Pika.Config do
           history_n,
           iteration_agents,
           integration_agent,
+          progress_summary,
           reference_catalog,
           stop_conditions,
           type
@@ -213,6 +215,7 @@ defmodule Pika.Config do
         "history_n" => history_n,
         "iteration_agents" => normalize_iteration_agents(iteration_agents, type, command),
         "integration_agent" => normalize_integration_agent(integration_agent, type, command),
+        "progress_summary" => normalize_progress_summary(progress_summary, type, command),
         "reference_catalog" => reference_catalog,
         "stop_conditions" => stop_conditions,
         "sync" => %{"remote" => sync["remote"], "branch" => sync["branch"]}
@@ -353,6 +356,7 @@ defmodule Pika.Config do
          history_n,
          iteration_agents,
          integration_agent,
+         progress_summary,
          references,
          stop_conditions,
          default_backend
@@ -376,6 +380,7 @@ defmodule Pika.Config do
     )
     |> Kernel.++(validate_iteration_agents(iteration_agents, default_backend))
     |> Kernel.++(validate_integration_agent(integration_agent, default_backend))
+    |> Kernel.++(validate_progress_summary(progress_summary, default_backend))
     |> maybe_error(not is_list(references), "campaign.reference_catalog: must be a list")
     |> maybe_error(not is_map(stop_conditions), "campaign.stop_conditions: must be a mapping")
     |> maybe_error(
@@ -461,6 +466,43 @@ defmodule Pika.Config do
 
   defp validate_integration_agent(_agent, _default_backend),
     do: ["campaign.integration_agent: must be a mapping"]
+
+  defp validate_progress_summary(summary, default_backend) when is_map(summary) do
+    prefix = "campaign.progress_summary"
+    summary = stringify_keys(summary)
+    profile = Map.drop(summary, ["enabled", "interval_minutes"])
+    backend = profile["backend"] || default_backend
+
+    unknown_fields(summary, @agent_profile_fields ++ ["enabled", "interval_minutes"], prefix) ++
+      if(is_boolean(Map.get(summary, "enabled", false)),
+        do: [],
+        else: ["#{prefix}.enabled: must be true or false"]
+      ) ++
+      if(
+        is_integer(Map.get(summary, "interval_minutes", 10)) and
+          Map.get(summary, "interval_minutes", 10) > 0,
+        do: [],
+        else: ["#{prefix}.interval_minutes: must be a positive integer"]
+      ) ++
+      validate_optional_backend(profile["backend"], prefix) ++
+      validate_optional_command(profile["command"], prefix) ++
+      validate_optional_string(profile["name"], "#{prefix}.name") ++
+      validate_optional_string(profile["model"], "#{prefix}.model") ++
+      validate_effort(profile["reasoning_effort"], prefix) ++
+      validate_permission(backend, :approval_policy, profile["approval_policy"], prefix) ++
+      validate_permission(backend, :sandbox_policy, profile["sandbox_policy"], prefix) ++
+      if(is_nil(profile["env"]) or is_map(profile["env"]),
+        do: [],
+        else: ["#{prefix}.env: must be a mapping"]
+      ) ++
+      if(is_nil(profile["protocol_config"]) or is_map(profile["protocol_config"]),
+        do: [],
+        else: ["#{prefix}.protocol_config: must be a mapping"]
+      )
+  end
+
+  defp validate_progress_summary(_summary, _default_backend),
+    do: ["campaign.progress_summary: must be a mapping"]
 
   defp validate_optional_backend(nil, _prefix), do: []
 
@@ -558,6 +600,16 @@ defmodule Pika.Config do
       "env" => agent["env"] || %{},
       "protocol_config" => agent["protocol_config"] || %{}
     }
+  end
+
+  defp normalize_progress_summary(summary, default_type, default_command) do
+    summary = stringify_keys(summary)
+    profile = normalize_integration_agent(summary, default_type, default_command)
+
+    profile
+    |> Map.put("name", summary["name"] || "progress-summary")
+    |> Map.put("enabled", Map.get(summary, "enabled", false))
+    |> Map.put("interval_minutes", Map.get(summary, "interval_minutes", 10))
   end
 
   defp command_for(type, type, default_command), do: default_command

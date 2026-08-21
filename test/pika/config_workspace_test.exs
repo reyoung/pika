@@ -24,6 +24,32 @@ defmodule Pika.ConfigWorkspaceTest do
     assert config.campaign["integration_agent"]["name"] == "integration"
     assert config.campaign["integration_agent"]["backend"] == "codex_app_server"
     assert config.campaign["integration_agent"]["reasoning_effort"] == "high"
+    assert config.campaign["progress_summary"]["enabled"] == false
+    assert config.campaign["progress_summary"]["interval_minutes"] == 10
+  end
+
+  test "loads an independently configured periodic progress summary profile" do
+    workspace = CampaignFixtures.workspace()
+
+    yaml = """
+    campaign:
+      progress_summary:
+        enabled: true
+        interval_minutes: 15
+        backend: cursor_acp
+        model: summary-model
+        reasoning_effort: low
+        approval_policy: auto_review
+        sandbox_policy: enabled
+    """
+
+    assert {:ok, config} = Config.load(CampaignFixtures.config_file(yaml), workspace: workspace)
+    summary = config.campaign["progress_summary"]
+    assert summary["enabled"]
+    assert summary["interval_minutes"] == 15
+    assert summary["backend"] == "cursor_acp"
+    assert summary["model"] == "summary-model"
+    assert summary["reasoning_effort"] == "low"
   end
 
   test "loads the Alignment/Baseline Agent model and reasoning effort" do

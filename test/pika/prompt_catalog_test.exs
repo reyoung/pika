@@ -126,6 +126,15 @@ defmodule Pika.PromptCatalogTest do
 
     assert sync =~ "exactly 8 alternating"
 
+    for validation_prompt <- [baseline, iteration, integration, sync] do
+      assert validation_prompt =~ "one long-lived batch driver"
+      assert validation_prompt =~ "all Cases and Pair indexes"
+      assert validation_prompt =~ "for-loop"
+      assert validation_prompt =~ "Never start a fresh Python process for each Case"
+      assert validation_prompt =~ "at most one persistent worker process per implementation"
+      assert validation_prompt =~ "not each individual sample"
+    end
+
     for execution_prompt <- [alignment, baseline, iteration, integration, sync] do
       assert execution_prompt =~ "uv venv .venv"
       assert execution_prompt =~ "uv pip install --python .venv/bin/python"

@@ -84,6 +84,7 @@ defmodule PikaWeb.AlignmentLive do
       |> assign(:reviewed_target_digest, nil)
       |> assign(:reviewed_development_sha, nil)
       |> assign(:reviewed_implementation_evidence_digest, nil)
+      |> assign(:command_console, nil)
       |> assign_campaign_snapshot(snapshot)
       |> allow_upload(:inputs, accept: :any, max_entries: 5, max_file_size: 1_073_741_824)
 
@@ -93,6 +94,22 @@ defmodule PikaWeb.AlignmentLive do
   @impl true
   def handle_info({:campaign_updated, snapshot}, socket),
     do: {:noreply, assign_campaign_snapshot(socket, snapshot)}
+
+  def handle_info(
+        {:command_console_event, ref, record},
+        %{assigns: %{command_console: %{ref: ref}}} = socket
+      ),
+      do:
+        {:noreply,
+         update(socket, :command_console, &Pika.CommandConsole.apply_record(&1, record))}
+
+  def handle_info({:command_console_event, _ref, _record}, socket), do: {:noreply, socket}
+
+  def handle_event("open_command_console", %{"ref" => ref}, socket),
+    do: {:noreply, open_command_console(socket, ref)}
+
+  def handle_event("close_command_console", _params, socket),
+    do: {:noreply, close_command_console(socket)}
 
   @impl true
   def handle_event("send_message", %{"message" => params}, socket) do
@@ -371,6 +388,7 @@ defmodule PikaWeb.AlignmentLive do
                     <div>
                       <strong>{detail.label}</strong>
                       <code :if={detail.detail not in [nil, ""]}>{detail.detail}</code>
+                      <button :if={detail[:console_ref]} type="button" class="console-open" phx-click="open_command_console" phx-value-ref={detail.console_ref}>打开 Console</button>
                     </div>
                   </div>
                 </div>
@@ -604,7 +622,9 @@ defmodule PikaWeb.AlignmentLive do
                       <strong>{metric["name"] || metric["id"]}</strong>
                       <small><code>{metric["id"]}</code> · {direction_label(metric["direction"])} · {metric["unit"]}</small>
                     </div>
-                    <span class="metric-threshold">{format_percent(metric["min_improvement_ratio"])}</span>
+                    <span class="metric-threshold">
+                      改善 ≥ {format_percent(metric["min_improvement_ratio"])} · 回退 ≤ {format_percent(metric["max_regression_ratio"] || 0.0)}
+                    </span>
                     <button :if={spec_editable?(@snapshot)} class="row-action" phx-click="prepare_change" phx-value-target={"metric:#{metric["id"]}"}>修改</button>
                   </article>
                 </div>
@@ -987,12 +1007,47 @@ defmodule PikaWeb.AlignmentLive do
           </div>
         </aside>
       </div>
+      <.command_console console={@command_console} />
     </main>
     """
   end
 
   defp message_form(body \\ "", intent \\ "conversation"),
     do: to_form(%{"body" => body, "intent" => intent}, as: :message)
+
+  defp open_command_console(socket, ref) do
+    socket = close_command_console(socket)
+
+    case allowed_console_ref?(socket.assigns.snapshot, ref) && Pika.CommandConsole.load(ref) do
+      {:ok, console} ->
+        if connected?(socket),
+          do: Phoenix.PubSub.subscribe(Pika.PubSub, Pika.CommandConsole.topic(ref))
+
+        assign(socket, :command_console, console)
+
+      _ ->
+        assign(socket, :flash_message, "无法读取该命令的 Console 输出。")
+    end
+  end
+
+  defp allowed_console_ref?(snapshot, ref) do
+    Enum.any?(snapshot.messages, fn
+      %{role: :activity, activity: activity} ->
+        Enum.any?(activity.details, &(&1[:console_ref] == ref))
+
+      _ ->
+        false
+    end)
+  end
+
+  defp close_command_console(%{assigns: %{command_console: %{ref: ref}}} = socket) do
+    if connected?(socket),
+      do: Phoenix.PubSub.unsubscribe(Pika.PubSub, Pika.CommandConsole.topic(ref))
+
+    assign(socket, :command_console, nil)
+  end
+
+  defp close_command_console(socket), do: socket
 
   defp reference_project_form(params \\ %{}) do
     defaults = %{"id" => "", "url" => "", "description" => ""}

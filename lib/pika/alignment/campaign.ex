@@ -110,6 +110,7 @@ defmodule Pika.Alignment.Campaign do
       backend_name: backend,
       backend_module: Keyword.get(opts, :backend_module, backend_module(backend)),
       backend_profile: Keyword.get(opts, :backend_profile, %{}),
+      reload_backend_profile: Keyword.get(opts, :reload_backend_profile, false),
       model: Keyword.get(opts, :model),
       reasoning_effort: Keyword.get(opts, :reasoning_effort, :high),
       backend_enabled: Keyword.get(opts, :start_backend, true),
@@ -2431,6 +2432,7 @@ defmodule Pika.Alignment.Campaign do
   end
 
   defp begin_open_session(state, workflow, cwd) do
+    state = reload_backend_profile(state)
     skill_roots = [state.skill.path | state.skill_roots] |> Enum.uniq()
 
     case session_instructions(state, workflow, skill_roots) do
@@ -2497,6 +2499,47 @@ defmodule Pika.Alignment.Campaign do
         %{state | last_error: "#{workflow} Agent Instructions 加载失败：#{inspect(reason)}"}
     end
   end
+
+  defp reload_backend_profile(%{reload_backend_profile: false} = state), do: state
+
+  defp reload_backend_profile(state) do
+    workspace = Pika.WorkspaceLock.workspace()
+
+    case Pika.RuntimeConfig.alignment_profile(workspace) do
+      {:ok, profile} ->
+        backend_name =
+          if profile["type"] == "cursor_acp", do: :cursor_acp, else: :codex_app_server
+
+        {command, args} = runtime_backend_command(backend_name, profile["command"])
+
+        %{
+          state
+          | backend_name: backend_name,
+            backend_module: backend_module(backend_name),
+            backend_profile: %{
+              command: command,
+              args: args,
+              approval_policy: profile["approval_policy"],
+              sandbox_policy: profile["sandbox_policy"],
+              protocol_config: profile["protocol_config"] || %{}
+            },
+            model: profile["model"],
+            reasoning_effort: profile["reasoning_effort"] || :high,
+            last_error: nil
+        }
+
+      {:error, reason} ->
+        %{state | last_error: "Backend 配置热加载失败：#{inspect(reason)}"}
+    end
+  end
+
+  defp runtime_backend_command(_backend, [command, "app-server", "--listen", "stdio://"]),
+    do: {command, []}
+
+  defp runtime_backend_command(_backend, [command, "acp"]), do: {command, []}
+  defp runtime_backend_command(_backend, [command | args]), do: {command, args}
+  defp runtime_backend_command(:cursor_acp, nil), do: {"cursor-agent", []}
+  defp runtime_backend_command(_, nil), do: {"codex", []}
 
   defp start_reference_resolution(state) do
     parent = self()
@@ -2639,11 +2682,19 @@ defmodule Pika.Alignment.Campaign do
     end
   end
 
-  defp apply_backend_event(state, %{type: type, data: data})
+  defp apply_backend_event(state, %{type: type, data: data} = event)
        when type in [:tool_started, :tool_completed] do
     case activity_for_tool(type, data) do
-      nil -> state
-      activity -> record_activity(state, activity)
+      nil ->
+        state
+
+      activity ->
+        activity =
+          if Pika.CommandConsole.command?(event),
+            do: Map.put(activity, :console_ref, Pika.CommandConsole.ref(event)),
+            else: activity
+
+        record_activity(state, activity)
     end
   end
 
