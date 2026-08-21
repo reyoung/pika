@@ -43,7 +43,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 ## 已确认的 Oracle、Target、Development 与 Harness 边界
 
 - Correctness Oracle 只负责判定语义正确性；Optimization Target 是固定性能锚点；Development Implementation 是持续优化的产品代码。三者不能由一个含混的 `reference_path` 隐式兼任。
-- Boundary Agent 在独立 setup worktree 中创建或完善仓库内 Oracle（若使用）、Development、正确性测试和 Benchmark Harness；空仓库必须同时产生可运行 Target 来源与初始 Development。
+- Alignment Actor 在独立 setup worktree 中创建或完善仓库内 Oracle（若使用）、Development、正确性测试和 Benchmark Harness；空仓库必须同时产生可运行 Target 来源与初始 Development。
 - Target 可取自被审阅 setup commit 的精确快照，也可取自固定 SHA 的 Reference Project。Pika 把它固化在 Workspace `targets/<revision>/repo`，并以 Git 忽略的 `target/` 软链接暴露；它不进入 setup squash 或候选 Patch。
 - 用户确认前必须审阅 Oracle、Target、Development 源码，并看到同一 Case 上两种实现都通过 Oracle 的 Target/Development 配对性能证据。
 - 用户确认后，仓库内 Oracle、正确性测试、Harness 与初始 Development 由 Agent Merge 到 Campaign Best Branch；只有 Development 在后续 Attempt 中变化。
@@ -95,7 +95,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 ## 已确认的并发与归并边界
 
 - 一个调优任务允许多个候选尝试并行执行。
-- 用户配置 Iteration Agent 并发度和 `max_unverified_attempts`；后者限制等待或执行 Integration 的完成候选队列深度。默认 `0`，即初始批次启动后，只要已有候选待验证就暂停新派发。Pika 不暴露 Boundary、Plan、Integration 等其他角色的并发参数。
+- 用户配置 Iteration Agent 并发度和 `max_unverified_attempts`；后者限制等待或执行 Integration 的完成候选队列深度。默认 `0`，即初始批次启动后，只要已有候选待验证就暂停新派发。Pika 不暴露 Alignment、Setup Merge、Baseline、Plan、Integration 等其他 Role 的并发参数。
 - Iteration 开发 Agent 可以自由运行 Benchmark；Pika 不提供独立 Benchmark Lease 或 Benchmark 并发限制。
 - 并发候选尝试的归并有明确先后顺序；归并阶段只有一个并发。
 - 排队期间最佳已知版本发生变化的候选，必须由编码 Agent 在最新版本上重放、解决冲突并重新运行正确性与 Metrics 测试。只有相对最新版本仍满足接受条件时才能归并。
@@ -164,7 +164,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Patch、Prompt、Agent 输出、日志和 Profiler 文件等文件型产物保存在本地 Artifact Workspace 中；SQLite 保存相对路径及必要元数据。
 - Profiler 原始文件不得作为 Blob 写入 SQLite。
 - 未来可以把 Artifact Workspace 扩展到 S3，但对象存储不在本次开发范围内。
-- SQLite 使用当前状态表加 `domain_events` 的混合模型。主要表包括 `campaign`、`spec_revisions`、`benchmark_cases`、`metric_definitions`、`sampling_revisions`、`sampling_revision_cases`、`best_revisions`、`attempts`、`attempt_metrics`、`agent_sessions`、`agent_messages`、`guidance`、`artifacts`、`sync_runs`、`operation_intents` 和 `domain_events`。
+- SQLite 使用当前状态表加 `domain_events` 的混合模型。主要表包括 `campaign`、`spec_revisions`、`benchmark_cases`、`metric_definitions`、`sampling_revisions`、`sampling_revision_cases`、`best_revisions`、`attempts`、`attempt_metrics`、`agent_sessions`、`agent_operation_receipts`、`agent_messages`、`guidance`、`artifacts`、`progress_summaries`、`sync_runs`、`operation_intents` 和 `domain_events`。
 - 每个 Attempt/Case/Metric 只保留最新结构化 Metric；Integration Full Regression 覆盖 Iteration 快照并补齐全量 Case。`domain_events` 保存状态转换和 UI 时间线，但不复制被覆盖的旧 Metric 快照。
 - 状态变更、Operation Intent 和待广播 Domain Event 必须在同一 SQLite 事务中提交。事务成功后再通过 Phoenix PubSub 广播。
 
@@ -178,7 +178,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 - Pika 的恢复正确性不依赖 Codex、Cursor 或其他 Agent 的会话 resume 能力。
 - Agent 异常结束或服务重启后，运行中的候选尝试标记为 `Interrupted`，原 worktree、提交和 Artifact 保留。
-- 系统优先恢复原 Provider Session；恢复不可用或失败时，通过新 Backend Session 注入任务定义、当前计划、工作区状态和最近输出，继续同一个候选尝试。
+- Symphony 从持久化领域状态恢复同一 Agent Work，并总是创建新的 Actor、Provider Session 与 Token；新 Session 注入最新有效配置、Role Instructions、当前计划、工作区状态和持久化历史。
 - 服务启动后自动恢复正常的 Planning、Iteration 和归并前全量回归工作，不等待用户点击继续。
 - 启动恢复必须检查未完成的 Full Regression、merge 和实际 Git 状态；`Blocked` 不自动解除。
 - 无法确认 Campaign Best Branch 安全、Campaign Workspace 被外部修改或 Artifact 校验失败时，停止危险推进并通知用户。
@@ -189,10 +189,10 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Agent 通过 Pika MCP 读取 Campaign、历史、用户指导、Sampling/Best Advanced 与当前系统状态，并提交 Plan、Summary、Metrics、Full Regression、Commit、Merge 和最终状态。
 - Agent 的文本输出和传输层事件只用于实时展示与诊断，不作为结构化状态的权威来源。
 - 候选尝试只有成功调用 `complete_attempt` 后才算完成；Plan 只有成功调用对应的 MCP 提交操作后才算生成。
-- Backend Turn 正常结束但缺少当前角色必须完成的 MCP 操作时，Pika 保持同一 Backend Session，并发送 follow-up Prompt 要求 Agent 继续完成和提交缺失工作。
+- Backend Turn 正常结束但缺少当前 Role 必须完成的 MCP 操作时，Actor 根据最新 committed facts 在同一 Backend Session 发送 follow-up Prompt。
 - 缺失 MCP 提交不会仅凭 Agent 自然语言中的“完成”而自动补全。
-- 缺失必需 MCP 提交没有提醒次数、Agent 更换次数或时间预算；Pika 持续驱动 Agent，直到 MCP 提交成功、用户取消或调优任务因其他停止条件结束。
-- Backend Session 或进程失效时，自动恢复流程优先 resume/load，失败时用新会话继续上述无限重试，不因此消耗新的优化 Iteration。
+- 缺失必需 MCP 提交没有领域层面的隐式失败转换；单 Session follow-up 使用技术上限，达到上限后把 Work 作为中断交给新的 Actor，而不是伪造完成或拒绝。
+- Backend Session 或进程失效时，自动恢复流程使用新会话继续同一 Agent Work，不因此消耗新的优化 Iteration。
 - Pika 不从 Agent 的自然语言最终回答中猜测 Metrics、Commit 或完成状态。
 - 新 Plan/Iteration Prompt 默认注入最近 10 个终态 Attempt 的 Description、Summary、Outcome、Metric delta 和关键失败原因；N 可在 Server 启动配置中修改。
 - 未读 BestAdvanced、Sampling Advanced 和用户指导不受 N 限制，必须全部注入；完整历史通过 `query_attempt_history` 查询。
@@ -202,29 +202,29 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Phoenix 只在 loopback 暴露 Streamable HTTP `/mcp`。
 - 每个 Backend Session 获得独立、短期、角色受限的 MCP Token；SQLite 只保存 Token 哈希，服务重启后的新 Session 使用新 Token。
 - Agent Backend 在打开 Session 时配置 MCP URL 与 Token。Codex 通过 App Server 进程配置注入，Cursor 通过 ACP Session 配置注入；不能连接 HTTP MCP 的 Backend 不符合 conformance contract。
-- MCP Token 在服务端绑定 Campaign、Backend Session、Role 与可选 Attempt ID；Agent 不能通过工具参数切换身份。
-- Boundary、Plan、Iteration、Integration、Sync 与 Side Conversation 使用不同工具集合。跨 Attempt 读取只能通过显式历史查询工具，所有写操作必须携带 idempotency key。
-- 必需完成调用为：Boundary Drafting 的 `submit_spec`/`submit_harness`/`submit_implementation_bundle`/`submit_implementation_review`、用户确认后的 `complete_setup_merge`/`submit_baseline`/`submit_iteration_sample`，Plan 的 `submit_plan`，Iteration 的 `record_metrics`/`submit_attempt_summary`/`complete_attempt`，Integration 的 `submit_full_regression`、必要时的 `submit_sampling_feedback` 和通过后的 `complete_merge`，Sync 的 `complete_sync`。Side Conversation 没有完成门禁。
-- Metrics 可以重复提交，后一次覆盖当前快照；缺少必需调用时继续采用无限 follow-up 规则。
+- MCP Token 在服务端绑定 Campaign、Backend Session、Actor、Role 与 Agent Work；Agent 不能通过工具参数切换身份。
+- Alignment、Setup Merge、Baseline、Plan、Iteration、Integration、Sync、Progress Summary 与 Side Conversation 使用各自最小工具集合。跨 Attempt 读取只能通过显式历史查询工具，所有写操作必须携带 idempotency key。
+- 必需完成调用为：Alignment 的 `submit_spec`/`submit_harness`/`submit_implementation_bundle`/`submit_implementation_review`，Setup Merge 的 `complete_setup_merge`，Baseline 的 `submit_baseline`/`submit_iteration_sample`，Plan 的 `submit_plan`，Iteration 的 Metrics/Summary 与 `complete_attempt` 或 `reject_attempt`，Integration 的 durable validation、拒绝或 merge 路径，Sync 的 `complete_sync`，Progress Summary 的 `submit_progress_summary`。Side Conversation 没有完成门禁。
+- Metrics 可以重复提交，后一次覆盖当前快照；命令幂等身份绑定 Role 与 Agent Work，不绑定可替换 Session。
 
 ## 已确认的 Agent Backend 与通信协议
 
 - Pika 领域层只依赖 `Pika.AgentBackend` Behaviour，不依赖 Codex App Server 或 ACP wire types。
 - `Pika.AgentBackend` 固定提供 `start_link`、`open_session`、`start_turn`、`steer`、`interrupt`、`close_session` 和 `capabilities`。
 - 标准化 Backend Event 包括 `session_started`、`turn_started`、`message_delta`、`plan_updated`、`tool_started`、`tool_updated`、`tool_completed`、`command_output`、`file_changed`、`usage_updated`、`turn_completed`、`backend_error` 和 `process_exited`。
-- Codex 使用 `Pika.AgentBackend.CodexAppServer`：每个 Backend Session 启动独立 `codex app-server --listen stdio://`，执行 `initialize → initialized → thread/start|thread/resume → turn/start`，通过 developer instructions 注入 Agent Instructions，并把 `item/*`/`turn/*` 通知转换为标准事件。
-- Cursor 使用 `Pika.AgentBackend.CursorACP`：每个 Backend Session 启动独立 `cursor-agent acp`，执行 ACP `initialize`、`session/new|session/load`、`session/prompt` 和 `session/cancel`；由于 ACP 没有 system-instruction 字段，adapter 在临时 Workspace 安装 Git-excluded、always-on 的 `.cursor/rules` 系统规则，并在 Session 关闭时清理。`session/load` 和 `session/close` 都按 capability 广告调用，否则分别降级为新 Session 或进程级 close。
+- Codex 使用 `Pika.AgentBackend.CodexAppServer`：每个 Backend Session 启动独立 `codex app-server --listen stdio://`，Agent Work 正常打开执行 `initialize → initialized → thread/start → turn/start`，通过 developer instructions 注入 Agent Instructions，并把 `item/*`/`turn/*` 通知转换为标准事件。
+- Cursor 使用 `Pika.AgentBackend.CursorACP`：每个 Backend Session 启动独立 `cursor-agent acp`，Agent Work 正常打开执行 ACP `initialize`、`session/new`、`session/prompt` 和 `session/cancel`；由于 ACP 没有 system-instruction 字段，adapter 在临时 Workspace 安装 Git-excluded、always-on 的 `.cursor/rules` 系统规则，并在 Session 关闭时清理。adapter 的 provider-native load 能力不用于 Agent Work 恢复。
 - Codex 当次指导使用原生 `turn/steer`，不 interrupt 当前 Turn；Cursor 由 Backend adapter 通过 cancel + follow-up Prompt 模拟 `steer`。
 - Stop Now 调用统一 `AgentBackend.interrupt`；Codex 映射到 `turn/interrupt`，Cursor 映射到 `session/cancel`。
 - 每个活跃 Backend Session 使用独立子进程、MCP Token 和配置，隔离崩溃与权限影响。
-- Coordinator 重启或替换 Backend Session 前必须把该角色遗留的 `starting`、`running`、`awaiting_report` Session 持久化为 `interrupted`；新的恢复 Session 才能成为唯一活跃会话，并可接管同一 Attempt 的 Integration Lease。
+- Symphony/Actor 恢复或替换 Backend Session 前必须把该 Role Work 遗留的 `starting`、`running`、`awaiting_report` Session 持久化为 `interrupted`；Directory 保证新的 Actor/Token 才能成为唯一活动执行者，并可核对和接管同一 Attempt 的 Integration Lease。
 - 多 Agent 通信采用中心辐射模型。Agent 不直接连接其他 Agent，而是通过 Pika MCP 的 Agent Mailbox 查询 Agent、发送消息和读取消息。
 - Agent Mailbox 消息必须先持久化到 SQLite，只能在同一调优任务内路由。目标 Agent 忙碌时，在后续 MCP 检查点或 Backend Turn 获取消息。
 - v0 内置 Codex App Server 与 Cursor ACP；新增 Backend 必须实现 `Pika.AgentBackend` conformance contract。
 
 ## 已确认的 Agent Profile
 
-- Boundary、Plan、Iteration、Integration、Sync 和旁路对话角色都可以选择命名 Agent Profile。
+- Alignment/Setup Merge/Baseline、Plan/Iteration、Integration、Sync、Progress Summary 和旁路对话 Role 都可以选择对应 Agent Profile。
 - 每个 Agent 实例都可以使用不同的 Agent Backend、模型和 reasoning effort；同一 Campaign 不要求统一模型。
 - Iteration Agent 使用显式 Slot 配置；每个 Slot 指定自己的 Agent Backend、模型、reasoning effort、环境与权限覆盖。
 - `iteration_agents` 数组长度就是用户配置的 Iteration 并发度。每个 Slot 完成一个 Attempt 后继续领取下一个，不使用额外的权重调度。
@@ -233,7 +233,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 ## 已确认的后端语言
 
 - Pika 服务后端使用 Elixir/OTP，而不是全 TypeScript 后端。
-- 每个 Backend Session、Campaign 状态机、归并队列和 Sync 队列都应映射为受监督的独立进程。
+- 每项活动 Agent Work 使用受监督的 Actor，Actor 内部拥有至多一个 Backend Session；Campaign 状态机、归并队列和 Sync 队列仍由独立领域进程管理。
 - Agent 协议通过 `Pika.AgentBackend` 隔离；Codex adapter 直接实现 App Server JSON-RPC，Cursor adapter 可使用经过 conformance 的 Elixir ACP 库或受控 fork。
 
 ## 已确认的部署与配置
@@ -297,7 +297,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 ## 已确认的对话界面
 
-- 目标对齐使用独立 Alignment Conversation，专门承载 Boundary Agent 的多轮访谈、输入 Artifact、Campaign Spec diff 和用户确认。
+- 目标对齐使用独立 Alignment Conversation，专门承载 Alignment Actor 的多轮访谈、输入 Artifact、Campaign Spec diff 和用户确认。
 - 每个运行中的 Attempt 提供独立 Attempt Conversation，展示对应 Backend Session 的文本、Plan、Tool Call、Diff、Terminal 和状态事件。
 - BTW Conversation 只能从某个正在运行的 Attempt Conversation 中 fork；它天然绑定该 Attempt，不提供无来源的“当前 Attempt”选择器。
 - BTW 使用同一 Composer 的三个显式模式：仅对话、注入该 Attempt、注入后续 Attempts。默认仅对话，Pika 不根据自然语言静默升级注入级别。
@@ -313,10 +313,10 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 ## 已确认的线上输入获取
 
-- 线上 Shape 与输入分布在 Alignment Conversation 中由 Boundary Agent 和用户共同确认，不要求预先固定一种导入格式。
-- Boundary Agent 可以生成面向实际环境的测试/采集脚本，也可以读取用户提供的 pickle dump 或 JSONL 文件。
+- 线上 Shape 与输入分布在 Alignment Conversation 中由 Alignment Actor 和用户共同确认，不要求预先固定一种导入格式。
+- Alignment Actor 可以生成面向实际环境的测试/采集脚本，也可以读取用户提供的 pickle dump 或 JSONL 文件。
 - 采集或导入结果进入 Campaign Spec 草稿，只有用户明确确认后才成为 Benchmark Cases。
-- Alignment、setup merge 与 Baseline Agent Instructions 分别是 Config 可覆盖的独立 EEx 资源；资源缺失或无法编译时必须在打开 Backend Session 前失败。
+- 每个 Role 的固定 Agent Instructions 由 Pika-owned 资源构造；Workspace 可在 `prompts/roles/<role>.md` 添加使用受限占位符的指导。显式存在但不可读取或引用未知变量的模板必须在打开 Backend Session 前失败，缺失时使用 built-in default。
 - Agent Instructions 只作为 provider 的系统级上下文注入，不能作为首条用户 Prompt 或自动 Kick-off。Campaign 的首个 Backend Turn 必须保留用户首条消息原文；用户确认 Spec 的显式动作负责推进 setup merge 与 Baseline。
 - Alignment Instructions 建议但不强制 latency、memory、TFLOPS、bandwidth 或 throughput 等常见 Metrics；Metric ID、名称和单位保持自由。
 - 用户消息与附件作为同一个领域动作提交；附件只向 Agent 注入相对路径、MIME、大小与哈希，不自动把文件内容展开进 Prompt。

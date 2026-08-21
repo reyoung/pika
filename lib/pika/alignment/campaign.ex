@@ -3,6 +3,8 @@ defmodule Pika.Alignment.Campaign do
 
   use GenServer
 
+  alias Pika.Agent.{Actor, Directory}
+  alias Pika.Agent.Role.Work
   alias Pika.AgentBackend
 
   alias Pika.{Baseline, Harness, PromptCatalog, ReferenceCatalog, Sampling, TargetSnapshot}
@@ -41,10 +43,37 @@ defmodule Pika.Alignment.Campaign do
     call_if_started(:implementation_review, {:error, :not_started})
   end
 
-  def authorize(token), do: call_if_started({:authorize, token}, {:error, :not_started})
+  def authorize(token) do
+    case Directory.lookup(token) do
+      {:ok, %{role_id: role_id}} when role_id in ~w(alignment setup_merge baseline) -> :ok
+      _ -> call_if_started({:authorize, token}, {:error, :not_started})
+    end
+  catch
+    :exit, _reason -> call_if_started({:authorize, token}, {:error, :not_started})
+  end
 
-  def mcp_call(token, tool, args),
-    do: call_if_started({:mcp, token, tool, args}, {:error, :not_started}, :infinity)
+  def mcp_call(token, tool, args) do
+    case Directory.lookup(token) do
+      {:ok, %{role_id: role_id, actor: actor}}
+      when role_id in ~w(alignment setup_merge baseline) ->
+        legacy_actor_call(actor, tool, args)
+
+      _ ->
+        call_if_started({:mcp, token, tool, args}, {:error, :not_started}, :infinity)
+    end
+  catch
+    :exit, _reason ->
+      call_if_started({:mcp, token, tool, args}, {:error, :not_started}, :infinity)
+  end
+
+  def runnable_agent_work(campaign_id),
+    do: call_if_started({:runnable_agent_work, campaign_id}, [])
+
+  def role_context(%Work{} = work),
+    do: call_if_started({:role_context, work}, {:error, :not_started})
+
+  def role_call(%Work{} = work, tool, args, meta),
+    do: call_if_started({:role_call, work, tool, args, meta}, {:error, :not_started}, :infinity)
 
   def send_message(body, artifacts \\ []),
     do: call_if_started({:send_message, body, artifacts}, {:error, :not_started})
@@ -114,6 +143,8 @@ defmodule Pika.Alignment.Campaign do
       model: Keyword.get(opts, :model),
       reasoning_effort: Keyword.get(opts, :reasoning_effort, :high),
       backend_enabled: Keyword.get(opts, :start_backend, true),
+      role_owners: Keyword.get(opts, :role_owners, %{}),
+      symphony: Keyword.get(opts, :symphony, Pika.Agent.Symphony),
       backend: nil,
       backend_session: nil,
       backend_open_generation: 0,
@@ -121,6 +152,7 @@ defmodule Pika.Alignment.Campaign do
       backend_token_hash: nil,
       closed_sessions: MapSet.new(),
       backend_workflow: :alignment,
+      actor_session_id: nil,
       active_turn_id: nil,
       agent_responding: false,
       stream_message_id: nil,
@@ -175,6 +207,11 @@ defmodule Pika.Alignment.Campaign do
 
     state = restore_durable_state(state, Keyword.get(opts, :durable_state))
 
+    if Process.whereis(Pika.PubSub) do
+      Phoenix.PubSub.subscribe(Pika.PubSub, "pika:agent:#{state.campaign_id}")
+      Phoenix.PubSub.subscribe(Pika.PubSub, "pika:agent-lifecycle:#{state.campaign_id}")
+    end
+
     with :ok <- restore_target_views(state),
          :ok <- PromptCatalog.validate() do
       broadcast(state)
@@ -182,7 +219,8 @@ defmodule Pika.Alignment.Campaign do
       if state.status == :resolving_references do
         {:ok, state, {:continue, :resume_reference_resolution}}
       else
-        if state.backend_enabled and state.status != :optimizing do
+        if legacy_backend_enabled?(state, active_role_id(state)) and
+             state.status != :optimizing do
           {:ok, state, {:continue, :open_backend}}
         else
           {:ok, state}
@@ -215,6 +253,14 @@ defmodule Pika.Alignment.Campaign do
     {:reply, load_implementation_review(state), state}
   end
 
+  def handle_call({:runnable_agent_work, campaign_id}, _from, state) do
+    works = if campaign_id == state.campaign_id, do: current_agent_work(state), else: []
+    {:reply, works, state}
+  end
+
+  def handle_call({:role_context, %Work{} = work}, _from, state),
+    do: {:reply, build_role_context(state, work), state}
+
   def handle_call({:authorize, token}, _from, state) do
     authorized = Map.has_key?(state.mcp_tokens, token_hash(token))
     {:reply, if(authorized, do: :ok, else: {:error, :unauthorized}), state}
@@ -231,7 +277,7 @@ defmodule Pika.Alignment.Campaign do
       state = %{state | messages: state.messages ++ [message(:user, body, artifacts)]}
       input = user_input(body, artifacts)
       state = record_workflow_kickoff(state, input)
-      state = dispatch_input(state, input)
+      state = deliver_input(state, input)
       state = mark_kickoff_dispatched(state)
       broadcast(state)
       {:reply, :ok, state}
@@ -392,7 +438,7 @@ defmodule Pika.Alignment.Campaign do
         }
 
         state =
-          dispatch_input(
+          deliver_input(
             state,
             user_input("用户拒绝当前 Spec，并要求修改：#{body}", artifacts)
           )
@@ -440,6 +486,29 @@ defmodule Pika.Alignment.Campaign do
 
       {:ok, identity} ->
         execute_mcp(tool, stringify_keys(args), identity, token_hash, from, state)
+    end
+  end
+
+  def handle_call({:role_call, %Work{} = work, tool, args, meta}, from, state) do
+    with {:ok, _context} <- build_role_context(state, work),
+         {:ok, workflow} <- workflow_for_role(work.role_id) do
+      identity = %{
+        workflow: workflow,
+        role: :boundary,
+        session_key: meta.session_id,
+        role_work: work
+      }
+
+      execute_mcp(
+        tool,
+        stringify_keys(args),
+        identity,
+        role_work_hash(work),
+        from,
+        state
+      )
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -545,7 +614,7 @@ defmodule Pika.Alignment.Campaign do
     }
 
     state =
-      if state.backend_enabled and is_nil(state.backend) do
+      if legacy_backend_enabled?(state, "setup_merge") and is_nil(state.backend) do
         state
         |> Map.update!(
           :workflow_kickoffs,
@@ -649,6 +718,58 @@ defmodule Pika.Alignment.Campaign do
   end
 
   def handle_info({:backend_turn_result, _generation, _result}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:agent_event, %Work{campaign_id: campaign_id, role_id: role_id}, event},
+        %{campaign_id: campaign_id} = state
+      )
+      when role_id in ~w(alignment setup_merge baseline) do
+    {:ok, workflow} = workflow_for_role(role_id)
+
+    state =
+      state
+      |> Map.put(:actor_session_id, event.session_id)
+      |> Map.put(:backend_workflow, workflow)
+      |> apply_backend_event(event)
+
+    broadcast(state, persist: persist_backend_event?(event))
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:agent_actor_started, %Work{campaign_id: campaign_id, role_id: role_id}, session_id},
+        %{campaign_id: campaign_id} = state
+      )
+      when role_id in ~w(alignment setup_merge baseline) do
+    {:ok, workflow} = workflow_for_role(role_id)
+    state = %{state | actor_session_id: session_id, backend_workflow: workflow}
+    broadcast(state, persist: false)
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {event, %Work{campaign_id: campaign_id, role_id: role_id}, _details},
+        %{campaign_id: campaign_id} = state
+      )
+      when event in [
+             :agent_actor_completed,
+             :agent_actor_skipped,
+             :agent_actor_failed,
+             :agent_actor_interrupted,
+             :agent_actor_stopped
+           ] and role_id in ~w(alignment setup_merge baseline) do
+    state = %{
+      state
+      | actor_session_id: nil,
+        active_turn_id: nil,
+        agent_responding: false,
+        stream_message_id: nil,
+        activity_message_id: nil
+    }
+
+    broadcast(state, persist: false)
+    {:noreply, state}
+  end
 
   def handle_info({:pika_backend_event, event}, state) do
     state =
@@ -756,7 +877,11 @@ defmodule Pika.Alignment.Campaign do
         do: state.workspace.repo,
         else: state.workspace.setup_worktree
 
-    {:noreply, begin_open_session(state, state.backend_workflow, cwd)}
+    role_id = active_role_id(state)
+
+    if legacy_backend_enabled?(state, role_id),
+      do: {:noreply, begin_open_session(state, state.backend_workflow, cwd)},
+      else: {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -1207,6 +1332,7 @@ defmodule Pika.Alignment.Campaign do
                   required: MapSet.new(["submit_baseline"]),
                   backend: nil,
                   backend_session: nil,
+                  actor_session_id: nil,
                   provider_session_id: nil,
                   backend_token_hash: nil,
                   closed_sessions:
@@ -1233,7 +1359,7 @@ defmodule Pika.Alignment.Campaign do
                 end
 
               state =
-                if state.backend_enabled,
+                if legacy_backend_enabled?(state, "baseline"),
                   do: begin_open_session(state, :baseline, state.workspace.repo),
                   else: state
 
@@ -2341,6 +2467,7 @@ defmodule Pika.Alignment.Campaign do
             |> Map.delete(:baseline),
           backend: nil,
           backend_session: nil,
+          actor_session_id: nil,
           provider_session_id: nil,
           backend_token_hash: nil,
           backend_workflow: :alignment,
@@ -2363,9 +2490,11 @@ defmodule Pika.Alignment.Campaign do
       }
 
       state =
-        if state.backend_enabled,
-          do: begin_open_session(state, :alignment, workspace.setup_worktree),
-          else: state
+        if legacy_backend_enabled?(state, "alignment") do
+          begin_open_session(state, :alignment, workspace.setup_worktree)
+        else
+          deliver_input(state, input)
+        end
 
       {:ok, state}
     end
@@ -2602,7 +2731,7 @@ defmodule Pika.Alignment.Campaign do
     }
 
     if Map.has_key?(state.workflow_kickoffs, :alignment) do
-      dispatch_input(
+      deliver_input(
         state,
         "#{change}. Selected Reference Projects are now: #{Enum.join(selected_ids, ", ")}. Update and resubmit the Campaign Spec with submit_spec before asking for confirmation."
       )
@@ -2750,8 +2879,9 @@ defmodule Pika.Alignment.Campaign do
   end
 
   defp apply_backend_event(state, %{type: :process_exited}) do
-    if state.backend_enabled and state.status != :optimizing,
-      do: Process.send_after(self(), :recover_backend, 100)
+    if legacy_backend_enabled?(state, active_role_id(state)) and
+         state.status != :optimizing,
+       do: Process.send_after(self(), :recover_backend, 100)
 
     state =
       cancel_pending_questions(
@@ -2775,11 +2905,212 @@ defmodule Pika.Alignment.Campaign do
         recovery_pending: true,
         stream_message_id: nil,
         activity_message_id: nil,
-        messages: state.messages ++ [message(:system, "Backend 进程退出；将尝试恢复原 Session。")]
+        messages: state.messages ++ [message(:system, "Backend 进程退出；将尝试用新 Session 恢复当前工作。")]
     }
   end
 
   defp apply_backend_event(state, _event), do: state
+
+  defp current_agent_work(state) do
+    case current_role_id(state) do
+      nil -> []
+      role_id -> [role_work(state.campaign_id, spec_revision(state), role_id)]
+    end
+  end
+
+  defp current_role_id(state) do
+    cond do
+      state.status in [:drafting_spec, :awaiting_confirmation] ->
+        "alignment"
+
+      state.status == :building_baseline and
+          MapSet.member?(state.required, "complete_setup_merge") ->
+        "setup_merge"
+
+      state.status in [:building_baseline, :selecting_iteration_sample] and
+          Enum.any?(
+            ~w(submit_baseline submit_iteration_sample),
+            &MapSet.member?(state.required, &1)
+          ) ->
+        "baseline"
+
+      true ->
+        nil
+    end
+  end
+
+  defp role_work(campaign_id, revision, role_id) do
+    %Work{
+      role_id: role_id,
+      kind: :campaign_revision,
+      id: role_work_id(campaign_id, revision),
+      campaign_id: campaign_id
+    }
+  end
+
+  defp role_work_id(campaign_id, revision), do: "#{campaign_id}:spec:#{revision}"
+
+  defp parse_role_work_id(id) when is_binary(id) do
+    case String.split(id, ":spec:", parts: 2) do
+      [campaign_id, revision] ->
+        case Integer.parse(revision) do
+          {value, ""} when value > 0 -> {:ok, campaign_id, value}
+          _ -> {:error, :invalid_campaign_revision_work}
+        end
+
+      _ ->
+        {:error, :invalid_campaign_revision_work}
+    end
+  end
+
+  defp build_role_context(state, %Work{kind: :campaign_revision} = work)
+       when work.role_id in ~w(alignment setup_merge baseline) do
+    with {:ok, campaign_id, work_revision} <- parse_role_work_id(work.id),
+         true <- campaign_id == state.campaign_id and work.campaign_id == state.campaign_id do
+      revision = spec_revision(state)
+      required = state.required |> MapSet.to_list() |> Enum.sort()
+      superseded = work_revision != revision
+
+      facts = %{
+        _revision:
+          :erlang.phash2({
+            revision,
+            state.status,
+            required,
+            not is_nil(state.target_progress),
+            not is_nil(state.baseline_progress)
+          }),
+        blocked: state.status == :blocked,
+        kickoff_recorded: kickoff_recorded?(state, work.role_id),
+        phase_complete: role_phase_complete?(work.role_id, state, superseded),
+        required_operations: required,
+        needs_submit_spec: "submit_spec" in required,
+        needs_submit_harness: "submit_harness" in required,
+        needs_implementation_bundle:
+          "submit_implementation_bundle" in required and is_nil(state.target_progress),
+        needs_implementation_review: "submit_implementation_review" in required,
+        needs_setup_merge: "complete_setup_merge" in required,
+        needs_baseline: "submit_baseline" in required and is_nil(state.baseline_progress),
+        needs_iteration_sample: "submit_iteration_sample" in required
+      }
+
+      {:ok,
+       %{
+         facts: facts,
+         cwd: role_cwd(state, work.role_id),
+         skill_roots: [state.skill.path | state.skill_roots] |> Enum.uniq(),
+         revision: work_revision,
+         current_revision: revision,
+         status: state.status,
+         required_operations: required,
+         campaign: public_snapshot(state),
+         instruction_assigns:
+           if(superseded, do: %{}, else: role_instruction_assigns(state, work.role_id)),
+         confirmation_input: state.pending_confirmation_input,
+         workflow_kickoff: workflow_kickoff(state, work.role_id)
+       }}
+    else
+      false -> {:error, :campaign_revision_work_mismatch}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp build_role_context(_state, _work), do: {:error, :invalid_campaign_revision_work}
+
+  defp role_phase_complete?(_role_id, _state, true), do: true
+
+  defp role_phase_complete?("alignment", state, false),
+    do: state.status not in [:drafting_spec, :awaiting_confirmation]
+
+  defp role_phase_complete?("setup_merge", state, false),
+    do: not MapSet.member?(state.required, "complete_setup_merge")
+
+  defp role_phase_complete?("baseline", state, false),
+    do: state.status not in [:building_baseline, :selecting_iteration_sample]
+
+  defp role_cwd(state, "baseline"), do: state.workspace.repo
+  defp role_cwd(state, _role_id), do: state.workspace.setup_worktree
+
+  defp role_instruction_assigns(state, "alignment"), do: instruction_assigns(state, :alignment)
+
+  defp role_instruction_assigns(state, "setup_merge"),
+    do: instruction_assigns(state, :setup_merge)
+
+  defp role_instruction_assigns(state, "baseline"), do: instruction_assigns(state, :baseline)
+
+  defp workflow_kickoff(state, "baseline"), do: Map.get(state.workflow_kickoffs, :baseline)
+  defp workflow_kickoff(state, _role_id), do: Map.get(state.workflow_kickoffs, :alignment)
+
+  defp kickoff_recorded?(state, "baseline"),
+    do: Map.has_key?(state.workflow_kickoffs, :baseline)
+
+  defp kickoff_recorded?(state, "setup_merge"),
+    do: is_binary(state.pending_confirmation_input)
+
+  defp kickoff_recorded?(state, "alignment"),
+    do: Map.has_key?(state.workflow_kickoffs, :alignment)
+
+  defp workflow_for_role("baseline"), do: {:ok, :baseline}
+  defp workflow_for_role(role_id) when role_id in ~w(alignment setup_merge), do: {:ok, :alignment}
+  defp workflow_for_role(_role_id), do: {:error, :unknown_alignment_role}
+
+  defp role_for_workflow(:baseline), do: "baseline"
+  defp role_for_workflow(_workflow), do: "alignment"
+
+  defp active_role_id(state),
+    do: current_role_id(state) || role_for_workflow(state.backend_workflow)
+
+  defp role_work_hash(work),
+    do: :crypto.hash(:sha256, :erlang.term_to_binary({work.role_id, work.kind, work.id}))
+
+  defp legacy_backend_enabled?(state, role_id) do
+    state.backend_enabled and
+      Map.get(state.role_owners, role_id, :legacy) not in [:actor, "actor"]
+  end
+
+  defp deliver_input(state, input) do
+    role_id = active_role_id(state)
+
+    if legacy_backend_enabled?(state, role_id) do
+      dispatch_input(state, input)
+    else
+      queue_actor_input(state, role_id, input)
+      state
+    end
+  end
+
+  defp queue_actor_input(state, role_id, input) do
+    work = role_work(state.campaign_id, spec_revision(state), role_id)
+    symphony = state.symphony
+
+    Task.start(fn ->
+      _ = safe_symphony_reconcile(symphony)
+      deliver_actor_input(work, input, 80)
+    end)
+
+    :ok
+  end
+
+  defp safe_symphony_reconcile(symphony) do
+    Pika.Agent.Symphony.reconcile(symphony)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp deliver_actor_input(work, input, attempts) when attempts > 0 do
+    case Directory.lookup_work(work) do
+      {:ok, actor} ->
+        Actor.kickoff(actor, input)
+
+      _ ->
+        Process.sleep(25)
+        deliver_actor_input(work, input, attempts - 1)
+    end
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp deliver_actor_input(_work, _input, 0), do: :ok
 
   defp session_instructions(state, :alignment, skill_roots) do
     with {:ok, alignment} <-
@@ -2877,7 +3208,8 @@ defmodule Pika.Alignment.Campaign do
         source_dirty: state.workspace.source_status != ""
       },
       backend: state.backend_name,
-      backend_session_id: state.backend_session && state.backend_session.id,
+      backend_session_id:
+        state.actor_session_id || (state.backend_session && state.backend_session.id),
       active_turn_id: state.active_turn_id,
       agent_responding: state.agent_responding,
       pending_question: public_question(state.pending_questions),
@@ -3322,20 +3654,40 @@ defmodule Pika.Alignment.Campaign do
         {:replay, response}
 
       nil ->
-        if state.persistence && function_exported?(state.persistence, :lookup_idempotency, 5) do
-          state.persistence.lookup_idempotency(
-            identity.session_key,
-            tool,
-            key,
-            request_hash,
-            state
-          )
-        else
-          :missing
-        end
+        lookup_persisted_idempotency(state, identity, tool, key, request_hash)
 
       _ ->
         :conflict
+    end
+  end
+
+  defp lookup_persisted_idempotency(
+         state,
+         %{role_work: work} = identity,
+         tool,
+         key,
+         request_hash
+       )
+       when not is_nil(state.persistence) do
+    if function_exported?(state.persistence, :lookup_role_idempotency, 5),
+      do: state.persistence.lookup_role_idempotency(work, tool, key, request_hash, state),
+      else: lookup_session_idempotency(state, identity, tool, key, request_hash)
+  end
+
+  defp lookup_persisted_idempotency(state, identity, tool, key, request_hash),
+    do: lookup_session_idempotency(state, identity, tool, key, request_hash)
+
+  defp lookup_session_idempotency(state, identity, tool, key, request_hash) do
+    if state.persistence && function_exported?(state.persistence, :lookup_idempotency, 5) do
+      state.persistence.lookup_idempotency(
+        identity.session_key,
+        tool,
+        key,
+        request_hash,
+        state
+      )
+    else
+      :missing
     end
   end
 
@@ -3564,6 +3916,21 @@ defmodule Pika.Alignment.Campaign do
 
   defp backend_session_message(workflow, session),
     do: "#{workflow} Backend Session 已启动：#{session.backend_protocol}"
+
+  defp legacy_actor_call(actor, tool, args) do
+    case Actor.invoke(actor, tool, args, :infinity) do
+      {:ok, outcome} ->
+        {:ok, outcome.value}
+
+      {:error, %Pika.Agent.Role.Error{} = error} ->
+        {:error, Atom.to_string(error.code), error.message, error.details}
+
+      {:error, reason} ->
+        {:error, "actor_operation_failed", inspect(reason), %{}}
+    end
+  catch
+    :exit, reason -> {:error, "actor_unavailable", inspect(reason), %{}}
+  end
 
   defp call_if_started(message, default, timeout \\ 120_000) do
     case Process.whereis(__MODULE__) do

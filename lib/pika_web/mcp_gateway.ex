@@ -5,6 +5,9 @@ defmodule PikaWeb.MCPGateway do
 
   def call(conn, _opts) do
     cond do
+      agent_role_token?(conn) ->
+        Pika.Agent.MCP.Router.call(conn, Pika.Agent.MCP.Router.init([]))
+
       sync_token?(conn) ->
         Pika.Sync.MCP.Router.call(conn, Pika.Sync.MCP.Router.init([]))
 
@@ -19,6 +22,13 @@ defmodule PikaWeb.MCPGateway do
 
       true ->
         Pika.MCP.Router.call(conn, Pika.MCP.Router.init([]))
+    end
+  end
+
+  defp agent_role_token?(conn) do
+    case Plug.Conn.get_req_header(conn, "authorization") do
+      ["Bearer " <> token] -> Pika.Agent.Directory.authorize(token) == :ok
+      _ -> false
     end
   end
 

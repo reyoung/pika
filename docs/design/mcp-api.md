@@ -9,12 +9,14 @@ Phoenix 在 loopback 暴露 Streamable HTTP `/mcp`。每个 Backend Session 获�
   "campaign_id": "...",
   "backend_session_id": "...",
   "role": "iteration",
+  "work_kind": "attempt",
+  "work_id": "...",
   "attempt_id": "...",
   "sync_run_id": null
 }
 ```
 
-工具参数不接受 `campaign_id` 或任意 Session/Attempt 身份切换。跨 Attempt 读取只能经过明确历史工具。所有写工具必须包含调用方生成的 `idempotency_key`；响应由 `idempotency_records` 去重。
+Directory 还把 Token 绑定到当前 Actor；工具参数不接受 `campaign_id` 或任意 Session/Work 身份切换。跨 Attempt 读取只能经过明确历史工具。工具目录取自 Actor 打开 Session 时冻结的 Role Definition。所有写工具必须包含调用方生成的 `idempotency_key`；响应按 `Role + Agent Work + operation + key` 由 `agent_operation_receipts` 去重，因此恢复 Session 不会丢失幂等身份。
 
 Backend-specific 注入方式：
 
@@ -34,7 +36,9 @@ Backend-specific 注入方式：
 - `missing_required_data`：完成门禁缺字段/Artifact/Metric。
 - `blocked`：Campaign 已阻止危险推进。
 
-## 2. 所有工作 Role 可用的读取工具
+## 2. Attempt 工作 Role 的共享工具
+
+以下工具由 Plan 与 Iteration 共享；其他 Role 只获得各自 Definition 明确列出的工具，不存在隐式的全局工具集合。
 
 ### `get_context`
 
@@ -68,7 +72,15 @@ Backend-specific 注入方式：
 
 参数：`kind`、以 `artifacts/` 开头的 Workspace 相对路径、SHA-256、大小、MIME、metadata。Pika 使用有界内存流式校验路径、文件存在性和哈希后登记；Workspace 中其他目录不能登记为 Artifact。Baseline 使用下面的单 Manifest 流程，不需要逐个调用本工具。
 
-## 3. Boundary Role
+## 3. Alignment、Setup Merge 与 Baseline Roles
+
+三个 Role 共享同一个 Campaign/Spec Revision 领域流程，但使用不同 Actor、Backend Session、Token 和最小工具目录：
+
+- Alignment：`get_context`、`ask_questions`、`register_artifact`、`submit_spec`、`submit_harness`、`submit_implementation_bundle`、`submit_implementation_review`。
+- Setup Merge：`get_context`、`complete_setup_merge`。
+- Baseline：`get_context`、`register_artifact`、`reopen_baseline_definition`、`submit_baseline`、`submit_iteration_sample`。
+
+Alignment Session 只注入 Instructions 并等待真实用户首条消息；Setup Merge 与 Baseline 由已持久化的确认动作自动启动。Role 切换必然关闭旧 Actor 并创建新的 provider Session。
 
 ### `submit_spec`
 
@@ -88,7 +100,7 @@ Backend-specific 注入方式：
 
 ### `complete_setup_merge`
 
-用户在 UI 确认 Campaign Spec 后，Boundary Agent 提交 `base_sha`、setup commit SHA 和 squash 后 `best_sha`。Pika 独立核验 `pika/best` 的父提交、Diff 和 protected digest；自然语言或 Git 命令退出码不能代替该工具。
+用户在 UI 确认 Campaign Spec 后，Setup Merge Actor 提交 `base_sha`、setup commit SHA 和 squash 后 `best_sha`。Pika 独立核验 `pika/best` 的父提交、Diff 和 protected digest；自然语言或 Git 命令退出码不能代替该工具。
 
 ### `reopen_baseline_definition`
 
@@ -104,7 +116,7 @@ Pair JSONL 按 Spec 的 Case 顺序、Metric 顺序和递增 `pair_index` 分组
 
 只在全量 Baseline 已接受后可用。参数包含最多十个初始 Case IDs、逐项选择理由、预计 Iteration/Full 测量秒数、节省比例和 Summary。Pika 校验它是 Full Case Set 的非空子集、至少包含一个 Target Case，并创建首个 Sampling Revision。该调用完成前 Campaign 停留在 `SelectingIterationSample`，不能进入 Optimizing。
 
-Boundary 在 DraftingSpec 的完成门禁要求 `submit_spec`、`submit_harness`、`submit_implementation_bundle` 与 `submit_implementation_review` 都成功，且 UI 已出现可确认 Spec diff、Oracle/Target/Development 源码和配对运行证据。用户确认不是 MCP Agent 工具。确认后依次要求 `complete_setup_merge`、`submit_baseline` 和 `submit_iteration_sample`；缺少调用时继续使用同 Session follow-up，Backend 失效则创建新 Session 重建上下文。
+Alignment 在 DraftingSpec 的完成门禁要求 `submit_spec`、`submit_harness`、`submit_implementation_bundle` 与 `submit_implementation_review` 都成功，且 UI 已出现可确认 Spec diff、Oracle/Target/Development 源码和配对运行证据。用户确认不是 MCP Agent 工具。确认后 Setup Merge 要求 `complete_setup_merge`，Baseline 再要求 `submit_baseline` 与 `submit_iteration_sample`；缺少调用时根据 committed facts follow-up，Backend 失效则用新 Actor/Session 重建同一 Work 上下文。
 
 用户确认还必须绑定当前 Target digest、Development SHA 与 Implementation Review Evidence digest。UI 在有界源码预览中分别显示 Oracle、Target、Development 的路径、大小、内容和哈希，并要求用户显式确认已审阅；Pika 接受确认前重新核验 Target checkout、Development commit、Harness digest 与证据 Artifact。任一身份变化后旧审阅确认不能复用。
 
@@ -136,7 +148,7 @@ Boundary 在 DraftingSpec 的完成门禁要求 `submit_spec`、`submit_harness`
 
 参数：`sampling_revision_id`、`base_sha`、`candidate_sha`、worktree status、最新 commit。完成前要求采样版本 Metric、Summary、Patch 可生成、无 protected path 修改和 clean worktree。成功后 Attempt 进入 `ready_for_integration`。
 
-Backend Turn 结束但缺少任一必需工具时，Pika 向同一 Backend Session 发送 follow-up；没有次数或时间预算。
+Backend Turn 结束但缺少任一必需工具时，Actor 根据最新 committed facts 发送 follow-up。单个 Session 使用有界 follow-up 防止坏会话永久占用；达到边界只会把 Work 标记为可恢复的中断，Symphony 用新的 Session 继续，不能凭此制造领域终态。
 
 ## 6. Integration Role
 
@@ -169,28 +181,35 @@ Backend Turn 结束但缺少任一必需工具时，Pika 向同一 Backend Sessi
 
 参数：Sync Intent、remote/branch、remote_before/candidate/remote_after/best_after SHA、正确性、Best Metrics、Sync Trail Artifact。Pika 核对 remote 和本地 Git；若 protected Harness 改变，返回 `awaiting_spec_confirmation`，不能完成。
 
-## 8. Side Conversation Role
+## 8. Progress Summary Role
+
+这个 Role 只有 `get_progress_context` 与 `submit_progress_summary`。前者读取定时器到期时已经持久化的不可变快照；后者提交唯一权威 Summary 并完成 Request。它没有文件、Shell、Git、Metric、Mailbox 或其他写权限，Pika 不解析 Backend 的自然语言尾输出来生成 Summary。
+
+## 9. Side Conversation Role
 
 只可使用读取、Mailbox 和 Artifact 工具，没有完成门禁，不能提交 Metric、Spec、Full Regression、Merge 或 Sync。BTW 的“注入父 Attempt/后续 Attempts”由用户 UI 动作创建 Guidance，不由 Side Agent 自行调用。
 
-## 9. Tool 权限矩阵
+## 10. Tool 权限矩阵
 
-| Tool family | Boundary | Plan | Iteration | Integration | Sync | Side |
-|---|---:|---:|---:|---:|---:|---:|
-| Context/history | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Mailbox | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Artifact | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Spec/Harness/Implementation Review/Baseline/Sample | ✓ |  |  |  |  |  |
-| Plan |  | ✓ |  |  |  |  |
-| Metrics/Summary/Attempt complete |  |  | ✓ |  |  |  |
-| Full Regression/Sampling Feedback/Merge |  |  |  | ✓ |  |  |
-| Sync |  |  |  |  | ✓ |  |
+| Tool family | Alignment | Setup Merge | Baseline | Plan | Iteration | Integration | Sync | Progress Summary | Side |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Role context | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Attempt history / Mailbox |  |  |  | ✓ | ✓ |  |  |  | ✓ |
+| Artifact registration | ✓ |  | ✓ | ✓ | ✓ | ✓ | ✓ |  | ✓ |
+| Spec/Harness/Implementation Review | ✓ |  |  |  |  |  |  |  |  |
+| Setup merge |  | ✓ |  |  |  |  |  |  |  |
+| Baseline/Sample/Reopen |  |  | ✓ |  |  |  |  |  |  |
+| Plan |  |  |  | ✓ |  |  |  |  |  |
+| Attempt Metrics/Summary/complete/reject |  |  |  |  | ✓ |  |  |  |  |
+| Full Regression/Lease/Merge/reject |  |  |  |  |  | ✓ |  |  |  |
+| Sync |  |  |  |  |  |  | ✓ |  |  |
+| Submit captured progress summary |  |  |  |  |  |  |  | ✓ |  |
 
-## 10. MCP conformance tests
+## 11. MCP conformance tests
 
 - 每个写工具重复相同 idempotency key 返回同响应，不产生重复 Domain Event。
 - 同 key 不同 body 返回 `idempotency_conflict`。
 - 错误 Role、Attempt 或 Campaign 身份返回拒绝且不泄露资源是否存在。
-- 服务重启后旧 Token 失效，新 Backend Session 能读取未读消息和恢复上下文。
+- 服务重启后旧 Token 失效，新 Backend Session 用同一 Agent Work 读取 committed context，且 work-scoped command receipt 仍可重放。
 - `record_metrics`、`complete_attempt` 和 Integration 在 BestAdvanced 后拒绝陈旧 Base。
 - MCP 工具异常不得导致 Backend Session 进程或 Phoenix Endpoint 崩溃。

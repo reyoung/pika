@@ -74,7 +74,7 @@ defmodule Pika.Alignment.MCP.Router do
   defp dispatch_rpc(conn, _token, _request),
     do: rpc_error(conn, nil, -32_600, "invalid request", 400)
 
-  defp tools do
+  def tools do
     [
       tool(
         "get_context",

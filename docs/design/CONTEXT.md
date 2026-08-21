@@ -81,8 +81,28 @@ Pika 提供给 Backend Session 的外部 Skill 清单，与 `ref/` Kernel 仓库
 _Avoid_: Reference Catalog、Agent Backend、Pika MCP tools
 
 **Backend Session**：
-由 Pika 启动并通过某个 Agent Backend 控制的独立编码会话；Codex 对应独立 App Server thread，Cursor 对应独立 ACP session。
+由一个 Agent Actor 启动并通过某个 Agent Backend 控制的独立编码会话；Codex 对应独立 App Server thread，Cursor 对应独立 ACP session。同一 Session 使用固定的 Agent Profile、Agent Instructions、Pika MCP 权限和 Agent Role 契约；同一工作恢复时按当时最新配置创建新的 provider Session 和新 Token，但不能跨 Agent Role 复用 Session。
 _Avoid_: GPU Worker、执行节点、统一 ACP Session
+
+**Agent Role**：
+在调优任务中定义固定职责、启动方式、Pika MCP 权限、Agent Instructions 构造规则与完成条件的静态工作契约；它不持有进程或会话状态，同一 Agent Role 可以由多个 Agent Actor 执行。Workspace 可以定制 Role 的工作指导，但不能定义新 Role、扩大 MCP 权限或改变完成条件。
+_Avoid_: Backend Session、Agent Profile、Implementation Role
+
+**Agent Actor**：
+为一个 Agent Role 与一项持久化领域工作组成的身份执行工作的临时运行实体；它接收运行消息并拥有至多一个活动 Backend Session，但自身不是持久化状态权威。恢复时可以为同一工作创建新的 Actor 和 Backend Session。
+_Avoid_: Agent Role、Backend Session、Agent Profile
+
+**Agent 工作（Agent Work）**：
+由一个 Agent Role 与 Campaign、Spec Revision、Attempt、Sync Run 或 Progress Summary Request 等已有持久化领域实体共同确定的可执行工作身份；对应领域流程决定它是否可运行，Agent Symphony 可以据此重建 Agent Actor，而不创建通用运行记录作为新权威。
+_Avoid_: Agent Actor、Backend Session、通用 Actor Run
+
+**Agent Symphony**：
+在启动恢复和收到 Domain Event 时核对领域流程已经判定可运行的 Agent 工作，据此创建、监督和停止 Agent Actor，并防止同一工作被重复执行的运行协调者；它可以施加技术容量限制，但不决定 Attempt、Integration、Sync 等领域工作的运行资格。
+_Avoid_: 领域状态机、Integration Queue、全局 Backend Session Manager
+
+**Progress Summary Request**：
+可选定时汇总到期时先行持久化、由 Progress Summary Role 处理的 Agent 工作；同一时刻至多存在一个活动 Request，其提交结果是持久化 Progress Summary，而不是从 Backend 自然语言输出推断。
+_Avoid_: Backend Session、临时定时器、Agent 消息拼接
 
 **Agent Profile**：
 为一次 Agent 会话选择 Agent Backend、模型、reasoning effort、环境和权限行为的命名配置。
@@ -101,7 +121,7 @@ Pika 为同一调优任务内的 Agent 持久化并按目标路由消息的通�
 _Avoid_: Backend Session、共享 Prompt、进程标准输入
 
 **Pika MCP**：
-所有 Agent 读取调优状态、历史与用户指导，以及提交计划、Metrics、Git 结果和完成状态的强制语义接口。
+所有 Agent 读取调优状态、历史与用户指导，以及提交计划、Metrics、Git 结果和完成状态的强制语义接口；写操作的幂等身份绑定 Agent 工作、操作名与调用方提供的幂等键，不绑定可替换的 Backend Session。
 _Avoid_: Agent stdout、Backend 原始事件流、自然语言结果解析
 
 **Iteration 开发 Agent（Iteration Agent）**：
@@ -161,7 +181,7 @@ _Avoid_: Iteration Benchmark、合入后复验、自由 Benchmark
 _Avoid_: Paused、Stopped、Failed
 
 **中断（Interrupted）**：
-Backend Session 意外结束但候选尝试的工作空间与持久状态仍可继续使用的状态；恢复不要求重新使用原 Backend Session。
+Backend Session 意外结束但候选尝试的工作空间与持久状态仍可继续使用的状态；恢复 Agent 工作会创建新的 Backend Session，不恢复或复用原 provider Session。
 _Avoid_: Failed、Blocked、Cancelled
 
 **Metric 快照（Metric Snapshot）**：
@@ -229,11 +249,11 @@ _Avoid_: 普通 By the way、指导
 _Avoid_: Attempt Conversation、BTW Conversation、Campaign Guidance
 
 **Campaign Kick-off**：
-用户通过首条消息或明确确认动作授权 Pika 开始或推进 Campaign 的领域动作；Pika 的系统指令、Session 创建和恢复都不构成 Kick-off。
+用户通过首条消息或明确确认动作授权 Pika 开始或推进 Campaign 的持久化领域动作；它在投递给 Backend Session 前记录，Session 创建、系统指令和恢复都不构成新的 Kick-off。
 _Avoid_: 自动 Prompt、Session 启动、系统消息
 
 **Agent 系统指令（Agent Instructions）**：
-Pika 注入 Backend Session、用于约束角色、权限与完成门禁的系统级上下文；它不属于用户消息，也不能触发或冒充 Campaign Kick-off。
+Agent Role 为 Backend Session 构造的系统级上下文，由不可覆盖的身份、权限及完成约束、Workspace 中用户可定制的 Role 模板与持久化领域上下文共同组成；新建或恢复的 Session 使用当时最新的有效模板并保存最终内容摘要与快照。它不属于用户消息，也不能触发或冒充 Campaign Kick-off。
 _Avoid_: 用户 Prompt、Campaign Kick-off、自动用户消息
 
 **Attempt 对话（Attempt Conversation）**：

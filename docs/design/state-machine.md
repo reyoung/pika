@@ -36,7 +36,7 @@ stateDiagram-v2
     Blocked --> Draining: 用户解决并显式恢复
 ```
 
-`DraftingSpec` 只表示 Campaign 正在等待或形成 Spec 草稿，不等于 Backend Turn 已启动。Pika 可以提前打开并注入 Agent Instructions，但首个 Turn 必须等待用户消息完成 Campaign Kick-off；`AwaitingConfirmation → BuildingBaseline` 的用户确认动作同时授权 setup merge 与后续 Baseline Session。
+`DraftingSpec` 只表示 Campaign 正在等待或形成 Spec 草稿，不等于 Backend Turn 已启动。Alignment Actor 可以提前打开 Session 并注入 Agent Instructions，但首个 Turn 必须等待用户消息完成 Campaign Kick-off；`AwaitingConfirmation → BuildingBaseline` 的用户确认动作先完成持久化，再依次授权新的 Setup Merge Actor 与 Baseline Actor。每次 Role 切换都使用新的 Backend Session 和 Token。
 
 `Paused` 不取消在途 Agent 或 Integration，只关闭新 Attempt dispatch。`Stopped` 会调用 `AgentBackend.interrupt` 终止活跃 Backend Turn，关闭自动恢复和归并，但保留全部状态。为正确 Resume，Campaign 表保存 `resume_state`。
 
@@ -57,7 +57,7 @@ Sync 不替换 Campaign 主状态，而设置 `dispatch_gate=sync`。这允许�
 | `rejected` | 正确性、性能、protected path 或测量门禁失败 | 终态 |
 | `cancelled` | 用户 Stop 或显式取消 | 终态，可保留 worktree |
 
-`awaiting_report` 没有自动超时和次数预算。Pika 在同一 Backend Session 无限 follow-up；进程失效则进入 `interrupted` 并用新 Session 继续。只有用户取消或其他 Campaign 停止条件可以结束该循环。
+`awaiting_report` 没有领域超时或隐式失败转换。Actor 会在单个 Backend Session 内对缺失操作做有界 follow-up；坏 Session 达到技术边界后进入 `interrupted`，Symphony 再以同一 Agent Work、最新配置和新的 provider Session 继续。只有 committed domain facts、用户取消或 Campaign 停止条件可以形成终态。
 
 Attempt 创建时即消耗 `max_attempts`。Plan Session、恢复 Session、Integration 和 Sync 不消耗 Attempt 预算。
 
@@ -102,7 +102,7 @@ Push 成功而本地推进前崩溃时，恢复流程 fetch 远端并核对 Sync
 
 | SQLite 状态 | 外部事实 | 恢复动作 |
 |---|---|---|
-| Agent `running` | 对应 OS 进程不存在 | 标记 `interrupted`，保留 worktree，启动新 Session |
+| Agent `running` | 对应 Actor/Backend 进程不存在 | 标记旧 Session `interrupted`，保留 Work 与 worktree，启动新 Actor 和新 provider Session |
 | `awaiting_report` | Backend Session 存活 | 同 Session 发送 completion follow-up |
 | Integration Lease 存在 | Git 未变化、无 merge state | 恢复 Integration Agent，继续 Intent |
 | Integration Lease 存在 | Full Regression Receipt 存在且 Git 未变化 | 恢复 Agent，继续创建 Intent/归并 |
@@ -113,4 +113,4 @@ Push 成功而本地推进前崩溃时，恢复流程 fetch 远端并核对 Sync
 | Artifact 哈希不符 | 任意 | 停止危险推进并通知用户 |
 | Managed Repo lock 无法获取 | 启动/恢复 | 拒绝启动，不修改仓库 |
 
-所有恢复操作必须携带稳定 idempotency key。重复恢复只能返回先前结果或继续未完成步骤，不能创建第二个 Agent、第二次 Full Regression、第二次 Merge 或第二次 Push。
+所有恢复操作必须携带稳定 idempotency key。command receipt 绑定 `Role + Agent Work + operation + key`，不绑定旧 Session。重复恢复只能返回先前结果或继续未完成步骤，不能同时创建第二个 Actor、第二次 Full Regression、第二次 Merge 或第二次 Push。

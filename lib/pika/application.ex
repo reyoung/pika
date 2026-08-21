@@ -5,6 +5,7 @@ defmodule Pika.Application do
 
   @impl true
   def start(_type, _args) do
+    :ok = Pika.Agent.RoleRegistry.validate!()
     mode = Application.get_env(:pika, :runtime_mode, :preview)
     children = children(mode)
     strategy = if mode == :serve, do: :rest_for_one, else: :one_for_one
@@ -20,8 +21,11 @@ defmodule Pika.Application do
       Pika.Repo,
       {Phoenix.PubSub, name: Pika.PubSub},
       {DynamicSupervisor, strategy: :one_for_one, name: Pika.AgentBackendSessionSupervisor},
+      Pika.Agent.Directory,
+      {DynamicSupervisor, strategy: :one_for_one, name: Pika.Agent.ActorSupervisor},
       {DynamicSupervisor, strategy: :one_for_one, name: Pika.CampaignSupervisor},
       Pika.Runtime,
+      Pika.Agent.Symphony,
       Pika.CampaignBootstrap,
       Pika.AttemptCoordinator,
       Pika.IntegrationCoordinator,
@@ -36,6 +40,8 @@ defmodule Pika.Application do
       Pika.MCP.ProbeState,
       {Phoenix.PubSub, name: Pika.PubSub},
       {DynamicSupervisor, strategy: :one_for_one, name: Pika.AgentBackendSessionSupervisor},
+      Pika.Agent.Directory,
+      {DynamicSupervisor, strategy: :one_for_one, name: Pika.Agent.ActorSupervisor},
       {DynamicSupervisor, strategy: :one_for_one, name: Pika.CampaignSupervisor},
       PikaWeb.Endpoint
     ]

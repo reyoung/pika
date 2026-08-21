@@ -118,6 +118,39 @@ defmodule Pika.CampaignStore do
     end
   end
 
+  def lookup_role_idempotency(work, tool, key, request_hash, _state) do
+    case Repo.query!(
+           """
+           SELECT records.request_sha256, records.response_json
+           FROM idempotency_records AS records
+           JOIN agent_sessions AS sessions ON sessions.id = records.backend_session_id
+           WHERE sessions.campaign_id = ? AND sessions.role = ?
+             AND sessions.work_kind = ? AND sessions.work_id = ?
+             AND records.tool_name = ? AND records.idempotency_key = ?
+           ORDER BY sessions.started_at DESC
+           LIMIT 1
+           """,
+           [
+             work.campaign_id,
+             work.role_id,
+             Atom.to_string(work.kind),
+             work.id,
+             tool,
+             key
+           ]
+         ).rows do
+      [] ->
+        :missing
+
+      [[stored_hash, response_json]] ->
+        if stored_hash == hex(request_hash),
+          do: {:replay, decode_response(response_json)},
+          else: :conflict
+    end
+  rescue
+    _error -> :missing
+  end
+
   def store_idempotency(session_id, tool, key, request_hash, response, _state) do
     session_exists? =
       Repo.query!("SELECT 1 FROM agent_sessions WHERE id = ? LIMIT 1", [session_id]).rows != []

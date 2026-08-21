@@ -29,7 +29,9 @@ erDiagram
     campaigns ||--o{ sync_runs : syncs
     campaigns ||--o{ operation_intents : protects
     campaigns ||--o{ domain_events : emits
-    agent_sessions ||--o{ idempotency_records : deduplicates
+    campaigns ||--o{ progress_summaries : requests
+    campaigns ||--o{ agent_operation_receipts : deduplicates
+    agent_sessions ||--o{ idempotency_records : legacy_deduplicates
     campaigns ||--o| integration_leases : serializes
 ```
 
@@ -210,11 +212,19 @@ erDiagram
 
 ### `agent_sessions`
 
-包含 `id`（即 Pika Backend Session ID）、`campaign_id`、可选 `attempt_id`/`sync_run_id`、`role`、`slot_index`、`profile_json`、`backend`、`backend_protocol`、`backend_version`、`provider_session_id`、`backend_capabilities_json`、`model`、`reasoning_effort`、`status`、`process_pid`、`process_started_at`、`mcp_token_hash`、`log_artifact_id`、`required_operations_json`、`last_turn_sequence`、`last_event_seq`、`started_at`、`ended_at`。
+包含 `id`（即 Pika Backend Session ID）、`campaign_id`、兼容字段 `attempt_id`/`sync_run_id`、`role`、`work_kind`、`work_id`、`role_contract_revision`、`session_mode`、`profile_json`、`backend`、`backend_protocol`、`backend_version`、`provider_session_id`、`backend_capabilities_json`、`model`、`reasoning_effort`、`status`、`process_pid`、`process_started_at`、`mcp_token_hash`、`log_artifact_id`、`required_operations_json`、`role_definition_sha256`、`template_sha256`、`instructions_sha256`、`instructions_artifact_id`、`last_turn_sequence`、`last_event_seq`、`started_at`、`ended_at`。
 
-`backend_protocol` v0 取 `codex_app_server` 或 `cursor_acp`；`provider_session_id` 保存 Codex thread ID 或 Cursor ACP session ID，并作为服务重启后的原生 resume/load 提示。恢复失败时仍由 Pika 持久化上下文重建，因此正确性不依赖 provider resume。Backend 原始消息写 JSONL，SQLite 只保存标准化游标和 Session identity。
+`work_kind + work_id + role` 标识 Session 执行的 Agent Work；同一 Work 可以留下多个按时间排序的 Session audit 行，但只有 Directory 中的一个 Actor/Token 可以活动。`session_mode` 为 `fresh` 或 `recovering`。`provider_session_id` 仅审计 Codex thread ID 或 Cursor ACP session ID；服务恢复总是根据 committed domain facts 创建全新 provider Session，不把该字段作为 resume/load 输入。Backend 原始消息写 JSONL，最终 Agent Instructions 另存 Artifact，并以三个 SHA 字段记录 Role、模板和最终文本身份。
 
 明文 MCP Token 不持久化。PID 只用于诊断和同进程监控，不能独立证明进程身份。
+
+### `agent_operation_receipts`
+
+主键为 `(campaign_id, role, work_kind, work_id, operation, idempotency_key)`，另存 `request_sha256`、`response_json` 与 `created_at`。同一 Work 替换 Actor、Backend Session 或 Token 后，重复的同请求返回已提交响应；同 key 不同请求返回冲突。旧 `idempotency_records` 继续保留给 legacy adapter 读取，但新 Role command 不以 Session ID 作为幂等身份。
+
+### `progress_summaries`
+
+每个可选定时汇总先写入一条 Request，包含 `id`、`campaign_id`、捕获时的 `phase`、`attempt_ids_json`、不可变 `context_json`、Backend/模型/reasoning effort、`status` (`requested`, `running`, `completed`, `failed`)、结果 `content`、失败原因与各时间戳。部分唯一索引保证每个 Campaign 同时至多一个 `requested`/`running` Request。旧版已完成 Summary 行通过默认值继续可读。
 
 ### `agent_messages`
 
@@ -246,14 +256,14 @@ erDiagram
 
 自增 `sequence` 为 UI/订阅顺序，另有唯一 UUID `event_id`、`aggregate_type/id`、`event_type`、`payload_json`、`created_at`。Payload 可以保存 Attempt ID、SHA、状态和 Delta，但不保存被覆盖的旧 Metric 快照。
 
-### `idempotency_records`
+### `idempotency_records`（legacy）
 
-主键 `(backend_session_id, tool_name, idempotency_key)`，保存 `request_sha256`、`response_json`、`created_at`。同 key 同请求返回原响应；同 key 不同请求返回冲突，不重复执行。
+主键 `(backend_session_id, tool_name, idempotency_key)`，保存旧 MCP adapter 的 `request_sha256`、`response_json`、`created_at`。它用于滚动迁移与旧 Workspace 恢复；统一 Role Runtime 的命令改用 `agent_operation_receipts`。
 
 ## 7. 必要索引与约束
 
 - `attempts(campaign_id, status, ordinal)`：调度和时间线。
-- `agent_sessions(status, role)`、`agent_sessions(attempt_id, status)`：恢复扫描。
+- `agent_sessions(status, role)`、`agent_sessions(attempt_id, status)` 与 `agent_sessions(campaign_id, role, work_kind, work_id, status)`：恢复扫描和 Work 历史。
 - `domain_events(sequence)`、`domain_events(aggregate_type, aggregate_id, sequence)`。
 - `artifacts(owner_type, owner_id, kind)`。
 - `sync_runs(status, started_at)`。

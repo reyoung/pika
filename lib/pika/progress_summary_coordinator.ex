@@ -1,149 +1,87 @@
 defmodule Pika.ProgressSummaryCoordinator do
-  @moduledoc false
+  @moduledoc "Periodic scheduler that creates durable Progress Summary Work for Agent Symphony."
 
   use GenServer
 
-  alias Pika.{AgentBackend, ProgressSummaryStore, Repo, WorkspaceLock}
+  alias Pika.{ProgressSummaryStore, Repo, WorkspaceLock}
 
-  def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  def start_link(opts \\ []) do
+    case Keyword.get(opts, :name, __MODULE__) do
+      nil -> GenServer.start_link(__MODULE__, opts)
+      name -> GenServer.start_link(__MODULE__, opts, name: name)
+    end
+  end
+
+  def trigger(server \\ __MODULE__), do: GenServer.call(server, :summarize, :infinity)
 
   @impl true
   def init(opts) do
-    workspace = WorkspaceLock.workspace()
-    campaign = Pika.Persistence.current_campaign()
+    workspace = Keyword.get_lazy(opts, :workspace, &WorkspaceLock.workspace/0)
+
+    campaign_id =
+      Keyword.get_lazy(opts, :campaign_id, fn -> Pika.Persistence.current_campaign().id end)
+
     config = workspace.snapshot["mutable"]["progress_summary"] || %{"enabled" => false}
-    interval = Keyword.get(opts, :interval_ms, config["interval_minutes"] * 60_000)
+    configured_interval = config["interval_minutes"] * 60_000
 
     state = %{
-      campaign_id: campaign.id,
+      campaign_id: campaign_id,
       workspace: workspace,
       config: config,
-      interval: interval,
+      interval: Keyword.get(opts, :interval_ms, configured_interval),
       timer: nil,
-      run: nil,
-      backend_modules: Keyword.get(opts, :backend_modules, %{})
+      symphony: Keyword.get(opts, :symphony, Pika.Agent.Symphony),
+      last_error: nil
     }
 
     {:ok, schedule(state)}
   end
 
   @impl true
-  def handle_info(:summarize, %{run: nil} = state) do
-    state = state |> Map.put(:timer, nil) |> reload_config()
-
-    case {state.config["enabled"], active_context(state.campaign_id)} do
-      {true, context} when not is_nil(context) -> {:noreply, start_summary(state, context)}
-      _ -> {:noreply, schedule(state)}
-    end
+  def handle_call(:summarize, _from, state) do
+    state = state |> cancel_timer() |> reload_config() |> create_request()
+    {:reply, :ok, schedule(state)}
   end
 
-  def handle_info(:summarize, state), do: {:noreply, state}
-
-  def handle_info({:pika_backend_event, event}, %{run: run} = state) when not is_nil(run) do
-    case event.type do
-      :message_delta ->
-        delta = event.data[:delta] || event.data["delta"] || ""
-        {:noreply, put_in(state.run.content, run.content <> delta)}
-
-      :turn_completed ->
-        content = String.trim(run.content)
-        if content != "", do: persist(state, run, content)
-        Process.cancel_timer(run.timeout)
-        close(run.handle)
-        {:noreply, schedule(%{state | run: nil})}
-
-      type when type in [:backend_error, :process_exited] ->
-        Process.cancel_timer(run.timeout)
-        close(run.handle)
-        {:noreply, schedule(%{state | run: nil})}
-
-      _ ->
-        {:noreply, state}
-    end
-  end
-
-  def handle_info(:summary_timeout, %{run: run} = state) when not is_nil(run) do
-    close(run.handle)
-    {:noreply, schedule(%{state | run: nil})}
+  @impl true
+  def handle_info(:summarize, state) do
+    state = state |> Map.put(:timer, nil) |> reload_config() |> create_request()
+    {:noreply, schedule(state)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
 
-  @impl true
-  def terminate(_reason, %{run: %{handle: handle}}), do: close(handle)
-  def terminate(_reason, _state), do: :ok
+  defp create_request(%{config: %{"enabled" => true}} = state) do
+    case active_context(state.campaign_id) do
+      nil ->
+        state
 
-  defp schedule(%{config: %{"enabled" => true}} = state) do
-    if state.timer, do: Process.cancel_timer(state.timer)
-    %{state | timer: Process.send_after(self(), :summarize, state.interval)}
+      context ->
+        case ProgressSummaryStore.request(state.campaign_id, context, state.config) do
+          {:ok, _request} ->
+            reconcile(state.symphony)
+            %{state | last_error: nil}
+
+          {:error, reason} ->
+            %{state | last_error: reason}
+        end
+    end
   end
 
-  defp schedule(state), do: state
+  defp create_request(state), do: state
 
   defp reload_config(state) do
     case Pika.RuntimeConfig.profile(state.workspace, "progress_summary") do
       {:ok, config} ->
-        %{state | config: config, interval: config["interval_minutes"] * 60_000}
+        interval =
+          if state.interval == :infinity,
+            do: :infinity,
+            else: config["interval_minutes"] * 60_000
 
-      {:error, _reason} ->
-        state
-    end
-  end
+        %{state | config: config, interval: interval, last_error: nil}
 
-  defp start_summary(state, context) do
-    profile = state.config
-    backend = if profile["backend"] == "cursor_acp", do: :cursor_acp, else: :codex_app_server
-    module = Map.get(state.backend_modules, backend, backend_module(backend))
-    {command, args} = backend_command(backend, profile["command"])
-
-    backend_profile = %{
-      backend: backend,
-      command: command,
-      args: args,
-      approval_policy: profile["approval_policy"],
-      sandbox_policy: profile["sandbox_policy"],
-      env: profile["env"] || %{},
-      protocol_config: profile["protocol_config"] || %{},
-      artifact_dir: Path.join([state.workspace.artifacts, "logs", "progress-summary"])
-    }
-
-    instructions = """
-    You are Pika's read-only Progress Summary Agent. Summarize only the supplied snapshot. Do not
-    modify files, run commands, use tools, or propose changes as completed work. Be concise and
-    factual. Report current phase, completed work, active work, blockers/errors, measurements when
-    present, and the next expected milestone. Clearly distinguish observation from inference.
-    """
-
-    with {:ok, handle} <- AgentBackend.start_link(module, backend_profile, self()),
-         {:ok, session} <-
-           AgentBackend.open_session(
-             handle,
-             state.workspace.repo,
-             profile["model"],
-             profile["reasoning_effort"],
-             %{enabled: false},
-             [],
-             instructions
-           ),
-         {:ok, _turn_id} <-
-           AgentBackend.start_turn(
-             handle,
-             "Summarize this Pika progress snapshot:\n\n" <> Jason.encode!(context, pretty: true)
-           ) do
-      timeout = Process.send_after(self(), :summary_timeout, min(state.interval, 5 * 60_000))
-
-      %{
-        state
-        | run: %{
-            handle: handle,
-            session: session,
-            context: context,
-            content: "",
-            timeout: timeout
-          }
-      }
-    else
-      _error -> schedule(state)
+      {:error, reason} ->
+        %{state | last_error: reason}
     end
   end
 
@@ -207,32 +145,25 @@ defmodule Pika.ProgressSummaryCoordinator do
     end
   end
 
-  defp persist(state, run, content) do
-    ProgressSummaryStore.insert(state.campaign_id, %{
-      phase: run.context.phase,
-      attempt_ids: Enum.map(run.context.active_attempts, & &1.id),
-      backend: to_string(run.session.backend),
-      model: run.session.model,
-      reasoning_effort: to_string(run.session.reasoning_effort || ""),
-      content: content
-    })
+  defp reconcile(server) do
+    Pika.Agent.Symphony.reconcile(server)
+  catch
+    :exit, _reason -> :ok
   end
 
-  defp backend_command(_backend, [command, "app-server", "--listen", "stdio://"]),
-    do: {command, []}
+  defp schedule(%{interval: :infinity} = state), do: state
+  defp schedule(%{config: %{"enabled" => false}} = state), do: state
 
-  defp backend_command(_backend, [command, "acp"]), do: {command, []}
-  defp backend_command(_backend, [command | args]), do: {command, args}
-  defp backend_command(:cursor_acp, nil), do: {"cursor-agent", []}
-  defp backend_command(_, nil), do: {"codex", []}
-  defp backend_module(:cursor_acp), do: Pika.AgentBackend.CursorACP
-  defp backend_module(_), do: Pika.AgentBackend.CodexAppServer
+  defp schedule(state) do
+    if state.timer,
+      do: state,
+      else: %{state | timer: Process.send_after(self(), :summarize, state.interval)}
+  end
 
-  defp close(handle) do
-    try do
-      AgentBackend.close_session(handle)
-    catch
-      _, _ -> :ok
-    end
+  defp cancel_timer(%{timer: nil} = state), do: state
+
+  defp cancel_timer(state) do
+    Process.cancel_timer(state.timer)
+    %{state | timer: nil}
   end
 end
