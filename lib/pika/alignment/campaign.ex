@@ -664,7 +664,7 @@ defmodule Pika.Alignment.Campaign do
   def handle_info({:completion_followup, _completed_turn_id}, state) do
     if state.backend && is_nil(state.active_turn_id) &&
          not MapSet.equal?(state.required, MapSet.new()) && state.status != :optimizing do
-      if state.baseline_submission or state.target_submission do
+      if not is_nil(state.baseline_submission) or not is_nil(state.target_submission) do
         {:noreply, state}
       else
         missing = state.required |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
@@ -1672,7 +1672,8 @@ defmodule Pika.Alignment.Campaign do
              state,
              inputs.profiler,
              inputs.profiler_dependencies
-           ) do
+           ),
+         :ok <- validate_optional_profiler_manifest(state, inputs.profiler) do
       submission_id = Pika.AgentBackend.Id.new("baseline")
       parent = self()
       spec = state.spec_result.spec
@@ -1859,7 +1860,7 @@ defmodule Pika.Alignment.Campaign do
          {:ok, correctness} <-
            ArtifactStore.resolve(state.workspace.root, manifest.correctness_artifact),
          {:ok, profiler} <-
-           ArtifactStore.resolve(state.workspace.root, manifest.profiler_artifact),
+           resolve_optional_artifact(state.workspace.root, manifest.profiler_artifact),
          {:ok, stat} <- File.stat(samples),
          true <- stat.type == :regular do
       {:ok,
@@ -1882,7 +1883,7 @@ defmodule Pika.Alignment.Campaign do
   defp baseline_inputs(state, args) do
     with {:ok, samples} <- registered_path(state, args["samples_artifact"]),
          {:ok, correctness} <- registered_path(state, args["correctness_artifact"]),
-         {:ok, profiler} <- registered_path(state, args["profiler_artifact"]),
+         {:ok, profiler} <- registered_optional_path(state, args["profiler_artifact"]),
          %{size: size} = sample_artifact <- Map.get(state.artifacts, args["samples_artifact"]) do
       {:ok,
        %{
@@ -1905,11 +1906,8 @@ defmodule Pika.Alignment.Campaign do
 
   defp register_manifest_artifacts(workspace_root, inputs) do
     references =
-      [
-        {inputs.manifest.correctness_artifact, "baseline_correctness"},
-        {inputs.manifest.profiler_artifact, "baseline_profiler"}
-      ] ++
-        Enum.map(inputs.manifest.profiler_dependencies, &{&1, "baseline_profiler_dependency"})
+      [{inputs.manifest.correctness_artifact, "baseline_correctness"}] ++
+        optional_profiler_references(inputs.manifest)
 
     Enum.reduce_while(
       references,
@@ -1997,6 +1995,23 @@ defmodule Pika.Alignment.Campaign do
     end
   end
 
+  defp resolve_optional_artifact(_workspace_root, nil), do: {:ok, nil}
+
+  defp resolve_optional_artifact(workspace_root, relative_path),
+    do: ArtifactStore.resolve(workspace_root, relative_path)
+
+  defp registered_optional_path(_state, nil), do: {:ok, nil}
+  defp registered_optional_path(state, relative_path), do: registered_path(state, relative_path)
+
+  defp optional_profiler_references(%{profiler_artifact: nil, profiler_dependencies: []}), do: []
+
+  defp optional_profiler_references(manifest) do
+    [{manifest.profiler_artifact, "baseline_profiler"}] ++
+      Enum.map(manifest.profiler_dependencies, &{&1, "baseline_profiler_dependency"})
+  end
+
+  defp validate_profiler_dependencies(_state, nil, []), do: :ok
+
   defp validate_profiler_dependencies(state, profiler_path, additional_paths) do
     available_paths =
       state.artifacts
@@ -2006,20 +2021,38 @@ defmodule Pika.Alignment.Campaign do
 
     with {:ok, body} <- File.read(profiler_path),
          {:ok, manifest} <- Jason.decode(body),
-         report_paths when is_list(report_paths) and report_paths != [] <-
-           manifest["report_paths"],
-         %{"output_paths" => parser_paths} when is_list(parser_paths) and parser_paths != [] <-
-           manifest["parser"],
-         evidence_paths when is_list(evidence_paths) and evidence_paths != [] <-
-           manifest["remote_evidence_paths"],
-         true <-
-           Enum.all?(
-             report_paths ++ parser_paths ++ evidence_paths,
-             &MapSet.member?(available_paths, &1)
-           ) do
-      :ok
+         report_paths when is_list(report_paths) <- manifest["report_paths"],
+         %{"output_paths" => parser_paths} when is_list(parser_paths) <- manifest["parser"],
+         evidence_paths when is_list(evidence_paths) <- manifest["remote_evidence_paths"] do
+      missing =
+        (report_paths ++ parser_paths ++ evidence_paths)
+        |> Enum.reject(&MapSet.member?(available_paths, &1))
+
+      if missing == [], do: :ok, else: {:error, {:profiler_dependencies_not_registered, missing}}
     else
-      _ -> {:error, :profiler_dependencies_not_registered}
+      _ ->
+        {:error,
+         {:invalid_profiler_dependencies,
+          "report_paths, parser.output_paths, and remote_evidence_paths must be lists"}}
+    end
+  end
+
+  defp validate_optional_profiler_manifest(_state, nil), do: :ok
+
+  defp validate_optional_profiler_manifest(state, profiler_path) do
+    target_case_ids =
+      for case_ <- state.spec_result.spec["benchmark_cases"],
+          case_["kind"] == "target",
+          do: case_["id"]
+
+    case Pika.Profiler.validate_manifest(
+           profiler_path,
+           target_case_ids,
+           state.best_sha,
+           state.skill.sha
+         ) do
+      {:ok, _manifest} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 

@@ -321,7 +321,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 ## 已确认的 Profiler 策略
 
-- BuildingBaseline 必须生成一次 Profiler Artifact。
+- BuildingBaseline 可以生成 Profiler Artifact 以供诊断，但它不是 Baseline 有效性门禁；正确性与正式配对 Metrics 才是。
 - Iteration Agent 可以自主决定是否运行 NCU、Nsight Systems 或其他 Profiler；Profiler 不是候选接受门禁，正确性与正式 Metrics 才是。
 - Agent 通过 Pika MCP 注册 Profiler 目录、工具、命令、目标 SHA 与 Summary。
 - 归并前全量回归默认不重复 Profiler。

@@ -38,6 +38,11 @@ defmodule Pika.InitTest do
                    iteration_effort: "xhigh",
                    iteration_approval_policy: "untrusted",
                    iteration_sandbox_policy: "workspace_write",
+                   integration_backend: "codex",
+                   integration_model: "integration-test-model",
+                   integration_effort: "max",
+                   integration_approval_policy: "on_request",
+                   integration_sandbox_policy: "workspace_write",
                    iteration_agents: 2,
                    max_attempts: 7,
                    sync_remote: "origin",
@@ -79,6 +84,18 @@ defmodule Pika.InitTest do
                profile["sandbox_policy"] == "workspace_write"
            end)
 
+    assert config.campaign["integration_agent"] == %{
+             "name" => "integration",
+             "backend" => "codex_app_server",
+             "command" => ["codex", "app-server", "--listen", "stdio://"],
+             "model" => "integration-test-model",
+             "reasoning_effort" => "max",
+             "approval_policy" => "on_request",
+             "sandbox_policy" => "workspace_write",
+             "env" => %{},
+             "protocol_config" => %{}
+           }
+
     assert config.sync == %{"remote" => "origin", "branch" => "main"}
 
     for {kind, {source, destination}} <- @prompt_templates do
@@ -105,6 +122,11 @@ defmodule Pika.InitTest do
         "2",
         "2",
         "4",
+        "1",
+        "2",
+        "2",
+        "2",
+        "3",
         "1",
         "2",
         "2",
@@ -169,6 +191,8 @@ defmodule Pika.InitTest do
     assert output =~ "cursor-test-model · Cursor Test"
     assert output =~ "Available Iteration Agent models (codex)"
     assert output =~ "codex-test-model · Codex Test"
+    assert output =~ "Integration Agent backend type:"
+    assert output =~ "Available Integration Agent models (codex)"
     assert output =~ "Concurrent Iteration Agents"
     assert output =~ "Configure Git sync?"
 
@@ -195,6 +219,8 @@ defmodule Pika.InitTest do
            )
 
     assert length(config.campaign["iteration_agents"]) == 2
+    assert config.campaign["integration_agent"]["backend"] == "codex_app_server"
+    assert config.campaign["integration_agent"]["model"] == "codex-test-model"
     assert Git.run!(Path.join(workspace, "repo"), ["branch", "--show-current"]) == "pika/best"
   end
 

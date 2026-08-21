@@ -92,10 +92,10 @@
 至少完成一个 NVIDIA Campaign：
 
 1. 用户在 Alignment 确认 Correctness Oracle、固定 Optimization Target、初始 Development、多个 Cases、Metrics 与 Reference Project 选择。
-2. Baseline 正确性、Profiler 和噪声估算成功。
+2. Baseline 正确性、正式配对性能数据和噪声估算成功；Profiler 如提供则作为可选诊断验证。
 3. 至少两个不同 Agent Backend 并行运行 Attempts。
 4. 至少一个 Accepted、一个 Rejected，并验证 Patch、Summary、Metrics 与 worktree 清理。
-5. `ncu-report-skill` 在两个 Backend Session 可读，并生成登记的 Profiler Artifact。
+5. `ncu-report-skill` 在两个 Backend Session 可读；可选 Profiler Artifact 可被登记和校验，但不阻塞 Baseline。
 6. 服务中途重启后自动恢复。
 7. 手工 Sync 完成 pull、验证、push、Metrics 更新和 Sync Trail。
 

@@ -733,17 +733,31 @@ defmodule Pika.IntegrationCoordinator do
       turn_id: event.turn_id,
       type: event.type,
       backend: event.backend,
+      role: :integration,
       data: Pika.JSONSafe.json_safe(event.data)
     }
 
     case Pika.ArtifactStore.append_jsonl(state.workspace, state.session.log_path, record, attrs) do
       {:ok, artifact} ->
         _ = AttemptStore.attach_session_log(state.session.session.id, artifact.id)
+        broadcast_attempt_progress(state.campaign_id, state.session.identity.attempt_id)
         state
 
       {:error, reason} ->
         %{state | last_error: inspect(reason)}
     end
+  end
+
+  defp broadcast_attempt_progress(campaign_id, attempt_id) do
+    if Process.whereis(Pika.PubSub) do
+      Phoenix.PubSub.broadcast(
+        Pika.PubSub,
+        Pika.AttemptCoordinator.progress_topic(campaign_id),
+        {:attempt_progress, attempt_id}
+      )
+    end
+
+    :ok
   end
 
   defp ensure_log(state) do
@@ -815,6 +829,10 @@ defmodule Pika.IntegrationCoordinator do
   defp kickoff(attempt, true), do: "Recover Integration for existing Attempt ##{attempt.ordinal}."
 
   defp profile(workspace) do
+    get_in(workspace.snapshot, ["mutable", "integration_agent"]) || fallback_profile(workspace)
+  end
+
+  defp fallback_profile(workspace) do
     backend = get_in(workspace.snapshot, ["immutable", "backend"])
 
     %{

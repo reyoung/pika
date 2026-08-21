@@ -162,6 +162,24 @@ defmodule Pika.IntegrationFullRegressionTest do
     assert IntegrationCoordinator.snapshot(coordinator).last_error == nil
   end
 
+  test "broadcasts incremental progress while the Integration Agent streams" do
+    context = ready_attempts(1)
+    [attempt] = AttemptStore.attempts(context.campaign.id, limit: 1)
+
+    Phoenix.PubSub.subscribe(
+      Pika.PubSub,
+      AttemptCoordinator.progress_topic(context.campaign.id)
+    )
+
+    _coordinator =
+      start_integration(context, integration_profile(%{test_pid: self(), barrier: true}))
+
+    attempt_id = attempt.id
+    assert_receive {:attempt_progress, ^attempt_id}, 5_000
+    assert_receive {:integration_started, ^attempt_id, task_pid, _token}, 5_000
+    send(task_pid, :release)
+  end
+
   test "a crash after squash recovers the durable Lease, Receipt, and Intent without a second merge" do
     context = ready_attempts(1)
     {:ok, crash_counter} = Agent.start_link(fn -> 0 end)

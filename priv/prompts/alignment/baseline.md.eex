@@ -22,8 +22,8 @@ Each Pair JSONL line must contain only case_id, metric_id, pair_index 0..<%= @pa
 order=tc|ct, numeric target/candidate, valid and error. Produce exactly <%= @pair_count %> genuinely
 independent alternating Target/Candidate pairs
 with at least <%= @min_valid_pairs %> valid pairs for every Full Case Set × Metric
-combination, download all raw outputs, correctness, profiler and remote cleanup evidence into
-<%= @artifacts %>. Do not add or change Metrics after Spec confirmation.
+combination, and write raw outputs plus correctness evidence into <%= @artifacts %>. Do not add or change
+Metrics after Spec confirmation.
 Every pair_index must represent a genuinely independent A/B execution. Never duplicate, relabel, interpolate or
 expand one measured value into multiple Pair records to satisfy pair_count. If the available raw measurements are
 fewer than the confirmed protocol requires, rerun the Harness. If pair_count appears to be a Case/sample/shape
@@ -34,23 +34,23 @@ Write the Pair JSONL in canonical Campaign Spec order: benchmark_cases order fir
 with pair_index increasing from 0 through <%= @pair_count - 1 %> inside each contiguous Case/Metric group.
 Pika validates this file as a bounded-memory stream and rejects interleaved or reordered groups.
 
-Use the injected ncu-report-skill for at least one target Case. On AFS record proxy status before and after,
-visible workload output, exact exit status, and cleanup. The profiler manifest must list local
-report_paths and remote_evidence_paths plus schema_version=1, measured_sha, case_id, skill_sha, tool,
-the exact collection command, profile_directory under artifacts/profiles/, and summary. It must also contain
-parser={skill: "ncu-report-skill", command: <exact parser command>, output_paths: [...]}; every parser output
-must be non-empty, inside profile_directory, listed in profiler_dependencies, and at least one output must be valid JSON. The
+NCU/profiler evidence is optional diagnostic material, never a Baseline validity gate. Do not run NCU merely
+to submit a Baseline. If the user or confirmed Spec explicitly asks for a profile, use the injected
+ncu-report-skill and include a profiler manifest with schema_version=1, measured_sha, case_id, skill_sha,
+tool, collection_command, profile_directory under artifacts/profiles/, report_paths,
+remote_evidence_paths, summary, and parser={skill: "ncu-report-skill", command: <exact parser command>,
+output_paths: [...]}. Every parser output must be non-empty, inside profile_directory, and at least one output
+must be valid JSON. List every report, parser output, and remote evidence path in profiler_dependencies.
+Otherwise omit profiler_artifact and profiler_dependencies from the Baseline manifest entirely. The
 correctness JSON must contain schema_version=2, target_snapshot_id=<%= @target_snapshot_id %>,
 candidate_sha=<%= @best_sha %>, and every case_id with target_passed=true and candidate_passed=true. The
 Oracle decides both results. Profile Development only; the profiler measured_sha remains <%= @best_sha %>.
-Copy final outputs to the
-Artifact Workspace, remove untracked profiler/harness files from the temporary Best worktree, and verify git
-status is clean. Then write one JSON manifest under artifacts/baseline/ with schema_version=2,
-target_snapshot_id=<%= @target_snapshot_id %>, candidate_sha=<%= @best_sha %>,
-summary, samples_artifact, correctness_artifact, profiler_artifact and profiler_dependencies. Every Artifact
-value must be a Workspace-relative path under artifacts/; profiler_dependencies must contain every report,
-parser output and remote evidence path referenced by the profiler manifest. Do not call register_artifact for
-these Baseline files. Call submit_baseline once with only idempotency_key and manifest_artifact. Pika accepts
+Copy final outputs to the Artifact Workspace, remove untracked harness files from the temporary Best worktree,
+and verify git status is clean. Then write one JSON manifest under artifacts/baseline/ with schema_version=2,
+target_snapshot_id=<%= @target_snapshot_id %>, candidate_sha=<%= @best_sha %>, summary,
+samples_artifact, and correctness_artifact. profiler_artifact and profiler_dependencies are an all-or-nothing
+optional pair. Every Artifact value must be a Workspace-relative path under artifacts/. Do not call
+register_artifact for these Baseline files. Call submit_baseline once with only idempotency_key and manifest_artifact. Pika accepts
 the local manifest quickly, streams and hashes the samples in one background pass, and registers the local
 files itself. After receiving status=validating_baseline, do not resubmit. Wait for Pika to report the final
 validation result before selecting the Iteration Sample.

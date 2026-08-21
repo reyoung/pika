@@ -92,6 +92,7 @@ defmodule PikaWeb.ControlLiveTest do
                  type: "message_delta",
                  session_id: session.id,
                  turn_id: "turn-1",
+                 role: "integration",
                  data: %{delta: "Inspecting ", item_id: "reply-1"}
                },
                %{
@@ -111,6 +112,7 @@ defmodule PikaWeb.ControlLiveTest do
                  type: "message_delta",
                  session_id: session.id,
                  turn_id: "turn-1",
+                 role: "integration",
                  data: %{delta: "the kernel\n\n**Profiling now.**", item_id: "reply-1"}
                },
                %{
@@ -168,6 +170,7 @@ defmodule PikaWeb.ControlLiveTest do
     assert html =~ "Attempts"
     assert html =~ "Stop Now"
     assert html =~ "Agent 对话"
+    assert html =~ "Integration Agent"
     assert html =~ "Inspecting the kernel"
     assert html =~ "Profiling now."
     assert html =~ "Try block size 128 next."

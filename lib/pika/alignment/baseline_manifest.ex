@@ -30,7 +30,8 @@ defmodule Pika.Alignment.BaselineManifest do
   def load(_workspace_root, _relative_path), do: {:error, :invalid_baseline_manifest_path}
 
   defp validate(workspace_root, manifest) when is_map(manifest) do
-    dependencies = manifest["profiler_dependencies"]
+    profiler = manifest["profiler_artifact"]
+    dependencies = manifest["profiler_dependencies"] || []
 
     with true <- manifest["schema_version"] == 2,
          target_snapshot_id when is_binary(target_snapshot_id) <- manifest["target_snapshot_id"],
@@ -39,10 +40,10 @@ defmodule Pika.Alignment.BaselineManifest do
          true <- String.trim(summary) != "",
          samples when is_binary(samples) <- manifest["samples_artifact"],
          correctness when is_binary(correctness) <- manifest["correctness_artifact"],
-         profiler when is_binary(profiler) <- manifest["profiler_artifact"],
          dependencies when is_list(dependencies) <- dependencies,
          true <- Enum.all?(dependencies, &is_binary/1),
-         paths <- [samples, correctness, profiler | dependencies],
+         :ok <- validate_profiler_fields(profiler, dependencies),
+         paths <- [samples, correctness] ++ optional_profiler_paths(profiler, dependencies),
          true <- length(paths) == length(Enum.uniq(paths)),
          :ok <- validate_artifact_paths(workspace_root, paths) do
       {:ok,
@@ -63,6 +64,18 @@ defmodule Pika.Alignment.BaselineManifest do
   end
 
   defp validate(_workspace_root, _manifest), do: {:error, :invalid_baseline_manifest}
+
+  defp validate_profiler_fields(nil, []), do: :ok
+
+  defp validate_profiler_fields(profiler, dependencies)
+       when is_binary(profiler) and dependencies != [],
+       do: :ok
+
+  defp validate_profiler_fields(_profiler, _dependencies),
+    do: {:error, :invalid_optional_profiler_fields}
+
+  defp optional_profiler_paths(nil, []), do: []
+  defp optional_profiler_paths(profiler, dependencies), do: [profiler | dependencies]
 
   defp validate_artifact_paths(workspace_root, paths) do
     if Enum.all?(paths, &valid_artifact?(workspace_root, &1)),

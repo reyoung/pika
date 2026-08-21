@@ -5,31 +5,89 @@ defmodule Pika.Profiler do
     workspace_root = path |> Path.dirname() |> Path.dirname() |> Path.dirname()
 
     with {:ok, body} <- File.read(path),
-         {:ok, manifest} <- Jason.decode(body),
-         true <- manifest["schema_version"] == 1,
-         true <- manifest["measured_sha"] == measured_sha,
-         true <- manifest["case_id"] in target_case_ids,
-         true <- manifest["skill_sha"] == skill_sha,
-         true <- present?(manifest["tool"]),
-         true <- present?(manifest["command"]),
-         true <- present?(manifest["summary"]),
-         directory when is_binary(directory) <- manifest["profile_directory"],
-         true <- profile_directory?(directory),
-         reports when is_list(reports) and reports != [] <- manifest["report_paths"],
-         evidence when is_list(evidence) and evidence != [] <- manifest["remote_evidence_paths"],
-         %{"skill" => "ncu-report-skill", "command" => parser_command, "output_paths" => outputs}
-         when is_binary(parser_command) and is_list(outputs) and outputs != [] <-
-           manifest["parser"],
-         true <- present?(parser_command),
-         true <- Enum.all?(reports, &under_directory?(&1, directory)),
-         true <- Enum.all?(outputs, &(&1 in reports)),
-         true <- Enum.any?(reports, &String.ends_with?(&1, ".ncu-rep")),
-         :ok <- validate_parser_outputs(workspace_root, outputs) do
-      {:ok, manifest}
+         {:ok, manifest} <- Jason.decode(body) do
+      case validation_errors(manifest, workspace_root, target_case_ids, measured_sha, skill_sha) do
+        [] -> {:ok, manifest}
+        errors -> {:error, {:invalid_profiler_manifest, errors}}
+      end
     else
-      _ -> {:error, :invalid_profiler_manifest}
+      {:error, :enoent} ->
+        {:error, {:invalid_profiler_manifest, ["manifest file is missing"]}}
+
+      {:error, reason} ->
+        {:error, {:invalid_profiler_manifest, ["manifest cannot be read: #{inspect(reason)}"]}}
     end
   end
+
+  defp validation_errors(manifest, root, target_case_ids, measured_sha, skill_sha) do
+    directory = manifest["profile_directory"]
+    reports = manifest["report_paths"]
+    evidence = manifest["remote_evidence_paths"]
+    parser = manifest["parser"]
+    outputs = if is_map(parser), do: parser["output_paths"], else: nil
+
+    []
+    |> require(manifest["schema_version"] == 1, "schema_version must equal 1")
+    |> require(
+      manifest["measured_sha"] == measured_sha,
+      "measured_sha does not match the Development SHA"
+    )
+    |> require(manifest["case_id"] in target_case_ids, "case_id is not a Target Case")
+    |> require(manifest["skill_sha"] == skill_sha, "skill_sha does not match the frozen skill")
+    |> require(present?(manifest["tool"]), "tool is required")
+    |> require(present?(manifest["collection_command"]), "collection_command is required")
+    |> require(present?(manifest["summary"]), "summary is required")
+    |> require(
+      is_binary(directory) and profile_directory?(directory),
+      "profile_directory must be under artifacts/profiles"
+    )
+    |> require(is_list(reports) and reports != [], "report_paths must be a non-empty list")
+    |> require(
+      is_list(evidence) and evidence != [],
+      "remote_evidence_paths must be a non-empty list"
+    )
+    |> require(
+      valid_parser?(parser),
+      "parser must name ncu-report-skill and include command plus output_paths"
+    )
+    |> require(
+      paths_under_directory?(reports, directory),
+      "report_paths must stay inside profile_directory"
+    )
+    |> require(
+      paths_under_directory?(evidence, directory),
+      "remote_evidence_paths must stay inside profile_directory"
+    )
+    |> require(
+      paths_under_directory?(outputs, directory),
+      "parser.output_paths must stay inside profile_directory"
+    )
+    |> require(
+      is_list(reports) and Enum.any?(reports, &String.ends_with?(&1, ".ncu-rep")),
+      "report_paths must include an .ncu-rep file"
+    )
+    |> require(
+      validate_parser_outputs(root, outputs) == :ok,
+      "parser.output_paths must be non-empty files; .json outputs must parse as JSON"
+    )
+  end
+
+  defp require(errors, true, _message), do: errors
+  defp require(errors, false, message), do: errors ++ [message]
+
+  defp valid_parser?(%{
+         "skill" => "ncu-report-skill",
+         "command" => command,
+         "output_paths" => outputs
+       }),
+       do: present?(command) and is_list(outputs) and outputs != []
+
+  defp valid_parser?(_parser), do: false
+
+  defp paths_under_directory?(paths, directory) when is_list(paths) and is_binary(directory),
+    do: Enum.all?(paths, &under_directory?(&1, directory))
+
+  defp paths_under_directory?(_paths, _directory), do: false
 
   defp validate_parser_outputs(root, paths) do
     if Enum.all?(paths, &parsed_output?(Path.join(root, &1))),

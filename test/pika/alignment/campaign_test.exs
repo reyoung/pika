@@ -245,7 +245,11 @@ defmodule Pika.Alignment.CampaignTest do
              })
 
     AlignmentFixtures.write_baseline_artifacts(workspace, best_sha, skill.sha)
-    manifest = AlignmentFixtures.write_baseline_manifest(workspace, best_sha)
+
+    manifest =
+      AlignmentFixtures.write_baseline_manifest(workspace, best_sha, "fixture baseline",
+        profiler: false
+      )
 
     assert {:ok, %{status: "validating_baseline", total_records: 7}} =
              Campaign.mcp_call(@token, "submit_baseline", %{
@@ -264,6 +268,11 @@ defmodule Pika.Alignment.CampaignTest do
     assert Enum.any?(
              snapshot.artifacts,
              &(&1.relative_path == "artifacts/baseline/samples.jsonl")
+           )
+
+    refute Enum.any?(
+             snapshot.artifacts,
+             &(&1.relative_path == "artifacts/profiles/profiler.json")
            )
 
     assert {:ok, %{status: "optimizing", sampling_revision: 1}} =
@@ -994,6 +1003,20 @@ defmodule Pika.Alignment.CampaignTest do
 
     Process.sleep(20)
     assert Campaign.snapshot().active_turn_id == "new-turn"
+  end
+
+  test "a completion follow-up tolerates a missing Baseline submission" do
+    pid = Process.whereis(Campaign)
+
+    :sys.replace_state(Campaign, fn state ->
+      %{state | backend: self(), baseline_submission: nil, target_submission: %{id: "in-flight"}}
+    end)
+
+    send(pid, {:completion_followup, "completed-turn"})
+
+    Process.sleep(20)
+    assert Process.alive?(pid)
+    refute Campaign.snapshot().agent_responding
   end
 
   test "filters protocol internals and aggregates a Turn into one concise activity row" do

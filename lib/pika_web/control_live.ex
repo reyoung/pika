@@ -698,7 +698,7 @@ defmodule PikaWeb.ControlLive do
           %{
             id: "attempt-agent-#{event["session_id"] || "session"}-#{index}",
             kind: :agent,
-            label: "Iteration Agent",
+            label: agent_label(event),
             content: delta,
             at: event["at"],
             merge_key: merge_key
@@ -728,6 +728,10 @@ defmodule PikaWeb.ControlLive do
         [entry | acc]
     end
   end
+
+  defp agent_label(%{"role" => "integration"}), do: "Integration Agent"
+  defp agent_label(%{"role" => :integration}), do: "Integration Agent"
+  defp agent_label(_event), do: "Iteration Agent"
 
   defp message_merge_key(event) do
     data = event["data"] || %{}

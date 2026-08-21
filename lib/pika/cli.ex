@@ -59,6 +59,11 @@ defmodule Pika.CLI do
           iteration_effort: :string,
           iteration_approval_policy: :string,
           iteration_sandbox_policy: :string,
+          integration_backend: :string,
+          integration_model: :string,
+          integration_effort: :string,
+          integration_approval_policy: :string,
+          integration_sandbox_policy: :string,
           model: :string,
           effort: :string,
           iteration_agents: :integer,
@@ -75,6 +80,7 @@ defmodule Pika.CLI do
     positional_workspace = if length(args) == 1, do: List.first(args)
     alignment_backend = opts[:alignment_backend] || opts[:backend] || "codex"
     iteration_backend = opts[:iteration_backend] || opts[:backend] || alignment_backend
+    integration_backend = opts[:integration_backend] || opts[:backend] || alignment_backend
 
     errors =
       []
@@ -108,6 +114,11 @@ defmodule Pika.CLI do
         "--iteration-backend must be codex or cursor"
       )
       |> maybe_cli_error(
+        not is_nil(opts[:integration_backend]) and
+          opts[:integration_backend] not in ~w(codex cursor),
+        "--integration-backend must be codex or cursor"
+      )
+      |> maybe_cli_error(
         not is_nil(opts[:effort]) and opts[:effort] not in ~w(low medium high xhigh max ultra),
         "invalid --effort"
       )
@@ -120,6 +131,11 @@ defmodule Pika.CLI do
         not is_nil(opts[:iteration_effort]) and
           opts[:iteration_effort] not in ~w(low medium high xhigh max ultra),
         "invalid --iteration-effort"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:integration_effort]) and
+          opts[:integration_effort] not in ~w(low medium high xhigh max ultra),
+        "invalid --integration-effort"
       )
       |> maybe_cli_error(
         not valid_init_permission?(
@@ -152,6 +168,22 @@ defmodule Pika.CLI do
           opts[:iteration_sandbox_policy]
         ),
         "invalid --iteration-sandbox-policy for #{iteration_backend}"
+      )
+      |> maybe_cli_error(
+        not valid_init_permission?(
+          integration_backend,
+          :approval_policy,
+          opts[:integration_approval_policy]
+        ),
+        "invalid --integration-approval-policy for #{integration_backend}"
+      )
+      |> maybe_cli_error(
+        not valid_init_permission?(
+          integration_backend,
+          :sandbox_policy,
+          opts[:integration_sandbox_policy]
+        ),
+        "invalid --integration-sandbox-policy for #{integration_backend}"
       )
       |> maybe_cli_error(
         not is_nil(opts[:port]) and opts[:port] not in 1..65_535,
@@ -262,7 +294,10 @@ defmodule Pika.CLI do
 
     with {:ok, config} <- Pika.Config.load(opts[:config], config_opts),
          preflight <-
-           Pika.Preflight.run([config.backend | config.campaign["iteration_agents"]]),
+           Pika.Preflight.run([
+             config.backend,
+             config.campaign["integration_agent"] | config.campaign["iteration_agents"]
+           ]),
          {:ok, plan} <- Pika.Workspace.plan(config),
          :ok <- configure_serve(config, plan, preflight),
          %{token: token} <- Pika.Auth.generate(),

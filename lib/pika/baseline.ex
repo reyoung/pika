@@ -30,8 +30,8 @@ defmodule Pika.Baseline do
          :ok <- report_phase(on_progress, :validating_correctness),
          :ok <-
            validate_correctness(correctness_path, spec, target_snapshot_id, measured_sha),
-         :ok <- report_phase(on_progress, :validating_profiler),
-         {:ok, profiler} <- validate_profiler(profiler_path, spec, measured_sha, skill_sha) do
+         {:ok, profiler} <-
+           validate_optional_profiler(profiler_path, spec, measured_sha, skill_sha, on_progress) do
       report_phase(on_progress, :completed)
 
       {:ok,
@@ -166,6 +166,15 @@ defmodule Pika.Baseline do
   defp validate_profiler(path, spec, measured_sha, skill_sha) do
     target_ids = for case_ <- spec["benchmark_cases"], case_["kind"] == "target", do: case_["id"]
     Pika.Profiler.validate_manifest(path, target_ids, measured_sha, skill_sha)
+  end
+
+  defp validate_optional_profiler(nil, _spec, _measured_sha, _skill_sha, _on_progress),
+    do: {:ok, nil}
+
+  defp validate_optional_profiler(path, spec, measured_sha, skill_sha, on_progress) do
+    with :ok <- report_phase(on_progress, :validating_profiler) do
+      validate_profiler(path, spec, measured_sha, skill_sha)
+    end
   end
 
   # The file is canonical and each Case/Metric group has exactly expected_pairs

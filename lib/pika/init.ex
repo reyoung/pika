@@ -51,6 +51,14 @@ defmodule Pika.Init do
     iteration_sandbox_policy =
       Map.get(settings, :iteration_sandbox_policy, iteration_permissions.sandbox_policy)
 
+    integration_permissions = PermissionPolicy.defaults(settings.integration_backend)
+
+    integration_approval_policy =
+      Map.get(settings, :integration_approval_policy, integration_permissions.approval_policy)
+
+    integration_sandbox_policy =
+      Map.get(settings, :integration_sandbox_policy, integration_permissions.sandbox_policy)
+
     agents =
       1..settings.iteration_agents
       |> Enum.map_join("\n", fn index ->
@@ -72,6 +80,11 @@ defmodule Pika.Init do
     alignment_model =
       if settings.alignment_model,
         do: "\n  model: #{yaml_string(settings.alignment_model)}",
+        else: ""
+
+    integration_model =
+      if settings.integration_model,
+        do: "\n    model: #{yaml_string(settings.integration_model)}",
         else: ""
 
     sync =
@@ -117,6 +130,12 @@ defmodule Pika.Init do
       history_n: 10
       iteration_agents:
     #{agents}
+      integration_agent:
+        name: integration
+        backend: #{settings.integration_backend}#{integration_model}
+        reasoning_effort: #{settings.integration_effort}
+        approval_policy: #{integration_approval_policy}
+        sandbox_policy: #{integration_sandbox_policy}
       reference_catalog: []
       stop_conditions:
         mode: all_goals
@@ -218,6 +237,46 @@ defmodule Pika.Init do
              "Iteration Agent",
              "high"
            ),
+         {:ok, integration_backend} <-
+           collect_backend(
+             inherit_backend(opts, :integration_backend),
+             :integration_backend,
+             "Integration Agent",
+             backend_label(alignment_backend)
+           ),
+         {:ok, integration_approval_policy} <-
+           collect_permission(
+             opts,
+             :integration_approval_policy,
+             integration_backend,
+             "Integration Agent",
+             :approval_policy
+           ),
+         {:ok, integration_sandbox_policy} <-
+           collect_permission(
+             opts,
+             :integration_sandbox_policy,
+             integration_backend,
+             "Integration Agent",
+             :sandbox_policy
+           ),
+         integration_opts <- inherit_option(opts, :integration_model, :model),
+         {:ok, integration_model, _model_cache} <-
+           collect_model(
+             integration_opts,
+             :integration_model,
+             integration_backend,
+             "Integration Agent",
+             model_cache
+           ),
+         integration_effort_opts <- inherit_option(opts, :integration_effort, :effort),
+         {:ok, integration_effort} <-
+           collect_effort(
+             integration_effort_opts,
+             :integration_effort,
+             "Integration Agent",
+             "high"
+           ),
          {:ok, iteration_agents} <-
            choose(
              opts,
@@ -253,6 +312,11 @@ defmodule Pika.Init do
          iteration_effort: iteration_effort,
          iteration_approval_policy: iteration_approval_policy,
          iteration_sandbox_policy: iteration_sandbox_policy,
+         integration_backend: integration_backend,
+         integration_model: integration_model,
+         integration_effort: integration_effort,
+         integration_approval_policy: integration_approval_policy,
+         integration_sandbox_policy: integration_sandbox_policy,
          iteration_agents: iteration_agents,
          max_attempts: max_attempts,
          sync: sync
@@ -532,6 +596,7 @@ defmodule Pika.Init do
     selection =
       case IO.gets("Select model [1]: ") do
         nil -> "1"
+        :eof -> "1"
         input -> String.trim(input) |> use_default("1")
       end
 

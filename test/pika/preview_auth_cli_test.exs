@@ -71,6 +71,16 @@ defmodule Pika.PreviewAuthCLITest do
                "untrusted",
                "--iteration-sandbox-policy",
                "workspace_write",
+               "--integration-backend",
+               "cursor",
+               "--integration-model",
+               "integration-test",
+               "--integration-effort",
+               "high",
+               "--integration-approval-policy",
+               "auto_review",
+               "--integration-sandbox-policy",
+               "enabled",
                "--iteration-agents",
                "3",
                "--max-attempts",
@@ -90,6 +100,11 @@ defmodule Pika.PreviewAuthCLITest do
     assert opts[:iteration_effort] == "max"
     assert opts[:iteration_approval_policy] == "untrusted"
     assert opts[:iteration_sandbox_policy] == "workspace_write"
+    assert opts[:integration_backend] == "cursor"
+    assert opts[:integration_model] == "integration-test"
+    assert opts[:integration_effort] == "high"
+    assert opts[:integration_approval_policy] == "auto_review"
+    assert opts[:integration_sandbox_policy] == "enabled"
     assert opts[:iteration_agents] == 3
     assert opts[:max_attempts] == 12
     assert opts[:yes]
@@ -101,6 +116,8 @@ defmodule Pika.PreviewAuthCLITest do
     assert {:error, _message} = CLI.parse_init(["--iteration-backend", "unknown"])
     assert {:error, _message} = CLI.parse_init(["--alignment-effort", "infinite"])
     assert {:error, _message} = CLI.parse_init(["--iteration-effort", "infinite"])
+    assert {:error, _message} = CLI.parse_init(["--integration-backend", "unknown"])
+    assert {:error, _message} = CLI.parse_init(["--integration-effort", "infinite"])
 
     assert {:error, _message} =
              CLI.parse_init([

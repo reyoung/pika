@@ -21,6 +21,21 @@ defmodule Pika.Alignment.BaselineManifestTest do
     assert manifest.manifest_artifact.size > 0
   end
 
+  test "accepts a Baseline manifest without optional profiler evidence" do
+    root = AlignmentFixtures.temp_dir("pika-baseline-manifest-no-profiler")
+    workspace = %{root: root, artifacts: Path.join(root, "artifacts")}
+    sha = String.duplicate("d", 40)
+
+    AlignmentFixtures.write_baseline_artifacts(workspace, sha, String.duplicate("e", 40))
+
+    relative_path =
+      AlignmentFixtures.write_baseline_manifest(workspace, sha, "no profiler", profiler: false)
+
+    assert {:ok, manifest} = BaselineManifest.load(root, relative_path)
+    assert manifest.profiler_artifact == nil
+    assert manifest.profiler_dependencies == []
+  end
+
   test "rejects references outside the Artifact Workspace" do
     root = AlignmentFixtures.temp_dir("pika-baseline-manifest-escape")
     manifest_path = Path.join(root, "artifacts/baseline/manifest.json")
@@ -34,9 +49,7 @@ defmodule Pika.Alignment.BaselineManifestTest do
         "candidate_sha" => String.duplicate("c", 40),
         "summary" => "escape",
         "samples_artifact" => "../samples.jsonl",
-        "correctness_artifact" => "artifacts/baseline/correctness.json",
-        "profiler_artifact" => "artifacts/profiles/profiler.json",
-        "profiler_dependencies" => []
+        "correctness_artifact" => "artifacts/baseline/correctness.json"
       })
     )
 

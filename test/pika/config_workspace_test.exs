@@ -19,6 +19,10 @@ defmodule Pika.ConfigWorkspaceTest do
     assert [iteration] = config.campaign["iteration_agents"]
     assert iteration["approval_policy"] == "never"
     assert iteration["sandbox_policy"] == "danger_full_access"
+
+    assert config.campaign["integration_agent"]["name"] == "integration"
+    assert config.campaign["integration_agent"]["backend"] == "codex_app_server"
+    assert config.campaign["integration_agent"]["reasoning_effort"] == "high"
   end
 
   test "loads the Alignment/Baseline Agent model and reasoning effort" do
@@ -101,6 +105,30 @@ defmodule Pika.ConfigWorkspaceTest do
              errors,
              &String.contains?(&1, "campaign.iteration_agents[0].sandbox_policy")
            )
+  end
+
+  test "loads a separately configured Integration Agent profile" do
+    workspace = CampaignFixtures.workspace()
+
+    yaml = """
+    backend:
+      type: codex_app_server
+    campaign:
+      integration_agent:
+        backend: cursor_acp
+        model: integration-model
+        reasoning_effort: max
+        approval_policy: auto_review
+        sandbox_policy: enabled
+    """
+
+    assert {:ok, config} = Config.load(CampaignFixtures.config_file(yaml), workspace: workspace)
+
+    assert config.campaign["integration_agent"]["backend"] == "cursor_acp"
+    assert config.campaign["integration_agent"]["model"] == "integration-model"
+    assert config.campaign["integration_agent"]["reasoning_effort"] == "max"
+    assert config.campaign["integration_agent"]["approval_policy"] == "auto_review"
+    assert config.campaign["integration_agent"]["sandbox_policy"] == "enabled"
   end
 
   test "reports all field validation failures without guessing values" do

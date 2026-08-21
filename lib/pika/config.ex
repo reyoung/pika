@@ -7,10 +7,10 @@ defmodule Pika.Config do
   @root_fields ~w(server backend campaign prompts sync)
   @server_fields ~w(host port)
   @backend_fields ~w(type command model reasoning_effort approval_policy sandbox_policy protocol_config)
-  @campaign_fields ~w(plan max_attempts history_n iteration_agents reference_catalog stop_conditions)
+  @campaign_fields ~w(plan max_attempts history_n iteration_agents integration_agent reference_catalog stop_conditions)
   @prompt_fields ~w(alignment setup_merge baseline plan iteration integration sync)
   @sync_fields ~w(remote branch)
-  @iteration_agent_fields ~w(name backend command model reasoning_effort approval_policy sandbox_policy env protocol_config)
+  @agent_profile_fields ~w(name backend command model reasoning_effort approval_policy sandbox_policy env protocol_config)
   @backend_types ~w(codex_app_server cursor_acp)
 
   defstruct [
@@ -149,6 +149,7 @@ defmodule Pika.Config do
     max_attempts = Map.get(campaign, "max_attempts")
     history_n = Map.get(campaign, "history_n", 10)
     iteration_agents = Map.get(campaign, "iteration_agents", default_iteration_agents(type))
+    integration_agent = Map.get(campaign, "integration_agent", default_integration_agent(type))
     reference_catalog = Map.get(campaign, "reference_catalog", [])
     stop_conditions = Map.get(campaign, "stop_conditions", %{})
 
@@ -170,6 +171,7 @@ defmodule Pika.Config do
           max_attempts,
           history_n,
           iteration_agents,
+          integration_agent,
           reference_catalog,
           stop_conditions,
           type
@@ -207,6 +209,7 @@ defmodule Pika.Config do
         "max_attempts" => max_attempts,
         "history_n" => history_n,
         "iteration_agents" => normalize_iteration_agents(iteration_agents, type, command),
+        "integration_agent" => normalize_integration_agent(integration_agent, type, command),
         "reference_catalog" => reference_catalog,
         "stop_conditions" => stop_conditions,
         "sync" => %{"remote" => sync["remote"], "branch" => sync["branch"]}
@@ -345,6 +348,7 @@ defmodule Pika.Config do
          max_attempts,
          history_n,
          iteration_agents,
+         integration_agent,
          references,
          stop_conditions,
          default_backend
@@ -363,6 +367,7 @@ defmodule Pika.Config do
       "campaign.history_n: must be a non-negative integer"
     )
     |> Kernel.++(validate_iteration_agents(iteration_agents, default_backend))
+    |> Kernel.++(validate_integration_agent(integration_agent, default_backend))
     |> maybe_error(not is_list(references), "campaign.reference_catalog: must be a list")
     |> maybe_error(not is_map(stop_conditions), "campaign.stop_conditions: must be a mapping")
     |> maybe_error(
@@ -398,7 +403,7 @@ defmodule Pika.Config do
         agent = stringify_keys(agent)
         backend = agent["backend"] || default_backend
 
-        unknown_fields(agent, @iteration_agent_fields, prefix) ++
+        unknown_fields(agent, @agent_profile_fields, prefix) ++
           validate_optional_backend(agent["backend"], prefix) ++
           validate_optional_command(agent["command"], prefix) ++
           validate_optional_string(agent["name"], "#{prefix}.name") ++
@@ -422,6 +427,32 @@ defmodule Pika.Config do
 
   defp validate_iteration_agents(_agents, _default_backend),
     do: ["campaign.iteration_agents: must be a non-empty list"]
+
+  defp validate_integration_agent(agent, default_backend) when is_map(agent) do
+    prefix = "campaign.integration_agent"
+    agent = stringify_keys(agent)
+    backend = agent["backend"] || default_backend
+
+    unknown_fields(agent, @agent_profile_fields, prefix) ++
+      validate_optional_backend(agent["backend"], prefix) ++
+      validate_optional_command(agent["command"], prefix) ++
+      validate_optional_string(agent["name"], "#{prefix}.name") ++
+      validate_optional_string(agent["model"], "#{prefix}.model") ++
+      validate_effort(agent["reasoning_effort"], prefix) ++
+      validate_permission(backend, :approval_policy, agent["approval_policy"], prefix) ++
+      validate_permission(backend, :sandbox_policy, agent["sandbox_policy"], prefix) ++
+      if(is_nil(agent["env"]) or is_map(agent["env"]),
+        do: [],
+        else: ["#{prefix}.env: must be a mapping"]
+      ) ++
+      if(is_nil(agent["protocol_config"]) or is_map(agent["protocol_config"]),
+        do: [],
+        else: ["#{prefix}.protocol_config: must be a mapping"]
+      )
+  end
+
+  defp validate_integration_agent(_agent, _default_backend),
+    do: ["campaign.integration_agent: must be a mapping"]
 
   defp validate_optional_backend(nil, _prefix), do: []
 
@@ -457,6 +488,9 @@ defmodule Pika.Config do
   defp default_iteration_agents(type),
     do: [%{"backend" => type, "reasoning_effort" => "high"}]
 
+  defp default_integration_agent(type),
+    do: %{"name" => "integration", "backend" => type, "reasoning_effort" => "high"}
+
   defp normalize_iteration_agents(agents, default_type, default_command) do
     Enum.with_index(agents)
     |> Enum.map(fn {agent, index} ->
@@ -487,6 +521,35 @@ defmodule Pika.Config do
         "protocol_config" => agent["protocol_config"] || %{}
       }
     end)
+  end
+
+  defp normalize_integration_agent(agent, default_type, default_command) do
+    agent = stringify_keys(agent)
+    type = agent["backend"] || default_type
+    permissions = PermissionPolicy.defaults(type)
+
+    %{
+      "name" => agent["name"] || "integration",
+      "backend" => type,
+      "command" =>
+        normalize_command(agent["command"] || command_for(type, default_type, default_command)),
+      "model" => agent["model"],
+      "reasoning_effort" => agent["reasoning_effort"] || "high",
+      "approval_policy" =>
+        normalize_permission(
+          type,
+          :approval_policy,
+          agent["approval_policy"] || permissions.approval_policy
+        ),
+      "sandbox_policy" =>
+        normalize_permission(
+          type,
+          :sandbox_policy,
+          agent["sandbox_policy"] || permissions.sandbox_policy
+        ),
+      "env" => agent["env"] || %{},
+      "protocol_config" => agent["protocol_config"] || %{}
+    }
   end
 
   defp command_for(type, type, default_command), do: default_command

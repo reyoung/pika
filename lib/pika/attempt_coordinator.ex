@@ -1348,6 +1348,7 @@ defmodule Pika.AttemptCoordinator do
       turn_id: event.turn_id,
       type: event.type,
       backend: event.backend,
+      role: session_state.identity.role,
       data: Pika.JSONSafe.json_safe(event.data)
     }
 

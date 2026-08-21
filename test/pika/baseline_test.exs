@@ -144,6 +144,65 @@ defmodule Pika.BaselineTest do
     assert_received {:progress, %{phase: :completed}}
   end
 
+  test "accepts a valid Baseline without a profiler artifact" do
+    root = AlignmentFixtures.temp_dir("pika-baseline-without-profiler")
+    workspace = %{root: root, artifacts: Path.join(root, "artifacts")}
+    sha = String.duplicate("6", 40)
+    skill_sha = String.duplicate("7", 40)
+
+    [samples, correctness, _profiler] =
+      AlignmentFixtures.write_baseline_artifacts(workspace, sha, skill_sha)
+
+    owner = self()
+
+    assert {:ok, %{profiler: nil}} =
+             Baseline.evaluate(
+               Path.join(root, samples),
+               Path.join(root, correctness),
+               nil,
+               AlignmentFixtures.spec(),
+               sha,
+               skill_sha,
+               target_snapshot_id: "target-fixture",
+               on_progress: &send(owner, {:optional_progress, &1})
+             )
+
+    assert_received {:optional_progress, %{phase: :validating_correctness}}
+    refute_received {:optional_progress, %{phase: :validating_profiler}}
+  end
+
+  test "returns field-level errors for an optional profiler manifest" do
+    root = AlignmentFixtures.temp_dir("pika-baseline-profiler-errors")
+    workspace = %{root: root, artifacts: Path.join(root, "artifacts")}
+    sha = String.duplicate("8", 40)
+    skill_sha = String.duplicate("9", 40)
+
+    [samples, correctness, profiler] =
+      AlignmentFixtures.write_baseline_artifacts(workspace, sha, skill_sha)
+
+    profiler_path = Path.join(root, profiler)
+
+    profiler_path
+    |> File.read!()
+    |> Jason.decode!()
+    |> Map.delete("collection_command")
+    |> Jason.encode!()
+    |> then(&File.write!(profiler_path, &1))
+
+    assert {:error, {:invalid_profiler_manifest, errors}} =
+             Baseline.evaluate(
+               Path.join(root, samples),
+               Path.join(root, correctness),
+               profiler_path,
+               AlignmentFixtures.spec(),
+               sha,
+               skill_sha,
+               target_snapshot_id: "target-fixture"
+             )
+
+    assert "collection_command is required" in errors
+  end
+
   test "validates canonical Case/Metric groups concurrently without changing result order" do
     root = AlignmentFixtures.temp_dir("pika-baseline-parallel")
     workspace = %{root: root, artifacts: Path.join(root, "artifacts")}

@@ -264,10 +264,10 @@ defmodule Pika.Test.AlignmentFixtures do
         "skill_sha" => skill_sha,
         "schema_version" => 1,
         "tool" => "NVIDIA Nsight Compute",
-        "command" => "ncu --set full --export artifacts/profiles/report",
+        "collection_command" => "ncu --set full --export artifacts/profiles/report",
         "profile_directory" => "artifacts/profiles",
         "summary" => "fixture profiler",
-        "report_paths" => [report_relative, parsed_relative],
+        "report_paths" => [report_relative],
         "parser" => %{
           "skill" => "ncu-report-skill",
           "command" => "python3 helpers/analyze_reports.py --run-dir artifacts/profiles",
@@ -295,24 +295,31 @@ defmodule Pika.Test.AlignmentFixtures do
       "artifacts/profiles/afs-trail.log"
     ]
 
-  def write_baseline_manifest(workspace, sha, summary \\ "fixture baseline") do
+  def write_baseline_manifest(workspace, sha, summary \\ "fixture baseline", opts \\ []) do
     relative_path = "artifacts/baseline/manifest.json"
     absolute_path = Path.join(workspace.root, relative_path)
     File.mkdir_p!(Path.dirname(absolute_path))
 
-    File.write!(
-      absolute_path,
-      Jason.encode!(%{
-        "schema_version" => 2,
-        "target_snapshot_id" => active_target_snapshot_id(),
-        "candidate_sha" => sha,
-        "summary" => summary,
-        "samples_artifact" => "artifacts/baseline/samples.jsonl",
-        "correctness_artifact" => "artifacts/baseline/correctness.json",
-        "profiler_artifact" => "artifacts/profiles/profiler.json",
-        "profiler_dependencies" => baseline_dependency_paths()
-      })
-    )
+    manifest = %{
+      "schema_version" => 2,
+      "target_snapshot_id" => active_target_snapshot_id(),
+      "candidate_sha" => sha,
+      "summary" => summary,
+      "samples_artifact" => "artifacts/baseline/samples.jsonl",
+      "correctness_artifact" => "artifacts/baseline/correctness.json"
+    }
+
+    manifest =
+      if Keyword.get(opts, :profiler, true) do
+        Map.merge(manifest, %{
+          "profiler_artifact" => "artifacts/profiles/profiler.json",
+          "profiler_dependencies" => baseline_dependency_paths()
+        })
+      else
+        manifest
+      end
+
+    File.write!(absolute_path, Jason.encode!(manifest))
 
     relative_path
   end
