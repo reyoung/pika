@@ -72,15 +72,19 @@ Backend-specific 注入方式：
 
 ### `submit_spec`
 
-提交 Campaign Spec draft 或 Revision：计算语义、输入契约、Fusion、Cases、Metrics、Harness、停止条件、选中 Ref。返回 Spec Revision 与缺失项；不等于用户确认。
+提交 Campaign Spec v2 draft 或 Revision：计算语义、输入契约、Fusion、Correctness Oracle、固定 Optimization Target、可变 Development、Cases、Metrics、Harness、停止条件和选中 Reference Projects。返回 Spec Revision 与缺失项；不等于用户确认。旧 v1 `reference_path` 不能推断为任一实现角色。
 
 ### `submit_harness`
 
-登记 Reference、正确性测试、Benchmark Harness 路径与 digest。Pika 验证 protected paths；只有 Reference Review Evidence 也已提交后，Spec 才进入 `awaiting_confirmation`。
+登记仓库内 Oracle（若 Spec 使用独立路径）、正确性测试、Benchmark Harness 路径与 digest。Pika 验证 protected paths；Development 入口不能受保护，外部 Target Snapshot 不属于产品仓库 protected paths。
 
-### `submit_reference_review`
+### `submit_implementation_bundle`
 
-登记当前 Reference 在当前 Harness 中针对至少一个 Spec Benchmark Case 的成功 smoke run。提交必须绑定 Spec revision、Harness digest 与 Reference SHA-256，包含实际命令、执行环境、退出码 0、至少一个与 Spec ID/单位一致的性能 Metric，以及 kind 为 `reference_review_evidence` 的已登记本地输出 Artifact。这份证据只用于确认前证明 Reference 可运行并向用户展示性能观测，不是 Baseline，也不要求完整 Case 集或配对测量；Spec、Harness、Reference 或 Artifact 变化都会使其失效。
+绑定干净的 setup commit 作为初始 Development，并异步固化 Optimization Target。Target 可来自该 Development commit 的精确快照，或来自选中 Reference Project 的固定 SHA；Pika 返回 Target Snapshot ID，验证 Development/Oracle 入口，并在 Workspace `targets/` 建立不可变 checkout。该调用不传源码或测量数据。
+
+### `submit_implementation_review`
+
+登记当前 Target 与初始 Development 在同一个 Spec Benchmark Case 上的成功 smoke run。提交绑定 Spec revision、Harness digest、Target Snapshot ID 和 Development SHA，包含实际命令、执行环境、退出码 0、两者均通过 Oracle 的结果、至少一个 Target/Development 配对 Metric，以及 kind 为 `implementation_review_evidence` 的已登记本地输出 Artifact。这份证据用于用户同时审阅 Oracle、Target、Development 源码和首次运行结果，不是 Full Case Baseline；任何绑定身份或 Artifact 变化都会使其失效。
 
 ### `complete_setup_merge`
 
@@ -88,11 +92,11 @@ Backend-specific 注入方式：
 
 ### `reopen_baseline_definition`
 
-Baseline Agent 在冻结的 Reference、Harness、Case/Metric 契约或测量协议无法产生有效 Baseline 时，提交 `idempotency_key`、具体 `reason` 和 `requested_changes`。这是 Baseline Role 独有的逃生转换，不是完成门禁，也不能用于可原地重试的临时命令、依赖、GPU 或网络故障。Pika 会终止正在进行的 Baseline 校验和旧 Backend Session；setup 已合并时从当前 Best 创建下一条 `pika/setup/<revision>`，将技术交接发送给新的 Alignment Agent，并回到 `DraftingSpec`。修订后的 Spec、Harness 和 Reference Review Evidence 仍必须重新提交并由用户确认，Agent 不能借此绕过确认边界。
+Baseline Agent 在冻结的 Oracle、Target、Development、Harness、Case/Metric 契约或测量协议无法产生有效 Baseline 时，提交 `idempotency_key`、具体 `reason` 和 `requested_changes`。这是 Baseline Role 独有的逃生转换，不是完成门禁，也不能用于可原地重试的临时命令、依赖、GPU 或网络故障。Pika 会终止正在进行的 Baseline 校验和旧 Backend Session；setup 已合并时从当前 Best 创建下一条 `pika/setup/<revision>`，将技术交接发送给新的 Alignment Agent，并回到 `DraftingSpec`。修订后的 Spec、Harness、Implementation Bundle 和 Review Evidence 仍必须重新提交并由用户确认，Agent 不能借此绕过确认边界。未显式改变 Target 定义时继续引用原 Target Snapshot。
 
 ### `submit_baseline`
 
-Boundary Agent 在已核验的 Best SHA 上完成正确性、每个 Case/Metric 按用户在 Campaign Spec 中指定的正式 Pair 数交替自配对、以及至少一个 Target Case 的 Profiler 后，把所有输出写入本地 Artifact Workspace，并创建一个小型 JSON Manifest。Manifest 包含 `schema_version`、`measured_sha`、`summary`、`samples_artifact`、`correctness_artifact`、`profiler_artifact` 和完整的 `profiler_dependencies` 相对路径列表。`submit_baseline` 的首选参数只有 `idempotency_key` 与 `manifest_artifact`；原始数据不经过 MCP。旧的逐项 Artifact 引用参数暂时兼容。
+Baseline Agent 在已核验的 Target Snapshot 与 Development Best SHA 上完成正确性、每个 Case/Metric 按用户在 Campaign Spec 中指定的正式 Pair 数交替运行 Target/Development，以及至少一个 Target Case 的 Development Profiler 后，把所有输出写入本地 Artifact Workspace，并创建一个小型 schema v2 JSON Manifest。Manifest 包含 `target_snapshot_id`、`candidate_sha`、`summary`、`samples_artifact`、`correctness_artifact`、`profiler_artifact` 和完整的 `profiler_dependencies` 相对路径列表。`submit_baseline` 只传 `idempotency_key` 与 `manifest_artifact`；原始数据不经过 MCP。
 
 Pair JSONL 按 Spec 的 Case 顺序、Metric 顺序和递增 `pair_index` 分组写入。Pika 立即返回 `validating_baseline`，随后在 Campaign GenServer 之外以有界内存单次扫描原始文件：同一遍扫描完成 SHA-256、字节数、Pair 完整性以及 Baseline 中位数、Pair delta、MAD、有效 Pair 数和 `max(0.5%, 3×1.4826×MAD)` 的计算。其余 Manifest 文件由 Pika 在后台流式登记。校验期间 `get_context` 与 UI 快照保持可用并报告记录/分组进度。Agent 收到 accepted 响应后不应重复提交，等待 Pika 主动通知最终结果。不接受 Agent 预计算值作为权威结果。有效 Pair 少于用户指定的 `min_valid_pairs` 时只允许整组重跑一次。
 
@@ -100,9 +104,9 @@ Pair JSONL 按 Spec 的 Case 顺序、Metric 顺序和递增 `pair_index` 分组
 
 只在全量 Baseline 已接受后可用。参数包含最多十个初始 Case IDs、逐项选择理由、预计 Iteration/Full 测量秒数、节省比例和 Summary。Pika 校验它是 Full Case Set 的非空子集、至少包含一个 Target Case，并创建首个 Sampling Revision。该调用完成前 Campaign 停留在 `SelectingIterationSample`，不能进入 Optimizing。
 
-Boundary 在 DraftingSpec 的完成门禁要求 `submit_spec`、`submit_harness` 与 `submit_reference_review` 都成功，且 UI 已出现可确认 Spec diff、Reference 源码和运行性能证据。用户确认不是 MCP Agent 工具。确认后依次要求 `complete_setup_merge`、`submit_baseline` 和 `submit_iteration_sample`；缺少调用时继续使用同 Session 无限 follow-up，Backend 失效则创建新 Session 重建上下文。
+Boundary 在 DraftingSpec 的完成门禁要求 `submit_spec`、`submit_harness`、`submit_implementation_bundle` 与 `submit_implementation_review` 都成功，且 UI 已出现可确认 Spec diff、Oracle/Target/Development 源码和配对运行证据。用户确认不是 MCP Agent 工具。确认后依次要求 `complete_setup_merge`、`submit_baseline` 和 `submit_iteration_sample`；缺少调用时继续使用同 Session follow-up，Backend 失效则创建新 Session 重建上下文。
 
-用户确认还必须绑定到 Harness manifest 中当前 Reference 文件的 SHA-256。UI 在有界源码预览中显示路径、大小、内容和哈希，并要求用户显式确认已审阅；Pika 接受确认前重新流式计算 Reference 哈希并校验完整 Harness digest。Reference 路径、内容或 Harness digest 变化后，旧审阅确认不能复用。
+用户确认还必须绑定当前 Target digest、Development SHA 与 Implementation Review Evidence digest。UI 在有界源码预览中分别显示 Oracle、Target、Development 的路径、大小、内容和哈希，并要求用户显式确认已审阅；Pika 接受确认前重新核验 Target checkout、Development commit、Harness digest 与证据 Artifact。任一身份变化后旧审阅确认不能复用。
 
 ## 4. Plan Role
 
@@ -114,7 +118,7 @@ Boundary 在 DraftingSpec 的完成门禁要求 `submit_spec`、`submit_harness`
 
 ### `record_metrics`
 
-参数包括 `sampling_revision_id`、`base_sha`、`candidate_sha`、采样集中每个 Case/Metric 的 raw value、baseline value、improvement、MAD、noise tolerance、Pair counts、Harness Artifact。Pika 检查：
+参数只引用本地 Target/Candidate JSONL 与 correctness Artifact，并包括 `sampling_revision_id`、`base_sha`、`candidate_sha`。Pika 重算采样集中每个 Case/Metric 的 Target value、Development value、`target_relative_improvement`、相对当前 Best 的 `best_relative_improvement`、MAD、noise tolerance 和 Pair counts。Pika 检查：
 
 - `base_sha` 等于当前 Best；否则返回 `stale_best` 并附新 SHA。
 - Candidate SHA 属于当前 Attempt Branch。
@@ -176,7 +180,7 @@ Backend Turn 结束但缺少任一必需工具时，Pika 向同一 Backend Sessi
 | Context/history | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Mailbox | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Artifact | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Spec/Harness/Reference Review/Baseline/Sample | ✓ |  |  |  |  |  |
+| Spec/Harness/Implementation Review/Baseline/Sample | ✓ |  |  |  |  |  |
 | Plan |  | ✓ |  |  |  |  |
 | Metrics/Summary/Attempt complete |  |  | ✓ |  |  |  |
 | Full Regression/Sampling Feedback/Merge |  |  |  | ✓ |  |  |

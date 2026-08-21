@@ -42,6 +42,7 @@ defmodule PikaWeb.ControlLive do
        |> assign(:stop_armed, false)
        |> assign(:flash_message, nil)
        |> assign(:refresh_timer, nil)
+       |> assign(:agent_refresh_timer, nil)
        |> assign(:refresh_spec, false)
        |> assign(:action_keys, action_keys())}
     else
@@ -55,7 +56,17 @@ defmodule PikaWeb.ControlLive do
 
   def handle_info({:attempt_progress, attempt_id}, socket) do
     if attempt_id == socket.assigns.selected_attempt_id do
-      {:noreply, schedule_refresh(socket, false, @agent_refresh_debounce_ms)}
+      {:noreply, schedule_attempt_refresh(socket, attempt_id)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:refresh_attempt, attempt_id}, socket) do
+    socket = assign(socket, :agent_refresh_timer, nil)
+
+    if attempt_id == socket.assigns.selected_attempt_id do
+      {:noreply, refresh_attempt(socket, attempt_id)}
     else
       {:noreply, socket}
     end
@@ -259,7 +270,7 @@ defmodule PikaWeb.ControlLive do
             <button :for={attempt <- @snapshot.attempts} class={"attempt-list-item #{if @selected_attempt_id == attempt.id, do: "selected"}"} phx-click="select_attempt" phx-value-id={attempt.id}>
               <span class="attempt-ordinal">#{attempt.ordinal}</span>
               <span><strong>{attempt_title(attempt)}</strong><small>Slot {attempt.slot_index + 1} · {attempt.status}</small></span>
-              <b>{best_delta(attempt.metrics)}</b>
+              <b title="相对固定 Optimization Target">{target_delta(attempt.metrics)}</b>
             </button>
             <p :if={@snapshot.attempts == []} class="empty-copy">尚未创建 Attempt。</p>
           </div>
@@ -376,8 +387,8 @@ defmodule PikaWeb.ControlLive do
               </article>
               <div class="metric-table-wrap">
                 <table class="metric-table">
-                  <thead><tr><th>Case</th><th>Metric</th><th>Value</th><th>改善</th><th>Source</th></tr></thead>
-                  <tbody><tr :for={metric <- @selected_attempt.metrics}><td>{metric.case_id}</td><td>{metric.metric_id}</td><td>{format_value(metric.value, metric.unit)}</td><td>{format_ratio(metric.improvement_ratio)}</td><td>{metric.source}</td></tr></tbody>
+                  <thead><tr><th>Case</th><th>Metric</th><th>Target</th><th>Development</th><th>vs Target</th><th>vs Best</th><th>Source</th></tr></thead>
+                  <tbody><tr :for={metric <- @selected_attempt.metrics}><td>{metric.case_id}</td><td>{metric.metric_id}</td><td>{format_value(metric.target_value, metric.unit)}</td><td>{format_value(metric.value, metric.unit)}</td><td>{format_ratio(metric.target_relative_improvement)}</td><td>{format_ratio(metric.best_relative_improvement)}</td><td>{metric.source}</td></tr></tbody>
                 </table>
               </div>
               <section class="artifact-list">
@@ -435,7 +446,7 @@ defmodule PikaWeb.ControlLive do
           <button :for={point <- @filtered_metrics} class={"metric-point-card #{if @selected_attempt_id == point.attempt_id, do: "selected"}"} phx-click="select_attempt" phx-value-id={point.attempt_id}>
             <div><strong>Attempt #{point.ordinal} · {point.case_id}</strong><span>{point.source}</span></div>
             <p>{point.summary}</p>
-            <small>{format_time(point.measured_at)} · {format_value(point.value, point.unit)} · {format_ratio(point.improvement_ratio)}</small>
+            <small>{format_time(point.measured_at)} · {format_value(point.value, point.unit)} · vs Target {format_ratio(point.target_relative_improvement)} · vs Best {format_ratio(point.best_relative_improvement)}</small>
           </button>
           <p :if={@filtered_metrics == []} class="empty-copy">当前筛选没有 Metrics。</p>
         </div>
@@ -504,6 +515,9 @@ defmodule PikaWeb.ControlLive do
     refresh_spec = refresh_spec or socket.assigns.refresh_spec
     if socket.assigns.refresh_timer, do: Process.cancel_timer(socket.assigns.refresh_timer)
 
+    if socket.assigns.agent_refresh_timer,
+      do: Process.cancel_timer(socket.assigns.agent_refresh_timer)
+
     snapshot_opts = if refresh_spec, do: [], else: [spec: socket.assigns.snapshot.spec]
     snapshot = Pika.Dashboard.snapshot(socket.assigns.campaign_id, snapshot_opts)
     selected = selected_attempt_id(snapshot, socket.assigns.selected_attempt_id)
@@ -512,8 +526,37 @@ defmodule PikaWeb.ControlLive do
       snapshot: snapshot,
       selected_attempt_id: selected,
       refresh_timer: nil,
+      agent_refresh_timer: nil,
       refresh_spec: false
     )
+  end
+
+  defp refresh_attempt(socket, attempt_id) do
+    case Pika.Dashboard.attempt(socket.assigns.campaign_id, attempt_id) do
+      {:ok, attempt} ->
+        attempts =
+          Enum.map(socket.assigns.snapshot.attempts, fn
+            %{id: ^attempt_id} -> attempt
+            existing -> existing
+          end)
+
+        assign(socket, :snapshot, %{socket.assigns.snapshot | attempts: attempts})
+
+      {:error, _reason} ->
+        socket
+    end
+  end
+
+  defp schedule_attempt_refresh(socket, attempt_id) do
+    if socket.assigns.refresh_timer || socket.assigns.agent_refresh_timer do
+      socket
+    else
+      assign(
+        socket,
+        :agent_refresh_timer,
+        Process.send_after(self(), {:refresh_attempt, attempt_id}, @agent_refresh_debounce_ms)
+      )
+    end
   end
 
   defp schedule_refresh(socket, refresh_spec),
@@ -886,13 +929,13 @@ defmodule PikaWeb.ControlLive do
   defp format_value(value, unit),
     do: :erlang.float_to_binary(value * 1.0, decimals: 3) <> " " <> unit
 
-  defp best_delta([]), do: "—"
+  defp target_delta([]), do: "—"
 
-  defp best_delta(metrics),
+  defp target_delta(metrics),
     do:
       metrics
-      |> Enum.max_by(&(&1.improvement_ratio || -1.0))
-      |> Map.get(:improvement_ratio)
+      |> Enum.max_by(&(&1.target_relative_improvement || -1.0))
+      |> Map.get(:target_relative_improvement)
       |> format_ratio()
 
   defp format_time(value) when is_integer(value) do

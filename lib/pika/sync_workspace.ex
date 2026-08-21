@@ -1,7 +1,7 @@
 defmodule Pika.SyncWorkspace do
   @moduledoc false
 
-  alias Pika.Git
+  alias Pika.{Git, TargetSnapshot}
 
   def preview(workspace, remote, branch) do
     with :ok <- validate_name(remote, :remote),
@@ -23,7 +23,7 @@ defmodule Pika.SyncWorkspace do
     end
   end
 
-  def prepare(workspace, run) do
+  def prepare(workspace, run, target_snapshot \\ nil) do
     path = Path.join(workspace.root, run.worktree_relative_path)
     fetch_ref = fetch_ref(run.id)
 
@@ -37,13 +37,19 @@ defmodule Pika.SyncWorkspace do
            ]),
          {:ok, fetched_sha} <- Git.run(workspace.repo, ["rev-parse", fetch_ref]),
          true <- fetched_sha == run.remote_before_sha,
-         :ok <- ensure_worktree(workspace.repo, path, run.sync_branch, run.base_sha) do
+         :ok <- ensure_worktree(workspace.repo, path, run.sync_branch, run.base_sha),
+         :ok <- link_target(workspace.root, path, target_snapshot) do
       {:ok, %{path: path, remote_ref: fetch_ref, remote_sha: fetched_sha}}
     else
       false -> {:error, :remote_changed_before_prepare}
       {:error, _} = error -> error
     end
   end
+
+  defp link_target(_workspace_root, _path, nil), do: {:error, :target_snapshot_missing}
+
+  defp link_target(workspace_root, path, target_snapshot),
+    do: TargetSnapshot.link(workspace_root, path, target_snapshot)
 
   def verify_candidate(workspace, run, candidate_sha, protected_paths) do
     path = Path.join(workspace.root, run.worktree_relative_path)

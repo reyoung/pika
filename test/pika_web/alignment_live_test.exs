@@ -128,7 +128,7 @@ defmodule PikaWeb.AlignmentLiveTest do
     assert html =~ "not_started"
   end
 
-  test "renders five human-readable review sections without raw Shape JSON", %{
+  test "renders human-readable implementation roles without raw Shape JSON", %{
     conn: conn,
     token: token
   } do
@@ -139,7 +139,9 @@ defmodule PikaWeb.AlignmentLiveTest do
     assert html =~ "Metrics"
     assert html =~ "Benchmark Cases"
     assert html =~ "测量与采样规则"
-    assert html =~ "Baseline Reference 源码"
+    assert html =~ "实现角色、源码与运行证据"
+    assert html =~ "Optimization Target"
+    assert html =~ "Development"
     assert html =~ "Reference Projects"
     assert html =~ "全量 5 Pair · 异常升级 等待用户指定"
 
@@ -261,7 +263,7 @@ defmodule PikaWeb.AlignmentLiveTest do
              )
 
     assert {:ok, _} =
-             AlignmentFixtures.submit_reference_review(
+             AlignmentFixtures.submit_implementation_review(
                "mcp-test",
                workspace,
                "confirm-reference-review"
@@ -270,24 +272,26 @@ defmodule PikaWeb.AlignmentLiveTest do
     conn = conn |> get("/?token=#{token}") |> recycle()
     {:ok, view, html} = live(conn, "/")
     assert html =~ "AwaitingConfirmation"
-    assert html =~ "Baseline Reference 源码"
+    assert html =~ "实现角色、源码与运行证据"
     assert html =~ "kernel/reference.py"
+    assert html =~ "kernel/development.py"
     assert html =~ "def reference(x): return x"
     assert html =~ ~s(phx-hook="ReferenceSyntaxHighlight")
     assert html =~ ~s(data-language="python")
-    assert html =~ "Reference Review Evidence"
+    assert html =~ "Implementation Review Evidence"
     assert html =~ "target_case"
+    assert html =~ "10.0000 us"
     assert html =~ "12.5000 us"
     assert html =~ "python kernel/bench.py --case target_case"
     assert html =~ "要求 Agent 修改或重跑"
-    assert html =~ "请先审阅并确认 Baseline Reference 源码、运行命令与性能指标"
+    assert html =~ "请先审阅并确认 Oracle、固定 Target、Development 源码与配对性能指标"
     assert has_element?(view, ~s(button[phx-click="confirm_spec"][disabled]))
 
     view
-    |> element("#reference-review-ack")
+    |> element("#implementation-review-ack")
     |> render_click()
 
-    assert has_element?(view, "#reference-review-ack[checked]")
+    assert has_element?(view, "#implementation-review-ack[checked]")
     assert has_element?(view, ~s|button[phx-click="confirm_spec"]:not([disabled])|)
 
     send(
@@ -304,11 +308,15 @@ defmodule PikaWeb.AlignmentLiveTest do
                render(view) =~ "等待 Agent 完成本轮…"
            end)
 
-    {:ok, reference_review} = Campaign.reference_review()
-    evidence_digest = Campaign.snapshot().reference_review_evidence.digest
+    {:ok, implementation_review} = Campaign.implementation_review()
+    evidence = Campaign.snapshot().implementation_review_evidence
 
     assert {:error, :agent_still_responding} =
-             Campaign.confirm_spec(reference_review.sha256, evidence_digest)
+             Campaign.confirm_spec(
+               implementation_review.target_snapshot.digest,
+               evidence.development_sha,
+               evidence.digest
+             )
 
     assert Campaign.snapshot().status == :awaiting_confirmation
 
@@ -342,7 +350,7 @@ defmodule PikaWeb.AlignmentLiveTest do
     |> element(~s(button[phx-value-target="baseline"]))
     |> render_click()
 
-    assert render(view) =~ "请返回上一步并修改 Baseline 定义、Reference 或 Harness"
+    assert render(view) =~ "请返回上一步并修改 Oracle、Optimization Target、Development 或 Harness"
 
     view
     |> form("#message-form",
@@ -357,12 +365,13 @@ defmodule PikaWeb.AlignmentLiveTest do
 
     assert Campaign.snapshot().required_operations == [
              "submit_harness",
-             "submit_reference_review",
+             "submit_implementation_bundle",
+             "submit_implementation_review",
              "submit_spec"
            ]
   end
 
-  test "invalidates Reference review when the submitted source digest changes", %{
+  test "invalidates implementation review when its Development source changes", %{
     conn: conn,
     token: token,
     workspace: workspace
@@ -383,7 +392,7 @@ defmodule PikaWeb.AlignmentLiveTest do
              )
 
     assert {:ok, _} =
-             AlignmentFixtures.submit_reference_review(
+             AlignmentFixtures.submit_implementation_review(
                "mcp-test",
                workspace,
                "review-reset-evidence"
@@ -391,12 +400,12 @@ defmodule PikaWeb.AlignmentLiveTest do
 
     conn = conn |> get("/?token=#{token}") |> recycle()
     {:ok, view, _html} = live(conn, "/")
-    view |> element("#reference-review-ack") |> render_click()
-    assert has_element?(view, "#reference-review-ack[checked]")
+    view |> element("#implementation-review-ack") |> render_click()
+    assert has_element?(view, "#implementation-review-ack[checked]")
 
     File.write!(
-      Path.join(workspace.setup_worktree, "kernel/reference.py"),
-      "def reference(x): return x + 1\n"
+      Path.join(workspace.setup_worktree, "kernel/development.py"),
+      "def candidate(x): return x + 1\n"
     )
 
     assert {:ok, _} =
@@ -406,14 +415,13 @@ defmodule PikaWeb.AlignmentLiveTest do
                Map.put(harness_args, "idempotency_key", "review-reset-harness-2")
              )
 
-    assert eventually(fn -> render(view) =~ "def reference(x): return x + 1" end)
-    refute has_element?(view, "#reference-review-ack[checked]")
+    assert eventually(fn -> render(view) =~ "等待 Agent 固化 Optimization Target" end)
+    refute has_element?(view, "#implementation-review-ack[checked]")
     assert has_element?(view, ~s(button[phx-click="confirm_spec"][disabled]))
-    assert render(view) =~ "等待 Agent 实际运行当前 Reference"
-    refute has_element?(view, "#reference-run-evidence")
+    refute has_element?(view, "#implementation-run-evidence")
   end
 
-  test "invalidates user review when Reference performance evidence is replaced", %{
+  test "invalidates user review when implementation performance evidence is replaced", %{
     conn: conn,
     token: token,
     workspace: workspace
@@ -434,7 +442,7 @@ defmodule PikaWeb.AlignmentLiveTest do
              )
 
     assert {:ok, _} =
-             AlignmentFixtures.submit_reference_review(
+             AlignmentFixtures.submit_implementation_review(
                "mcp-test",
                workspace,
                "metric-review-evidence-1"
@@ -442,11 +450,11 @@ defmodule PikaWeb.AlignmentLiveTest do
 
     conn = conn |> get("/?token=#{token}") |> recycle()
     {:ok, view, _html} = live(conn, "/")
-    view |> element("#reference-review-ack") |> render_click()
-    assert has_element?(view, "#reference-review-ack[checked]")
+    view |> element("#implementation-review-ack") |> render_click()
+    assert has_element?(view, "#implementation-review-ack[checked]")
 
     assert {:ok, _} =
-             AlignmentFixtures.submit_reference_review(
+             AlignmentFixtures.submit_implementation_review(
                "mcp-test",
                workspace,
                "metric-review-evidence-2",
@@ -454,7 +462,8 @@ defmodule PikaWeb.AlignmentLiveTest do
                  "metrics" => [
                    %{
                      "metric_id" => "latency_us",
-                     "value" => 13.75,
+                     "target_value" => 10.0,
+                     "development_value" => 13.75,
                      "unit" => "us",
                      "sample_count" => 5
                    }
@@ -465,11 +474,11 @@ defmodule PikaWeb.AlignmentLiveTest do
 
     assert eventually(fn -> render(view) =~ "13.7500 us" end)
     assert render(view) =~ "Replacement smoke measurement."
-    refute has_element?(view, "#reference-review-ack[checked]")
+    refute has_element?(view, "#implementation-review-ack[checked]")
     assert has_element?(view, ~s(button[phx-click="confirm_spec"][disabled]))
   end
 
-  test "rejects confirmation if the reviewed Reference changes before the click", %{
+  test "rejects confirmation if reviewed Development changes before the click", %{
     conn: conn,
     token: token,
     workspace: workspace
@@ -490,7 +499,7 @@ defmodule PikaWeb.AlignmentLiveTest do
              )
 
     assert {:ok, _} =
-             AlignmentFixtures.submit_reference_review(
+             AlignmentFixtures.submit_implementation_review(
                "mcp-test",
                workspace,
                "review-race-evidence"
@@ -498,7 +507,7 @@ defmodule PikaWeb.AlignmentLiveTest do
 
     conn = conn |> get("/?token=#{token}") |> recycle()
     {:ok, view, _html} = live(conn, "/")
-    view |> element("#reference-review-ack") |> render_click()
+    view |> element("#implementation-review-ack") |> render_click()
 
     File.write!(
       Path.join(workspace.setup_worktree, "kernel/reference.py"),
@@ -510,8 +519,8 @@ defmodule PikaWeb.AlignmentLiveTest do
     |> render_click()
 
     assert Campaign.snapshot().status == :awaiting_confirmation
-    assert render(view) =~ "Reference 源码读取或哈希校验失败"
-    refute has_element?(view, "#reference-review-ack")
+    assert render(view) =~ "实现源码无法安全读取"
+    refute has_element?(view, "#implementation-review-ack")
   end
 
   test "shows Reference preparation progress next to the confirmation action", %{
@@ -554,7 +563,11 @@ defmodule PikaWeb.AlignmentLiveTest do
         %{
           case_id: "case_#{case_index}",
           metric_id: "metric_#{metric_index}",
+          target_value: 10.2,
           value: 10.0,
+          baseline_value: 10.0,
+          improvement_ratio: 0.0,
+          target_relative_improvement: 0.019_607_8,
           unit: "us",
           noise_tolerance: 0.005,
           valid_pair_count: 8_000,

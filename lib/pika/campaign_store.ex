@@ -4,7 +4,8 @@ defmodule Pika.CampaignStore do
   alias Pika.Repo
 
   @durable_fields ~w(
-    status messages artifacts spec_result spec_diff harness reference_review_evidence references skill best_sha setup_base_sha setup_sha
+    status messages artifacts spec_result spec_diff harness reference_review_evidence implementation_review_evidence
+    references skill best_sha setup_base_sha setup_sha prepared_setup_sha target_snapshot inherited_target_snapshot target_progress
     baseline baseline_retry_count baseline_error sampling_revisions iteration_sampling workflow_kickoffs
     pending_confirmation_input last_error backend_workflow required provider_session_id
   )a
@@ -40,6 +41,7 @@ defmodule Pika.CampaignStore do
 
     Repo.transaction(fn ->
       spec_revision_id = persist_spec!(campaign_id, state, now)
+      persist_target_snapshot!(campaign_id, spec_revision_id, state, now)
       persist_baseline!(campaign_id, spec_revision_id, state, now)
       persist_sampling!(campaign_id, spec_revision_id, state, now)
       persist_artifacts!(campaign_id, state, now)
@@ -71,7 +73,8 @@ defmodule Pika.CampaignStore do
   end
 
   def counts(campaign_id) do
-    for table <- ~w(spec_revisions benchmark_cases metric_definitions sampling_revisions
+    for table <-
+          ~w(spec_revisions target_snapshots benchmark_cases metric_definitions sampling_revisions
                      sampling_revision_cases best_revisions best_metrics),
         into: %{} do
       [[count]] =
@@ -169,21 +172,25 @@ defmodule Pika.CampaignStore do
 
     skill_snapshot = Map.take(state.skill, [:name, :url, :branch, :sha])
     confirmed_at = if status == "confirmed", do: now, else: nil
-    baseline_sha = if state.setup_sha, do: state.best_sha, else: nil
+    development_baseline_sha = if state.setup_sha, do: state.best_sha, else: nil
+    implementations = spec["implementations"] || %{}
 
     Repo.query!(
       """
       INSERT INTO spec_revisions(
         id, campaign_id, revision, status, spec_json, protected_paths_json,
         protected_digest, baseline_sha, reference_snapshot_json, skill_snapshot_json,
+        development_baseline_sha, implementation_manifest_json,
         confirmed_at, inserted_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(campaign_id, revision) DO UPDATE SET
         status = excluded.status,
         spec_json = excluded.spec_json,
         protected_paths_json = excluded.protected_paths_json,
         protected_digest = excluded.protected_digest,
         baseline_sha = COALESCE(excluded.baseline_sha, spec_revisions.baseline_sha),
+        development_baseline_sha = COALESCE(excluded.development_baseline_sha, spec_revisions.development_baseline_sha),
+        implementation_manifest_json = excluded.implementation_manifest_json,
         reference_snapshot_json = excluded.reference_snapshot_json,
         skill_snapshot_json = excluded.skill_snapshot_json,
         confirmed_at = COALESCE(spec_revisions.confirmed_at, excluded.confirmed_at),
@@ -197,9 +204,11 @@ defmodule Pika.CampaignStore do
         Jason.encode!(spec),
         Jason.encode!(if(harness, do: harness.protected_paths, else: [])),
         harness && harness.digest,
-        baseline_sha,
+        development_baseline_sha,
         Jason.encode!(Pika.JSONSafe.json_safe(ref_snapshot)),
         Jason.encode!(Pika.JSONSafe.json_safe(skill_snapshot)),
+        development_baseline_sha,
+        Jason.encode!(implementations),
         confirmed_at,
         now,
         now
@@ -212,6 +221,70 @@ defmodule Pika.CampaignStore do
     end
 
     id
+  end
+
+  defp persist_target_snapshot!(_campaign_id, spec_revision_id, %{target_snapshot: nil}, _now) do
+    Repo.query!("UPDATE spec_revisions SET target_snapshot_id = NULL WHERE id = ?", [
+      spec_revision_id
+    ])
+
+    :ok
+  end
+
+  defp persist_target_snapshot!(campaign_id, spec_revision_id, state, now) do
+    snapshot = state.target_snapshot
+
+    # A draft revision may prepare more than one explicit Target definition before
+    # confirmation. The previous snapshot is no longer addressable by that Spec and
+    # its revision-scoped checkout has been replaced, so remove its durable identity
+    # before inserting the newly reviewed snapshot. Foreign keys intentionally make
+    # this fail if a supposedly-draft Target has already been used by measurements.
+    Repo.query!(
+      "UPDATE spec_revisions SET target_snapshot_id = NULL WHERE id = ? AND target_snapshot_id IS NOT NULL AND target_snapshot_id != ?",
+      [spec_revision_id, snapshot.id]
+    )
+
+    Repo.query!(
+      "DELETE FROM target_snapshots WHERE spec_revision_id = ? AND id != ?",
+      [spec_revision_id, snapshot.id]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO target_snapshots(
+        id, campaign_id, spec_revision_id, source_kind, source_reference_id,
+        source_sha, tree_sha, entrypoint, digest, checkout_relative_path, inserted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        source_kind = excluded.source_kind,
+        source_reference_id = excluded.source_reference_id,
+        source_sha = excluded.source_sha,
+        tree_sha = excluded.tree_sha,
+        entrypoint = excluded.entrypoint,
+        digest = excluded.digest,
+        checkout_relative_path = excluded.checkout_relative_path
+      """,
+      [
+        snapshot.id,
+        campaign_id,
+        spec_revision_id,
+        snapshot.source_kind,
+        snapshot.source_reference_id,
+        snapshot.source_sha,
+        snapshot.tree_sha,
+        snapshot.entrypoint,
+        snapshot.digest,
+        snapshot.checkout_relative_path,
+        now
+      ]
+    )
+
+    Repo.query!("UPDATE spec_revisions SET target_snapshot_id = ? WHERE id = ?", [
+      snapshot.id,
+      spec_revision_id
+    ])
+
+    :ok
   end
 
   defp definitions_changed?(persisted_spec_json, spec) do
@@ -363,8 +436,9 @@ defmodule Pika.CampaignStore do
         INSERT INTO best_metrics(
           best_revision_id, benchmark_case_id, metric_definition_id, measured_sha,
           value, baseline_value, improvement_ratio, mad, noise_tolerance,
-          pair_count, valid_pair_count, source, measured_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, 'baseline', ?)
+          pair_count, valid_pair_count, source, measured_at, target_snapshot_id,
+          target_value, target_relative_improvement, best_relative_improvement
+        ) VALUES (?, ?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, 'baseline', ?, ?, ?, ?, 0.0)
         ON CONFLICT(best_revision_id, benchmark_case_id, metric_definition_id) DO UPDATE SET
           measured_sha = excluded.measured_sha,
           value = excluded.value,
@@ -373,6 +447,10 @@ defmodule Pika.CampaignStore do
           noise_tolerance = excluded.noise_tolerance,
           pair_count = excluded.pair_count,
           valid_pair_count = excluded.valid_pair_count,
+          target_snapshot_id = excluded.target_snapshot_id,
+          target_value = excluded.target_value,
+          target_relative_improvement = excluded.target_relative_improvement,
+          best_relative_improvement = excluded.best_relative_improvement,
           measured_at = excluded.measured_at
         """,
         [
@@ -386,7 +464,10 @@ defmodule Pika.CampaignStore do
           metric.noise_tolerance,
           metric.pair_count,
           metric.valid_pair_count,
-          now
+          now,
+          state.target_snapshot.id,
+          metric.target_value,
+          metric.target_relative_improvement
         ]
       )
     end)

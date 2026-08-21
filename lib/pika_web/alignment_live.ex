@@ -78,11 +78,12 @@ defmodule PikaWeb.AlignmentLive do
       |> assign(:reference_project_form, reference_project_form())
       |> assign(:show_diff, false)
       |> assign(:flash_message, nil)
-      |> assign(:reference_review, nil)
-      |> assign(:reference_review_error, nil)
-      |> assign(:reference_review_identity, nil)
-      |> assign(:reviewed_reference_sha, nil)
-      |> assign(:reviewed_reference_evidence_digest, nil)
+      |> assign(:implementation_review, nil)
+      |> assign(:implementation_review_error, nil)
+      |> assign(:implementation_review_identity, nil)
+      |> assign(:reviewed_target_digest, nil)
+      |> assign(:reviewed_development_sha, nil)
+      |> assign(:reviewed_implementation_evidence_digest, nil)
       |> assign_campaign_snapshot(snapshot)
       |> allow_upload(:inputs, accept: :any, max_entries: 5, max_file_size: 1_073_741_824)
 
@@ -173,45 +174,53 @@ defmodule PikaWeb.AlignmentLive do
   def handle_event("confirm_spec", _params, socket) do
     result =
       Campaign.confirm_spec(
-        socket.assigns.reviewed_reference_sha,
-        socket.assigns.reviewed_reference_evidence_digest
+        socket.assigns.reviewed_target_digest,
+        socket.assigns.reviewed_development_sha,
+        socket.assigns.reviewed_implementation_evidence_digest
       )
 
     socket =
       case result do
         :ok -> assign_campaign_snapshot(socket, Campaign.snapshot())
-        _error -> assign_campaign_snapshot(socket, Campaign.snapshot(), force_reference: true)
+        _error -> assign_campaign_snapshot(socket, Campaign.snapshot(), force_review: true)
       end
 
     {:noreply, assign_result(socket, result)}
   end
 
-  def handle_event("toggle_reference_review", _params, socket) do
-    {reviewed_reference_sha, reviewed_reference_evidence_digest} =
+  def handle_event("toggle_implementation_review", _params, socket) do
+    {reviewed_target_digest, reviewed_development_sha, reviewed_implementation_evidence_digest} =
       case {
         socket.assigns.snapshot.status,
-        socket.assigns.reference_review,
-        socket.assigns.snapshot.reference_review_evidence
+        socket.assigns.implementation_review,
+        socket.assigns.snapshot.implementation_review_evidence
       } do
-        {:awaiting_confirmation, %{sha256: sha256}, %{digest: evidence_digest}} ->
-          if socket.assigns.reviewed_reference_sha == sha256 and
-               socket.assigns.reviewed_reference_evidence_digest == evidence_digest do
-            {nil, nil}
+        {:awaiting_confirmation, %{target_snapshot: %{digest: target_digest}},
+         %{digest: evidence_digest, development_sha: development_sha}} ->
+          if socket.assigns.reviewed_target_digest == target_digest and
+               socket.assigns.reviewed_development_sha == development_sha and
+               socket.assigns.reviewed_implementation_evidence_digest == evidence_digest do
+            {nil, nil, nil}
           else
-            {sha256, evidence_digest}
+            {target_digest, development_sha, evidence_digest}
           end
 
         _ ->
           {
-            socket.assigns.reviewed_reference_sha,
-            socket.assigns.reviewed_reference_evidence_digest
+            socket.assigns.reviewed_target_digest,
+            socket.assigns.reviewed_development_sha,
+            socket.assigns.reviewed_implementation_evidence_digest
           }
       end
 
     {:noreply,
      socket
-     |> assign(:reviewed_reference_sha, reviewed_reference_sha)
-     |> assign(:reviewed_reference_evidence_digest, reviewed_reference_evidence_digest)}
+     |> assign(:reviewed_target_digest, reviewed_target_digest)
+     |> assign(:reviewed_development_sha, reviewed_development_sha)
+     |> assign(
+       :reviewed_implementation_evidence_digest,
+       reviewed_implementation_evidence_digest
+     )}
   end
 
   def handle_event("toggle_diff", _params, socket) do
@@ -273,15 +282,15 @@ defmodule PikaWeb.AlignmentLive do
   end
 
   defp assign_campaign_snapshot(socket, snapshot, opts \\ []) do
-    identity = reference_review_identity(snapshot)
-    force? = Keyword.get(opts, :force_reference, false)
+    identity = implementation_review_identity(snapshot)
+    force? = Keyword.get(opts, :force_review, false)
 
-    if not force? and socket.assigns.reference_review_identity == identity do
+    if not force? and socket.assigns.implementation_review_identity == identity do
       assign(socket, :snapshot, snapshot)
     else
-      {reference_review, reference_review_error} =
+      {implementation_review, implementation_review_error} =
         if identity do
-          case Campaign.reference_review() do
+          case Campaign.implementation_review() do
             {:ok, review} -> {review, nil}
             {:error, reason} -> {nil, inspect(reason)}
           end
@@ -291,20 +300,24 @@ defmodule PikaWeb.AlignmentLive do
 
       socket
       |> assign(:snapshot, snapshot)
-      |> assign(:reference_review, reference_review)
-      |> assign(:reference_review_error, reference_review_error)
-      |> assign(:reference_review_identity, identity)
-      |> assign(:reviewed_reference_sha, nil)
-      |> assign(:reviewed_reference_evidence_digest, nil)
+      |> assign(:implementation_review, implementation_review)
+      |> assign(:implementation_review_error, implementation_review_error)
+      |> assign(:implementation_review_identity, identity)
+      |> assign(:reviewed_target_digest, nil)
+      |> assign(:reviewed_development_sha, nil)
+      |> assign(:reviewed_implementation_evidence_digest, nil)
     end
   end
 
-  defp reference_review_identity(%{harness: %{digest: digest, reference_path: path}} = snapshot),
-    do:
-      {digest, path, get_in(snapshot.spec, ["computation", "reference_path"]),
-       snapshot.reference_review_evidence && snapshot.reference_review_evidence.digest}
+  defp implementation_review_identity(
+         %{harness: %{digest: harness_digest}, target_snapshot: %{id: target_id}} = snapshot
+       ),
+       do:
+         {harness_digest, target_id, snapshot.prepared_setup_sha,
+          snapshot.implementation_review_evidence &&
+            snapshot.implementation_review_evidence.digest}
 
-  defp reference_review_identity(_snapshot), do: nil
+  defp implementation_review_identity(_snapshot), do: nil
 
   @impl true
   def render(assigns) do
@@ -552,7 +565,9 @@ defmodule PikaWeb.AlignmentLive do
                 <button :if={spec_editable?(@snapshot)} class="text-action" phx-click="prepare_change" phx-value-target="boundary">要求 Agent 修改</button>
                 <dl class="boundary-list">
                   <div><dt>Hardware</dt><dd>{@snapshot.spec["target_hardware"] || "待确认"}</dd></div>
-                  <div><dt>Reference</dt><dd>{nested(@snapshot.spec, ~w(computation reference_path))}</dd></div>
+                  <div><dt>Correctness Oracle</dt><dd>{oracle_label(@snapshot.spec)}</dd></div>
+                  <div><dt>Optimization Target</dt><dd>{target_label(@snapshot.spec)}</dd></div>
+                  <div><dt>Development</dt><dd>{nested(@snapshot.spec, ~w(implementations development entrypoint))}</dd></div>
                   <div class="wide"><dt>Semantics</dt><dd>{nested(@snapshot.spec, ~w(computation semantics))}</dd></div>
                   <div class="wide"><dt>Fusion</dt><dd>{nested(@snapshot.spec, ~w(computation fusion_scope))}</dd></div>
                   <div class="wide"><dt>Inputs</dt><dd>{format_contract(get_in(@snapshot.spec, ~w(computation inputs)))}</dd></div>
@@ -688,11 +703,13 @@ defmodule PikaWeb.AlignmentLive do
                   </code>
                 </div>
                 <table :if={@snapshot.baseline} class="baseline-table">
-                  <thead><tr><th>Case / Metric</th><th>Value</th><th>Noise</th><th>Pairs</th></tr></thead>
+                  <thead><tr><th>Case / Metric</th><th>Target</th><th>Development</th><th>vs Target</th><th>Noise</th><th>Pairs</th></tr></thead>
                   <tbody>
                     <tr :for={metric <- visible_baseline_metrics(@snapshot.baseline.metrics)}>
                       <td>{metric.case_id} / {metric.metric_id}</td>
+                      <td>{format_number(Map.get(metric, :target_value, Map.get(metric, :baseline_value)))} {metric.unit}</td>
                       <td>{format_number(metric.value)} {metric.unit}</td>
+                      <td>{format_percent(Map.get(metric, :target_relative_improvement, Map.get(metric, :improvement_ratio)))}</td>
                       <td>{format_percent(metric.noise_tolerance)}</td>
                       <td>{metric.valid_pair_count}/{metric.pair_count}</td>
                     </tr>
@@ -709,11 +726,11 @@ defmodule PikaWeb.AlignmentLive do
               <summary>
                 <span class="review-step">5</span>
                 <span>
-                  <strong>Baseline Reference 源码与性能证据</strong>
-                  <small>{reference_review_path(@snapshot, @reference_review)}</small>
+                  <strong>实现角色、源码与运行证据</strong>
+                  <small>{implementation_review_path(@snapshot, @implementation_review)}</small>
                 </span>
                 <span class="review-check">
-                  {progress_mark(reference_review_complete?(@snapshot, @reference_review, @snapshot.reference_review_evidence, @reviewed_reference_sha, @reviewed_reference_evidence_digest))}
+                  {progress_mark(implementation_review_complete?(@snapshot, @implementation_review, @snapshot.implementation_review_evidence, @reviewed_target_digest, @reviewed_development_sha, @reviewed_implementation_evidence_digest))}
                 </span>
               </summary>
               <div class="review-content">
@@ -721,100 +738,119 @@ defmodule PikaWeb.AlignmentLive do
                   :if={@snapshot.status in [:drafting_spec, :awaiting_confirmation]}
                   class="text-action"
                   phx-click="prepare_change"
-                  phx-value-target="reference_review"
+                  phx-value-target="implementation_review"
                 >要求 Agent 修改或重跑</button>
-                <div :if={@reference_review} id="reference-source-review" class="reference-source-review">
-                  <div class="reference-source-meta">
-                    <code>{@reference_review.path}</code>
-                    <span>{format_bytes(@reference_review.size)}</span>
-                    <span>SHA-256 {short_sha(@reference_review.sha256)}</span>
-                  </div>
-                  <pre
-                    id="reference-source-code"
-                    phx-hook="ReferenceSyntaxHighlight"
-                    data-language={reference_language(@reference_review.path)}
-                  ><code>{@reference_review.content}</code></pre>
-                  <p :if={@reference_review.truncated} class="reference-source-warning">
-                    页面仅预览前 {format_bytes(@reference_review.preview_bytes)}；勾选前请在 Workspace 中审阅完整文件。
-                  </p>
+                <div :if={@snapshot.target_progress} class="reference-run-pending">
+                  正在准备 Optimization Target：{target_progress_label(@snapshot.target_progress)}
+                </div>
+                <div :if={@implementation_review} id="implementation-source-review" class="reference-source-review">
                   <section
-                    :if={@snapshot.reference_review_evidence}
-                    id="reference-run-evidence"
+                    :for={source <- implementation_sources(@implementation_review)}
+                    id={"implementation-source-#{source_key(source)}"}
+                    class="implementation-source"
+                  >
+                    <div class="reference-source-meta">
+                      <strong>{implementation_role_label(source.role)}</strong>
+                      <code>{source.path}</code>
+                      <span>{format_bytes(source.size)}</span>
+                      <span>SHA-256 {short_sha(source.sha256)}</span>
+                    </div>
+                    <pre
+                      id={"implementation-source-code-#{source_key(source)}"}
+                      phx-hook="ReferenceSyntaxHighlight"
+                      data-language={reference_language(source.path)}
+                    ><code>{source.content}</code></pre>
+                    <p :if={source.truncated} class="reference-source-warning">
+                      页面仅预览前 {format_bytes(source.preview_bytes)}；勾选前请在 Workspace 中审阅完整文件。
+                    </p>
+                  </section>
+                  <section
+                    :if={@snapshot.implementation_review_evidence}
+                    id="implementation-run-evidence"
                     class="reference-run-evidence"
                   >
                     <header>
                       <div>
-                        <p class="eyebrow">Reference Review Evidence</p>
-                        <strong>{@snapshot.reference_review_evidence.case_name}</strong>
+                        <p class="eyebrow">Implementation Review Evidence</p>
+                        <strong>{@snapshot.implementation_review_evidence.case_name}</strong>
                       </div>
                       <span>
-                        exit {@snapshot.reference_review_evidence.exit_code} · {short_sha(@snapshot.reference_review_evidence.digest)}
+                        exit {@snapshot.implementation_review_evidence.exit_code} · {short_sha(@snapshot.implementation_review_evidence.digest)}
                       </span>
                     </header>
                     <dl>
                       <div>
                         <dt>Case</dt>
-                        <dd><code>{@snapshot.reference_review_evidence.case_id}</code></dd>
+                        <dd><code>{@snapshot.implementation_review_evidence.case_id}</code></dd>
                       </div>
                       <div>
                         <dt>Environment</dt>
-                        <dd>{@snapshot.reference_review_evidence.environment}</dd>
+                        <dd>{@snapshot.implementation_review_evidence.environment}</dd>
                       </div>
                       <div>
                         <dt>Output</dt>
-                        <dd><code>{@snapshot.reference_review_evidence.output_artifact}</code></dd>
+                        <dd><code>{@snapshot.implementation_review_evidence.output_artifact}</code></dd>
                       </div>
+                      <div><dt>Correctness</dt><dd>Target ✓ · Development ✓</dd></div>
                     </dl>
                     <div class="reference-run-command">
                       <span>实际执行命令</span>
-                      <code>{@snapshot.reference_review_evidence.command}</code>
+                      <code>{@snapshot.implementation_review_evidence.command}</code>
                     </div>
                     <table class="reference-run-metrics">
                       <thead>
-                        <tr><th>Metric</th><th>Measured value</th><th>Samples</th></tr>
+                        <tr><th>Metric</th><th>Target</th><th>Development</th><th>Samples</th></tr>
                       </thead>
                       <tbody>
-                        <tr :for={metric <- @snapshot.reference_review_evidence.metrics}>
+                        <tr :for={metric <- @snapshot.implementation_review_evidence.metrics}>
                           <td>
                             <strong>{metric.name}</strong>
                             <small><code>{metric.metric_id}</code> · {direction_label(metric.direction)}</small>
                           </td>
-                          <td>{format_number(metric.value)} {metric.unit}</td>
+                          <td>{format_number(metric.target_value)} {metric.unit}</td>
+                          <td>{format_number(metric.development_value)} {metric.unit}</td>
                           <td>{metric.sample_count}</td>
                         </tr>
                       </tbody>
                     </table>
-                    <p>{@snapshot.reference_review_evidence.summary}</p>
+                    <p>{@snapshot.implementation_review_evidence.summary}</p>
                   </section>
                   <p
-                    :if={is_nil(@snapshot.reference_review_evidence)}
-                    id="reference-run-pending"
+                    :if={is_nil(@snapshot.implementation_review_evidence)}
+                    id="implementation-run-pending"
                     class="reference-run-pending"
                   >
-                    等待 Agent 实际运行当前 Reference，并提交至少一个 Benchmark Case 的性能 Metric。
+                    等待 Agent 在同一个 Benchmark Case 上运行 Target 与 Development，校验两者正确性并提交配对性能 Metric。
                   </p>
                   <label
-                    :if={@snapshot.status == :awaiting_confirmation && @snapshot.reference_review_evidence}
+                    :if={@snapshot.status == :awaiting_confirmation && @snapshot.implementation_review_evidence}
                     class="reference-review-ack"
                   >
                     <input
-                      id="reference-review-ack"
+                      id="implementation-review-ack"
                       type="checkbox"
-                      checked={reference_reviewed?(@reference_review, @snapshot.reference_review_evidence, @reviewed_reference_sha, @reviewed_reference_evidence_digest)}
-                      phx-click="toggle_reference_review"
+                      checked={implementation_reviewed?(@implementation_review, @snapshot.implementation_review_evidence, @reviewed_target_digest, @reviewed_development_sha, @reviewed_implementation_evidence_digest)}
+                      phx-click="toggle_implementation_review"
                     />
-                    <span>我已审阅该 SHA 对应的 Reference 源码、实际运行命令与性能指标，并同意用它建立 Baseline</span>
+                    <span>我已审阅 Oracle、固定 Target、可变 Development 的源码和配对证据，并同意以该 Target 建立 Baseline</span>
                   </label>
                   <p
-                    :if={@snapshot.reference_review_evidence && @snapshot.status in [:resolving_references, :building_baseline, :selecting_iteration_sample, :optimizing]}
+                    :if={@snapshot.implementation_review_evidence && @snapshot.status in [:resolving_references, :building_baseline, :selecting_iteration_sample, :optimizing]}
                     class="reference-reviewed-status"
-                  >Reference 与运行性能证据已随 Campaign Spec 确认并冻结。</p>
+                  >Optimization Target 与审阅证据已冻结；Development 将继续优化。</p>
                 </div>
-                <p :if={@reference_review_error} class="missing">
-                  Reference 源码无法安全读取：{@reference_review_error}
+                <p :if={@implementation_review_error} class="missing">
+                  实现源码无法安全读取：{@implementation_review_error}
                 </p>
                 <p :if={is_nil(@snapshot.harness)} class="empty-copy">
-                  等待 Agent 提交 Reference 与 Harness。
+                  等待 Agent 提交 Oracle 与 Harness。
+                </p>
+                <p
+                  :if={not is_nil(@snapshot.harness) && is_nil(@snapshot.target_snapshot)}
+                  id="implementation-bundle-pending"
+                  class="empty-copy"
+                >
+                  等待 Agent 固化 Optimization Target、绑定 Development 提交并提交运行证据。
                 </p>
               </div>
             </details>
@@ -923,10 +959,10 @@ defmodule PikaWeb.AlignmentLive do
               <span>{reference_progress_label(@snapshot)}</span>
             </div>
             <div
-              :if={confirmation_blocker(@snapshot, @reference_review, @reference_review_error, @reviewed_reference_sha, @reviewed_reference_evidence_digest)}
+              :if={confirmation_blocker(@snapshot, @implementation_review, @implementation_review_error, @reviewed_target_digest, @reviewed_development_sha, @reviewed_implementation_evidence_digest)}
               class="review-action-error"
             >
-              {confirmation_blocker(@snapshot, @reference_review, @reference_review_error, @reviewed_reference_sha, @reviewed_reference_evidence_digest)}
+              {confirmation_blocker(@snapshot, @implementation_review, @implementation_review_error, @reviewed_target_digest, @reviewed_development_sha, @reviewed_implementation_evidence_digest)}
             </div>
             <div
               :if={@snapshot.status == :awaiting_confirmation && @snapshot.last_error}
@@ -946,7 +982,7 @@ defmodule PikaWeb.AlignmentLive do
             <button
               class="primary"
               phx-click="confirm_spec"
-              disabled={not confirmable?(@snapshot, @reference_review, @reviewed_reference_sha, @reviewed_reference_evidence_digest)}
+              disabled={not confirmable?(@snapshot, @implementation_review, @reviewed_target_digest, @reviewed_development_sha, @reviewed_implementation_evidence_digest)}
             >{confirmation_button_label(@snapshot)}</button>
           </div>
         </aside>
@@ -1005,6 +1041,10 @@ defmodule PikaWeb.AlignmentLive do
       reference_progress: nil,
       harness: nil,
       reference_review_evidence: nil,
+      implementation_review_evidence: nil,
+      prepared_setup_sha: nil,
+      target_snapshot: nil,
+      target_progress: nil,
       baseline: nil,
       baseline_retry_count: 0,
       baseline_error: nil,
@@ -1077,10 +1117,12 @@ defmodule PikaWeb.AlignmentLive do
   defp change_prompt("metrics"), do: "请重新检查并修改 Metrics："
   defp change_prompt("cases"), do: "请重新检查并修改 Benchmark Cases："
   defp change_prompt("measurement"), do: "请修改测量、正确性或停止规则："
-  defp change_prompt("baseline"), do: "请返回上一步并修改 Baseline 定义、Reference 或 Harness："
 
-  defp change_prompt("reference_review"),
-    do: "请修改 Reference/Harness 或重新运行 Review Case，并提交新的实际性能证据："
+  defp change_prompt("baseline"),
+    do: "请返回上一步并修改 Oracle、Optimization Target、Development 或 Harness："
+
+  defp change_prompt("implementation_review"),
+    do: "请修改实现角色/Harness 或重新运行 Review Case，并提交新的配对性能证据："
 
   defp change_prompt("metric:" <> id), do: "请修改 Metric `#{id}`："
   defp change_prompt("case:" <> id), do: "请修改 Benchmark Case `#{id}`："
@@ -1272,7 +1314,7 @@ defmodule PikaWeb.AlignmentLive do
     do: "解析固定版本，并发准备所选 Reference 仓库"
 
   defp baseline_flow_step_detail(:setup_merge, _snapshot),
-    do: "核验 Harness 与 Reference 快照，并合入 pika/best"
+    do: "核验已审阅的 Development tree 与固定 Target 身份，并合入 pika/best"
 
   defp baseline_flow_step_detail(:measure, %{baseline_error: error}) when is_binary(error),
     do: "上次提交未通过；Agent 正在修正 Artifact 并重新测量"
@@ -1292,9 +1334,33 @@ defmodule PikaWeb.AlignmentLive do
     do: "从 #{length(cases(snapshot))} 个 Cases 中选择首轮优化样本"
 
   defp computation_ready?(spec) do
-    is_binary(get_in(spec, ["computation", "reference_path"])) and
+    is_map(spec["implementations"]) and
       is_binary(get_in(spec, ["computation", "fusion_scope"])) and
       is_binary(spec["target_hardware"])
+  end
+
+  defp oracle_label(spec) do
+    case get_in(spec, ["implementations", "oracle"]) do
+      %{"kind" => "optimization_target"} -> "Optimization Target"
+      %{"kind" => "repository_path", "entrypoint" => path} -> path
+      _ -> "待确认"
+    end
+  end
+
+  defp target_label(spec) do
+    case get_in(spec, ["implementations", "optimization_target"]) do
+      %{"source" => %{"kind" => "development_snapshot"}, "entrypoint" => path} ->
+        "已审阅 Development 提交快照 · #{path}"
+
+      %{
+        "source" => %{"kind" => "reference_project", "reference_id" => id},
+        "entrypoint" => path
+      } ->
+        "#{id} · #{path}"
+
+      _ ->
+        "等待 Optimization Target"
+    end
   end
 
   defp metrics(snapshot), do: List.wrap(snapshot.spec["metrics"])
@@ -1447,17 +1513,19 @@ defmodule PikaWeb.AlignmentLive do
 
   defp confirmable?(
          snapshot,
-         reference_review,
-         reviewed_reference_sha,
+         implementation_review,
+         reviewed_target_digest,
+         reviewed_development_sha,
          reviewed_evidence_digest
        ),
        do:
          snapshot.status == :awaiting_confirmation and snapshot.spec_ready and
            not is_nil(snapshot.harness) and alignment_idle?(snapshot) and
-           reference_reviewed?(
-             reference_review,
-             snapshot.reference_review_evidence,
-             reviewed_reference_sha,
+           implementation_reviewed?(
+             implementation_review,
+             snapshot.implementation_review_evidence,
+             reviewed_target_digest,
+             reviewed_development_sha,
              reviewed_evidence_digest
            )
 
@@ -1476,9 +1544,10 @@ defmodule PikaWeb.AlignmentLive do
 
   defp confirmation_blocker(
          snapshot,
-         reference_review,
-         reference_review_error,
-         reviewed_sha,
+         implementation_review,
+         implementation_review_error,
+         reviewed_target_digest,
+         reviewed_development_sha,
          reviewed_evidence_digest
        ) do
     cond do
@@ -1497,22 +1566,29 @@ defmodule PikaWeb.AlignmentLive do
       is_nil(snapshot.harness) ->
         "Benchmark Harness 尚未就绪，暂时不能建立 Baseline。"
 
-      is_binary(reference_review_error) ->
-        "Reference 源码读取或哈希校验失败，修复并重新提交 Harness 后才能确认。"
+      not is_nil(snapshot.target_progress) ->
+        "Optimization Target 正在固化，完成后才能审阅和确认。"
 
-      is_nil(reference_review) ->
-        "Reference 源码尚未加载，暂时不能建立 Baseline。"
+      is_nil(snapshot.target_snapshot) ->
+        "Optimization Target 尚未固化，暂时不能建立 Baseline。"
 
-      is_nil(snapshot.reference_review_evidence) ->
-        "Reference 尚未成功运行并提交性能证据，暂时不能建立 Baseline。"
+      is_binary(implementation_review_error) ->
+        "实现源码读取或身份校验失败，修复并重新提交后才能确认。"
 
-      not reference_reviewed?(
-        reference_review,
-        snapshot.reference_review_evidence,
-        reviewed_sha,
+      is_nil(implementation_review) ->
+        "Oracle、Target 或 Development 源码尚未加载，暂时不能建立 Baseline。"
+
+      is_nil(snapshot.implementation_review_evidence) ->
+        "Target 与 Development 尚未同时通过正确性校验并提交配对性能证据。"
+
+      not implementation_reviewed?(
+        implementation_review,
+        snapshot.implementation_review_evidence,
+        reviewed_target_digest,
+        reviewed_development_sha,
         reviewed_evidence_digest
       ) ->
-        "请先审阅并确认 Baseline Reference 源码、运行命令与性能指标。"
+        "请先审阅并确认 Oracle、固定 Target、Development 源码与配对性能指标。"
 
       true ->
         nil
@@ -1524,10 +1600,12 @@ defmodule PikaWeb.AlignmentLive do
       is_nil(snapshot.pending_question)
   end
 
-  defp reference_review_path(snapshot, nil),
-    do: get_in(snapshot.spec, ["computation", "reference_path"]) || "等待 Reference"
+  defp implementation_review_path(snapshot, nil),
+    do: target_label(snapshot.spec)
 
-  defp reference_review_path(_snapshot, review), do: review.path
+  defp implementation_review_path(_snapshot, review) do
+    "Target #{review.target.path} · Development #{review.development.path}"
+  end
 
   defp reference_language(path) when is_binary(path) do
     filename = path |> Path.basename() |> String.downcase()
@@ -1538,22 +1616,30 @@ defmodule PikaWeb.AlignmentLive do
 
   defp reference_language(_path), do: "plaintext"
 
-  defp reference_reviewed?(
-         %{sha256: sha256},
-         %{digest: evidence_digest},
-         sha256,
+  defp implementation_reviewed?(
+         %{target_snapshot: %{digest: target_digest}},
+         %{digest: evidence_digest, development_sha: development_sha},
+         target_digest,
+         development_sha,
          evidence_digest
        ),
        do: true
 
-  defp reference_reviewed?(_review, _evidence, _reviewed_sha, _reviewed_evidence_digest),
-    do: false
+  defp implementation_reviewed?(
+         _review,
+         _evidence,
+         _reviewed_target,
+         _reviewed_development,
+         _reviewed_evidence
+       ),
+       do: false
 
-  defp reference_review_complete?(
+  defp implementation_review_complete?(
          snapshot,
-         reference_review,
+         implementation_review,
          evidence,
-         reviewed_sha,
+         reviewed_target_digest,
+         reviewed_development_sha,
          reviewed_evidence_digest
        ) do
     if snapshot.status in [
@@ -1562,16 +1648,35 @@ defmodule PikaWeb.AlignmentLive do
          :selecting_iteration_sample,
          :optimizing
        ] do
-      not is_nil(reference_review) and not is_nil(evidence)
+      not is_nil(implementation_review) and not is_nil(evidence)
     else
-      reference_reviewed?(
-        reference_review,
+      implementation_reviewed?(
+        implementation_review,
         evidence,
-        reviewed_sha,
+        reviewed_target_digest,
+        reviewed_development_sha,
         reviewed_evidence_digest
       )
     end
   end
+
+  defp implementation_sources(review) do
+    if review.oracle.sha256 == review.target.sha256 and review.oracle.path == review.target.path do
+      [Map.put(review.target, :role, :target_and_oracle), review.development]
+    else
+      [review.oracle, review.target, review.development]
+    end
+  end
+
+  defp implementation_role_label(:target_and_oracle),
+    do: "Optimization Target + Correctness Oracle"
+
+  defp implementation_role_label(:optimization_target), do: "Optimization Target"
+  defp implementation_role_label(:development), do: "Development Implementation"
+  defp implementation_role_label(:oracle), do: "Correctness Oracle"
+  defp implementation_role_label(role), do: to_string(role)
+
+  defp source_key(%{role: role}), do: role |> to_string() |> String.replace("_", "-")
 
   defp short_sha(sha256) when is_binary(sha256), do: String.slice(sha256, 0, 16) <> "…"
   defp short_sha(_sha256), do: "—"
@@ -1588,6 +1693,19 @@ defmodule PikaWeb.AlignmentLive do
        do: "#{completed}/#{total} 已完成"
 
   defp reference_progress_label(_snapshot), do: "正在恢复准备进度"
+
+  defp target_progress_label(%{phase: :queued}), do: "等待后台任务"
+  defp target_progress_label(%{phase: :resolving_source}), do: "解析固定源码版本"
+
+  defp target_progress_label(%{phase: :materializing_source} = progress) do
+    id = Map.get(progress, :id)
+    completed = Map.get(progress, :completed, 0)
+    total = Map.get(progress, :total, 1)
+    "clone #{id || "repository"} · #{completed}/#{total}"
+  end
+
+  defp target_progress_label(%{phase: :freezing_snapshot}), do: "创建独立只读快照"
+  defp target_progress_label(_progress), do: "准备中"
 
   defp reference_status(%{status: :resolved, sha: sha}) when is_binary(sha),
     do: String.slice(sha, 0, 8)

@@ -148,7 +148,7 @@ defmodule Pika.AlignmentPersistenceTest do
     assert case_id_after == case_id_before
 
     assert {:ok, _} =
-             AlignmentFixtures.submit_reference_review(
+             AlignmentFixtures.submit_implementation_review(
                @token,
                %{root: context.workspace.root},
                "persisted-review"
@@ -164,9 +164,15 @@ defmodule Pika.AlignmentPersistenceTest do
     assert {:ok, [frozen]} = Registry.references([], durable)
     assert frozen.sha == String.duplicate("a", 40)
 
+    target_link = Path.join(context.stage_workspace.setup_worktree, "target")
+    assert File.lstat!(target_link).type == :symlink
+    File.rm!(target_link)
+    assert {:error, :enoent} = File.lstat(target_link)
+
     pid = start_campaign(context, durable)
     assert Campaign.snapshot().status == :awaiting_confirmation
     assert Campaign.snapshot().references |> hd() |> Map.fetch!(:sha) == frozen.sha
+    assert File.lstat!(target_link).type == :symlink
 
     assert :ok = confirm_reviewed_spec()
     assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
@@ -178,29 +184,27 @@ defmodule Pika.AlignmentPersistenceTest do
                "idempotency_key" => "merge-1",
                "base_sha" => context.stage_workspace.source_sha,
                "setup_sha" => setup_sha,
-               "best_sha" => best_sha
+               "best_sha" => best_sha,
+               "target_snapshot_id" => Campaign.snapshot().target_snapshot.id
              })
 
-    [samples, correctness, profiler] =
-      AlignmentFixtures.write_baseline_artifacts(
+    AlignmentFixtures.write_baseline_artifacts(
+      context.stage_workspace,
+      best_sha,
+      context.skill.sha
+    )
+
+    manifest =
+      AlignmentFixtures.write_baseline_manifest(
         context.stage_workspace,
         best_sha,
-        context.skill.sha
+        "persistent fixture baseline"
       )
-
-    Enum.each(
-      [samples, correctness, profiler] ++ AlignmentFixtures.baseline_dependency_paths(),
-      &register_artifact(&1, context.stage_workspace)
-    )
 
     assert {:ok, %{status: "validating_baseline"}} =
              Campaign.mcp_call(@token, "submit_baseline", %{
                "idempotency_key" => "baseline-1",
-               "measured_sha" => best_sha,
-               "samples_artifact" => samples,
-               "correctness_artifact" => correctness,
-               "profiler_artifact" => profiler,
-               "summary" => "persistent fixture baseline"
+               "manifest_artifact" => manifest
              })
 
     assert eventually(fn -> Campaign.snapshot().status == :selecting_iteration_sample end)
@@ -230,7 +234,8 @@ defmodule Pika.AlignmentPersistenceTest do
              "metric_definitions" => 1,
              "sampling_revision_cases" => 1,
              "sampling_revisions" => 1,
-             "spec_revisions" => 1
+             "spec_revisions" => 1,
+             "target_snapshots" => 1
            }
 
     assert [["cutlass", "main", ref_sha, skill_sha, ^digest]] =
@@ -297,7 +302,7 @@ defmodule Pika.AlignmentPersistenceTest do
              )
 
     assert {:ok, _} =
-             AlignmentFixtures.submit_reference_review(
+             AlignmentFixtures.submit_implementation_review(
                @token,
                %{root: context.workspace.root},
                "resume-review"
@@ -357,15 +362,68 @@ defmodule Pika.AlignmentPersistenceTest do
 
     legacy =
       durable
-      |> Map.delete(:reference_review_evidence)
+      |> Map.delete(:implementation_review_evidence)
       |> Map.put(:status, :awaiting_confirmation)
       |> Map.put(:required, MapSet.new())
 
     _pid = start_campaign(context, legacy)
     snapshot = Campaign.snapshot()
     assert snapshot.status == :drafting_spec
-    assert snapshot.required_operations == ["submit_reference_review"]
-    assert snapshot.last_error =~ "尚无可审阅的运行与性能证据"
+
+    assert snapshot.required_operations == [
+             "submit_implementation_bundle",
+             "submit_implementation_review"
+           ]
+
+    assert snapshot.last_error =~ "Optimization Target 或 Development 提交身份缺失"
+  end
+
+  test "opens an ambiguous Campaign Spec v1 as an explicit v2 draft without inferring roles",
+       context do
+    pid = start_campaign(context)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "legacy-v1-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, durable} = Store.load(context.campaign.id)
+    GenServer.stop(pid)
+
+    legacy_spec =
+      durable.spec_result.spec
+      |> Map.put("schema_version", 1)
+      |> Map.delete("implementations")
+      |> put_in(["computation", "reference_path"], "kernel/reference.py")
+
+    legacy = %{
+      durable
+      | status: :optimizing,
+        spec_result: %{durable.spec_result | spec: legacy_spec, ready?: true},
+        required: MapSet.new()
+    }
+
+    assert {:ok, revision_workspace} =
+             Pika.CampaignWorkspace.prepare(context.workspace, context.campaign, 2)
+
+    _pid = start_campaign(context, legacy, revision_workspace)
+    snapshot = Campaign.snapshot()
+
+    assert snapshot.status == :drafting_spec
+    assert snapshot.spec["schema_version"] == 2
+    assert snapshot.spec["revision"] == 2
+    refute Map.has_key?(snapshot.spec, "implementations")
+    refute snapshot.spec_ready
+
+    assert snapshot.required_operations == [
+             "submit_harness",
+             "submit_implementation_bundle",
+             "submit_implementation_review",
+             "submit_spec"
+           ]
+
+    assert snapshot.last_error =~ "ambiguous v1 Reference model"
   end
 
   test "revalidates legacy generic Metric errors when restoring", context do
@@ -450,7 +508,8 @@ defmodule Pika.AlignmentPersistenceTest do
                "idempotency_key" => "rollback-merge-1",
                "base_sha" => context.stage_workspace.source_sha,
                "setup_sha" => setup_sha,
-               "best_sha" => best_sha
+               "best_sha" => best_sha,
+               "target_snapshot_id" => Campaign.snapshot().target_snapshot.id
              })
 
     assert {:ok, %{status: "drafting_spec", revision: 2}} =
@@ -485,7 +544,8 @@ defmodule Pika.AlignmentPersistenceTest do
 
     assert restored.required_operations == [
              "submit_harness",
-             "submit_reference_review",
+             "submit_implementation_bundle",
+             "submit_implementation_review",
              "submit_spec"
            ]
 
@@ -542,39 +602,29 @@ defmodule Pika.AlignmentPersistenceTest do
   end
 
   defp merge_setup(workspace) do
-    Git.run!(workspace.setup_worktree, ["add", "."])
-    Git.run!(workspace.setup_worktree, ["commit", "-m", "alignment setup"])
-    setup_sha = Git.run!(workspace.setup_worktree, ["rev-parse", "HEAD"])
+    setup_sha = Campaign.snapshot().prepared_setup_sha
+    assert Git.run!(workspace.setup_worktree, ["rev-parse", "HEAD"]) == setup_sha
+    assert Git.clean?(workspace.setup_worktree)
     Git.run!(workspace.repo, ["merge", "--squash", setup_sha])
     Git.run!(workspace.repo, ["commit", "-m", "Alignment setup"])
     {setup_sha, Git.run!(workspace.repo, ["rev-parse", "HEAD"])}
   end
 
   defp confirm_reviewed_spec do
-    if is_nil(Campaign.snapshot().reference_review_evidence) do
+    if is_nil(Campaign.snapshot().implementation_review_evidence) do
       root = Campaign.snapshot().workspace.root
       key = "persistence-review-#{System.unique_integer([:positive])}"
-      {:ok, _} = AlignmentFixtures.submit_reference_review(@token, %{root: root}, key)
+      {:ok, _} = AlignmentFixtures.submit_implementation_review(@token, %{root: root}, key)
     end
 
-    {:ok, reference_review} = Campaign.reference_review()
-    evidence_digest = Campaign.snapshot().reference_review_evidence.digest
-    Campaign.confirm_spec(reference_review.sha256, evidence_digest)
-  end
+    {:ok, implementation_review} = Campaign.implementation_review()
+    evidence = Campaign.snapshot().implementation_review_evidence
 
-  defp register_artifact(relative, workspace) do
-    {:ok, artifact} = ArtifactStore.register(workspace.root, relative)
-
-    assert {:ok, _} =
-             Campaign.mcp_call(@token, "register_artifact", %{
-               "idempotency_key" => "artifact-#{relative}",
-               "kind" => artifact.kind,
-               "relative_path" => relative,
-               "sha256" => artifact.sha256,
-               "size" => artifact.size,
-               "mime" => artifact.mime,
-               "metadata" => %{}
-             })
+    Campaign.confirm_spec(
+      implementation_review.target_snapshot.digest,
+      evidence.development_sha,
+      evidence.digest
+    )
   end
 
   defp insert_second_revision(campaign_id) do

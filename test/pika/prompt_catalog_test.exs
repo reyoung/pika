@@ -33,11 +33,13 @@ defmodule Pika.PromptCatalogTest do
     assert alignment =~ "Case count × Metric count × pair_count"
     assert alignment =~ "never change pair_count when the user only corrects the number of Cases"
     assert alignment =~ "Never invent, infer or apply defaults for either"
-    assert alignment =~ "Reference Review Evidence"
-    assert alignment =~ "at least one of the submitted performance Metrics"
-    assert alignment =~ "register_artifact with kind `reference_review_evidence`"
-    assert alignment =~ "artifacts/reference-review/"
-    assert alignment =~ "submit_reference_review"
+    assert alignment =~ "Implementation Review Evidence"
+    assert alignment =~ "Both must pass the Oracle on the same inputs"
+    assert alignment =~ "register its canonical Workspace-relative path with kind"
+    assert alignment =~ "`implementation_review_evidence`"
+    assert alignment =~ "artifacts/implementation-review/"
+    assert alignment =~ "submit_implementation_bundle"
+    assert alignment =~ "submit_implementation_review"
     assert alignment =~ "not the full Baseline"
     refute alignment =~ "call ask_question with"
 
@@ -55,13 +57,17 @@ defmodule Pika.PromptCatalogTest do
                best_sha: "def",
                repo: "/tmp/repo",
                artifacts: "/tmp/artifacts",
+               target_snapshot_id: "target-fixture",
+               target_entrypoint: "kernel/reference.py",
+               development_entrypoint: "kernel/development.py",
                pair_count: 8,
                min_valid_pairs: 6,
                max_initial_cases: 10
              })
 
     assert baseline =~ "submit_iteration_sample"
-    assert baseline =~ "exactly 8 alternating self-pairs"
+    assert baseline =~ "exactly 8 genuinely"
+    assert baseline =~ "Target/Candidate pairs"
     assert baseline =~ "at least 6 valid pairs"
     assert baseline =~ "genuinely independent A/B execution"
     assert baseline =~ "Never duplicate, relabel, interpolate or"
@@ -83,6 +89,7 @@ defmodule Pika.PromptCatalogTest do
     context = %{
       protected_paths: ["kernel/bench.py"],
       spec: %{"benchmark" => benchmark, "stopping" => %{}},
+      target_snapshot: %{id: "target-fixture", entrypoint: "kernel/reference.py"},
       cases: [],
       sampled_case_ids: []
     }
@@ -99,7 +106,7 @@ defmodule Pika.PromptCatalogTest do
              })
 
     assert iteration =~ "exactly 8 alternating"
-    assert iteration =~ "at least 6 valid Pairs"
+    assert iteration =~ ~r/at least\s+6 valid Pairs/
 
     assert {:ok, integration} =
              PromptCatalog.render(:integration, %{
@@ -109,7 +116,7 @@ defmodule Pika.PromptCatalogTest do
                patch_path: "/tmp/candidate.patch"
              })
 
-    assert integration =~ "independent 8 Pair run"
+    assert integration =~ ~r/independent\s+8 Pair run/
 
     assert {:ok, sync} =
              PromptCatalog.render(:sync, %{
@@ -117,7 +124,7 @@ defmodule Pika.PromptCatalogTest do
                context: %{"spec" => %{"benchmark" => benchmark}}
              })
 
-    assert sync =~ "exactly 8 alternating Best metric pairs"
+    assert sync =~ "exactly 8 alternating"
 
     for execution_prompt <- [alignment, baseline, iteration, integration, sync] do
       assert execution_prompt =~ "uv venv .venv"

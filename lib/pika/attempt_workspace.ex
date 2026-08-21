@@ -1,9 +1,9 @@
 defmodule Pika.AttemptWorkspace do
   @moduledoc false
 
-  alias Pika.{Git, ReferenceCatalog}
+  alias Pika.{Git, ReferenceCatalog, TargetSnapshot}
 
-  def create(workspace, attempt_id, best_sha, references) do
+  def create(workspace, attempt_id, best_sha, references, target_snapshot \\ nil) do
     relative = Path.join("attempts", attempt_id)
     path = Path.join(workspace.root, relative)
     branch = "pika/attempt/#{attempt_id}"
@@ -11,6 +11,7 @@ defmodule Pika.AttemptWorkspace do
     with :ok <- ensure_attempt_directories(workspace.root, attempt_id),
          :ok <- ensure_worktree(workspace.repo, path, branch, best_sha),
          :ok <- materialize_references(workspace.root, path, references),
+         :ok <- link_target(workspace.root, path, target_snapshot),
          {:ok, head} <- Git.head(path),
          true <- head == best_sha do
       {:ok,
@@ -55,14 +56,16 @@ defmodule Pika.AttemptWorkspace do
       "#{attempt.base_sha}...#{candidate_sha}",
       "--",
       ".",
-      ":(exclude)ref/**"
+      ":(exclude)ref/**",
+      ":(exclude)target",
+      ":(exclude)target/**"
     ]
 
     with {:ok, patch} <- Git.run(workspace.repo, args),
          false <- patch_contains_injected_paths?(patch) do
       {:ok, patch <> if(patch == "", do: "", else: "\n")}
     else
-      true -> {:error, :injected_reference_in_patch}
+      true -> {:error, :injected_workspace_dependency_in_patch}
       {:error, _} = error -> error
     end
   end
@@ -142,6 +145,11 @@ defmodule Pika.AttemptWorkspace do
     end
   end
 
+  defp link_target(_workspace_root, _path, nil), do: {:error, :target_snapshot_missing}
+
+  defp link_target(workspace_root, path, target_snapshot),
+    do: TargetSnapshot.link(workspace_root, path, target_snapshot)
+
   defp reference_status(nil), do: :resolved
   defp reference_status(status) when is_atom(status), do: status
   defp reference_status("resolved"), do: :resolved
@@ -154,6 +162,6 @@ defmodule Pika.AttemptWorkspace do
   end
 
   defp patch_contains_injected_paths?(patch) do
-    String.contains?(patch, [" a/ref/", " b/ref/"])
+    String.contains?(patch, [" a/ref/", " b/ref/", " a/target", " b/target"])
   end
 end

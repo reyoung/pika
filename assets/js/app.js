@@ -191,8 +191,10 @@ Hooks.MetricsChart = {
     points.forEach(point => {
       const key = `v${point.spec_revision} · ${point.case_id} · ${point.metric_id} · ${point.source}`
       if (!grouped.has(key)) grouped.set(key, [])
+      const targetImprovement = point.target_relative_improvement ?? point.improvement_ratio
+      const bestImprovement = point.best_relative_improvement ?? point.improvement_ratio
       grouped.get(key).push({
-        value: [Math.floor(point.measured_at / 1000), point.improvement_ratio * 100],
+        value: [Math.floor(point.measured_at / 1000), targetImprovement == null ? null : targetImprovement * 100],
         attemptId: point.attempt_id,
         ordinal: point.ordinal,
         status: point.status,
@@ -203,6 +205,9 @@ Hooks.MetricsChart = {
         specRevision: point.spec_revision,
         caseId: point.case_id,
         metricId: point.metric_id,
+        targetValue: point.target_value,
+        targetImprovement: targetImprovement == null ? null : targetImprovement * 100,
+        bestImprovement: bestImprovement == null ? null : bestImprovement * 100,
         noise: point.noise_tolerance * 100
       })
     })
@@ -239,7 +244,8 @@ Hooks.MetricsChart = {
           return `<div style="padding:5px 7px;white-space:normal">
             <strong>Attempt #${point.ordinal} · ${escapeHTML(point.status)}</strong>
             <div style="margin-top:7px;color:#8fa1a9">Spec v${escapeHTML(point.specRevision)} · ${escapeHTML(point.caseId)} / ${escapeHTML(point.metricId)}</div>
-            <div style="margin-top:5px;font-family:monospace">${Number(point.rawValue).toFixed(3)} ${escapeHTML(point.unit)} · ${Number(point.value[1]).toFixed(2)}%</div>
+            <div style="margin-top:5px;font-family:monospace">Development ${formatMetricNumber(point.rawValue)} ${escapeHTML(point.unit)} · Target ${formatMetricNumber(point.targetValue)} ${escapeHTML(point.unit)}</div>
+            <div style="margin-top:4px;font-family:monospace">vs Target ${formatPercent(point.targetImprovement)} · vs Best ${formatPercent(point.bestImprovement)}</div>
             <div style="margin-top:8px;padding-top:8px;border-top:1px solid #2a3940;color:#aab8be;line-height:1.5"><span style="display:block;color:#647780;font-size:9px;text-transform:uppercase">Summary</span>${escapeHTML(point.summary)}</div>
             <div style="margin-top:6px;color:#647780;font-size:9px">${escapeHTML(point.source)} · noise ±${Number(point.noise).toFixed(2)}%</div>
           </div>`
@@ -252,7 +258,7 @@ Hooks.MetricsChart = {
       },
       yAxis: {
         type: "value",
-        name: "相对 Baseline 改善 (%)",
+        name: "相对固定 Target 改善 (%)",
         nameTextStyle: {color: "#70818a"},
         axisLabel: {color: "#70818a", formatter: "{value}%"},
         splitLine: {lineStyle: {color: "rgba(111,133,147,.13)"}}
@@ -260,6 +266,14 @@ Hooks.MetricsChart = {
       series
     }, {notMerge: true})
   }
+}
+
+function formatMetricNumber(value) {
+  return value == null ? "—" : Number(value).toFixed(3)
+}
+
+function formatPercent(value) {
+  return value == null ? "—" : `${Number(value).toFixed(2)}%`
 }
 
 function escapeHTML(value) {

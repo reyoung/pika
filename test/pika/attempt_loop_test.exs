@@ -84,7 +84,7 @@ defmodule Pika.AttemptLoopTest do
 
     [start] = receive_starts(1)
     assert start.instructions =~ "exactly 8 alternating"
-    assert start.instructions =~ "at least 6 valid Pairs"
+    assert start.instructions =~ ~r/at least\s+6 valid Pairs/
     send(start.task_pid, :release)
 
     eventually(fn ->
@@ -127,16 +127,30 @@ defmodule Pika.AttemptLoopTest do
 
     log =
       ExUnit.CaptureLog.capture_log([level: :info], fn ->
-        _coordinator =
+        coordinator =
           start_coordinator(
             context,
-            profiles(1, %{test_pid: self(), barrier: true}),
-            progress_log_interval_ms: 10,
+            profiles(1, %{
+              test_pid: self(),
+              barrier: true,
+              progress_event_output: "PIKA_MCP_TOKEN=periodic-log-secret"
+            }),
+            progress_log_interval_ms: 0,
             progress_log_level: :warning
           )
 
         [start] = receive_starts(1)
-        Process.sleep(30)
+
+        eventually(fn ->
+          coordinator
+          |> :sys.get_state()
+          |> Map.fetch!(:sessions)
+          |> Map.values()
+          |> Enum.any?(&(&1.last_event_summary == "PIKA_MCP_TOKEN=[REDACTED]"))
+        end)
+
+        send(coordinator, :log_work_snapshot)
+        Process.sleep(50)
         send(start.task_pid, :release)
 
         eventually(fn ->
@@ -150,6 +164,49 @@ defmodule Pika.AttemptLoopTest do
     assert log =~ "Pika attempt work snapshot"
     assert log =~ "awaiting_agent_summary"
     assert log =~ "required_operations"
+    assert log =~ "PIKA_MCP_TOKEN=[REDACTED]"
+    refute log =~ "periodic-log-secret"
+  end
+
+  test "periodic Git inspection does not block Coordinator calls" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+    owner = self()
+
+    probe = fn _workspace, attempt ->
+      send(owner, {:progress_probe_started, self()})
+
+      receive do
+        :release_probe -> %{attempt_id: attempt.id, git: %{dirty: false}}
+      end
+    end
+
+    coordinator =
+      start_coordinator(
+        context,
+        profiles(1, %{test_pid: self(), barrier: true}),
+        progress_log_interval_ms: 0,
+        progress_log_level: :debug,
+        progress_probe: probe
+      )
+
+    [start] = receive_starts(1)
+    send(coordinator, :log_work_snapshot)
+    assert_receive {:progress_probe_started, probe_pid}, 1_000
+    send(coordinator, :log_work_snapshot)
+    refute_receive {:progress_probe_started, _other_pid}, 50
+
+    assert %{campaign: %{campaign_id: campaign_id}} = AttemptCoordinator.snapshot(coordinator)
+    assert campaign_id == context.campaign.id
+
+    send(probe_pid, :release_probe)
+    send(start.task_pid, :release)
+
+    eventually(fn ->
+      match?(
+        {:ok, %{status: "ready_for_integration"}},
+        AttemptStore.attempt(start.attempt_id)
+      )
+    end)
   end
 
   test "UI Spec overview reuses the snapshot and dispatch checks stay lightweight" do

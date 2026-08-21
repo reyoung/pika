@@ -23,7 +23,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 ## 已确认的调优流程
 
-1. 用户与 AI 共同定义计算边界、PyTorch 参考实现、拟融合范围、正确性要求、测试 Shapes 和性能指标。
+1. 用户与 AI 共同定义计算边界、Correctness Oracle、固定 Optimization Target、可变 Development Implementation、拟融合范围、正确性要求、测试 Shapes 和性能指标。
 2. 用户确认性能目标或候选尝试预算。
 3. 系统循环执行有边界的候选尝试，直到满足停止条件。
 4. 每个候选尝试使用独立 Git worktree，并在尝试期间积极提交代码。
@@ -35,17 +35,19 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 ## 已确认的 Campaign Spec 生命周期
 
 - 优化开始前必须显式冻结带版本号的 Campaign Spec，状态依次为 `DraftingSpec → AwaitingConfirmation → BuildingBaseline → Optimizing`。
-- Campaign Spec 至少包含 PyTorch 计算语义、输入/dtype/layout、正确性容差、Fusion 边界、Shapes、目标与保护 Metrics、停止条件和 Benchmark 协议。
+- Campaign Spec v2 至少包含计算语义、输入/dtype/layout、正确性容差、Fusion 边界、三种 Implementation Role、Shapes、目标与保护 Metrics、停止条件和 Benchmark 协议。
 - 只有用户明确确认后，系统才能离开 `AwaitingConfirmation` 并建立 Baseline。
 - 优化开始后，任何改变计算语义、Shapes、Metric、Benchmark 或正确性要求的全局指导都创建新 Spec Revision，并重新生成 Baseline 与噪声估计。
 - 不同 Spec Revision 的 Metrics 不得直接连成同一条可比较曲线。
 
-## 已确认的 Reference 与 Harness 边界
+## 已确认的 Oracle、Target、Development 与 Harness 边界
 
-- Boundary Agent 在独立 setup worktree 中创建或完善 PyTorch Reference、正确性测试和 Benchmark Harness。
-- 用户确认 Campaign Spec 后，这些文件由 Agent Merge 到 Campaign Best Branch，之后才开始 Baseline。
-- Campaign Spec 记录受保护文件的路径与内容哈希。Iteration Agent 可以读取和执行，但不得修改。
-- 候选 Patch 修改任一受保护文件时直接拒绝；修正 Reference 或 Harness 必须创建新 Spec Revision。
+- Correctness Oracle 只负责判定语义正确性；Optimization Target 是固定性能锚点；Development Implementation 是持续优化的产品代码。三者不能由一个含混的 `reference_path` 隐式兼任。
+- Boundary Agent 在独立 setup worktree 中创建或完善仓库内 Oracle（若使用）、Development、正确性测试和 Benchmark Harness；空仓库必须同时产生可运行 Target 来源与初始 Development。
+- Target 可取自被审阅 setup commit 的精确快照，也可取自固定 SHA 的 Reference Project。Pika 把它固化在 Workspace `targets/<revision>/repo`，并以 Git 忽略的 `target/` 软链接暴露；它不进入 setup squash 或候选 Patch。
+- 用户确认前必须审阅 Oracle、Target、Development 源码，并看到同一 Case 上两种实现都通过 Oracle 的 Target/Development 配对性能证据。
+- 用户确认后，仓库内 Oracle、正确性测试、Harness 与初始 Development 由 Agent Merge 到 Campaign Best Branch；只有 Development 在后续 Attempt 中变化。
+- Campaign Spec 记录受保护文件的路径与内容哈希。候选 Patch 修改任一受保护文件时直接拒绝；修正 Oracle、Harness 或显式更换 Target 必须创建新 Spec Revision。
 
 ## 已确认的可选 Plan 阶段
 
@@ -77,7 +79,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 
 ## 已确认的 Campaign Workspace 与 Git 布局
 
-- Workspace 固定包含 `repo/`、`attempts/`、`artifacts/plans/`、`artifacts/patches/`、`artifacts/profiles/`、`artifacts/prompts/`、`artifacts/logs/`、`pika.sqlite3` 和 `config.json`。
+- Workspace 固定包含 `repo/`、`refs/`、`targets/`、`attempts/`、`artifacts/plans/`、`artifacts/patches/`、`artifacts/profiles/`、`artifacts/prompts/`、`artifacts/logs/`、`pika.sqlite3` 和 `config.json`。
 - 用户显式提供本地仓库时，`workspace/repo` 是指向该仓库的软链接，并假设该仓库由当前 Pika Server 独占管理。
 - Managed Repo 首次启动要求 working tree 与 index 干净。Pika 在 Git common directory 中创建带 Server UUID、PID、启动时间和 Workspace canonical path 的锁文件，并在进程生命周期内持有 OS advisory lock。
 - 另一个 Pika Server 无法取得该 advisory lock 时必须拒绝启动；崩溃后的锁释放依赖 OS，而不是仅凭 PID 文件猜测。
@@ -99,7 +101,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - 排队期间最佳已知版本发生变化的候选，必须由编码 Agent 在最新版本上重放、解决冲突并重新运行正确性与 Metrics 测试。只有相对最新版本仍满足接受条件时才能归并。
 - 已接受尝试由编码 Agent 自动 squash merge 到本次服务唯一的 Campaign Best Branch；源仓库启动时的原分支不被 Iteration 修改。
 - Integration 串行取得 Lease 后，必须在任何 Git mutation 前完成归并前全量回归；失败候选直接拒绝，不会短暂进入 Campaign Best Branch。
-- 初始 Baseline 对 Full Case Set 完成用户在 Campaign Spec 中声明的正式 Pair 数；Baseline Agent 自动选择最多十个 Case 形成首个 Sampling Revision。
+- 初始 Baseline 对 Full Case Set 交错运行固定 Target 与初始 Development，完成用户在 Campaign Spec 中声明的正式 Pair 数；Baseline Agent 自动选择最多十个 Case 形成首个 Sampling Revision。
 - 日常 Attempt 只要求其启动 Sampling Revision 的正式 Metrics；Sampling Advanced 通知活动 Agent，但不强迫已运行 Attempt 返工。
 - Integration 对全量 Case/Metric 做 5 Pair 筛查；中位数回退超过当前 Best noise tolerance 或样本无效的组合按 Campaign Spec 的正式 Pair 数独立重跑。
 - 任一 Case/Metric 经正式 Pair 测量确认回退都拒绝候选，包括 Iteration 阶段的 Informational 项。
@@ -113,8 +115,8 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Iteration 阶段至少一个采样 Target Case 的目标 Metric 必须真实改善，采样 Guard Case 不得退化超过噪声容忍值。
 - 线上频率权重只用于综合评分、候选排序和 UI，不能用高频 Case 的收益抵消保护 Case 的退化。
 - 观察 Case 在 Iteration 阶段只记录和展示；归并前全量回归仍执行 universal no-regression gate。
-- 正式性能判定必须在 warmup 后交错执行 `baseline → candidate` 的多轮配对测量，使用配对比值的中位数和 MAD 自动估算每个 Metric 的噪声容忍值。
-- Baseline 和 Iteration 正式测量在 warmup 后执行用户指定数量的 Pair，次序交替为 `baseline → candidate` 与 `candidate → baseline`。
+- 正式性能判定必须在 warmup 后交错执行固定 `Target → Development candidate` 的多轮配对测量，使用配对比值的中位数和 MAD 自动估算每个 Metric 的噪声容忍值。
+- Baseline、Iteration 和升级后的 Integration 正式测量执行用户指定数量的 Pair，次序交替为 `target → candidate` 与 `candidate → target`。同一结果同时计算 `vs Target` 与 `vs current Best`；Target 决定是否达到优化目标，Best 决定是否回归。
 - 归并前全量回归先执行 5 Pair，至少 4 Pair 有效；回退超过既有 noise tolerance 或样本无效时，按 Campaign Spec 独立重跑完整正式 Pair 数并达到 `min_valid_pairs`。
 - 使用改善比例的中位数作为结果，`noise_tolerance = max(0.5%, 3 × 1.4826 × MAD)`。
 - 只有非有限值、进程失败或 GPU 错误会使 Pair 无效；普通统计离群点不裁剪。有效 Pair 少于用户在 Campaign Spec 中指定的 `min_valid_pairs` 时整组重跑，再次不足则拒绝该 Attempt。
@@ -201,7 +203,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - Agent Backend 在打开 Session 时配置 MCP URL 与 Token。Codex 通过 App Server 进程配置注入，Cursor 通过 ACP Session 配置注入；不能连接 HTTP MCP 的 Backend 不符合 conformance contract。
 - MCP Token 在服务端绑定 Campaign、Backend Session、Role 与可选 Attempt ID；Agent 不能通过工具参数切换身份。
 - Boundary、Plan、Iteration、Integration、Sync 与 Side Conversation 使用不同工具集合。跨 Attempt 读取只能通过显式历史查询工具，所有写操作必须携带 idempotency key。
-- 必需完成调用为：Boundary Drafting 的 `submit_spec`/`submit_harness`/`submit_reference_review`、用户确认后的 `complete_setup_merge`/`submit_baseline`/`submit_iteration_sample`，Plan 的 `submit_plan`，Iteration 的 `record_metrics`/`submit_attempt_summary`/`complete_attempt`，Integration 的 `submit_full_regression`、必要时的 `submit_sampling_feedback` 和通过后的 `complete_merge`，Sync 的 `complete_sync`。Side Conversation 没有完成门禁。
+- 必需完成调用为：Boundary Drafting 的 `submit_spec`/`submit_harness`/`submit_implementation_bundle`/`submit_implementation_review`、用户确认后的 `complete_setup_merge`/`submit_baseline`/`submit_iteration_sample`，Plan 的 `submit_plan`，Iteration 的 `record_metrics`/`submit_attempt_summary`/`complete_attempt`，Integration 的 `submit_full_regression`、必要时的 `submit_sampling_feedback` 和通过后的 `complete_merge`，Sync 的 `complete_sync`。Side Conversation 没有完成门禁。
 - Metrics 可以重复提交，后一次覆盖当前快照；缺少必需调用时继续采用无限 follow-up 规则。
 
 ## 已确认的 Agent Backend 与通信协议

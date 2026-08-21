@@ -42,6 +42,9 @@ defmodule PikaWeb.ControlLiveTest do
                    value: 9.8,
                    baseline_value: 10.0,
                    improvement_ratio: 0.02,
+                   target_value: 10.0,
+                   target_relative_improvement: 0.02,
+                   best_relative_improvement: 0.02,
                    mad: 0.001,
                    noise_tolerance: 0.005,
                    pair_count: 7,
@@ -181,6 +184,8 @@ defmodule PikaWeb.ControlLiveTest do
     assert metrics_html =~ "Spec Revision"
     assert metrics_html =~ "Selected point"
     assert metrics_html =~ "latency_us"
+    assert metrics_html =~ "vs Target"
+    assert metrics_html =~ "vs Best"
 
     assert has_element?(view, "#metrics-chart[data-points]")
 
@@ -228,14 +233,102 @@ defmodule PikaWeb.ControlLiveTest do
                }
              )
 
-    Phoenix.PubSub.broadcast(
-      Pika.PubSub,
-      Pika.AttemptCoordinator.progress_topic(context.campaign.id),
-      {:attempt_progress, attempt.id}
-    )
+    progress_queries =
+      capture_repo_queries(view.pid, fn ->
+        Phoenix.PubSub.broadcast(
+          Pika.PubSub,
+          Pika.AttemptCoordinator.progress_topic(context.campaign.id),
+          {:attempt_progress, attempt.id}
+        )
 
-    Process.sleep(300)
+        Process.sleep(300)
+        :sys.get_state(view.pid)
+      end)
+
     assert render(view) =~ "Live progress arrived."
+    assert Enum.any?(progress_queries, &String.contains?(&1, "FROM attempts WHERE id = ?"))
+
+    refute Enum.any?(
+             progress_queries,
+             &String.contains?(&1, "FROM attempts WHERE campaign_id = ?")
+           )
+  end
+
+  test "coalesces a long streamed message before limiting event history", %{context: context} do
+    {:ok, attempt} = Pika.AttemptStore.create_attempt(context.campaign.id, 0)
+    {:ok, attempt} = Pika.AttemptStore.mark_running(attempt.id)
+
+    session = %Pika.AgentBackend.Session{
+      id: Ecto.UUID.generate(),
+      backend: :codex_app_server,
+      backend_protocol: "codex-app-server",
+      backend_session_id: "long-message-provider-session",
+      cwd: context.workspace.repo,
+      model: "gpt-test",
+      reasoning_effort: :high,
+      jsonl_path: "/dev/null"
+    }
+
+    identity = %{
+      attempt_id: attempt.id,
+      role: :iteration,
+      slot_index: 0,
+      token_hash: String.duplicate("b", 64)
+    }
+
+    assert :ok =
+             Pika.AttemptStore.insert_session(
+               context.campaign.id,
+               identity,
+               session,
+               %{},
+               []
+             )
+
+    relative_path = "artifacts/logs/#{attempt.id}/#{session.id}.jsonl"
+    path = Path.join(context.workspace.root, relative_path)
+    File.mkdir_p!(Path.dirname(path))
+
+    records =
+      for index <- 1..700 do
+        delta =
+          cond do
+            index == 1 -> "BEGIN OF LONG RESPONSE "
+            index == 700 -> " END OF LONG RESPONSE"
+            true -> "chunk-#{index} "
+          end
+
+        %{
+          "at" => "2026-08-20T00:00:00.#{String.pad_leading(to_string(index), 6, "0")}Z",
+          "type" => "message_delta",
+          "session_id" => session.id,
+          "turn_id" => "long-turn",
+          "data" => %{"delta" => delta, "item_id" => "long-message"}
+        }
+      end
+
+    File.write!(path, Enum.map_join(records, "\n", &Jason.encode!/1) <> "\n")
+
+    assert {:ok, artifact} =
+             Pika.ArtifactStore.register(context.workspace, relative_path, %{
+               campaign_id: context.campaign.id,
+               owner_type: "attempt",
+               owner_id: attempt.id,
+               kind: "agent_jsonl"
+             })
+
+    assert :ok = Pika.AttemptStore.attach_session_log(session.id, artifact.id)
+    assert {:ok, detail} = Pika.Dashboard.attempt(context.campaign.id, attempt.id)
+
+    deltas =
+      detail.agent_events
+      |> Enum.filter(&(&1["type"] == "message_delta"))
+      |> Enum.map(&get_in(&1, ["data", "delta"]))
+
+    assert [message] = deltas
+    assert String.starts_with?(message, "BEGIN OF LONG RESPONSE")
+    assert String.ends_with?(message, "END OF LONG RESPONSE")
+    assert length(detail.agent_events) <= 500
   end
 
   test "JSON API is bearer protected, idempotent, and excludes MCP credentials", %{

@@ -3,6 +3,8 @@ defmodule Pika.Dashboard do
 
   alias Pika.{AttemptStore, Control, Repo, SyncCoordinator}
 
+  @agent_event_limit 500
+
   def snapshot(campaign_id \\ current_campaign_id(), opts \\ []) do
     attempts = AttemptStore.attempts(campaign_id, limit: 1_000) |> Enum.sort_by(& &1.ordinal)
     sessions = AttemptStore.sessions(campaign_id)
@@ -73,6 +75,10 @@ defmodule Pika.Dashboard do
           value: metric.value,
           baseline_value: metric.baseline_value,
           improvement_ratio: metric.improvement_ratio,
+          target_snapshot_id: metric.target_snapshot_id,
+          target_value: metric.target_value,
+          target_relative_improvement: metric.target_relative_improvement,
+          best_relative_improvement: metric.best_relative_improvement,
           noise_tolerance: metric.noise_tolerance,
           source: metric.source,
           patch_artifact_id: attempt.patch_artifact_id,
@@ -180,8 +186,62 @@ defmodule Pika.Dashboard do
 
     (backend_events ++ campaign_events)
     |> Enum.sort_by(&(&1["at"] || ""))
-    |> Enum.take(-500)
+    |> coalesce_message_deltas()
+    |> Enum.take(-@agent_event_limit)
   end
+
+  defp coalesce_message_deltas(events) do
+    {timeline, messages} =
+      Enum.reduce(events, {[], %{}}, fn event, {timeline, messages} ->
+        case message_delta_key(event) do
+          nil ->
+            {[{:event, event} | timeline], messages}
+
+          key ->
+            case Map.fetch(messages, key) do
+              :error ->
+                delta = get_in(event, ["data", "delta"])
+
+                {[{:message, key} | timeline],
+                 Map.put(messages, key, %{event: event, chunks: [delta]})}
+
+              {:ok, message} ->
+                delta = get_in(event, ["data", "delta"])
+                updated = %{message | chunks: [delta | message.chunks]}
+                {timeline, Map.put(messages, key, updated)}
+            end
+        end
+      end)
+
+    timeline
+    |> Enum.reverse()
+    |> Enum.map(fn
+      {:event, event} ->
+        event
+
+      {:message, key} ->
+        %{event: event, chunks: chunks} = Map.fetch!(messages, key)
+        put_in(event, ["data", "delta"], chunks |> Enum.reverse() |> IO.iodata_to_binary())
+    end)
+  end
+
+  defp message_delta_key(
+         %{
+           "type" => "message_delta",
+           "data" => %{"delta" => delta} = data
+         } = event
+       )
+       when is_binary(delta) do
+    case data["item_id"] || data["itemId"] do
+      item_id when is_binary(item_id) and item_id != "" ->
+        {event["session_id"], event["turn_id"], item_id}
+
+      _other ->
+        nil
+    end
+  end
+
+  defp message_delta_key(_event), do: nil
 
   defp guidance_by_attempt(campaign_id) do
     Repo.query!(

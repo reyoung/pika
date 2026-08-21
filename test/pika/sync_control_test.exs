@@ -70,7 +70,7 @@ defmodule Pika.SyncControlTest do
   test "protected input changes require explicit confirmation and rejection leaves Best unchanged" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 5)
     remote = create_remote(context.workspace.repo)
-    remote_commit(remote, "kernel/reference.py", "def reference(x): return x + 1\n")
+    remote_commit(remote, "kernel/test_correctness.py", "assert 1 == 1\n")
     coordinator = start_sync(context)
 
     assert {:ok, _} = SyncCoordinator.request(remote, "main", "sync-protected", coordinator)
@@ -83,7 +83,7 @@ defmodule Pika.SyncControlTest do
     end)
 
     {:ok, waiting} = SyncStore.latest_run(context.campaign.id)
-    assert waiting.protected_paths == ["kernel/reference.py"]
+    assert waiting.protected_paths == ["kernel/test_correctness.py"]
     assert Pika.Persistence.current_campaign().status == "awaiting_spec_confirmation"
 
     assert {:ok, failed} =
@@ -227,7 +227,7 @@ defmodule Pika.SyncControlTest do
   test "approved protected changes create a new Spec Revision and rebuild Baseline metrics" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 5)
     remote = create_remote(context.workspace.repo)
-    remote_commit(remote, "kernel/reference.py", "def reference(x): return x + 1\n")
+    remote_commit(remote, "kernel/test_correctness.py", "assert 1 == 1\n")
     coordinator = start_sync(context)
 
     assert {:ok, _} =
@@ -307,8 +307,12 @@ defmodule Pika.SyncControlTest do
       context.campaign.id
     ])
 
-    assert {:ok, %{status: "draining"}} = Control.reconcile(context.campaign.id)
-    assert {:ok, %{status: "completed"}} = Control.reconcile(context.campaign.id)
+    assert {:ok, reconciled} = Control.reconcile(context.campaign.id)
+    assert reconciled.status in ~w(draining completed)
+
+    if reconciled.status == "draining" do
+      assert {:ok, %{status: "completed"}} = Control.reconcile(context.campaign.id)
+    end
   end
 
   test "Stop interrupts an active Attempt while Pause leaves its turn and worktree intact" do

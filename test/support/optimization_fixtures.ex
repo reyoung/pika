@@ -1,5 +1,5 @@
 defmodule Pika.Test.OptimizationFixtures do
-  alias Pika.{Git, Harness}
+  alias Pika.{Git, Harness, TargetSnapshot}
   alias Pika.Alignment.ArtifactStore
   alias Pika.Test.{AlignmentFixtures, CampaignFixtures}
   alias Pika.{Config, Persistence, Repo, Workspace}
@@ -15,11 +15,30 @@ defmodule Pika.Test.OptimizationFixtures do
     {:ok, plan} = Workspace.plan(config)
     {:ok, workspace} = Workspace.activate(plan)
 
+    Git.run!(workspace.repo, ["config", "user.name", "Pika Test"])
+    Git.run!(workspace.repo, ["config", "user.email", "pika@example.invalid"])
     AlignmentFixtures.create_harness(workspace.repo)
     Git.run!(workspace.repo, ["add", "."])
     Git.run!(workspace.repo, ["commit", "-m", "Baseline harness"])
     best_sha = Git.run!(workspace.repo, ["rev-parse", "HEAD"])
     workspace = %{workspace | base_sha: best_sha}
+
+    spec =
+      AlignmentFixtures.spec()
+      |> put_in(["benchmark", "pair_count"], pair_count)
+      |> put_in(["benchmark", "min_valid_pairs"], min_valid_pairs)
+
+    {:ok, target_snapshot} =
+      TargetSnapshot.prepare(
+        workspace.root,
+        1,
+        workspace.repo,
+        best_sha,
+        spec,
+        []
+      )
+
+    :ok = TargetSnapshot.link(workspace.root, workspace.repo, target_snapshot)
 
     Application.put_env(:pika, Repo,
       database: workspace.database,
@@ -36,12 +55,7 @@ defmodule Pika.Test.OptimizationFixtures do
     {:ok, campaign, :initialized} = Persistence.initialize_or_recover(workspace)
     {:ok, harness} = Harness.validate(workspace.repo, harness_args())
 
-    spec =
-      AlignmentFixtures.spec()
-      |> put_in(["benchmark", "pair_count"], pair_count)
-      |> put_in(["benchmark", "min_valid_pairs"], min_valid_pairs)
-
-    ids = insert_alignment_state(campaign.id, best_sha, harness, spec)
+    ids = insert_alignment_state(campaign.id, best_sha, harness, spec, target_snapshot)
     campaign = Persistence.current_campaign()
 
     %{
@@ -49,6 +63,7 @@ defmodule Pika.Test.OptimizationFixtures do
       campaign: campaign,
       best_sha: best_sha,
       harness: harness,
+      target_snapshot: target_snapshot,
       spec: spec,
       spec_id: ids.spec_id,
       case_id: ids.case_id,
@@ -67,7 +82,13 @@ defmodule Pika.Test.OptimizationFixtures do
     end
   end
 
-  def write_iteration_artifacts(workspace_root, attempt_id, base_sha, candidate_sha, opts \\ []) do
+  def write_iteration_artifacts(
+        workspace_root,
+        attempt_id,
+        _base_sha,
+        candidate_sha,
+        opts \\ []
+      ) do
     improvement = Keyword.get(opts, :improvement, 0.02)
     pair_count = Keyword.get(opts, :pair_count, AlignmentFixtures.pair_count())
     valid_count = Keyword.get(opts, :valid_count, pair_count)
@@ -79,18 +100,15 @@ defmodule Pika.Test.OptimizationFixtures do
 
     records =
       for index <- 0..(pair_count - 1) do
-        baseline = 10.0 + index / 10_000
+        target = 10.0 + index / 10_000
 
         %{
-          "schema_version" => 1,
-          "base_sha" => base_sha,
-          "candidate_sha" => candidate_sha,
           "case_id" => "target_case",
           "metric_id" => "latency_us",
           "pair_index" => index,
-          "order" => if(rem(index, 2) == 0, do: "bc", else: "cb"),
-          "baseline" => baseline,
-          "candidate" => baseline * (1.0 - improvement),
+          "order" => if(rem(index, 2) == 0, do: "tc", else: "ct"),
+          "target" => target,
+          "candidate" => target * (1.0 - improvement),
           "valid" => index < valid_count,
           "error" => if(index < valid_count, do: nil, else: "fixture invalid")
         }
@@ -101,8 +119,16 @@ defmodule Pika.Test.OptimizationFixtures do
     File.write!(
       correctness_path,
       Jason.encode!(%{
+        "schema_version" => 2,
+        "target_snapshot_id" => active_target_snapshot_id(),
         "candidate_sha" => candidate_sha,
-        "cases" => [%{"case_id" => "target_case", "passed" => true}]
+        "cases" => [
+          %{
+            "case_id" => "target_case",
+            "target_passed" => true,
+            "candidate_passed" => true
+          }
+        ]
       })
     )
 
@@ -129,7 +155,7 @@ defmodule Pika.Test.OptimizationFixtures do
     pair_count = get_in(context.spec, ["benchmark", "pair_count"])
 
     Repo.query!(
-      "INSERT INTO best_metrics(best_revision_id, benchmark_case_id, metric_definition_id, measured_sha, value, baseline_value, improvement_ratio, mad, noise_tolerance, pair_count, valid_pair_count, source, measured_at) VALUES (?, ?, ?, ?, 10.0, 10.0, 0.0, 0.001, 0.005, ?, ?, 'baseline', ?)",
+      "INSERT INTO best_metrics(best_revision_id, benchmark_case_id, metric_definition_id, measured_sha, value, baseline_value, improvement_ratio, mad, noise_tolerance, pair_count, valid_pair_count, source, measured_at, target_snapshot_id, target_value, target_relative_improvement, best_relative_improvement) VALUES (?, ?, ?, ?, 10.0, 10.0, 0.0, 0.001, 0.005, ?, ?, 'baseline', ?, ?, 10.0, 0.0, 0.0)",
       [
         best_revision_id,
         case_id,
@@ -137,7 +163,8 @@ defmodule Pika.Test.OptimizationFixtures do
         context.best_sha,
         pair_count,
         pair_count,
-        now
+        now,
+        context.target_snapshot.id
       ]
     )
 
@@ -173,7 +200,7 @@ defmodule Pika.Test.OptimizationFixtures do
     """
   end
 
-  defp insert_alignment_state(campaign_id, best_sha, harness, spec) do
+  defp insert_alignment_state(campaign_id, best_sha, harness, spec, target_snapshot) do
     now = System.system_time(:microsecond)
     spec_id = Ecto.UUID.generate()
     case_id = Ecto.UUID.generate()
@@ -205,6 +232,42 @@ defmodule Pika.Test.OptimizationFixtures do
         now,
         now,
         now
+      ]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO target_snapshots(
+        id, campaign_id, spec_revision_id, source_kind, source_reference_id,
+        source_sha, tree_sha, entrypoint, digest, checkout_relative_path, inserted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      """,
+      [
+        target_snapshot.id,
+        campaign_id,
+        spec_id,
+        target_snapshot.source_kind,
+        target_snapshot.source_reference_id,
+        target_snapshot.source_sha,
+        target_snapshot.tree_sha,
+        target_snapshot.entrypoint,
+        target_snapshot.digest,
+        target_snapshot.checkout_relative_path,
+        now
+      ]
+    )
+
+    Repo.query!(
+      """
+      UPDATE spec_revisions
+      SET target_snapshot_id = ?, development_baseline_sha = ?, implementation_manifest_json = ?
+      WHERE id = ?
+      """,
+      [
+        target_snapshot.id,
+        best_sha,
+        Jason.encode!(spec["implementations"]),
+        spec_id
       ]
     )
 
@@ -257,8 +320,9 @@ defmodule Pika.Test.OptimizationFixtures do
       INSERT INTO best_metrics(
         best_revision_id, benchmark_case_id, metric_definition_id, measured_sha,
         value, baseline_value, improvement_ratio, mad, noise_tolerance,
-        pair_count, valid_pair_count, source, measured_at
-      ) VALUES (?, ?, ?, ?, 10.0, 10.0, 0.0, 0.001, 0.005, ?, ?, 'baseline', ?)
+        pair_count, valid_pair_count, source, measured_at, target_snapshot_id,
+        target_value, target_relative_improvement, best_relative_improvement
+      ) VALUES (?, ?, ?, ?, 10.0, 10.0, 0.0, 0.001, 0.005, ?, ?, 'baseline', ?, ?, 10.0, 0.0, 0.0)
       """,
       [
         best_id,
@@ -267,7 +331,8 @@ defmodule Pika.Test.OptimizationFixtures do
         best_sha,
         spec["benchmark"]["pair_count"],
         spec["benchmark"]["pair_count"],
-        now
+        now,
+        target_snapshot.id
       ]
     )
 
@@ -281,14 +346,26 @@ defmodule Pika.Test.OptimizationFixtures do
 
   defp harness_args do
     %{
-      "reference_path" => "kernel/reference.py",
+      "oracle_path" => nil,
       "correctness_paths" => ["kernel/test_correctness.py"],
       "benchmark_path" => "kernel/bench.py",
       "protected_paths" => [
-        "kernel/reference.py",
         "kernel/test_correctness.py",
         "kernel/bench.py"
       ]
     }
+  end
+
+  defp active_target_snapshot_id do
+    case Repo.query!("""
+         SELECT sr.target_snapshot_id
+         FROM campaigns c
+         JOIN spec_revisions sr ON sr.id = c.current_spec_revision_id
+         ORDER BY c.updated_at DESC
+         LIMIT 1
+         """).rows do
+      [[id]] when is_binary(id) -> id
+      _ -> raise "active Campaign has no Optimization Target snapshot"
+    end
   end
 end

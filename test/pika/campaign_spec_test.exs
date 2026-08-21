@@ -4,7 +4,7 @@ defmodule Pika.CampaignSpecTest do
   alias Pika.CampaignSpec, as: Spec
   alias Pika.Test.AlignmentFixtures
 
-  test "accepts a complete Campaign Spec v1 and applies non-sampling defaults" do
+  test "accepts a complete Campaign Spec v2 and applies non-sampling defaults" do
     result =
       AlignmentFixtures.spec()
       |> Map.update!("metrics", &[Map.delete(hd(&1), "min_improvement_ratio")])
@@ -15,6 +15,58 @@ defmodule Pika.CampaignSpecTest do
     assert result.errors == []
     assert hd(result.spec["metrics"])["min_improvement_ratio"] == 0.01
     assert result.spec["iteration_sampling"] == %{"max_initial_cases" => 10}
+  end
+
+  test "requires explicit Oracle, Optimization Target, and Development roles" do
+    spec = AlignmentFixtures.spec()
+
+    without_roles =
+      spec
+      |> Map.put("schema_version", 1)
+      |> Map.delete("implementations")
+      |> put_in(["computation", "reference_path"], "kernel/reference.py")
+      |> Spec.validate()
+
+    refute without_roles.ready?
+    assert "implementations.oracle" in without_roles.missing
+    assert "implementations.optimization_target" in without_roles.missing
+    assert "implementations.development" in without_roles.missing
+    assert "schema_version must be 2" in without_roles.errors
+    refute Map.has_key?(without_roles.spec, "implementations")
+
+    same_oracle_and_development =
+      spec
+      |> put_in(["implementations", "oracle"], %{
+        "kind" => "repository_path",
+        "entrypoint" => "kernel/development.py"
+      })
+      |> Spec.validate()
+
+    refute same_oracle_and_development.ready?
+
+    assert "repository_path Oracle and Development entrypoints must be different; use optimization_target when they share a snapshot" in same_oracle_and_development.errors
+  end
+
+  test "allows an Optimization Target from an explicitly selected Reference Project" do
+    result =
+      AlignmentFixtures.spec()
+      |> Map.put("reference_ids", ["fa4"])
+      |> put_in(["implementations", "optimization_target"], %{
+        "source" => %{"kind" => "reference_project", "reference_id" => "fa4"},
+        "entrypoint" => "src/flash_attention.py"
+      })
+      |> Spec.validate()
+
+    assert result.ready?
+
+    missing_selection =
+      result.spec
+      |> Map.put("reference_ids", [])
+      |> Spec.validate()
+
+    refute missing_selection.ready?
+
+    assert "implementations.optimization_target.source.reference_id must be selected in reference_ids" in missing_selection.errors
   end
 
   test "accepts an arbitrary user-specified formal pair count and validity floor" do

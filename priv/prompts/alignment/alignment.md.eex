@@ -32,25 +32,48 @@ For every chosen Metric confirm its unit, direction, role and improvement thresh
 Correctness remains a separate gate, not a paired performance Metric.
 
 You may create a shape collection script. Uploaded Artifacts are listed by get_context.
-Create or improve the Reference, correctness tests and normalized Benchmark Harness in this setup worktree.
+
+Model the implementation roles explicitly; never collapse them into one ambiguous "Reference":
+- Correctness Oracle defines semantic truth. It is either the frozen Optimization Target itself or a separate,
+  repository-local entrypoint protected with the Harness.
+- Optimization Target is the fixed performance anchor across Best advances and later Spec revisions unless the
+  user explicitly revises its source or entrypoint. It is either an exact snapshot of the reviewed Development
+  setup commit or an exact SHA from one selected Reference Project. It is frozen under the Workspace `targets/`
+  directory and exposed through the Git-ignored `target/` link; an explicit Target change requires a new snapshot
+  and review.
+- Development Implementation is repository-local, is included in the setup squash commit, and remains mutable
+  in every optimization Attempt. Never add its entrypoint to protected_paths.
+For an empty repository you must implement both a runnable Target and a runnable Development implementation;
+they may start from the same reviewed setup commit, but the Target becomes an independent frozen snapshot.
+For a repository with existing code, the Target may instead be an external implementation while Development
+is the current repository behavior. Ask the user whenever these roles cannot be determined from their request.
+
+Create or improve the Oracle (when repository-backed), Development implementation, correctness tests and
+normalized Benchmark Harness in this setup worktree. Ensure the Target entrypoint named in the Spec is runnable
+from its selected source.
 When Python tooling or dependencies are needed, use an existing project environment when appropriate, or create
 an isolated worktree-local environment with `uv venv .venv`, install only the required packages with
 `uv pip install --python .venv/bin/python ...`, and run tools through `.venv/bin/python`. Never use
 `uv pip install --system` or modify the global Python environment. Treat `.venv` and its caches as ephemeral:
 do not commit or register them as Artifacts, do not change dependency manifests or lockfiles merely to create the
 environment, and remove untracked environment files before the required clean commit.
-Call submit_spec and submit_harness, then execute the submitted Reference through that Harness on at least one
-exact Benchmark Case from the submitted Spec. A zero-exit import or correctness-only check is insufficient:
-collect at least one of the submitted performance Metrics, with its exact Spec unit and a positive sample_count.
-This smoke run is Reference Review Evidence, not the full Baseline and not an alternating A/B Pair run. Record
-the exact command, actual execution environment, case, measurements and useful output in a small local Artifact
-under the Workspace `artifacts/reference-review/` directory. From the setup worktree this directory is
-`../../artifacts/reference-review/`; pass its canonical Workspace-relative `artifacts/reference-review/...` path
-to register_artifact with kind `reference_review_evidence`, then call submit_reference_review with the current Spec
-revision, Harness digest and Reference SHA-256. Never fabricate, estimate, copy from documentation, or report a
-Metric from a different source revision. If the Spec, Reference or Harness changes, rerun and resubmit the
-evidence. The Campaign is not ready for user review until submit_spec, submit_harness and
-submit_reference_review have all succeeded; natural language is not completion.
+Call submit_spec first, then submit_harness with oracle_path=null when the Oracle is the Target, or the exact
+repository path for a separate Oracle. Commit a clean setup tree containing the Development implementation and
+call submit_implementation_bundle with that exact setup_sha. Target preparation is asynchronous; call get_context
+until target_snapshot is available instead of resubmitting. Then execute the frozen Target and Development through
+the same Harness on at least one exact Benchmark Case. Both must pass the Oracle on the same inputs. A zero-exit
+import or correctness-only check is insufficient: collect paired Target/Development values for at least one
+submitted performance Metric, with the exact Spec unit and positive sample_count.
+
+This smoke run is Implementation Review Evidence, not the full Baseline. Record the exact command, actual
+environment, Case, both correctness results, paired measurements and useful output in a small local Artifact under
+`artifacts/implementation-review/`. From the setup worktree this is
+`../../artifacts/implementation-review/`; register its canonical Workspace-relative path with kind
+`implementation_review_evidence`, then call submit_implementation_review with schema_version=2, the current Spec
+revision, target_snapshot_id, development_sha and Harness digest. Never fabricate, estimate, copy documentation,
+or combine results from different source revisions. If the Spec, Harness, Target or Development commit changes,
+rerun and resubmit. The Campaign is ready for user review only after submit_spec, submit_harness,
+submit_implementation_bundle and submit_implementation_review all succeed; natural language is not completion.
 
 Call get_context at the start of the user-initiated Turn and treat its selected Reference Catalog
 entries as authoritative; Reference selection may change while this Session is idle before Kick-off.

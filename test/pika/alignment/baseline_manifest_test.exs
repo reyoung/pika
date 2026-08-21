@@ -13,7 +13,9 @@ defmodule Pika.Alignment.BaselineManifestTest do
     relative_path = AlignmentFixtures.write_baseline_manifest(workspace, sha)
 
     assert {:ok, manifest} = BaselineManifest.load(root, relative_path)
-    assert manifest.measured_sha == sha
+    assert manifest.schema_version == 2
+    assert manifest.target_snapshot_id == "target-fixture"
+    assert manifest.candidate_sha == sha
     assert manifest.samples_artifact == "artifacts/baseline/samples.jsonl"
     assert manifest.manifest_artifact.relative_path == relative_path
     assert manifest.manifest_artifact.size > 0
@@ -27,8 +29,9 @@ defmodule Pika.Alignment.BaselineManifestTest do
     File.write!(
       manifest_path,
       Jason.encode!(%{
-        "schema_version" => 1,
-        "measured_sha" => String.duplicate("c", 40),
+        "schema_version" => 2,
+        "target_snapshot_id" => "target-fixture",
+        "candidate_sha" => String.duplicate("c", 40),
         "summary" => "escape",
         "samples_artifact" => "../samples.jsonl",
         "correctness_artifact" => "artifacts/baseline/correctness.json",

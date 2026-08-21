@@ -12,6 +12,7 @@ defmodule Pika.Baseline do
       ) do
     on_progress = Keyword.get(opts, :on_progress, fn _progress -> :ok end)
     expected_samples = Keyword.get(opts, :expected_samples)
+    target_snapshot_id = Keyword.fetch!(opts, :target_snapshot_id)
 
     max_concurrency =
       opts
@@ -22,13 +23,13 @@ defmodule Pika.Baseline do
            evaluate_jsonl(
              samples_path,
              spec,
-             measured_sha,
              on_progress,
              expected_samples,
              max_concurrency
            ),
          :ok <- report_phase(on_progress, :validating_correctness),
-         :ok <- validate_correctness(correctness_path, spec, measured_sha),
+         :ok <-
+           validate_correctness(correctness_path, spec, target_snapshot_id, measured_sha),
          :ok <- report_phase(on_progress, :validating_profiler),
          {:ok, profiler} <- validate_profiler(profiler_path, spec, measured_sha, skill_sha) do
       report_phase(on_progress, :completed)
@@ -36,6 +37,7 @@ defmodule Pika.Baseline do
       {:ok,
        %{
          measured_sha: measured_sha,
+         target_snapshot_id: target_snapshot_id,
          metrics: samples.metrics,
          profiler: profiler,
          samples_artifact: %{sha256: samples.sha256, size: samples.size}
@@ -43,7 +45,7 @@ defmodule Pika.Baseline do
     end
   end
 
-  def evaluate_records(records, spec, measured_sha) do
+  def evaluate_records(records, spec, _candidate_sha) do
     cases = Map.fetch!(spec, "benchmark_cases")
     metric_defs = Map.fetch!(spec, "metrics")
     expected_pairs = get_in(spec, ["benchmark", "pair_count"])
@@ -51,7 +53,7 @@ defmodule Pika.Baseline do
     expected_keys = for case_ <- cases, metric <- metric_defs, do: {case_["id"], metric["id"]}
     grouped = Enum.group_by(records, &{&1["case_id"], &1["metric_id"]})
 
-    with :ok <- validate_record_shapes(records, measured_sha),
+    with :ok <- validate_record_shapes(records),
          :ok <- validate_expected_keys(grouped, expected_keys) do
       results =
         Enum.map(expected_keys, fn {_case_id, metric_id} = key ->
@@ -91,13 +93,15 @@ defmodule Pika.Baseline do
         valid =
           Enum.filter(
             records,
-            &(&1["valid"] == true and finite_positive?(&1["a"]) and finite_positive?(&1["b"]))
+            &(&1["valid"] == true and finite_positive?(&1["target"]) and
+                finite_positive?(&1["candidate"]))
           )
 
         if length(valid) < min_valid do
           {:error, {:insufficient_valid_pairs, case_id, metric_id, length(valid)}}
         else
-          values = Enum.flat_map(valid, &[&1["a"], &1["b"]])
+          target_values = Enum.map(valid, & &1["target"])
+          candidate_values = Enum.map(valid, & &1["candidate"])
           deltas = Enum.map(valid, &delta(&1, definition["direction"]))
           center = median(deltas)
           mad = deltas |> Enum.map(&abs(&1 - center)) |> median()
@@ -108,7 +112,10 @@ defmodule Pika.Baseline do
              metric_id: metric_id,
              unit: definition["unit"],
              direction: definition["direction"],
-             value: median(values),
+             value: median(candidate_values),
+             target_value: median(target_values),
+             target_relative_improvement: center,
+             best_relative_improvement: 0.0,
              pair_delta_median: center,
              mad: mad,
              noise_tolerance: max(0.005, 3.0 * 1.4826 * mad),
@@ -119,11 +126,10 @@ defmodule Pika.Baseline do
     end
   end
 
-  defp validate_record_shapes(records, measured_sha) do
+  defp validate_record_shapes(records) do
     valid? =
       Enum.all?(records, fn record ->
-        record["schema_version"] == 1 and record["measured_sha"] == measured_sha and
-          record["order"] in ["ab", "ba"] and is_integer(record["pair_index"])
+        record["order"] in ["tc", "ct"] and is_integer(record["pair_index"])
       end)
 
     if valid?, do: :ok, else: {:error, :invalid_sample_record}
@@ -137,14 +143,20 @@ defmodule Pika.Baseline do
     |> Enum.all?(fn [left, right] -> left != right end)
   end
 
-  defp validate_correctness(path, spec, measured_sha) do
+  defp validate_correctness(path, spec, target_snapshot_id, candidate_sha) do
     with {:ok, body} <- File.read(path),
          {:ok, report} <- Jason.decode(body),
-         true <- report["measured_sha"] == measured_sha,
+         true <- report["schema_version"] == 2,
+         true <- report["target_snapshot_id"] == target_snapshot_id,
+         true <- report["candidate_sha"] == candidate_sha,
          cases when is_list(cases) <- report["cases"],
          expected <- Enum.map(spec["benchmark_cases"], & &1["id"]),
          true <- Enum.sort(Enum.map(cases, & &1["case_id"])) == Enum.sort(expected),
-         true <- Enum.all?(cases, &(&1["passed"] == true)) do
+         true <-
+           Enum.all?(
+             cases,
+             &(&1["target_passed"] == true and &1["candidate_passed"] == true)
+           ) do
       :ok
     else
       _ -> {:error, :correctness_failed}
@@ -159,7 +171,7 @@ defmodule Pika.Baseline do
   # The file is canonical and each Case/Metric group has exactly expected_pairs
   # consecutive lines. Hashing stays on the ordered reader while CPU-heavy JSON
   # decoding and statistics run in a bounded worker pool.
-  defp evaluate_jsonl(path, spec, measured_sha, on_progress, expected_samples, max_concurrency) do
+  defp evaluate_jsonl(path, spec, on_progress, expected_samples, max_concurrency) do
     expected_pairs = get_in(spec, ["benchmark", "pair_count"])
     min_valid = get_in(spec, ["benchmark", "min_valid_pairs"])
 
@@ -210,8 +222,7 @@ defmodule Pika.Baseline do
             group_bytes,
             expected_groups,
             expected_pairs,
-            min_valid,
-            measured_sha
+            min_valid
           )
         end,
         ordered: true,
@@ -247,8 +258,7 @@ defmodule Pika.Baseline do
          _group_bytes,
          expected_groups,
          _expected_pairs,
-         _min_valid,
-         _measured_sha
+         _min_valid
        )
        when group_index >= tuple_size(expected_groups),
        do: {:error, :unexpected_case_metric_samples}
@@ -259,15 +269,20 @@ defmodule Pika.Baseline do
          group_bytes,
          expected_groups,
          expected_pairs,
-         min_valid,
-         measured_sha
+         min_valid
        ) do
     {case_id, metric_id, definition} = elem(expected_groups, group_index)
 
     if length(lines) != expected_pairs do
       {:error, {:wrong_pair_count, case_id, metric_id}}
     else
-      initial = %{values: [], deltas: [], valid_count: 0, previous_order: nil}
+      initial = %{
+        target_values: [],
+        candidate_values: [],
+        deltas: [],
+        valid_count: 0,
+        previous_order: nil
+      }
 
       lines
       |> Enum.with_index()
@@ -282,7 +297,6 @@ defmodule Pika.Baseline do
                  pair_index,
                  case_id,
                  metric_id,
-                 measured_sha,
                  acc.previous_order
                ) do
           {:cont, {:ok, accumulate_group_record(acc, record, definition)}}
@@ -314,12 +328,10 @@ defmodule Pika.Baseline do
          pair_index,
          case_id,
          metric_id,
-         measured_sha,
          previous_order
        ) do
     cond do
-      record["schema_version"] != 1 or record["measured_sha"] != measured_sha or
-        record["order"] not in ["ab", "ba"] or not is_integer(record["pair_index"]) ->
+      record["order"] not in ["tc", "ct"] or not is_integer(record["pair_index"]) ->
         {:error, {:invalid_sample_record, record_number}}
 
       record["case_id"] != case_id or record["metric_id"] != metric_id ->
@@ -340,13 +352,14 @@ defmodule Pika.Baseline do
 
   defp accumulate_group_record(acc, record, definition) do
     valid? =
-      record["valid"] == true and finite_positive?(record["a"]) and
-        finite_positive?(record["b"])
+      record["valid"] == true and finite_positive?(record["target"]) and
+        finite_positive?(record["candidate"])
 
     if valid? do
       %{
         acc
-        | values: [record["b"], record["a"] | acc.values],
+        | target_values: [record["target"] | acc.target_values],
+          candidate_values: [record["candidate"] | acc.candidate_values],
           deltas: [delta(record, definition["direction"]) | acc.deltas],
           valid_count: acc.valid_count + 1,
           previous_order: record["order"]
@@ -380,7 +393,10 @@ defmodule Pika.Baseline do
          metric_id: metric_id,
          unit: definition["unit"],
          direction: definition["direction"],
-         value: median(acc.values),
+         value: median(acc.candidate_values),
+         target_value: median(acc.target_values),
+         target_relative_improvement: center,
+         best_relative_improvement: 0.0,
          pair_delta_median: center,
          mad: mad,
          noise_tolerance: max(0.005, 3.0 * 1.4826 * mad),
@@ -530,8 +546,11 @@ defmodule Pika.Baseline do
 
   defp normalize_concurrency(_value), do: min(System.schedulers_online(), 16)
 
-  defp delta(record, "minimize"), do: (record["a"] - record["b"]) / record["a"]
-  defp delta(record, "maximize"), do: (record["b"] - record["a"]) / record["a"]
+  defp delta(record, "minimize"),
+    do: (record["target"] - record["candidate"]) / record["target"]
+
+  defp delta(record, "maximize"),
+    do: (record["candidate"] - record["target"]) / record["target"]
 
   defp median(values) do
     sorted = Enum.sort(values)

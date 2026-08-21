@@ -18,6 +18,7 @@ defmodule Pika.AttemptStore do
          sampled_case_ids: sampled_case_ids(sampling.id),
          metrics: metrics(spec.id),
          best_metrics: best_metrics(campaign_id),
+         target_snapshot: target_snapshot(spec.target_snapshot_id),
          references: Jason.decode!(spec.reference_snapshot_json),
          skill: Jason.decode!(spec.skill_snapshot_json),
          protected_paths: Jason.decode!(spec.protected_paths_json),
@@ -315,6 +316,7 @@ defmodule Pika.AttemptStore do
   def record_metrics(attempt_id, metrics, candidate_sha, source \\ "iteration") do
     now = now_us()
     attempt = attempt_row!(attempt_id)
+    target_snapshot_id = target_snapshot_id!(attempt.spec_revision_id)
 
     Repo.transaction(fn ->
       Enum.each(metrics, fn metric ->
@@ -335,14 +337,19 @@ defmodule Pika.AttemptStore do
           INSERT INTO attempt_metrics(
             attempt_id, benchmark_case_id, metric_definition_id, measured_sha,
             value, baseline_value, improvement_ratio, mad, noise_tolerance,
-            pair_count, valid_pair_count, source, measured_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            pair_count, valid_pair_count, source, measured_at, target_snapshot_id,
+            target_value, target_relative_improvement, best_relative_improvement
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(attempt_id, benchmark_case_id, metric_definition_id) DO UPDATE SET
             measured_sha = excluded.measured_sha, value = excluded.value,
             baseline_value = excluded.baseline_value,
             improvement_ratio = excluded.improvement_ratio, mad = excluded.mad,
             noise_tolerance = excluded.noise_tolerance,
             pair_count = excluded.pair_count, valid_pair_count = excluded.valid_pair_count,
+            target_snapshot_id = excluded.target_snapshot_id,
+            target_value = excluded.target_value,
+            target_relative_improvement = excluded.target_relative_improvement,
+            best_relative_improvement = excluded.best_relative_improvement,
             source = excluded.source, measured_at = excluded.measured_at
           """,
           [
@@ -358,7 +365,11 @@ defmodule Pika.AttemptStore do
             metric.pair_count,
             metric.valid_pair_count,
             source,
-            now
+            now,
+            target_snapshot_id,
+            metric.target_value,
+            metric.target_relative_improvement,
+            metric.best_relative_improvement
           ]
         )
       end)
@@ -384,7 +395,9 @@ defmodule Pika.AttemptStore do
       """
       SELECT bc.name, md.name, md.unit, md.direction, md.role, am.measured_sha,
         am.value, am.baseline_value, am.improvement_ratio, am.mad,
-        am.noise_tolerance, am.pair_count, am.valid_pair_count, am.source, am.measured_at
+        am.noise_tolerance, am.pair_count, am.valid_pair_count, am.source, am.measured_at,
+        am.target_snapshot_id, am.target_value, am.target_relative_improvement,
+        am.best_relative_improvement
       FROM attempt_metrics am
       JOIN benchmark_cases bc ON bc.id = am.benchmark_case_id
       JOIN metric_definitions md ON md.id = am.metric_definition_id
@@ -407,7 +420,11 @@ defmodule Pika.AttemptStore do
                      pairs,
                      valid,
                      source,
-                     measured_at
+                     measured_at,
+                     target_snapshot_id,
+                     target_value,
+                     target_relative_improvement,
+                     best_relative_improvement
                    ] ->
       %{
         case_id: case_id,
@@ -419,6 +436,10 @@ defmodule Pika.AttemptStore do
         value: value,
         baseline_value: baseline,
         improvement_ratio: improvement,
+        target_snapshot_id: target_snapshot_id,
+        target_value: target_value,
+        target_relative_improvement: target_relative_improvement,
+        best_relative_improvement: best_relative_improvement,
         mad: mad,
         noise_tolerance: noise,
         pair_count: pairs,
@@ -427,6 +448,15 @@ defmodule Pika.AttemptStore do
         measured_at: measured_at
       }
     end)
+  end
+
+  defp target_snapshot_id!(spec_revision_id) do
+    case Repo.query!("SELECT target_snapshot_id FROM spec_revisions WHERE id = ?", [
+           spec_revision_id
+         ]).rows do
+      [[id]] when is_binary(id) -> id
+      _ -> Repo.rollback(:target_snapshot_missing)
+    end
   end
 
   def submit_summary(attempt_id, attrs) do
@@ -874,10 +904,10 @@ defmodule Pika.AttemptStore do
 
   defp current_spec(spec_id) do
     case Repo.query!(
-           "SELECT id, revision, spec_json, protected_paths_json, protected_digest, reference_snapshot_json, skill_snapshot_json FROM spec_revisions WHERE id = ?",
+           "SELECT id, revision, spec_json, protected_paths_json, protected_digest, reference_snapshot_json, skill_snapshot_json, target_snapshot_id, development_baseline_sha FROM spec_revisions WHERE id = ?",
            [spec_id]
          ).rows do
-      [[id, revision, spec, paths, digest, refs, skill]] ->
+      [[id, revision, spec, paths, digest, refs, skill, target_snapshot_id, development_sha]] ->
         {:ok,
          %{
            id: id,
@@ -886,11 +916,56 @@ defmodule Pika.AttemptStore do
            protected_paths_json: paths,
            protected_digest: digest,
            reference_snapshot_json: refs,
-           skill_snapshot_json: skill
+           skill_snapshot_json: skill,
+           target_snapshot_id: target_snapshot_id,
+           development_baseline_sha: development_sha
          }}
 
       [] ->
         {:error, :current_spec_not_found}
+    end
+  end
+
+  defp target_snapshot(nil), do: nil
+
+  defp target_snapshot(id) do
+    case Repo.query!(
+           """
+           SELECT ts.id, sr.revision, ts.source_kind, ts.source_reference_id, ts.source_sha,
+             ts.tree_sha, ts.entrypoint, ts.digest, ts.checkout_relative_path
+           FROM target_snapshots ts
+           JOIN spec_revisions sr ON sr.id = ts.spec_revision_id
+           WHERE ts.id = ?
+           """,
+           [id]
+         ).rows do
+      [
+        [
+          id,
+          revision,
+          source_kind,
+          reference_id,
+          source_sha,
+          tree_sha,
+          entrypoint,
+          digest,
+          checkout
+        ]
+      ] ->
+        %{
+          id: id,
+          revision: revision,
+          source_kind: source_kind,
+          source_reference_id: reference_id,
+          source_sha: source_sha,
+          tree_sha: tree_sha,
+          entrypoint: entrypoint,
+          digest: digest,
+          checkout_relative_path: checkout
+        }
+
+      [] ->
+        nil
     end
   end
 

@@ -75,10 +75,28 @@ erDiagram
 | `protected_paths_json` | TEXT | 路径清单 |
 | `protected_digest` | TEXT | 路径+内容哈希 |
 | `baseline_sha` | TEXT NULL | Baseline 对应 SHA |
+| `target_snapshot_id` | TEXT NULL | FK，当前 Revision 使用的固定 Optimization Target |
+| `development_baseline_sha` | TEXT NULL | 该 Revision 初始 Development / Best SHA |
+| `implementation_manifest_json` | TEXT | Oracle、Target、Development 定义 |
 | `reference_snapshot_json` | TEXT | 选中 Ref URL + full SHA |
 | `skill_snapshot_json` | TEXT | Skill URL + full SHA |
 | `confirmed_at` | INTEGER NULL | 用户确认时间 |
 | `inserted_at`, `updated_at` | INTEGER | |
+
+### `target_snapshots`
+
+| 字段 | 类型 | 约束/说明 |
+|---|---|---|
+| `id` | TEXT | PK，内容身份 |
+| `campaign_id` | TEXT | FK |
+| `spec_revision_id` | TEXT | 创建该 Target 的 Spec Revision；后续 Revision 可继续引用同一行 |
+| `source_kind` | TEXT | `development_snapshot`, `reference_project` |
+| `source_reference_id` | TEXT NULL | 外部 Target 的 Reference Project ID |
+| `source_sha`, `tree_sha` | TEXT | 固定源码身份 |
+| `entrypoint` | TEXT | Target 入口文件 |
+| `digest` | TEXT | 来源、入口和 tree 的完整 digest |
+| `checkout_relative_path` | TEXT | `targets/<revision>/repo` |
+| `inserted_at` | INTEGER | UTC μs |
 
 ### `benchmark_cases`
 
@@ -173,9 +191,13 @@ erDiagram
 | `benchmark_case_id` | TEXT | FK |
 | `metric_definition_id` | TEXT | FK |
 | `measured_sha` | TEXT | 必须等于提交时验证 SHA |
-| `value` | REAL | 最新原始值 |
-| `baseline_value` | REAL | 配对 Base 中位数 |
-| `improvement_ratio` | REAL | 统一为正值更好 |
+| `value` | REAL | Development candidate 中位数 |
+| `target_snapshot_id` | TEXT | FK，测量使用的固定 Target 身份 |
+| `target_value` | REAL | 同轮 Target 中位数 |
+| `target_relative_improvement` | REAL | Development 相对固定 Target，统一为正值更好 |
+| `baseline_value` | REAL | 当时 current Best 的持久化值 |
+| `best_relative_improvement` | REAL | Development 相对 current Best，统一为正值更好 |
+| `improvement_ratio` | REAL | `best_relative_improvement` 的兼容字段 |
 | `mad` | REAL | Pair ratio MAD |
 | `noise_tolerance` | REAL | `max(0.005, 3*1.4826*MAD)` |
 | `pair_count`, `valid_pair_count` | INTEGER | 用户在 Spec 中声明的正式数量 / 实际有效数量；必须达到用户声明的 `min_valid_pairs` |

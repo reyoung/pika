@@ -199,7 +199,9 @@ defmodule Pika.SyncCoordinator do
 
   defp prepare(state, run) do
     with {:ok, _} <- SyncStore.begin_prepare(run.id),
-         {:ok, _workspace} <- SyncWorkspace.prepare(state.workspace, run),
+         {:ok, context} <- AttemptStore.campaign_context(state.campaign_id),
+         {:ok, _workspace} <-
+           SyncWorkspace.prepare(state.workspace, run, context.target_snapshot),
          {:ok, run} <- SyncStore.mark_merging(run.id) do
       open_session(state, run, false)
     else
@@ -425,9 +427,11 @@ defmodule Pika.SyncCoordinator do
            Pika.Measurement.evaluate_iteration(samples_path, correctness_path, %{
              base_sha: run.base_sha,
              candidate_sha: run.candidate_sha,
+             target_snapshot_id: context.target_snapshot.id,
              case_ids: Enum.map(context.cases, & &1["id"]),
              metrics: context.metrics,
-             benchmark: context.spec["benchmark"]
+             benchmark: context.spec["benchmark"],
+             best_metrics: context.best_metrics
            }),
          {:ok, updated} <-
            SyncStore.record_validation(run_id, metrics, correctness.id, samples.id) do
@@ -614,13 +618,14 @@ defmodule Pika.SyncCoordinator do
 
   defp candidate_harness_digest(state, run, context) do
     spec = context.spec
-    reference = get_in(spec, ["computation", "reference_path"])
+    oracle = get_in(spec, ["implementations", "oracle"])
+    oracle_path = if(oracle && oracle["kind"] == "repository_path", do: oracle["entrypoint"])
     benchmark = get_in(spec, ["benchmark", "harness_path"])
-    correctness = context.protected_paths -- [reference, benchmark]
+    correctness = context.protected_paths -- Enum.reject([oracle_path, benchmark], &is_nil/1)
     root = Path.join(state.workspace.root, run.worktree_relative_path)
 
     Pika.Harness.validate(root, %{
-      "reference_path" => reference,
+      "oracle_path" => oracle_path,
       "benchmark_path" => benchmark,
       "correctness_paths" => correctness,
       "protected_paths" => context.protected_paths

@@ -441,9 +441,11 @@ defmodule Pika.IntegrationCoordinator do
            Pika.Measurement.evaluate_iteration(samples_path, correctness_path, %{
              base_sha: context.best_sha,
              candidate_sha: args["candidate_sha"],
+             target_snapshot_id: context.target_snapshot.id,
              case_ids: sampled_case_ids(attempt.sampling_revision_id),
              metrics: context.metrics,
-             benchmark: context.spec["benchmark"]
+             benchmark: context.spec["benchmark"],
+             best_metrics: context.best_metrics
            }),
          {:ok, refreshed} <-
            IntegrationStore.complete_refresh(
@@ -490,7 +492,10 @@ defmodule Pika.IntegrationCoordinator do
              %{
                base_sha: attempt.base_sha,
                candidate_sha: attempt.candidate_sha,
+               target_snapshot_id: context.target_snapshot.id,
                case_ids: Enum.map(context.cases, & &1["id"]),
+               target_case_ids:
+                 for(case_ <- context.cases, case_["kind"] == "target", do: case_["id"]),
                metrics: context.metrics,
                benchmark: context.spec["benchmark"]
              },

@@ -6,23 +6,24 @@ defmodule Pika.CampaignSpec do
   @directions ~w(minimize maximize)
   @stop_modes ~w(all_goals any_goal)
   @shape_source_kinds ~w(artifact script repository manual)
+  @oracle_kinds ~w(optimization_target repository_path)
+  @target_source_kinds ~w(development_snapshot reference_project)
 
   def json_schema do
     %{
       "type" => "object",
       "required" =>
-        ~w(schema_version revision title target_hardware computation benchmark_cases metrics benchmark iteration_sampling stopping reference_ids),
+        ~w(schema_version revision title target_hardware computation implementations benchmark_cases metrics benchmark iteration_sampling stopping reference_ids),
       "properties" => %{
-        "schema_version" => %{"type" => "integer", "const" => 1},
+        "schema_version" => %{"type" => "integer", "const" => 2},
         "revision" => %{"type" => "integer", "minimum" => 1},
         "title" => string_schema(),
         "target_hardware" => string_schema(),
         "computation" => %{
           "type" => "object",
-          "required" => ~w(semantics reference_path inputs outputs fusion_scope correctness),
+          "required" => ~w(semantics inputs outputs fusion_scope correctness),
           "properties" => %{
             "semantics" => string_schema(),
-            "reference_path" => string_schema(),
             "inputs" => object_array_schema(),
             "outputs" => object_array_schema(),
             "fusion_scope" => string_schema(),
@@ -37,6 +38,7 @@ defmodule Pika.CampaignSpec do
             }
           }
         },
+        "implementations" => implementation_schema(),
         "benchmark_cases" => %{
           "type" => "array",
           "minItems" => 1,
@@ -108,7 +110,7 @@ defmodule Pika.CampaignSpec do
             "mode" => %{"type" => "string", "enum" => @stop_modes}
           }
         },
-        "reference_ids" => %{"type" => "array", "minItems" => 1, "items" => string_schema()}
+        "reference_ids" => %{"type" => "array", "items" => string_schema()}
       }
     }
   end
@@ -146,7 +148,7 @@ defmodule Pika.CampaignSpec do
       |> Map.merge(supplied_benchmark)
 
     spec
-    |> Map.put_new("schema_version", 1)
+    |> Map.put_new("schema_version", 2)
     |> Map.put_new("revision", 1)
     |> Map.put("metrics", metrics)
     |> Map.put("benchmark", benchmark)
@@ -158,7 +160,6 @@ defmodule Pika.CampaignSpec do
       {"title", present?(spec["title"])},
       {"target_hardware", present?(spec["target_hardware"])},
       {"computation.semantics", present?(get_in(spec, ["computation", "semantics"]))},
-      {"computation.reference_path", present?(get_in(spec, ["computation", "reference_path"]))},
       {"computation.inputs", nonempty_list?(get_in(spec, ["computation", "inputs"]))},
       {"computation.outputs", nonempty_list?(get_in(spec, ["computation", "outputs"]))},
       {"computation.fusion_scope", present?(get_in(spec, ["computation", "fusion_scope"]))},
@@ -166,6 +167,11 @@ defmodule Pika.CampaignSpec do
        number?(get_in(spec, ["computation", "correctness", "rtol"]))},
       {"computation.correctness.atol",
        number?(get_in(spec, ["computation", "correctness", "atol"]))},
+      {"implementations.oracle", valid_oracle?(get_in(spec, ["implementations", "oracle"]))},
+      {"implementations.optimization_target",
+       valid_target?(get_in(spec, ["implementations", "optimization_target"]))},
+      {"implementations.development",
+       valid_development?(get_in(spec, ["implementations", "development"]))},
       {"benchmark_cases", nonempty_list?(spec["benchmark_cases"])},
       {"metrics", nonempty_list?(spec["metrics"])},
       {"benchmark.harness_path", present?(get_in(spec, ["benchmark", "harness_path"]))},
@@ -174,7 +180,7 @@ defmodule Pika.CampaignSpec do
        positive_integer?(get_in(spec, ["benchmark", "min_valid_pairs"]))},
       {"iteration_sampling.max_initial_cases",
        get_in(spec, ["iteration_sampling", "max_initial_cases"]) == 10},
-      {"reference_ids", nonempty_list?(spec["reference_ids"])},
+      {"reference_ids", is_list(spec["reference_ids"])},
       {"stopping", valid_stopping?(spec["stopping"])}
     ]
 
@@ -188,7 +194,7 @@ defmodule Pika.CampaignSpec do
     stopping = map(spec["stopping"])
 
     []
-    |> add_error(spec["schema_version"] != 1, "schema_version must be 1")
+    |> add_error(spec["schema_version"] != 2, "schema_version must be 2")
     |> add_error(
       not (is_integer(spec["revision"]) and spec["revision"] >= 1),
       "revision must be a positive integer"
@@ -203,6 +209,7 @@ defmodule Pika.CampaignSpec do
     )
     |> add_error(not unique_ids?(cases), "Benchmark Case ids must be unique stable slugs")
     |> add_error(Enum.any?(cases, &(not valid_case?(&1))), "Benchmark Cases have invalid fields")
+    |> Kernel.++(implementation_errors(spec))
     |> add_error(
       Enum.any?(cases, &range_shape?(&1["shape"])),
       "Benchmark Case shapes must be concrete; split min/max ranges into stable Case IDs"
@@ -243,6 +250,71 @@ defmodule Pika.CampaignSpec do
       structured_value?(case_["layout"])
   end
 
+  defp implementation_errors(spec) do
+    implementations = map(spec["implementations"])
+    oracle = map(implementations["oracle"])
+    target = map(implementations["optimization_target"])
+    source = map(target["source"])
+    development = map(implementations["development"])
+    reference_ids = list(spec["reference_ids"])
+
+    []
+    |> add_error(
+      oracle["kind"] not in @oracle_kinds,
+      "implementations.oracle.kind must be optimization_target or repository_path"
+    )
+    |> add_error(
+      oracle["kind"] == "repository_path" and not relative_path?(oracle["entrypoint"]),
+      "implementations.oracle.entrypoint must be a safe relative path for repository_path"
+    )
+    |> add_error(
+      source["kind"] not in @target_source_kinds,
+      "implementations.optimization_target.source.kind must be development_snapshot or reference_project"
+    )
+    |> add_error(
+      source["kind"] == "reference_project" and not present?(source["reference_id"]),
+      "implementations.optimization_target.source.reference_id is required for reference_project"
+    )
+    |> add_error(
+      source["kind"] == "reference_project" and present?(source["reference_id"]) and
+        source["reference_id"] not in reference_ids,
+      "implementations.optimization_target.source.reference_id must be selected in reference_ids"
+    )
+    |> add_error(
+      not relative_path?(target["entrypoint"]),
+      "implementations.optimization_target.entrypoint must be a safe relative path"
+    )
+    |> add_error(
+      not relative_path?(development["entrypoint"]),
+      "implementations.development.entrypoint must be a safe relative path"
+    )
+    |> add_error(
+      oracle["kind"] == "repository_path" and
+        oracle["entrypoint"] == development["entrypoint"],
+      "repository_path Oracle and Development entrypoints must be different; use optimization_target when they share a snapshot"
+    )
+    |> Enum.reverse()
+  end
+
+  defp valid_oracle?(oracle) when is_map(oracle) do
+    oracle["kind"] == "optimization_target" or
+      (oracle["kind"] == "repository_path" and relative_path?(oracle["entrypoint"]))
+  end
+
+  defp valid_oracle?(_oracle), do: false
+
+  defp valid_target?(target) when is_map(target) do
+    source = map(target["source"])
+    source["kind"] in @target_source_kinds and relative_path?(target["entrypoint"])
+  end
+
+  defp valid_target?(_target), do: false
+
+  defp valid_development?(development) when is_map(development),
+    do: relative_path?(development["entrypoint"])
+
+  defp valid_development?(_development), do: false
+
   defp range_shape?(value) when is_map(value) do
     (Map.has_key?(value, "min") and Map.has_key?(value, "max") and
        value["min"] != value["max"]) or Enum.any?(Map.values(value), &range_shape?/1)
@@ -263,13 +335,20 @@ defmodule Pika.CampaignSpec do
   defp nullable_relative_path?(nil), do: true
 
   defp nullable_relative_path?(value) when is_binary(value) do
-    present?(value) and Path.type(value) == :relative and ".." not in Path.split(value)
+    relative_path?(value)
   end
 
   defp nullable_relative_path?(_value), do: false
 
   defp nullable_positive_integer?(nil), do: true
   defp nullable_positive_integer?(value), do: positive_integer?(value)
+
+  defp relative_path?(value) when is_binary(value) do
+    present?(value) and Path.type(value) == :relative and
+      not Enum.any?(Path.split(value), &(&1 in ["", ".", ".."]))
+  end
+
+  defp relative_path?(_value), do: false
 
   defp metric_errors(metrics) do
     metrics
@@ -382,4 +461,41 @@ defmodule Pika.CampaignSpec do
 
   defp object_array_schema,
     do: %{"type" => "array", "minItems" => 1, "items" => %{"type" => "object"}}
+
+  defp implementation_schema do
+    %{
+      "type" => "object",
+      "required" => ~w(oracle optimization_target development),
+      "properties" => %{
+        "oracle" => %{
+          "type" => "object",
+          "required" => ["kind"],
+          "properties" => %{
+            "kind" => %{"type" => "string", "enum" => @oracle_kinds},
+            "entrypoint" => string_schema()
+          }
+        },
+        "optimization_target" => %{
+          "type" => "object",
+          "required" => ~w(source entrypoint),
+          "properties" => %{
+            "source" => %{
+              "type" => "object",
+              "required" => ["kind"],
+              "properties" => %{
+                "kind" => %{"type" => "string", "enum" => @target_source_kinds},
+                "reference_id" => string_schema()
+              }
+            },
+            "entrypoint" => string_schema()
+          }
+        },
+        "development" => %{
+          "type" => "object",
+          "required" => ["entrypoint"],
+          "properties" => %{"entrypoint" => string_schema()}
+        }
+      }
+    }
+  end
 end

@@ -43,9 +43,9 @@
 - Boundary Role MCP、Spec diff/确认 UI、Spec Revision。
 - Reference Catalog 16 项默认全选、Campaign 初始化时解析最新 HEAD 并固定 SHA。
 - Skill Registry 与 `ncu-report-skill` 固定 SHA。
-- setup worktree、protected Harness digest、Baseline、Profiler Artifact 和噪声估算。
+- setup worktree、独立 Correctness Oracle/Optimization Target/Development、不可变 Target Snapshot、protected Harness digest、Target/Development 审阅证据、Baseline、Profiler Artifact 和噪声估算。
 
-门禁：未确认 Spec 不能进入 Baseline；修改 protected path 的候选必拒绝；Ref/Skill 在重启和新 Attempt 间 SHA 不漂移。
+门禁：未确认 Spec 不能进入 Baseline；Target 与 Development 未在同一 Case 通过 Oracle 并提供配对性能时不能确认；修改 protected path 的候选必拒绝；Target/Ref/Skill 在重启和新 Attempt 间身份不漂移。
 
 ## 5. Phase 3：并发 Attempt 与 MCP 完成协议
 
@@ -91,7 +91,7 @@
 
 至少完成一个 NVIDIA Campaign：
 
-1. 用户在 Alignment 确认 PyTorch Reference、多个 Cases、Metrics 与 Ref 选择。
+1. 用户在 Alignment 确认 Correctness Oracle、固定 Optimization Target、初始 Development、多个 Cases、Metrics 与 Reference Project 选择。
 2. Baseline 正确性、Profiler 和噪声估算成功。
 3. 至少两个不同 Agent Backend 并行运行 Attempts。
 4. 至少一个 Accepted、一个 Rejected，并验证 Patch、Summary、Metrics 与 worktree 清理。

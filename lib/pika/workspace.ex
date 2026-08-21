@@ -208,7 +208,8 @@ defmodule Pika.Workspace do
         root,
         Path.join(root, "attempts"),
         Path.join(root, "artifacts"),
-        Path.join(root, "refs")
+        Path.join(root, "refs"),
+        Path.join(root, "targets")
       ] ++
         Enum.map(@artifact_kinds, &Path.join([root, "artifacts", &1])),
       :ok,

@@ -534,16 +534,26 @@ defmodule Pika.SyncStore do
     do: {campaign.current_spec_revision_id, :comparison}
 
   defp maybe_rebuild_spec!(run, campaign, now) do
-    [[revision, spec_json, paths_json, refs_json, skill_json]] =
+    [
+      [
+        revision,
+        spec_json,
+        paths_json,
+        refs_json,
+        skill_json,
+        target_snapshot_id,
+        implementation_manifest_json
+      ]
+    ] =
       Repo.query!(
-        "SELECT revision, spec_json, protected_paths_json, reference_snapshot_json, skill_snapshot_json FROM spec_revisions WHERE id = ?",
+        "SELECT revision, spec_json, protected_paths_json, reference_snapshot_json, skill_snapshot_json, target_snapshot_id, implementation_manifest_json FROM spec_revisions WHERE id = ?",
         [campaign.current_spec_revision_id]
       ).rows
 
     new_spec_id = Ecto.UUID.generate()
 
     Repo.query!(
-      "INSERT INTO spec_revisions(id, campaign_id, revision, status, spec_json, protected_paths_json, protected_digest, baseline_sha, reference_snapshot_json, skill_snapshot_json, confirmed_at, inserted_at, updated_at) VALUES (?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO spec_revisions(id, campaign_id, revision, status, spec_json, protected_paths_json, protected_digest, baseline_sha, reference_snapshot_json, skill_snapshot_json, confirmed_at, inserted_at, updated_at, target_snapshot_id, development_baseline_sha, implementation_manifest_json) VALUES (?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
         new_spec_id,
         run.campaign_id,
@@ -556,7 +566,10 @@ defmodule Pika.SyncStore do
         skill_json,
         now,
         now,
-        now
+        now,
+        target_snapshot_id,
+        run.candidate_sha,
+        implementation_manifest_json
       ]
     )
 
@@ -617,6 +630,11 @@ defmodule Pika.SyncStore do
         ]).rows
 
       value = metric["value"] || metric[:value]
+      target_snapshot_id = metric["target_snapshot_id"] || metric[:target_snapshot_id]
+      target_value = metric["target_value"] || metric[:target_value]
+
+      target_improvement =
+        metric["target_relative_improvement"] || metric[:target_relative_improvement]
 
       baseline_value =
         if(mode == :baseline,
@@ -630,8 +648,10 @@ defmodule Pika.SyncStore do
           else: metric["improvement_ratio"] || metric[:improvement_ratio]
         )
 
+      best_improvement = if(mode == :baseline, do: 0.0, else: improvement)
+
       Repo.query!(
-        "INSERT INTO best_metrics(best_revision_id, benchmark_case_id, metric_definition_id, measured_sha, value, baseline_value, improvement_ratio, mad, noise_tolerance, pair_count, valid_pair_count, source, measured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sync', ?)",
+        "INSERT INTO best_metrics(best_revision_id, benchmark_case_id, metric_definition_id, measured_sha, value, baseline_value, improvement_ratio, mad, noise_tolerance, pair_count, valid_pair_count, source, measured_at, target_snapshot_id, target_value, target_relative_improvement, best_relative_improvement) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sync', ?, ?, ?, ?, ?)",
         [
           best_revision_id,
           case_id,
@@ -644,7 +664,11 @@ defmodule Pika.SyncStore do
           metric["noise_tolerance"] || metric[:noise_tolerance],
           metric["pair_count"] || metric[:pair_count],
           metric["valid_pair_count"] || metric[:valid_pair_count],
-          now
+          now,
+          target_snapshot_id,
+          target_value,
+          target_improvement,
+          best_improvement
         ]
       )
     end)

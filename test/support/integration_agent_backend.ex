@@ -240,29 +240,41 @@ defmodule Pika.Test.IntegrationAgentBackend do
     register(state, screening_relative, "full_regression_screening")
     maybe_crash(server, state, :during_screening)
 
-    full? = regression?
     pair_count = context.spec["benchmark"]["pair_count"]
+    full_keys = screening_keys
 
-    if full? and
-         not reusable_jsonl?(full_path, context, [{"guard_case", "latency_us"}], pair_count) do
+    if not reusable_jsonl?(full_path, context, full_keys, pair_count) do
       full =
-        for index <- 0..(pair_count - 1),
-            do: pair(context, "guard_case", "latency_us", index, -0.02)
+        for benchmark_case <- context.cases,
+            metric <- context.metrics,
+            index <- 0..(pair_count - 1) do
+          improvement =
+            if regression? and benchmark_case["id"] == "guard_case", do: -0.02, else: 0.02
+
+          pair(context, benchmark_case["id"], metric["id"], index, improvement)
+        end
 
       track_measurement(state, :escalation)
       File.write!(full_path, encode_jsonl(full))
     end
 
-    if full? do
-      register(state, full_relative, "full_regression_escalation")
-      maybe_crash(server, state, :during_escalation)
-    end
+    register(state, full_relative, "full_regression_escalation")
+    maybe_crash(server, state, :during_escalation)
 
     File.write!(
       correctness_path,
       Jason.encode!(%{
+        "schema_version" => 2,
+        "target_snapshot_id" => context.target_snapshot.id,
         "candidate_sha" => context.attempt.candidate_sha,
-        "cases" => Enum.map(context.cases, &%{"case_id" => &1["id"], "passed" => true})
+        "cases" =>
+          Enum.map(context.cases, fn benchmark_case ->
+            %{
+              "case_id" => benchmark_case["id"],
+              "target_passed" => true,
+              "candidate_passed" => true
+            }
+          end)
       })
     )
 
@@ -277,7 +289,7 @@ defmodule Pika.Test.IntegrationAgentBackend do
         "harness_digest" => context.spec_revision.protected_digest,
         "screening_artifact" => screening_relative,
         "correctness_artifact" => correctness_relative,
-        "full_artifact" => if(full?, do: full_relative, else: nil)
+        "full_artifact" => full_relative
       })
 
     receipt
@@ -296,7 +308,7 @@ defmodule Pika.Test.IntegrationAgentBackend do
     Git.run!(context.best_worktree, ["rev-parse", "HEAD"])
   end
 
-  defp reusable_jsonl?(path, context, expected_keys, pair_count) do
+  defp reusable_jsonl?(path, _context, expected_keys, pair_count) do
     with {:ok, body} <- File.read(path),
          records <-
            body
@@ -304,11 +316,6 @@ defmodule Pika.Test.IntegrationAgentBackend do
            |> Enum.map(&Jason.decode/1),
          true <- Enum.all?(records, &match?({:ok, _}, &1)),
          decoded <- Enum.map(records, &elem(&1, 1)),
-         true <-
-           Enum.all?(decoded, fn record ->
-             record["base_sha"] == context.best_sha and
-               record["candidate_sha"] == context.attempt.candidate_sha
-           end),
          grouped <- Enum.group_by(decoded, &{&1["case_id"], &1["metric_id"]}),
          true <- Enum.sort(Map.keys(grouped)) == Enum.sort(expected_keys),
          true <-
@@ -318,7 +325,7 @@ defmodule Pika.Test.IntegrationAgentBackend do
              Enum.map(ordered, & &1["pair_index"]) == Enum.to_list(0..(pair_count - 1)) and
                Enum.with_index(ordered)
                |> Enum.all?(fn {record, index} ->
-                 record["order"] == if(rem(index, 2) == 0, do: "bc", else: "cb")
+                 record["order"] == if(rem(index, 2) == 0, do: "tc", else: "ct")
                end)
            end) do
       true
@@ -361,20 +368,18 @@ defmodule Pika.Test.IntegrationAgentBackend do
       })
   end
 
-  defp pair(context, case_id, metric_id, index, improvement) do
-    baseline = 10.0 + index / 10_000
+  defp pair(_context, case_id, metric_id, index, improvement) do
+    target = 10.0 + index / 10_000
 
     %{
-      "schema_version" => 1,
-      "base_sha" => context.best_sha,
-      "candidate_sha" => context.attempt.candidate_sha,
       "case_id" => case_id,
       "metric_id" => metric_id,
       "pair_index" => index,
-      "order" => if(rem(index, 2) == 0, do: "bc", else: "cb"),
-      "baseline" => baseline,
-      "candidate" => baseline * (1.0 - improvement),
-      "valid" => true
+      "order" => if(rem(index, 2) == 0, do: "tc", else: "ct"),
+      "target" => target,
+      "candidate" => target * (1.0 - improvement),
+      "valid" => true,
+      "error" => nil
     }
   end
 

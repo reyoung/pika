@@ -14,23 +14,37 @@ defmodule Pika.MeasurementTest do
     context = %{
       base_sha: base_sha,
       candidate_sha: candidate_sha,
+      target_snapshot_id: "target-fixture",
       case_ids: ["target_case"],
+      target_case_ids: ["target_case"],
       benchmark: %{"pair_count" => 7, "min_valid_pairs" => 5},
       metrics: [
         %{
           "id" => "latency_us",
           "unit" => "us",
           "direction" => "minimize",
-          "role" => "target"
+          "role" => "target",
+          "min_improvement_ratio" => 0.01
         }
-      ]
+      ],
+      best_metrics: %{
+        {"target_case", "latency_us"} => %{value: 10.0, noise_tolerance: 0.005}
+      }
     }
 
     File.write!(
       correctness,
       Jason.encode!(%{
+        "schema_version" => 2,
+        "target_snapshot_id" => "target-fixture",
         "candidate_sha" => candidate_sha,
-        "cases" => [%{"case_id" => "target_case", "passed" => true}]
+        "cases" => [
+          %{
+            "case_id" => "target_case",
+            "target_passed" => true,
+            "candidate_passed" => true
+          }
+        ]
       })
     )
 
@@ -54,8 +68,9 @@ defmodule Pika.MeasurementTest do
     assert metric.metric_id == "latency_us"
     assert metric.pair_count == 7
     assert metric.valid_pair_count == 7
-    assert_in_delta metric.improvement_ratio, 0.02, 1.0e-12
-    assert_in_delta metric.value / metric.baseline_value, 0.98, 1.0e-9
+    assert_in_delta metric.target_relative_improvement, 0.02, 1.0e-12
+    assert_in_delta metric.value / metric.target_value, 0.98, 1.0e-12
+    assert_in_delta metric.best_relative_improvement, 0.019_970_6, 1.0e-7
     assert metric.noise_tolerance >= 0.005
   end
 
@@ -74,7 +89,7 @@ defmodule Pika.MeasurementTest do
       context.context,
       7,
       fn _index -> {10.0, 9.8, true} end,
-      fn _index -> "bc" end
+      fn _index -> "tc" end
     )
 
     assert {:error, {:non_alternating_pair_orders, "target_case", "latency_us"}} =
@@ -87,8 +102,16 @@ defmodule Pika.MeasurementTest do
     File.write!(
       context.correctness,
       Jason.encode!(%{
+        "schema_version" => 2,
+        "target_snapshot_id" => "target-fixture",
         "candidate_sha" => context.context.candidate_sha,
-        "cases" => [%{"case_id" => "target_case", "passed" => false}]
+        "cases" => [
+          %{
+            "case_id" => "target_case",
+            "target_passed" => true,
+            "candidate_passed" => false
+          }
+        ]
       })
     )
 
@@ -145,7 +168,7 @@ defmodule Pika.MeasurementTest do
                full,
                context.correctness,
                context.context,
-               %{}
+               context.context.best_metrics
              )
 
     assert result.escalated == [{"target_case", "latency_us"}]
@@ -172,7 +195,7 @@ defmodule Pika.MeasurementTest do
                full,
                context.correctness,
                configured,
-               %{}
+               configured.best_metrics
              )
 
     assert [%{source: "integration_full", pair_count: 8, valid_pair_count: 6}] =
@@ -196,29 +219,31 @@ defmodule Pika.MeasurementTest do
                full,
                context.correctness,
                informational,
-               %{}
+               informational.best_metrics
              )
 
     assert result.escalated == [{"target_case", "latency_us"}]
-    assert result.regressions == [{"target_case", "latency_us"}]
+
+    assert result.regressions == [
+             {"target_case", "latency_us"},
+             {"__target__", "improvement_required"}
+           ]
+
     assert [%{role: "informational", source: "integration_full"}] = result.metrics
   end
 
-  defp write_pairs(path, context, count, values, order \\ nil) do
+  defp write_pairs(path, _context, count, values, order \\ nil) do
     records =
       for index <- 0..(count - 1) do
-        {baseline, candidate, valid} = values.(index)
+        {target, candidate, valid} = values.(index)
 
         %{
-          "schema_version" => 1,
-          "base_sha" => context.base_sha,
-          "candidate_sha" => context.candidate_sha,
           "case_id" => "target_case",
           "metric_id" => "latency_us",
           "pair_index" => index,
           "order" =>
-            if(order, do: order.(index), else: if(rem(index, 2) == 0, do: "bc", else: "cb")),
-          "baseline" => baseline,
+            if(order, do: order.(index), else: if(rem(index, 2) == 0, do: "tc", else: "ct")),
+          "target" => target,
           "candidate" => candidate,
           "valid" => valid
         }

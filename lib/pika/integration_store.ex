@@ -398,6 +398,8 @@ defmodule Pika.IntegrationStore do
   end
 
   defp upsert_attempt_metrics!(attempt, metrics, candidate_sha, measured_at) do
+    target_snapshot_id = target_snapshot_id!(attempt.spec_revision_id)
+
     Enum.each(metrics, fn metric ->
       case_name = metric[:case_id] || metric["case_id"]
       metric_name = metric[:metric_id] || metric["metric_id"]
@@ -419,14 +421,19 @@ defmodule Pika.IntegrationStore do
         INSERT INTO attempt_metrics(
           attempt_id, benchmark_case_id, metric_definition_id, measured_sha,
           value, baseline_value, improvement_ratio, mad, noise_tolerance,
-          pair_count, valid_pair_count, source, measured_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          pair_count, valid_pair_count, source, measured_at, target_snapshot_id,
+          target_value, target_relative_improvement, best_relative_improvement
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(attempt_id, benchmark_case_id, metric_definition_id) DO UPDATE SET
           measured_sha = excluded.measured_sha, value = excluded.value,
           baseline_value = excluded.baseline_value,
           improvement_ratio = excluded.improvement_ratio, mad = excluded.mad,
           noise_tolerance = excluded.noise_tolerance,
           pair_count = excluded.pair_count, valid_pair_count = excluded.valid_pair_count,
+          target_snapshot_id = excluded.target_snapshot_id,
+          target_value = excluded.target_value,
+          target_relative_improvement = excluded.target_relative_improvement,
+          best_relative_improvement = excluded.best_relative_improvement,
           source = excluded.source, measured_at = excluded.measured_at
         """,
         [
@@ -442,7 +449,11 @@ defmodule Pika.IntegrationStore do
           metric[:pair_count] || metric["pair_count"],
           metric[:valid_pair_count] || metric["valid_pair_count"],
           metric[:source] || metric["source"],
-          measured_at
+          measured_at,
+          target_snapshot_id,
+          metric[:target_value] || metric["target_value"],
+          metric[:target_relative_improvement] || metric["target_relative_improvement"],
+          metric[:best_relative_improvement] || metric["best_relative_improvement"]
         ]
       )
     end)
@@ -626,7 +637,7 @@ defmodule Pika.IntegrationStore do
         ).rows
 
       Repo.query!(
-        "INSERT INTO best_metrics(best_revision_id, benchmark_case_id, metric_definition_id, measured_sha, value, baseline_value, improvement_ratio, mad, noise_tolerance, pair_count, valid_pair_count, source, measured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO best_metrics(best_revision_id, benchmark_case_id, metric_definition_id, measured_sha, value, baseline_value, improvement_ratio, mad, noise_tolerance, pair_count, valid_pair_count, source, measured_at, target_snapshot_id, target_value, target_relative_improvement, best_relative_improvement) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           best_revision_id,
           case_id,
@@ -640,7 +651,11 @@ defmodule Pika.IntegrationStore do
           metric["pair_count"],
           metric["valid_pair_count"],
           metric["source"],
-          now
+          now,
+          metric["target_snapshot_id"] || target_snapshot_id!(attempt.spec_revision_id),
+          metric["target_value"],
+          metric["target_relative_improvement"],
+          metric["best_relative_improvement"]
         ]
       )
     end)
@@ -681,6 +696,15 @@ defmodule Pika.IntegrationStore do
     event = insert_event!("campaign", campaign.campaign_id, "best_advanced", payload)
     notify_active_sessions!(campaign.campaign_id, "best_advanced", payload)
     {AttemptStore.attempt(attempt.id) |> unwrap!(), event}
+  end
+
+  defp target_snapshot_id!(spec_revision_id) do
+    case Repo.query!("SELECT target_snapshot_id FROM spec_revisions WHERE id = ?", [
+           spec_revision_id
+         ]).rows do
+      [[id]] when is_binary(id) -> id
+      _ -> Repo.rollback(:target_snapshot_missing)
+    end
   end
 
   defp notify_active_sessions!(campaign_id, scope, payload) do

@@ -50,6 +50,8 @@ defmodule Pika.CampaignWorkspaceTest do
     setup = Path.join(root, "setup/1")
 
     Git.run!(root, ["clone", "--no-hardlinks", source, repo])
+    Git.run!(repo, ["config", "user.name", "Pika Test"])
+    Git.run!(repo, ["config", "user.email", "pika@example.invalid"])
     base_sha = Git.run!(repo, ["rev-parse", "HEAD"])
     Git.run!(repo, ["branch", "-f", "pika/best", base_sha])
     Git.run!(repo, ["checkout", "pika/best"])

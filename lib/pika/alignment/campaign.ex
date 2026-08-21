@@ -5,12 +5,19 @@ defmodule Pika.Alignment.Campaign do
 
   alias Pika.AgentBackend
 
-  alias Pika.{Baseline, Harness, PromptCatalog, ReferenceCatalog, Sampling}
-  alias Pika.Alignment.{ArtifactStore, BaselineManifest, ReferenceReviewEvidence, Workspace}
+  alias Pika.{Baseline, Harness, PromptCatalog, ReferenceCatalog, Sampling, TargetSnapshot}
+
+  alias Pika.Alignment.{
+    ArtifactStore,
+    BaselineManifest,
+    ImplementationReviewEvidence,
+    Workspace
+  }
+
   alias Pika.CampaignSpec, as: Spec
 
   @topic "alignment:campaign"
-  @write_tools ~w(register_artifact submit_spec submit_harness submit_reference_review complete_setup_merge reopen_baseline_definition submit_baseline submit_iteration_sample)
+  @write_tools ~w(register_artifact submit_spec submit_harness submit_implementation_review complete_setup_merge reopen_baseline_definition submit_baseline submit_iteration_sample)
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -30,8 +37,8 @@ defmodule Pika.Alignment.Campaign do
     call_if_started(:snapshot, {:error, :not_started})
   end
 
-  def reference_review do
-    call_if_started(:reference_review, {:error, :not_started})
+  def implementation_review do
+    call_if_started(:implementation_review, {:error, :not_started})
   end
 
   def authorize(token), do: call_if_started({:authorize, token}, {:error, :not_started})
@@ -50,10 +57,18 @@ defmodule Pika.Alignment.Campaign do
   def remove_reference_project(id),
     do: call_if_started({:remove_reference_project, id}, {:error, :not_started})
 
+  def confirm_spec(reviewed_target_digest, reviewed_development_sha, reviewed_evidence_digest),
+    do:
+      call_if_started(
+        {:confirm_spec, reviewed_target_digest, reviewed_development_sha,
+         reviewed_evidence_digest},
+        {:error, :not_started}
+      )
+
   def confirm_spec(reviewed_reference_sha, reviewed_evidence_digest),
     do:
       call_if_started(
-        {:confirm_spec, reviewed_reference_sha, reviewed_evidence_digest},
+        {:confirm_spec_v1, reviewed_reference_sha, reviewed_evidence_digest},
         {:error, :not_started}
       )
 
@@ -127,6 +142,7 @@ defmodule Pika.Alignment.Campaign do
       spec_diff: nil,
       harness: nil,
       reference_review_evidence: nil,
+      implementation_review_evidence: nil,
       required: draft_required_operations(),
       references: Keyword.get(opts, :references, ReferenceCatalog.entries()),
       reference_progress: nil,
@@ -137,6 +153,11 @@ defmodule Pika.Alignment.Campaign do
       best_sha: workspace.source_sha,
       setup_base_sha: workspace.source_sha,
       setup_sha: nil,
+      prepared_setup_sha: nil,
+      target_snapshot: nil,
+      inherited_target_snapshot: nil,
+      target_submission: nil,
+      target_progress: nil,
       baseline: nil,
       baseline_retry_count: 0,
       baseline_error: nil,
@@ -153,20 +174,20 @@ defmodule Pika.Alignment.Campaign do
 
     state = restore_durable_state(state, Keyword.get(opts, :durable_state))
 
-    case PromptCatalog.validate() do
-      :ok ->
-        broadcast(state)
+    with :ok <- restore_target_views(state),
+         :ok <- PromptCatalog.validate() do
+      broadcast(state)
 
-        if state.status == :resolving_references do
-          {:ok, state, {:continue, :resume_reference_resolution}}
+      if state.status == :resolving_references do
+        {:ok, state, {:continue, :resume_reference_resolution}}
+      else
+        if state.backend_enabled and state.status != :optimizing do
+          {:ok, state, {:continue, :open_backend}}
         else
-          if state.backend_enabled and state.status != :optimizing do
-            {:ok, state, {:continue, :open_backend}}
-          else
-            {:ok, state}
-          end
+          {:ok, state}
         end
-
+      end
+    else
       {:error, reason} ->
         {:stop, reason}
     end
@@ -189,8 +210,8 @@ defmodule Pika.Alignment.Campaign do
   @impl true
   def handle_call(:snapshot, _from, state), do: {:reply, public_snapshot(state), state}
 
-  def handle_call(:reference_review, _from, state) do
-    {:reply, load_reference_review(state), state}
+  def handle_call(:implementation_review, _from, state) do
+    {:reply, load_implementation_review(state), state}
   end
 
   def handle_call({:authorize, token}, _from, state) do
@@ -285,43 +306,66 @@ defmodule Pika.Alignment.Campaign do
   end
 
   def handle_call(
-        {:confirm_spec, reviewed_reference_sha, reviewed_evidence_digest},
+        {:confirm_spec, reviewed_target_digest, reviewed_development_sha,
+         reviewed_evidence_digest},
         _from,
         state
       ) do
-    if state.status == :awaiting_confirmation and state.spec_result.ready? and state.harness do
+    if state.status == :awaiting_confirmation and state.spec_result.ready? and
+         not is_nil(state.harness) and not is_nil(state.target_snapshot) and
+         not is_nil(state.prepared_setup_sha) do
       with :ok <- require_confirmation_idle(state),
-           {:ok, reference} <- load_reference_review(state),
+           {:ok, _review} <- load_implementation_review(state),
            :ok <-
              require_review_match(
-               reviewed_reference_sha,
-               reference.sha256,
-               :reference_not_reviewed
+               reviewed_target_digest,
+               state.target_snapshot.digest,
+               :target_not_reviewed
+             ),
+           :ok <-
+             require_review_match(
+               reviewed_development_sha,
+               state.prepared_setup_sha,
+               :development_not_reviewed
              ),
            :ok <-
              require_review_match(
                reviewed_evidence_digest,
-               state.reference_review_evidence && state.reference_review_evidence.digest,
-               :reference_evidence_not_reviewed
+               state.implementation_review_evidence &&
+                 state.implementation_review_evidence.digest,
+               :implementation_evidence_not_reviewed
              ),
            :ok <- Harness.verify_digest(state.workspace.setup_worktree, state.harness),
-           :ok <- verify_reference_review_evidence(state, reference.sha256) do
+           :ok <- TargetSnapshot.verify(state.workspace.root, state.target_snapshot),
+           :ok <- verify_prepared_setup(state),
+           :ok <- verify_implementation_review_evidence(state) do
         advance_confirmed_spec(state)
       else
         {:error, reason} when reason in [:agent_still_responding, :questions_pending] ->
           {:reply, {:error, reason}, state}
 
         {:error, reason}
-        when reason in [:reference_not_reviewed, :reference_evidence_not_reviewed] ->
+        when reason in [
+               :target_not_reviewed,
+               :development_not_reviewed,
+               :implementation_evidence_not_reviewed
+             ] ->
           {:reply, {:error, reason}, state}
 
         {:error, reason} ->
-          {:reply, {:error, {:reference_review_failed, reason}}, state}
+          {:reply, {:error, {:implementation_review_failed, reason}}, state}
       end
     else
       {:reply, {:error, :spec_not_confirmable}, state}
     end
   end
+
+  def handle_call(
+        {:confirm_spec_v1, _reviewed_reference_sha, _reviewed_evidence_digest},
+        _from,
+        state
+      ),
+      do: {:reply, {:error, :campaign_spec_v2_review_required}, state}
 
   def handle_call({:request_changes, body, artifacts}, _from, state)
       when is_binary(body) and is_list(artifacts) do
@@ -339,6 +383,10 @@ defmodule Pika.Alignment.Campaign do
           | status: :drafting_spec,
             required: draft_required_operations(),
             reference_review_evidence: nil,
+            implementation_review_evidence: nil,
+            prepared_setup_sha: nil,
+            target_snapshot: nil,
+            inherited_target_snapshot: nil,
             messages: state.messages ++ [message(:user, "修改要求：#{body}", artifacts)]
         }
 
@@ -403,6 +451,65 @@ defmodule Pika.Alignment.Campaign do
     else
       {:noreply, state}
     end
+  end
+
+  def handle_info(
+        {:target_progress, submission_id, progress},
+        %{target_submission: %{id: submission_id}} = state
+      ) do
+    state = %{state | target_progress: Map.merge(state.target_progress || %{}, progress)}
+    broadcast(state, persist: false)
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:target_finished, submission_id, result},
+        %{target_submission: %{id: submission_id} = submission} = state
+      ) do
+    Process.demonitor(submission.monitor_ref, [:flush])
+    {response, state} = finish_target_submission(result, submission.args, state)
+    entry = %{request_hash: submission.request_hash, response: response}
+
+    state = %{
+      state
+      | target_submission: nil,
+        target_progress: nil,
+        idempotency: Map.put(state.idempotency, submission.record_key, entry)
+    }
+
+    store_idempotency(
+      state,
+      submission.identity,
+      "submit_implementation_bundle",
+      submission.key,
+      submission.request_hash,
+      response
+    )
+
+    state = notify_target_result(state, response)
+    broadcast(state)
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:DOWN, monitor_ref, :process, _pid, reason},
+        %{target_submission: %{monitor_ref: monitor_ref} = submission} = state
+      ) do
+    message =
+      "Optimization Target 快照任务异常退出：#{inspect(reason)}。可以重新调用 submit_implementation_bundle。"
+
+    state = %{
+      state
+      | target_submission: nil,
+        target_progress: nil,
+        idempotency: Map.delete(state.idempotency, submission.record_key),
+        last_error: message,
+        messages: state.messages ++ [message(:system, message)]
+    }
+
+    state = dispatch_input(state, message)
+    broadcast(state)
+    {:noreply, state}
   end
 
   def handle_info({:references_resolved, {:ok, references}}, state) do
@@ -557,7 +664,7 @@ defmodule Pika.Alignment.Campaign do
   def handle_info({:completion_followup, _completed_turn_id}, state) do
     if state.backend && is_nil(state.active_turn_id) &&
          not MapSet.equal?(state.required, MapSet.new()) && state.status != :optimizing do
-      if state.baseline_submission do
+      if state.baseline_submission or state.target_submission do
         {:noreply, state}
       else
         missing = state.required |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
@@ -655,6 +762,9 @@ defmodule Pika.Alignment.Campaign do
 
   @impl true
   def terminate(_reason, state) do
+    if state.target_submission && Process.alive?(state.target_submission.pid),
+      do: Process.exit(state.target_submission.pid, :shutdown)
+
     if state.baseline_submission && Process.alive?(state.baseline_submission.pid),
       do: Process.exit(state.baseline_submission.pid, :shutdown)
 
@@ -707,6 +817,57 @@ defmodule Pika.Alignment.Campaign do
 
       {:error, message} ->
         {:reply, mcp_error("missing_required_data", message), state}
+    end
+  end
+
+  defp execute_mcp(
+         "submit_implementation_bundle" = tool,
+         args,
+         identity,
+         token_hash,
+         _from,
+         state
+       ) do
+    key = args["idempotency_key"]
+
+    if not is_binary(key) or key == "" do
+      {:reply, mcp_error("missing_required_data", "idempotency_key is required"), state}
+    else
+      request_hash = :crypto.hash(:sha256, :erlang.term_to_binary({tool, args}))
+      record_key = {token_hash, tool, key}
+
+      case lookup_idempotency(state, identity, tool, key, request_hash, record_key) do
+        {:replay, response} ->
+          {:reply, response, state}
+
+        :missing ->
+          case start_target_submission(
+                 args,
+                 identity,
+                 key,
+                 request_hash,
+                 record_key,
+                 state
+               ) do
+            {:started, response, next_state} ->
+              entry = %{request_hash: request_hash, response: response}
+
+              next_state = %{
+                next_state
+                | idempotency: Map.put(next_state.idempotency, record_key, entry)
+              }
+
+              broadcast(next_state, persist: false)
+              {:reply, response, next_state}
+
+            {:reply, response, next_state} ->
+              {:reply, response, next_state}
+          end
+
+        :conflict ->
+          {:reply,
+           mcp_error("idempotency_conflict", "same key was used with a different request"), state}
+      end
     end
   end
 
@@ -844,11 +1005,21 @@ defmodule Pika.Alignment.Campaign do
 
   defp perform_write("submit_spec", args, %{workflow: :alignment}, state)
        when state.status in [:drafting_spec, :awaiting_confirmation] do
-    state = invalidate_reference_review_evidence(state)
     selected_ids = for reference <- state.references, reference.selected, do: reference.id
     spec = args["spec"] |> map() |> Map.put("reference_ids", selected_ids)
     spec = Map.put(spec, "revision", spec_revision(state))
     result = Spec.validate(spec)
+
+    inherited_target_snapshot =
+      if target_definition(state.spec_result.spec) == target_definition(result.spec),
+        do: state.target_snapshot || state.inherited_target_snapshot,
+        else: nil
+
+    state =
+      state
+      |> invalidate_implementation_definition()
+      |> Map.put(:harness, nil)
+      |> Map.put(:inherited_target_snapshot, inherited_target_snapshot)
 
     required =
       if result.ready?,
@@ -860,7 +1031,7 @@ defmodule Pika.Alignment.Campaign do
         state
         | spec_result: result,
           spec_diff: Spec.diff(state.spec_result.spec, result.spec),
-          required: required
+          required: MapSet.put(required, "submit_harness")
       }
       |> maybe_awaiting_confirmation()
 
@@ -885,16 +1056,23 @@ defmodule Pika.Alignment.Campaign do
 
   defp perform_write("submit_harness", args, %{workflow: :alignment}, state)
        when state.status in [:drafting_spec, :awaiting_confirmation] do
-    case Harness.validate(state.workspace.setup_worktree, args) do
-      {:ok, harness} ->
-        state =
-          state
-          |> invalidate_reference_review_evidence()
-          |> Map.put(:harness, harness)
-          |> Map.update!(:required, &MapSet.delete(&1, "submit_harness"))
-          |> maybe_awaiting_confirmation()
+    with true <- state.spec_result.ready?,
+         :ok <- validate_harness_definition(state.spec_result.spec, args),
+         {:ok, harness} <- Harness.validate(state.workspace.setup_worktree, args) do
+      inherited_target_snapshot = state.target_snapshot || state.inherited_target_snapshot
 
-        {{:ok, %{digest: harness.digest, protected_paths: harness.protected_paths}}, state}
+      state =
+        state
+        |> invalidate_implementation_definition()
+        |> Map.put(:harness, harness)
+        |> Map.put(:inherited_target_snapshot, inherited_target_snapshot)
+        |> Map.update!(:required, &MapSet.delete(&1, "submit_harness"))
+        |> maybe_awaiting_confirmation()
+
+      {{:ok, %{digest: harness.digest, protected_paths: harness.protected_paths}}, state}
+    else
+      false ->
+        {mcp_error("invalid_state", "submit_harness requires a valid Campaign Spec"), state}
 
       {:error, reason} ->
         {mcp_error("missing_required_data", "Harness validation failed", %{reason: reason}),
@@ -909,30 +1087,34 @@ defmodule Pika.Alignment.Campaign do
          "submit_harness is only allowed before the Campaign Spec is confirmed"
        ), state}
 
-  defp perform_write("submit_reference_review", args, %{workflow: :alignment}, state)
+  defp perform_write("submit_implementation_review", args, %{workflow: :alignment}, state)
        when state.status in [:drafting_spec, :awaiting_confirmation] do
-    if state.spec_result.ready? and state.harness do
-      with {:ok, reference} <- load_reference_review(state),
+    if state.spec_result.ready? and not is_nil(state.harness) and
+         not is_nil(state.target_snapshot) and not is_nil(state.prepared_setup_sha) do
+      with {:ok, _review} <- load_implementation_review(state),
            :ok <- Harness.verify_digest(state.workspace.setup_worktree, state.harness),
+           :ok <- TargetSnapshot.verify(state.workspace.root, state.target_snapshot),
+           :ok <- verify_prepared_setup(state),
            {:ok, artifact} <-
              verified_registered_artifact(
                state,
                args["output_artifact"],
-               "reference_review_evidence"
+               "implementation_review_evidence"
              ),
            {:ok, evidence} <-
-             ReferenceReviewEvidence.validate(
+             ImplementationReviewEvidence.validate(
                state.spec_result.spec,
                state.harness,
-               reference.sha256,
+               state.target_snapshot,
+               state.prepared_setup_sha,
                args,
                artifact
              ) do
         state =
           %{
             state
-            | reference_review_evidence: evidence,
-              required: MapSet.delete(state.required, "submit_reference_review")
+            | implementation_review_evidence: evidence,
+              required: MapSet.delete(state.required, "submit_implementation_review")
           }
           |> maybe_awaiting_confirmation()
 
@@ -948,45 +1130,68 @@ defmodule Pika.Alignment.Campaign do
         {:error, reason} ->
           {mcp_error(
              "missing_required_data",
-             "Reference review evidence validation failed",
+             "Implementation review evidence validation failed",
              %{reason: reason}
            ), state}
       end
     else
       {mcp_error(
          "invalid_state",
-         "submit_reference_review requires a valid Campaign Spec and Harness"
+         "submit_implementation_review requires a prepared Target, Development commit, valid Campaign Spec, and Harness"
        ), state}
     end
   end
 
-  defp perform_write("submit_reference_review", _args, %{workflow: :alignment}, state),
+  defp perform_write("submit_implementation_review", _args, %{workflow: :alignment}, state),
     do:
       {mcp_error(
          "invalid_state",
-         "submit_reference_review is only allowed before the Campaign Spec is confirmed"
+         "submit_implementation_review is only allowed before the Campaign Spec is confirmed"
        ), state}
 
-  defp perform_write("submit_reference_review", _args, _identity, state),
+  defp perform_write("submit_implementation_review", _args, _identity, state),
     do:
       {mcp_error(
          "forbidden_role",
-         "submit_reference_review requires an alignment session before Spec confirmation"
+         "submit_implementation_review requires an alignment session before Spec confirmation"
        ), state}
 
   defp perform_write("complete_setup_merge", args, %{workflow: :alignment}, state) do
     if setup_merge_required?(state) do
       state = %{state | status: :building_baseline, last_error: nil}
 
-      case Workspace.verify_setup_merge(
-             state.workspace,
-             state.setup_base_sha,
-             args["base_sha"],
-             args["setup_sha"],
-             args["best_sha"]
-           ) do
+      verification =
+        with true <- args["setup_sha"] == state.prepared_setup_sha,
+             true <- args["target_snapshot_id"] == state.target_snapshot.id,
+             :ok <- TargetSnapshot.verify(state.workspace.root, state.target_snapshot),
+             :ok <-
+               Workspace.verify_setup_merge(
+                 state.workspace,
+                 state.setup_base_sha,
+                 args["base_sha"],
+                 args["setup_sha"],
+                 args["best_sha"]
+               ) do
+          :ok
+        else
+          false -> {:error, :reviewed_implementation_identity_mismatch}
+          {:error, reason} -> {:error, reason}
+        end
+
+      case verification do
         :ok ->
-          case Harness.verify_digest(state.workspace.repo, state.harness) do
+          implementation_verification =
+            with :ok <- Harness.verify_digest(state.workspace.repo, state.harness),
+                 :ok <-
+                   TargetSnapshot.link(
+                     state.workspace.root,
+                     state.workspace.repo,
+                     state.target_snapshot
+                   ) do
+              :ok
+            end
+
+          case implementation_verification do
             :ok ->
               old_session_id = state.backend_session && state.backend_session.id
               old_token_hash = state.backend_token_hash
@@ -1031,12 +1236,20 @@ defmodule Pika.Alignment.Campaign do
                   do: begin_open_session(state, :baseline, state.workspace.repo),
                   else: state
 
-              {{:ok, %{best_sha: state.best_sha, protected_digest: state.harness.digest}}, state}
+              {{:ok,
+                %{
+                  best_sha: state.best_sha,
+                  development_baseline_sha: state.best_sha,
+                  target_snapshot_id: state.target_snapshot.id,
+                  protected_digest: state.harness.digest
+                }}, state}
 
             {:error, reason} ->
-              {mcp_error("protected_path_changed", "protected Harness digest changed", %{
-                 reason: reason
-               }), state}
+              {mcp_error(
+                 "protected_path_changed",
+                 "protected Harness or Target link verification failed",
+                 %{reason: reason}
+               ), state}
           end
 
         {:error, reason} ->
@@ -1086,7 +1299,8 @@ defmodule Pika.Alignment.Campaign do
                 status: "drafting_spec",
                 revision: revision,
                 setup_branch: "pika/setup/#{revision}",
-                required_operations: ~w(submit_harness submit_reference_review submit_spec),
+                required_operations:
+                  ~w(submit_harness submit_implementation_bundle submit_implementation_review submit_spec),
                 next_action:
                   "the Baseline Session is closing; the Alignment Agent will revise the definition"
               }}, next_state}
@@ -1173,6 +1387,254 @@ defmodule Pika.Alignment.Campaign do
       state.spec_result.ready? and not is_nil(state.harness)
   end
 
+  defp start_target_submission(
+         _args,
+         _identity,
+         _key,
+         _request_hash,
+         _record_key,
+         %{target_submission: submission} = state
+       )
+       when not is_nil(submission) do
+    {:reply,
+     mcp_error(
+       "target_preparation_in_progress",
+       "an Optimization Target snapshot is already being prepared",
+       %{submission_id: submission.id}
+     ), state}
+  end
+
+  defp start_target_submission(
+         args,
+         %{workflow: :alignment} = identity,
+         key,
+         request_hash,
+         record_key,
+         state
+       ) do
+    setup_sha = args["setup_sha"]
+
+    with true <- state.status in [:drafting_spec, :awaiting_confirmation],
+         true <- MapSet.member?(state.required, "submit_implementation_bundle"),
+         true <- state.spec_result.ready?,
+         true <- not is_nil(state.harness),
+         true <- is_binary(setup_sha) and setup_sha != "" do
+      submission_id = Pika.AgentBackend.Id.new("target")
+      parent = self()
+      workspace_root = state.workspace.root
+      setup_root = state.workspace.setup_worktree
+      revision = spec_revision(state)
+      spec = state.spec_result.spec
+      references = state.references
+      inherited = state.inherited_target_snapshot
+
+      {:ok, task_pid} =
+        Task.start(fn ->
+          send(parent, {
+            :target_progress,
+            submission_id,
+            %{phase: :resolving_source, started_at: DateTime.utc_now()}
+          })
+
+          result =
+            with {:ok, resolved_references} <-
+                   prepare_target_references(
+                     workspace_root,
+                     spec,
+                     references,
+                     inherited,
+                     fn progress ->
+                       send(parent, {
+                         :target_progress,
+                         submission_id,
+                         Map.put(progress, :phase, :materializing_source)
+                       })
+                     end
+                   ),
+                 _ <-
+                   send(parent, {
+                     :target_progress,
+                     submission_id,
+                     %{phase: :freezing_snapshot}
+                   }),
+                 {:ok, snapshot} <-
+                   TargetSnapshot.prepare(
+                     workspace_root,
+                     revision,
+                     setup_root,
+                     setup_sha,
+                     spec,
+                     resolved_references,
+                     inherited_snapshot: inherited
+                   ),
+                 :ok <- TargetSnapshot.link(workspace_root, setup_root, snapshot) do
+              {:ok, %{snapshot: snapshot, references: resolved_references}}
+            end
+
+          send(parent, {:target_finished, submission_id, result})
+        end)
+
+      monitor_ref = Process.monitor(task_pid)
+
+      submission = %{
+        id: submission_id,
+        pid: task_pid,
+        monitor_ref: monitor_ref,
+        args: args,
+        identity: identity,
+        key: key,
+        request_hash: request_hash,
+        record_key: record_key
+      }
+
+      response =
+        {:ok,
+         %{
+           status: "preparing_optimization_target",
+           submission_id: submission_id,
+           next_action:
+             "wait for Pika to freeze the Target, then run and submit implementation review evidence"
+         }}
+
+      next_state = %{
+        state
+        | target_submission: submission,
+          target_progress: %{phase: :queued, started_at: DateTime.utc_now()},
+          last_error: nil,
+          messages:
+            state.messages ++
+              [
+                message(
+                  :system,
+                  "正在后台固化 Optimization Target，并绑定 Development 提交 #{short_sha(setup_sha)}。"
+                )
+              ]
+      }
+
+      {:started, response, next_state}
+    else
+      false ->
+        {:reply,
+         mcp_error(
+           "invalid_state",
+           "submit_implementation_bundle requires a valid Spec, Harness, clean setup commit, and an open implementation-bundle gate"
+         ), state}
+    end
+  end
+
+  defp start_target_submission(_args, _identity, _key, _hash, _record_key, state) do
+    {:reply,
+     mcp_error("forbidden_role", "submit_implementation_bundle requires alignment session"),
+     state}
+  end
+
+  defp prepare_target_references(workspace_root, spec, references, inherited, on_progress)
+       when is_map(inherited) do
+    if TargetSnapshot.reusable?(spec, inherited) do
+      {:ok, references}
+    else
+      prepare_target_references(workspace_root, spec, references, nil, on_progress)
+    end
+  end
+
+  defp prepare_target_references(workspace_root, spec, references, nil, on_progress) do
+    source = get_in(spec, ["implementations", "optimization_target", "source"]) || %{}
+
+    case source["kind"] do
+      "development_snapshot" ->
+        {:ok, references}
+
+      "reference_project" ->
+        id = source["reference_id"]
+
+        with %{} = entry <- Enum.find(references, &(&1.id == id)),
+             {:ok, [resolved]} <- ReferenceCatalog.resolve_selected([%{entry | selected: true}]),
+             {:ok, [materialized]} <-
+               ReferenceCatalog.materialize_selected(workspace_root, [resolved],
+                 max_concurrency: 1,
+                 on_progress: on_progress
+               ) do
+          {:ok, replace_reference(references, materialized)}
+        else
+          nil -> {:error, {:target_reference_not_found, id}}
+          {:error, failed} -> {:error, {:target_reference_preparation_failed, id, failed}}
+          other -> {:error, {:target_reference_preparation_failed, id, other}}
+        end
+
+      kind ->
+        {:error, {:invalid_target_source, kind}}
+    end
+  end
+
+  defp replace_reference(references, replacement) do
+    Enum.map(references, fn reference ->
+      if reference.id == replacement.id,
+        do: %{replacement | selected: reference.selected},
+        else: reference
+    end)
+  end
+
+  defp finish_target_submission(
+         {:ok, %{snapshot: snapshot, references: references}},
+         args,
+         state
+       ) do
+    state = %{
+      state
+      | target_snapshot: snapshot,
+        inherited_target_snapshot: nil,
+        prepared_setup_sha: args["setup_sha"],
+        references: references,
+        implementation_review_evidence: nil,
+        required:
+          state.required
+          |> MapSet.delete("submit_implementation_bundle")
+          |> MapSet.put("submit_implementation_review"),
+        last_error: nil,
+        messages:
+          state.messages ++
+            [
+              message(
+                :system,
+                "Optimization Target #{snapshot.id} 已固化；请在同一个 Case 上校验 Target 与 Development 的正确性和配对性能。"
+              )
+            ]
+    }
+
+    state = maybe_awaiting_confirmation(state)
+
+    {{:ok,
+      %{
+        status: "awaiting_implementation_review",
+        target_snapshot: TargetSnapshot.public(snapshot),
+        development_sha: state.prepared_setup_sha,
+        required_operations: state.required |> MapSet.to_list() |> Enum.sort()
+      }}, state}
+  end
+
+  defp finish_target_submission({:error, reason}, _args, state) do
+    {mcp_error("missing_required_data", "Optimization Target preparation failed", %{
+       reason: reason
+     }), %{state | last_error: "Optimization Target 准备失败：#{inspect(reason)}"}}
+  end
+
+  defp notify_target_result(state, {:ok, result}) do
+    dispatch_input(
+      state,
+      "Pika has frozen Optimization Target #{result.target_snapshot.id} and Development #{result.development_sha}. Run both against the Correctness Oracle on the same Benchmark Case, collect paired Target/Development Metrics, register the output as implementation_review_evidence, and call submit_implementation_review."
+    )
+  end
+
+  defp notify_target_result(state, {:error, _code, message, details}) do
+    dispatch_input(
+      state,
+      "Optimization Target preparation failed: #{message}; details=#{inspect(details)}. Correct the setup and call submit_implementation_bundle again with a new idempotency key."
+    )
+  end
+
+  defp short_sha(value) when is_binary(value), do: String.slice(value, 0, 12)
+  defp short_sha(value), do: inspect(value)
+
   defp start_baseline_submission(
          _args,
          _identity,
@@ -1201,6 +1663,8 @@ defmodule Pika.Alignment.Campaign do
     with true <- state.status == :building_baseline,
          true <- MapSet.member?(state.required, "submit_baseline"),
          true <- args["measured_sha"] == state.best_sha,
+         true <- args["target_snapshot_id"] == state.target_snapshot.id,
+         :ok <- TargetSnapshot.verify(state.workspace.root, state.target_snapshot),
          true <- Pika.Git.clean?(state.workspace.repo),
          {:ok, inputs} <- baseline_inputs(state, args),
          :ok <-
@@ -1213,6 +1677,7 @@ defmodule Pika.Alignment.Campaign do
       parent = self()
       spec = state.spec_result.spec
       best_sha = state.best_sha
+      target_snapshot_id = state.target_snapshot.id
       skill_sha = state.skill.sha
       workspace_root = state.workspace.root
 
@@ -1237,6 +1702,7 @@ defmodule Pika.Alignment.Campaign do
                      best_sha,
                      skill_sha,
                      expected_samples: inputs.expected_samples,
+                     target_snapshot_id: target_snapshot_id,
                      on_progress: fn progress ->
                        send(parent, {:baseline_progress, submission_id, progress})
                      end
@@ -1374,7 +1840,8 @@ defmodule Pika.Alignment.Campaign do
       {:ok,
        args
        |> Map.merge(%{
-         "measured_sha" => manifest.measured_sha,
+         "measured_sha" => manifest.candidate_sha,
+         "target_snapshot_id" => manifest.target_snapshot_id,
          "summary" => manifest.summary,
          "samples_artifact" => manifest.samples_artifact,
          "correctness_artifact" => manifest.correctness_artifact,
@@ -1385,7 +1852,7 @@ defmodule Pika.Alignment.Campaign do
     end
   end
 
-  defp normalize_baseline_args(_state, args), do: {:ok, args}
+  defp normalize_baseline_args(_state, _args), do: {:error, :baseline_manifest_v2_required}
 
   defp baseline_inputs(state, %{"__baseline_manifest" => manifest}) do
     with {:ok, samples} <- ArtifactStore.resolve(state.workspace.root, manifest.samples_artifact),
@@ -1557,13 +2024,54 @@ defmodule Pika.Alignment.Campaign do
   end
 
   defp draft_required_operations,
-    do: MapSet.new(~w(submit_spec submit_harness submit_reference_review))
+    do:
+      MapSet.new(
+        ~w(submit_spec submit_harness submit_implementation_bundle submit_implementation_review)
+      )
 
-  defp invalidate_reference_review_evidence(state) do
+  defp validate_harness_definition(spec, args) do
+    oracle = get_in(spec, ["implementations", "oracle"]) || %{}
+    development_path = get_in(spec, ["implementations", "development", "entrypoint"])
+    expected_oracle_path = if oracle["kind"] == "repository_path", do: oracle["entrypoint"]
+    protected_paths = List.wrap(args["protected_paths"])
+
+    cond do
+      args["oracle_path"] != expected_oracle_path ->
+        {:error, {:oracle_path_mismatch, expected_oracle_path, args["oracle_path"]}}
+
+      args["benchmark_path"] != get_in(spec, ["benchmark", "harness_path"]) ->
+        {:error,
+         {:benchmark_path_mismatch, get_in(spec, ["benchmark", "harness_path"]),
+          args["benchmark_path"]}}
+
+      development_path in protected_paths ->
+        {:error, {:development_entrypoint_must_remain_mutable, development_path}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp target_definition(spec) when is_map(spec),
+    do: get_in(spec, ["implementations", "optimization_target"])
+
+  defp target_definition(_spec), do: nil
+
+  defp invalidate_implementation_definition(state) do
+    stop_target_submission(state.target_submission)
+
     %{
       state
       | reference_review_evidence: nil,
-        required: MapSet.put(state.required, "submit_reference_review"),
+        implementation_review_evidence: nil,
+        prepared_setup_sha: nil,
+        target_snapshot: nil,
+        target_submission: nil,
+        target_progress: nil,
+        required:
+          state.required
+          |> MapSet.put("submit_implementation_bundle")
+          |> MapSet.put("submit_implementation_review"),
         status: :drafting_spec
     }
   end
@@ -1571,23 +2079,24 @@ defmodule Pika.Alignment.Campaign do
   defp require_review_match(value, value, _error) when not is_nil(value), do: :ok
   defp require_review_match(_reviewed, _current, error), do: {:error, error}
 
-  defp verify_reference_review_evidence(%{reference_review_evidence: nil}, _reference_sha),
-    do: {:error, :reference_review_evidence_missing}
+  defp verify_implementation_review_evidence(%{implementation_review_evidence: nil}),
+    do: {:error, :implementation_review_evidence_missing}
 
-  defp verify_reference_review_evidence(state, reference_sha) do
-    evidence = state.reference_review_evidence
+  defp verify_implementation_review_evidence(state) do
+    evidence = state.implementation_review_evidence
 
     with {:ok, artifact} <-
            verified_registered_artifact(
              state,
              evidence.output_artifact,
-             "reference_review_evidence"
+             "implementation_review_evidence"
            ),
          :ok <-
-           ReferenceReviewEvidence.verify(
+           ImplementationReviewEvidence.verify(
              state.spec_result.spec,
              state.harness,
-             reference_sha,
+             state.target_snapshot,
+             state.prepared_setup_sha,
              evidence,
              artifact
            ) do
@@ -1618,7 +2127,10 @@ defmodule Pika.Alignment.Campaign do
   end
 
   defp maybe_awaiting_confirmation(state) do
-    if (state.spec_result.ready? and state.harness) && MapSet.equal?(state.required, MapSet.new()) do
+    if state.spec_result.ready? and not is_nil(state.harness) and
+         not is_nil(state.target_snapshot) and not is_nil(state.prepared_setup_sha) and
+         not is_nil(state.implementation_review_evidence) and
+         MapSet.equal?(state.required, MapSet.new()) do
       %{state | status: :awaiting_confirmation}
     else
       %{state | status: :drafting_spec}
@@ -1636,33 +2148,73 @@ defmodule Pika.Alignment.Campaign do
 
   defp require_confirmation_idle(_state), do: :ok
 
-  defp load_reference_review(%{harness: nil}), do: {:error, :reference_not_ready}
+  defp load_implementation_review(%{harness: nil}),
+    do: {:error, :implementation_bundle_not_ready}
 
-  defp load_reference_review(state) do
-    spec_path = get_in(state.spec_result.spec, ["computation", "reference_path"])
-    harness_path = state.harness.reference_path
+  defp load_implementation_review(%{target_snapshot: nil}),
+    do: {:error, :implementation_bundle_not_ready}
 
-    if spec_path == harness_path do
-      state
-      |> reference_review_roots()
-      |> Enum.uniq()
-      |> Enum.reduce_while({:error, :reference_not_ready}, fn root, _last_error ->
-        case Harness.reference_review(root, state.harness) do
-          {:ok, review} -> {:halt, {:ok, review}}
-          {:error, reason} -> {:cont, {:error, reason}}
-        end
-      end)
-    else
-      {:error, {:reference_path_mismatch, spec_path, harness_path}}
+  defp load_implementation_review(%{prepared_setup_sha: nil}),
+    do: {:error, :implementation_bundle_not_ready}
+
+  defp load_implementation_review(state) do
+    implementations = state.spec_result.spec["implementations"]
+    oracle = implementations["oracle"]
+    development = implementations["development"]
+    target_root = TargetSnapshot.checkout_path(state.workspace.root, state.target_snapshot)
+
+    with :ok <- TargetSnapshot.verify(state.workspace.root, state.target_snapshot),
+         :ok <- verify_prepared_setup(state),
+         {:ok, target_review} <-
+           Harness.source_review(target_root, state.target_snapshot.entrypoint),
+         {:ok, development_review} <-
+           Harness.source_review(state.workspace.setup_worktree, development["entrypoint"]),
+         {:ok, oracle_review} <- load_oracle_review(state, oracle, target_review) do
+      {:ok,
+       %{
+         target_snapshot: TargetSnapshot.public(state.target_snapshot),
+         target: Map.put(target_review, :role, :optimization_target),
+         development:
+           development_review
+           |> Map.put(:role, :development)
+           |> Map.put(:sha, state.prepared_setup_sha),
+         oracle: oracle_review
+       }}
     end
   end
 
-  defp reference_review_roots(%{status: status, workspace: workspace})
-       when status in [:drafting_spec, :awaiting_confirmation],
-       do: [workspace.setup_worktree]
+  defp load_oracle_review(_state, %{"kind" => "optimization_target"}, target_review),
+    do: {:ok, Map.put(target_review, :role, :oracle)}
 
-  defp reference_review_roots(%{workspace: workspace}),
-    do: [workspace.setup_worktree, workspace.repo]
+  defp load_oracle_review(
+         state,
+         %{"kind" => "repository_path", "entrypoint" => entrypoint},
+         _target_review
+       ) do
+    case Harness.source_review(state.workspace.setup_worktree, entrypoint) do
+      {:ok, review} -> {:ok, Map.put(review, :role, :oracle)}
+      error -> error
+    end
+  end
+
+  defp load_oracle_review(_state, _oracle, _target_review), do: {:error, :invalid_oracle}
+
+  defp verify_prepared_setup(state) do
+    with {:ok, actual} <- Pika.Git.head(state.workspace.setup_worktree),
+         true <- actual == state.prepared_setup_sha,
+         true <- Pika.Git.clean?(state.workspace.setup_worktree) do
+      :ok
+    else
+      false ->
+        {:error, :development_changed_after_review_preparation}
+
+      {:ok, actual} ->
+        {:error, {:development_sha_changed, state.prepared_setup_sha, actual}}
+
+      {:error, reason} ->
+        {:error, {:development_verification_failed, reason}}
+    end
+  end
 
   defp advance_confirmed_spec(state) do
     confirmation_input =
@@ -1691,6 +2243,7 @@ defmodule Pika.Alignment.Campaign do
       input = user_input(input_body, artifacts)
 
       stop_baseline_submission(state.baseline_submission)
+      stop_target_submission(state.target_submission)
       close_backend(state.backend)
 
       old_session_id = state.backend_session && state.backend_session.id
@@ -1731,9 +2284,15 @@ defmodule Pika.Alignment.Campaign do
           spec_diff: Spec.diff(state.spec_result.spec, spec),
           harness: nil,
           reference_review_evidence: nil,
+          implementation_review_evidence: nil,
           required: draft_required_operations(),
           setup_base_sha: setup_base_sha,
           setup_sha: nil,
+          prepared_setup_sha: nil,
+          inherited_target_snapshot: state.target_snapshot || state.inherited_target_snapshot,
+          target_snapshot: nil,
+          target_submission: nil,
+          target_progress: nil,
           baseline: nil,
           baseline_submission: nil,
           baseline_progress: nil,
@@ -1815,6 +2374,14 @@ defmodule Pika.Alignment.Campaign do
   defp stop_baseline_submission(nil), do: :ok
 
   defp stop_baseline_submission(submission) do
+    Process.demonitor(submission.monitor_ref, [:flush])
+    if Process.alive?(submission.pid), do: Process.exit(submission.pid, :shutdown)
+    :ok
+  end
+
+  defp stop_target_submission(nil), do: :ok
+
+  defp stop_target_submission(submission) do
     Process.demonitor(submission.monitor_ref, [:flush])
     if Process.alive?(submission.pid), do: Process.exit(submission.pid, :shutdown)
     :ok
@@ -1946,16 +2513,15 @@ defmodule Pika.Alignment.Campaign do
     selected_ids = for reference <- references, reference.selected, do: reference.id
     spec_result = Spec.validate(Map.put(state.spec_result.spec, "reference_ids", selected_ids))
 
+    state = invalidate_implementation_definition(state)
+
     state = %{
       state
       | references: references,
         spec_result: spec_result,
         status: :drafting_spec,
-        required:
-          state.required
-          |> MapSet.put("submit_spec")
-          |> MapSet.put("submit_reference_review"),
-        reference_review_evidence: nil,
+        required: MapSet.put(state.required, "submit_spec"),
+        inherited_target_snapshot: nil,
         last_error: nil
     }
 
@@ -2169,6 +2735,8 @@ defmodule Pika.Alignment.Campaign do
 
     %{
       best_sha: state.best_sha,
+      target_snapshot_id: state.target_snapshot.id,
+      target_entrypoint: state.target_snapshot.entrypoint,
       repo: state.workspace.repo,
       artifacts: state.workspace.artifacts,
       pair_count: Map.fetch!(benchmark, "pair_count"),
@@ -2238,6 +2806,11 @@ defmodule Pika.Alignment.Campaign do
       spec_errors: state.spec_result.errors,
       harness: state.harness,
       reference_review_evidence: state.reference_review_evidence,
+      implementation_review_evidence: state.implementation_review_evidence,
+      prepared_setup_sha: state.prepared_setup_sha,
+      target_snapshot:
+        if(state.target_snapshot, do: TargetSnapshot.public(state.target_snapshot), else: nil),
+      target_progress: state.target_progress,
       required_operations: state.required |> MapSet.to_list() |> Enum.sort(),
       references: state.references,
       reference_progress: state.reference_progress,
@@ -2721,35 +3294,133 @@ defmodule Pika.Alignment.Campaign do
       skill: state.skill,
       references: state.references
     })
+    |> require_v2_revision()
     |> refresh_spec_validation()
-    |> ensure_reference_review_evidence_requirement()
+    |> ensure_implementation_review_requirement()
     |> repair_post_confirmation_draft()
   end
 
   defp restore_durable_state(state, _durable), do: state
+
+  defp restore_target_views(state) do
+    snapshot = state.target_snapshot || state.inherited_target_snapshot
+
+    if is_map(snapshot) do
+      with :ok <- TargetSnapshot.verify(state.workspace.root, snapshot),
+           :ok <-
+             TargetSnapshot.link(state.workspace.root, state.workspace.setup_worktree, snapshot),
+           :ok <- restore_best_target_view(state, snapshot) do
+        :ok
+      else
+        {:error, reason} -> {:error, {:target_snapshot_restore_failed, reason}}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp restore_best_target_view(%{setup_sha: setup_sha} = state, snapshot)
+       when is_binary(setup_sha),
+       do: TargetSnapshot.link(state.workspace.root, state.workspace.repo, snapshot)
+
+  defp restore_best_target_view(_state, _snapshot), do: :ok
+
+  defp require_v2_revision(%{spec_result: %{spec: %{"schema_version" => 2}}} = state),
+    do: state
+
+  defp require_v2_revision(%{spec_result: %{spec: legacy_spec}} = state)
+       when is_map(legacy_spec) do
+    old_revision = legacy_spec["revision"] || 1
+
+    spec =
+      legacy_spec
+      |> Map.put("schema_version", 2)
+      |> Map.put("revision", old_revision + 1)
+      |> Map.delete("implementations")
+
+    %{
+      state
+      | status: :drafting_spec,
+        spec_result: Spec.validate(spec),
+        spec_diff: Spec.diff(legacy_spec, spec),
+        harness: nil,
+        reference_review_evidence: nil,
+        implementation_review_evidence: nil,
+        required: draft_required_operations(),
+        setup_base_sha: state.best_sha,
+        setup_sha: nil,
+        prepared_setup_sha: nil,
+        target_snapshot: nil,
+        inherited_target_snapshot: nil,
+        target_progress: nil,
+        baseline: nil,
+        baseline_error: nil,
+        iteration_sampling: nil,
+        sampling_revisions: [],
+        pending_confirmation_input: nil,
+        backend_workflow: :alignment,
+        last_error:
+          "Campaign Spec v#{old_revision} used the ambiguous v1 Reference model. Pika opened v#{old_revision + 1}; explicitly define the Correctness Oracle, frozen Optimization Target, and mutable Development implementation.",
+        messages:
+          state.messages ++
+            [
+              message(
+                :system,
+                "旧 Campaign Spec v#{old_revision} 不能安全推断三种实现角色；已创建 v#{old_revision + 1} 草稿，必须明确 Oracle、Optimization Target 与 Development。"
+              )
+            ]
+    }
+  end
+
+  defp require_v2_revision(state), do: state
 
   defp refresh_spec_validation(%{spec_result: %{spec: spec}} = state) when is_map(spec),
     do: %{state | spec_result: Spec.validate(spec)}
 
   defp refresh_spec_validation(state), do: state
 
-  defp ensure_reference_review_evidence_requirement(
-         %{status: status, reference_review_evidence: nil} = state
-       )
+  defp ensure_implementation_review_requirement(%{status: status} = state)
        when status in [:drafting_spec, :awaiting_confirmation] do
+    bundle_missing = is_nil(state.target_snapshot) or is_nil(state.prepared_setup_sha)
+    evidence_missing = is_nil(state.implementation_review_evidence)
+
+    required =
+      state.required
+      |> then(fn required ->
+        if bundle_missing,
+          do: MapSet.put(required, "submit_implementation_bundle"),
+          else: required
+      end)
+      |> then(fn required ->
+        if evidence_missing,
+          do: MapSet.put(required, "submit_implementation_review"),
+          else: required
+      end)
+
+    needs_repair = bundle_missing or evidence_missing
+
     %{
       state
-      | status: :drafting_spec,
-        required: MapSet.put(state.required, "submit_reference_review"),
+      | status: if(needs_repair, do: :drafting_spec, else: state.status),
+        required: required,
         last_error:
-          if(status == :awaiting_confirmation,
-            do: "Reference 尚无可审阅的运行与性能证据；已退回 Agent 补充 smoke run。",
-            else: state.last_error
-          )
+          cond do
+            status != :awaiting_confirmation ->
+              state.last_error
+
+            bundle_missing ->
+              "Optimization Target 或 Development 提交身份缺失；已退回 Agent 重新固化实现并补充审阅证据。"
+
+            evidence_missing ->
+              "Target 与 Development 尚无可审阅的正确性和配对性能证据；已退回 Agent 补充 smoke run。"
+
+            true ->
+              state.last_error
+          end
     }
   end
 
-  defp ensure_reference_review_evidence_requirement(state), do: state
+  defp ensure_implementation_review_requirement(state), do: state
 
   defp repair_post_confirmation_draft(
          %{

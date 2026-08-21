@@ -77,7 +77,8 @@ defmodule Pika.Alignment.CampaignTest do
 
     assert snapshot.required_operations == [
              "submit_harness",
-             "submit_reference_review",
+             "submit_implementation_bundle",
+             "submit_implementation_review",
              "submit_spec"
            ]
 
@@ -154,7 +155,7 @@ defmodule Pika.Alignment.CampaignTest do
                Map.put(harness_args, "idempotency_key", "user-reference-harness")
              )
 
-    assert {:ok, _} = submit_reference_review()
+    assert {:ok, _} = submit_implementation_review()
     assert :ok = confirm_reviewed_spec()
     assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
 
@@ -198,7 +199,12 @@ defmodule Pika.Alignment.CampaignTest do
 
     assert is_binary(digest)
     assert Campaign.snapshot().status == :drafting_spec
-    assert Campaign.snapshot().required_operations == ["submit_reference_review"]
+
+    assert Campaign.snapshot().required_operations == [
+             "submit_implementation_bundle",
+             "submit_implementation_review"
+           ]
+
     assert :ok = confirm_reviewed_spec()
     assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
 
@@ -234,7 +240,8 @@ defmodule Pika.Alignment.CampaignTest do
                "idempotency_key" => "merge-1",
                "base_sha" => workspace.source_sha,
                "setup_sha" => setup_sha,
-               "best_sha" => best_sha
+               "best_sha" => best_sha,
+               "target_snapshot_id" => Campaign.snapshot().target_snapshot.id
              })
 
     AlignmentFixtures.write_baseline_artifacts(workspace, best_sha, skill.sha)
@@ -298,7 +305,7 @@ defmodule Pika.Alignment.CampaignTest do
   test "cannot build Baseline before confirmation and returns to DraftingSpec on user changes", %{
     workspace: workspace
   } do
-    assert {:error, :spec_not_confirmable} = Campaign.confirm_spec(nil, nil)
+    assert {:error, :spec_not_confirmable} = Campaign.confirm_spec(nil, nil, nil)
     harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
 
     assert {:ok, %{ready: true}} =
@@ -315,19 +322,20 @@ defmodule Pika.Alignment.CampaignTest do
              )
 
     assert Campaign.snapshot().status == :drafting_spec
-    assert {:ok, _} = submit_reference_review()
+    assert {:ok, _} = submit_implementation_review()
     assert Campaign.snapshot().status == :awaiting_confirmation
-    assert {:ok, reference_review} = Campaign.reference_review()
-    assert reference_review.path == "kernel/reference.py"
-    assert reference_review.content == "def reference(x): return x\n"
-    assert {:error, :reference_not_reviewed} = Campaign.confirm_spec(nil, nil)
+    assert {:ok, implementation_review} = Campaign.implementation_review()
+    assert implementation_review.target.path == "kernel/reference.py"
+    assert implementation_review.target.content == "def reference(x): return x\n"
+    assert {:error, :target_not_reviewed} = Campaign.confirm_spec(nil, nil, nil)
     assert :ok = Campaign.request_changes("目标 Case 需要改成 n=2048")
     snapshot = Campaign.snapshot()
     assert snapshot.status == :drafting_spec
 
     assert snapshot.required_operations == [
              "submit_harness",
-             "submit_reference_review",
+             "submit_implementation_bundle",
+             "submit_implementation_review",
              "submit_spec"
            ]
 
@@ -352,10 +360,13 @@ defmodule Pika.Alignment.CampaignTest do
                Map.put(harness_args, "idempotency_key", "evidence-harness")
              )
 
-    assert Campaign.snapshot().required_operations == ["submit_reference_review"]
+    assert Campaign.snapshot().required_operations == [
+             "submit_implementation_bundle",
+             "submit_implementation_review"
+           ]
 
-    assert {:error, "missing_required_data", _, %{reason: :reference_run_failed}} =
-             AlignmentFixtures.submit_reference_review(
+    assert {:error, "missing_required_data", _, %{reason: :implementation_review_run_failed}} =
+             AlignmentFixtures.submit_implementation_review(
                @token,
                workspace,
                "failed-reference-review",
@@ -366,7 +377,7 @@ defmodule Pika.Alignment.CampaignTest do
             %{
               reason: {:unknown_benchmark_case, "invented_case"}
             }} =
-             AlignmentFixtures.submit_reference_review(
+             AlignmentFixtures.submit_implementation_review(
                @token,
                workspace,
                "unknown-case-reference-review",
@@ -377,7 +388,7 @@ defmodule Pika.Alignment.CampaignTest do
             %{
               reason: {:metric_unit_mismatch, "latency_us", "ms", "us"}
             }} =
-             AlignmentFixtures.submit_reference_review(
+             AlignmentFixtures.submit_implementation_review(
                @token,
                workspace,
                "wrong-unit-reference-review",
@@ -385,7 +396,8 @@ defmodule Pika.Alignment.CampaignTest do
                  "metrics" => [
                    %{
                      "metric_id" => "latency_us",
-                     "value" => 1.0,
+                     "target_value" => 1.0,
+                     "development_value" => 1.0,
                      "unit" => "ms",
                      "sample_count" => 3
                    }
@@ -394,7 +406,7 @@ defmodule Pika.Alignment.CampaignTest do
              )
 
     assert {:ok, %{case_id: "target_case", ready_for_user_review: true}} =
-             AlignmentFixtures.submit_reference_review(
+             AlignmentFixtures.submit_implementation_review(
                @token,
                workspace,
                "valid-reference-review"
@@ -403,21 +415,36 @@ defmodule Pika.Alignment.CampaignTest do
     snapshot = Campaign.snapshot()
     assert snapshot.status == :awaiting_confirmation
 
-    assert [%{metric_id: "latency_us", value: 12.5, unit: "us", sample_count: 3}] =
-             snapshot.reference_review_evidence.metrics
+    assert [
+             %{
+               metric_id: "latency_us",
+               target_value: 10.0,
+               development_value: 12.5,
+               unit: "us",
+               sample_count: 3
+             }
+           ] = snapshot.implementation_review_evidence.metrics
 
-    {:ok, reference} = Campaign.reference_review()
+    {:ok, review} = Campaign.implementation_review()
 
-    assert {:error, :reference_evidence_not_reviewed} =
-             Campaign.confirm_spec(reference.sha256, nil)
+    assert {:error, :implementation_evidence_not_reviewed} =
+             Campaign.confirm_spec(
+               review.target_snapshot.digest,
+               snapshot.prepared_setup_sha,
+               nil
+             )
 
-    evidence = snapshot.reference_review_evidence
+    evidence = snapshot.implementation_review_evidence
     File.write!(Path.join(workspace.root, evidence.output_artifact), "changed after review\n")
 
     assert {:error,
-            {:reference_review_failed,
+            {:implementation_review_failed,
              {:artifact_verification_failed, artifact_path, :sha256_mismatch}}} =
-             Campaign.confirm_spec(reference.sha256, evidence.digest)
+             Campaign.confirm_spec(
+               review.target_snapshot.digest,
+               evidence.development_sha,
+               evidence.digest
+             )
 
     assert artifact_path == evidence.output_artifact
     assert Campaign.snapshot().status == :awaiting_confirmation
@@ -450,8 +477,11 @@ defmodule Pika.Alignment.CampaignTest do
                "idempotency_key" => "reopen-merge-1",
                "base_sha" => workspace.source_sha,
                "setup_sha" => setup_sha,
-               "best_sha" => first_best_sha
+               "best_sha" => first_best_sha,
+               "target_snapshot_id" => Campaign.snapshot().target_snapshot.id
              })
+
+    first_target_id = Campaign.snapshot().target_snapshot.id
 
     assert Campaign.snapshot().required_operations == ["submit_baseline"]
     assert :ok = Campaign.request_changes("Reference 应改为 FlashAttention 4 / CuTeDSL")
@@ -463,7 +493,8 @@ defmodule Pika.Alignment.CampaignTest do
 
     assert reopened.required_operations == [
              "submit_harness",
-             "submit_reference_review",
+             "submit_implementation_bundle",
+             "submit_implementation_review",
              "submit_spec"
            ]
 
@@ -479,6 +510,10 @@ defmodule Pika.Alignment.CampaignTest do
       AlignmentFixtures.spec()
       |> Map.put("revision", 99)
       |> Map.put("title", "Fixture kernel with FA4")
+      |> put_in(
+        ["implementations", "optimization_target", "entrypoint"],
+        "kernel/fa4_reference.py"
+      )
 
     assert {:ok, %{ready: true, revision: 2}} =
              Campaign.mcp_call(@token, "submit_spec", %{
@@ -489,8 +524,8 @@ defmodule Pika.Alignment.CampaignTest do
     revised_harness = AlignmentFixtures.create_harness(revision_workspace.setup_worktree)
 
     File.write!(
-      Path.join(revision_workspace.setup_worktree, "kernel/reference.py"),
-      "def reference(x): return x + 0\n"
+      Path.join(revision_workspace.setup_worktree, "kernel/fa4_reference.py"),
+      "def fa4_reference(x): return x\n"
     )
 
     assert {:ok, _} =
@@ -504,6 +539,7 @@ defmodule Pika.Alignment.CampaignTest do
     assert Campaign.snapshot().spec["revision"] == 2
     assert :ok = confirm_reviewed_spec()
     assert eventually(fn -> Campaign.snapshot().status == :building_baseline end)
+    refute Campaign.snapshot().target_snapshot.id == first_target_id
 
     {second_setup_sha, second_best_sha} = merge_setup(revision_workspace)
 
@@ -512,11 +548,68 @@ defmodule Pika.Alignment.CampaignTest do
                "idempotency_key" => "reopen-merge-2",
                "base_sha" => first_best_sha,
                "setup_sha" => second_setup_sha,
-               "best_sha" => second_best_sha
+               "best_sha" => second_best_sha,
+               "target_snapshot_id" => Campaign.snapshot().target_snapshot.id
              })
 
     assert Campaign.snapshot().required_operations == ["submit_baseline"]
     assert Campaign.snapshot().best_sha == second_best_sha
+  end
+
+  test "keeps the frozen Target when Harness or Development is revised", %{
+    workspace: workspace
+  } do
+    harness_args = AlignmentFixtures.create_harness(workspace.setup_worktree)
+
+    assert {:ok, %{ready: true}} =
+             Campaign.mcp_call(@token, "submit_spec", %{
+               "idempotency_key" => "stable-target-spec",
+               "spec" => AlignmentFixtures.spec()
+             })
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "stable-target-harness-1")
+             )
+
+    assert {:ok, _} =
+             AlignmentFixtures.submit_implementation_review(
+               @token,
+               workspace,
+               "stable-target-review"
+             )
+
+    first = Campaign.snapshot()
+    first_target = first.target_snapshot
+    first_development_sha = first.prepared_setup_sha
+
+    File.write!(
+      Path.join(workspace.setup_worktree, "kernel/development.py"),
+      "def candidate(x): return x + 1\n"
+    )
+
+    assert {:ok, _} =
+             Campaign.mcp_call(
+               @token,
+               "submit_harness",
+               Map.put(harness_args, "idempotency_key", "stable-target-harness-2")
+             )
+
+    assert {:ok, second_development_sha} =
+             AlignmentFixtures.prepare_implementation_bundle(
+               @token,
+               workspace,
+               "stable-target-bundle-2"
+             )
+
+    second = Campaign.snapshot()
+    assert second.target_snapshot.id == first_target.id
+    assert second.target_snapshot.digest == first_target.digest
+    assert second.target_snapshot.source_sha == first_target.source_sha
+    refute second_development_sha == first_development_sha
+    assert second.prepared_setup_sha == second_development_sha
   end
 
   test "Baseline Agent can autonomously reopen a frozen Baseline definition through MCP", %{
@@ -546,7 +639,8 @@ defmodule Pika.Alignment.CampaignTest do
                "idempotency_key" => "agent-reopen-merge",
                "base_sha" => workspace.source_sha,
                "setup_sha" => setup_sha,
-               "best_sha" => best_sha
+               "best_sha" => best_sha,
+               "target_snapshot_id" => Campaign.snapshot().target_snapshot.id
              })
 
     assert {:error, "missing_required_data", _, %{}} =
@@ -580,7 +674,12 @@ defmodule Pika.Alignment.CampaignTest do
               status: "drafting_spec",
               revision: 2,
               setup_branch: "pika/setup/2",
-              required_operations: ["submit_harness", "submit_reference_review", "submit_spec"]
+              required_operations: [
+                "submit_harness",
+                "submit_implementation_bundle",
+                "submit_implementation_review",
+                "submit_spec"
+              ]
             }} =
              Campaign.mcp_call(@token, "reopen_baseline_definition", %{
                "idempotency_key" => "agent-reopen-fa4",
@@ -597,7 +696,8 @@ defmodule Pika.Alignment.CampaignTest do
 
     assert reopened.required_operations == [
              "submit_harness",
-             "submit_reference_review",
+             "submit_implementation_bundle",
+             "submit_implementation_review",
              "submit_spec"
            ]
 
@@ -660,7 +760,8 @@ defmodule Pika.Alignment.CampaignTest do
                "idempotency_key" => "legacy-merge-complete",
                "base_sha" => workspace.source_sha,
                "setup_sha" => setup_sha,
-               "best_sha" => best_sha
+               "best_sha" => best_sha,
+               "target_snapshot_id" => Campaign.snapshot().target_snapshot.id
              })
 
     reconciled = Campaign.snapshot()
@@ -1001,24 +1102,14 @@ defmodule Pika.Alignment.CampaignTest do
         "idempotency_key" => "m",
         "base_sha" => workspace.source_sha,
         "setup_sha" => setup_sha,
-        "best_sha" => best_sha
+        "best_sha" => best_sha,
+        "target_snapshot_id" => Campaign.snapshot().target_snapshot.id
       })
 
-    [samples, correctness, profiler] =
-      AlignmentFixtures.write_baseline_artifacts(workspace, best_sha, skill.sha, 4)
+    AlignmentFixtures.write_baseline_artifacts(workspace, best_sha, skill.sha, 4)
+    manifest = AlignmentFixtures.write_baseline_manifest(workspace, best_sha, "insufficient")
 
-    Enum.each(
-      [samples, correctness, profiler] ++ AlignmentFixtures.baseline_dependency_paths(),
-      &register_artifact(&1, workspace)
-    )
-
-    base_request = %{
-      "measured_sha" => best_sha,
-      "samples_artifact" => samples,
-      "correctness_artifact" => correctness,
-      "profiler_artifact" => profiler,
-      "summary" => "insufficient"
-    }
+    base_request = %{"manifest_artifact" => manifest}
 
     first_request = Map.put(base_request, "idempotency_key", "b1")
     second_request = Map.put(base_request, "idempotency_key", "b2")
@@ -1047,43 +1138,33 @@ defmodule Pika.Alignment.CampaignTest do
   end
 
   defp merge_setup(workspace) do
-    Git.run!(workspace.setup_worktree, ["add", "."])
-    Git.run!(workspace.setup_worktree, ["commit", "-m", "alignment setup"])
-    setup_sha = Git.run!(workspace.setup_worktree, ["rev-parse", "HEAD"])
+    setup_sha = Campaign.snapshot().prepared_setup_sha
+    assert Git.run!(workspace.setup_worktree, ["rev-parse", "HEAD"]) == setup_sha
+    assert Git.clean?(workspace.setup_worktree)
     Git.run!(workspace.repo, ["merge", "--squash", setup_sha])
     Git.run!(workspace.repo, ["commit", "-m", "Alignment setup"])
     {setup_sha, Git.run!(workspace.repo, ["rev-parse", "HEAD"])}
   end
 
   defp confirm_reviewed_spec do
-    if is_nil(Campaign.snapshot().reference_review_evidence) do
-      {:ok, _} = submit_reference_review()
+    if is_nil(Campaign.snapshot().implementation_review_evidence) do
+      {:ok, _} = submit_implementation_review()
     end
 
-    {:ok, reference_review} = Campaign.reference_review()
-    evidence_digest = Campaign.snapshot().reference_review_evidence.digest
-    Campaign.confirm_spec(reference_review.sha256, evidence_digest)
+    {:ok, implementation_review} = Campaign.implementation_review()
+    evidence = Campaign.snapshot().implementation_review_evidence
+
+    Campaign.confirm_spec(
+      implementation_review.target_snapshot.digest,
+      evidence.development_sha,
+      evidence.digest
+    )
   end
 
-  defp submit_reference_review do
+  defp submit_implementation_review do
     root = Campaign.snapshot().workspace.root
     key = "campaign-review-#{System.unique_integer([:positive])}"
-    AlignmentFixtures.submit_reference_review(@token, %{root: root}, key)
-  end
-
-  defp register_artifact(relative, workspace) do
-    {:ok, artifact} = ArtifactStore.register(workspace.root, relative)
-
-    assert {:ok, _} =
-             Campaign.mcp_call(@token, "register_artifact", %{
-               "idempotency_key" => "artifact-#{relative}",
-               "kind" => "baseline",
-               "relative_path" => relative,
-               "sha256" => artifact.sha256,
-               "size" => artifact.size,
-               "mime" => artifact.mime,
-               "metadata" => %{}
-             })
+    AlignmentFixtures.submit_implementation_review(@token, %{root: root}, key)
   end
 
   defp question_args(id, question) do

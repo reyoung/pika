@@ -58,7 +58,8 @@ defmodule Pika.Alignment.MCP.RouterTest do
              "register_artifact",
              "submit_spec",
              "submit_harness",
-             "submit_reference_review",
+             "submit_implementation_bundle",
+             "submit_implementation_review",
              "complete_setup_merge",
              "reopen_baseline_definition",
              "submit_baseline",
@@ -69,17 +70,21 @@ defmodule Pika.Alignment.MCP.RouterTest do
 
     baseline_tool = Enum.find(tools, &(&1["name"] == "submit_baseline"))
     baseline_schema = baseline_tool["inputSchema"]
-    assert baseline_schema["required"] == ["idempotency_key"]
-    assert %{"required" => ["manifest_artifact"]} in baseline_schema["oneOf"]
+    assert baseline_schema["required"] == ~w(idempotency_key manifest_artifact)
+    refute Map.has_key?(baseline_schema, "oneOf")
 
     reopen_tool = Enum.find(tools, &(&1["name"] == "reopen_baseline_definition"))
 
     assert reopen_tool["inputSchema"]["required"] ==
              ~w(idempotency_key reason requested_changes)
 
-    review_tool = Enum.find(tools, &(&1["name"] == "submit_reference_review"))
+    bundle_tool = Enum.find(tools, &(&1["name"] == "submit_implementation_bundle"))
+    assert bundle_tool["inputSchema"]["required"] == ~w(idempotency_key setup_sha)
+
+    review_tool = Enum.find(tools, &(&1["name"] == "submit_implementation_review"))
     assert get_in(review_tool, ["inputSchema", "properties", "metrics", "minItems"]) == 1
     assert get_in(review_tool, ["inputSchema", "properties", "exit_code", "const"]) == 0
+    assert get_in(review_tool, ["inputSchema", "properties", "schema_version", "const"]) == 2
 
     questions_tool = Enum.find(tools, &(&1["name"] == "ask_questions"))
     questions_schema = get_in(questions_tool, ["inputSchema", "properties", "questions"])
@@ -94,7 +99,12 @@ defmodule Pika.Alignment.MCP.RouterTest do
                "params" => %{"name" => "get_context", "arguments" => %{}}
              })
 
-    assert required == ["submit_harness", "submit_reference_review", "submit_spec"]
+    assert required == [
+             "submit_harness",
+             "submit_implementation_bundle",
+             "submit_implementation_review",
+             "submit_spec"
+           ]
   end
 
   test "rejects a missing bearer token" do

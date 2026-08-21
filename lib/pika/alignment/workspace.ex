@@ -55,6 +55,10 @@ defmodule Pika.Alignment.Workspace do
          true <- actual_setup == setup_sha,
          {:ok, actual_best} <- Git.run(workspace.repo, ["rev-parse", "pika/best"]),
          true <- actual_best == best_sha,
+         {:ok, setup_tree} <-
+           Git.run(workspace.setup_worktree, ["rev-parse", "#{setup_sha}^{tree}"]),
+         {:ok, best_tree} <- Git.run(workspace.repo, ["rev-parse", "#{best_sha}^{tree}"]),
+         true <- setup_tree == best_tree,
          {:ok, parent} <- Git.run(workspace.repo, ["rev-parse", "#{best_sha}^"]),
          true <- parent == base_sha,
          {:ok, changed} <-
@@ -84,6 +88,8 @@ defmodule Pika.Alignment.Workspace do
   end
 
   defp deliverable_path?("ref/" <> _path), do: false
+  defp deliverable_path?("target"), do: false
+  defp deliverable_path?("target/" <> _path), do: false
   defp deliverable_path?(_path), do: true
 
   defp ensure_revision_worktree(repo, setup, branch, base_sha) do
@@ -173,6 +179,7 @@ defmodule Pika.Alignment.Workspace do
     setup = Path.join(root, "setup/1")
     artifacts = Path.join(root, "artifacts")
     references = Path.join(root, "refs")
+    targets = Path.join(root, "targets")
 
     with {:ok, _} <- Git.run(root, ["clone", "--no-hardlinks", source_repo, repo]),
          {:ok, _} <- Git.run(repo, ["remote", "remove", "origin"]),
@@ -182,6 +189,7 @@ defmodule Pika.Alignment.Workspace do
          {:ok, _} <- Git.run(repo, ["branch", "-f", "pika/best", source_sha]),
          {:ok, _} <- Git.run(repo, ["checkout", "pika/best"]),
          :ok <- File.mkdir_p(references),
+         :ok <- File.mkdir_p(targets),
          :ok <- File.mkdir_p(Path.dirname(setup)),
          {:ok, _} <- Git.run(repo, ["worktree", "add", "-b", "pika/setup/1", setup, source_sha]) do
       Enum.each(~w(inputs logs prompts profiles baseline), fn dir ->

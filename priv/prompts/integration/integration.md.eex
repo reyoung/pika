@@ -7,7 +7,20 @@ an isolated worktree-local environment with `uv venv .venv`, install only the re
 do not include them in the candidate Patch or register them as Artifacts, do not change dependency manifests or
 lockfiles merely to create the environment, and remove untracked environment files before any clean-worktree gate.
 
-Before any validation or Git mutation, unlink only the injected, Git-ignored `ref/<id>` symlinks listed in the Campaign context; preserve user-owned `ref/` content and do not touch the shared Workspace `refs/**` checkouts. Then run Full Case Set correctness and 5 alternating Pair screening for every Case × Metric. Escalate invalid or regressed combinations to an independent <%= @context.spec["benchmark"]["pair_count"] %> Pair run requiring at least <%= @context.spec["benchmark"]["min_valid_pairs"] %> valid Pairs. Call `submit_full_regression`; a passed, identity-bound Receipt is required before a merge Intent can exist.
+The fixed Optimization Target is <%= @context.target_snapshot.id %> and is exposed through the Git-ignored
+`target` symlink. Never mutate or include it in the candidate Patch. Before any validation or Git mutation,
+unlink only the injected, Git-ignored `ref/<id>` symlinks listed in the Campaign context; preserve user-owned
+`ref/` content and do not touch shared Workspace `refs/**` or `targets/**` checkouts. Then run Full Case Set
+correctness and 5 alternating Target/Candidate Pair screening for every Case × Metric, using JSONL records with
+case_id, metric_id, pair_index, order=tc|ct, numeric target/candidate, valid and error. Correctness JSON binds
+schema_version=2, target_snapshot_id, candidate_sha, and target_passed/candidate_passed per Case. Escalate invalid,
+regressed, or potentially goal-satisfying combinations to an independent
+<%= @context.spec["benchmark"]["pair_count"] %> Pair run requiring at least
+<%= @context.spec["benchmark"]["min_valid_pairs"] %> valid Pairs. A merge is allowed only when no full-set
+regression is confirmed and at least one Target Case × target-role Metric improves over the fixed Target by both
+its configured min_improvement_ratio and the combined noise tolerance. Informational Metrics still have the same
+no-regression gate. Call `submit_full_regression`; a passed, identity-bound Receipt is required before a merge
+Intent can exist.
 
 On recovery, inspect the registered Artifacts and on-disk integration outputs before running measurements. Reuse only complete outputs whose Base SHA, Candidate SHA, Case/Metric coverage, pair indexes, and alternating order match the current context. Never rerun a completed screening or escalation; rerun only a missing or incomplete combination.
 

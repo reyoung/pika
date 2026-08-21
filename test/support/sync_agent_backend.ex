@@ -173,19 +173,17 @@ defmodule Pika.Test.SyncAgentBackend do
       for benchmark_case <- context.campaign.cases,
           metric <- context.campaign.metrics,
           index <- 0..(pair_count - 1) do
-        baseline = 10.0 + index / 10_000
+        target = 10.0 + index / 10_000
 
         %{
-          "schema_version" => 1,
-          "base_sha" => run.base_sha,
-          "candidate_sha" => run.candidate_sha,
           "case_id" => benchmark_case["id"],
           "metric_id" => metric["id"],
           "pair_index" => index,
-          "order" => if(rem(index, 2) == 0, do: "bc", else: "cb"),
-          "baseline" => baseline,
-          "candidate" => baseline * 0.99,
-          "valid" => true
+          "order" => if(rem(index, 2) == 0, do: "tc", else: "ct"),
+          "target" => target,
+          "candidate" => target * 0.99,
+          "valid" => true,
+          "error" => nil
         }
       end
 
@@ -194,8 +192,17 @@ defmodule Pika.Test.SyncAgentBackend do
     File.write!(
       correctness_path,
       Jason.encode!(%{
+        "schema_version" => 2,
+        "target_snapshot_id" => context.campaign.target_snapshot.id,
         "candidate_sha" => run.candidate_sha,
-        "cases" => Enum.map(context.campaign.cases, &%{"case_id" => &1["id"], "passed" => true})
+        "cases" =>
+          Enum.map(context.campaign.cases, fn benchmark_case ->
+            %{
+              "case_id" => benchmark_case["id"],
+              "target_passed" => true,
+              "candidate_passed" => true
+            }
+          end)
       })
     )
 
@@ -230,13 +237,17 @@ defmodule Pika.Test.SyncAgentBackend do
 
   defp harness_digest(root, campaign) do
     spec = campaign.spec
-    reference = get_in(spec, ["computation", "reference_path"])
+    oracle = get_in(spec, ["implementations", "oracle"])
+
+    oracle_path =
+      if oracle && oracle["kind"] == "repository_path", do: oracle["entrypoint"], else: nil
+
     benchmark = get_in(spec, ["benchmark", "harness_path"])
-    correctness = campaign.protected_paths -- [reference, benchmark]
+    correctness = campaign.protected_paths -- Enum.reject([oracle_path, benchmark], &is_nil/1)
 
     {:ok, harness} =
       Pika.Harness.validate(root, %{
-        "reference_path" => reference,
+        "oracle_path" => oracle_path,
         "benchmark_path" => benchmark,
         "correctness_paths" => correctness,
         "protected_paths" => campaign.protected_paths

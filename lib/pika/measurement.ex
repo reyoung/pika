@@ -8,33 +8,53 @@ defmodule Pika.Measurement do
     {pair_count, min_valid_pairs} = formal_protocol(context)
 
     with {:ok, records} <- read_jsonl(samples_path),
-         :ok <- validate_correctness(correctness_path, context.case_ids, context.candidate_sha),
+         :ok <- validate_correctness(correctness_path, context),
          {:ok, metrics} <-
            evaluate_records(records, context,
              expected_pairs: pair_count,
              min_valid: min_valid_pairs,
              source: "iteration",
-             allow_insufficient: false
+             allow_insufficient: false,
+             best_metrics: Map.get(context, :best_metrics, %{})
            ) do
       {:ok, metrics}
     end
   end
 
   def evaluate_integration(screening_path, full_path, correctness_path, context, best_metrics) do
+    best_metrics =
+      Map.put(
+        best_metrics,
+        :target_case_ids,
+        Map.get(context, :target_case_ids, context.case_ids)
+      )
+
+    context = Map.put(context, :best_metrics, best_metrics)
+
     with {:ok, records} <- read_jsonl(screening_path),
-         :ok <- validate_correctness(correctness_path, context.case_ids, context.candidate_sha),
+         :ok <- validate_correctness(correctness_path, context),
          {:ok, screening} <-
            evaluate_records(records, context,
              expected_pairs: @screen_pairs,
              min_valid: @screen_min_valid,
              source: "integration_screen",
-             allow_insufficient: true
+             allow_insufficient: true,
+             best_metrics: best_metrics
            ),
          escalated <- escalation_keys(screening, best_metrics),
          {:ok, full} <- evaluate_escalations(full_path, escalated, context),
-         {:ok, final, regressions} <-
+         {:ok, final, regressions, target_improvement?} <-
            combine_integration(screening, full, escalated, best_metrics) do
-      {:ok, %{metrics: final, escalated: escalated, regressions: regressions}}
+      gate_failures =
+        if target_improvement?, do: [], else: [{"__target__", "improvement_required"}]
+
+      {:ok,
+       %{
+         metrics: final,
+         escalated: escalated,
+         regressions: regressions ++ gate_failures,
+         target_improvement?: target_improvement?
+       }}
     end
   end
 
@@ -43,6 +63,7 @@ defmodule Pika.Measurement do
     min_valid = Keyword.fetch!(opts, :min_valid)
     source = Keyword.fetch!(opts, :source)
     allow_insufficient = Keyword.get(opts, :allow_insufficient, false)
+    best_metrics = Keyword.get(opts, :best_metrics, %{})
     metric_defs = Map.new(context.metrics, &{&1["id"], &1})
 
     expected_keys =
@@ -54,19 +75,25 @@ defmodule Pika.Measurement do
 
     with :ok <- validate_record_shapes(records, context),
          :ok <- validate_expected_keys(grouped, expected_keys) do
-      expected_keys
-      |> Enum.map(fn {_case_id, metric_id} = key ->
-        evaluate_group(
-          key,
-          Map.fetch!(grouped, key),
-          Map.fetch!(metric_defs, metric_id),
-          expected_pairs,
-          min_valid,
-          source,
-          allow_insufficient
-        )
-      end)
-      |> collect()
+      result =
+        expected_keys
+        |> Enum.map(fn {_case_id, metric_id} = key ->
+          evaluate_group(
+            key,
+            Map.fetch!(grouped, key),
+            Map.fetch!(metric_defs, metric_id),
+            expected_pairs,
+            min_valid,
+            source,
+            allow_insufficient
+          )
+        end)
+        |> collect()
+
+      case result do
+        {:ok, metrics} -> {:ok, Enum.map(metrics, &compare_with_best(&1, best_metrics))}
+        error -> error
+      end
     end
   end
 
@@ -85,6 +112,7 @@ defmodule Pika.Measurement do
              min_valid: min_valid_pairs,
              source: "integration_full",
              allow_insufficient: false,
+             best_metrics: Map.get(context, :best_metrics, %{}),
              expected_keys: keys
            ) do
         {:ok, metrics} ->
@@ -116,23 +144,42 @@ defmodule Pika.Measurement do
       end)
       |> Enum.map(&{&1.case_id, &1.metric_id})
 
-    {:ok, final, regressions}
+    target_case_ids = MapSet.new(Map.get(best_metrics, :target_case_ids, []))
+
+    target_improvement? =
+      Enum.any?(final, fn metric ->
+        metric.role == "target" and
+          (MapSet.size(target_case_ids) == 0 or MapSet.member?(target_case_ids, metric.case_id)) and
+          is_number(metric.target_relative_improvement) and
+          metric.target_relative_improvement >=
+            max(metric.min_improvement_ratio, metric.noise_tolerance)
+      end)
+
+    {:ok, final, regressions, target_improvement?}
   end
 
   defp escalation_keys(screening, best_metrics) do
     screening
-    |> Enum.filter(&(&1.insufficient? or confirmed_regression?(&1, best_metrics)))
+    |> Enum.filter(
+      &(&1.insufficient? or confirmed_regression?(&1, best_metrics) or
+          target_goal_candidate?(&1, best_metrics))
+    )
     |> Enum.map(&{&1.case_id, &1.metric_id})
   end
 
-  defp confirmed_regression?(metric, best_metrics) do
-    tolerance =
-      case Map.fetch(best_metrics, {metric.case_id, metric.metric_id}) do
-        {:ok, best} -> best.noise_tolerance || best[:noise_tolerance] || 0.005
-        :error -> metric.noise_tolerance
-      end
+  defp target_goal_candidate?(metric, best_metrics) do
+    target_case_ids = MapSet.new(Map.get(best_metrics, :target_case_ids, []))
 
-    is_nil(metric.improvement_ratio) or metric.improvement_ratio < -tolerance
+    (MapSet.size(target_case_ids) == 0 or MapSet.member?(target_case_ids, metric.case_id)) and
+      metric.role == "target" and is_number(metric.target_relative_improvement) and
+      metric.target_relative_improvement >=
+        max(metric.min_improvement_ratio, metric.noise_tolerance)
+  end
+
+  defp confirmed_regression?(metric, _best_metrics) do
+    tolerance = metric.noise_tolerance || 0.005
+
+    is_nil(metric.best_relative_improvement) or metric.best_relative_improvement < -tolerance
   end
 
   defp evaluate_group(
@@ -180,7 +227,7 @@ defmodule Pika.Measurement do
              )}
 
           true ->
-            improvements = Enum.map(valid, &improvement(&1, definition["direction"]))
+            improvements = Enum.map(valid, &target_improvement(&1, definition["direction"]))
             center = median(improvements)
             mad = improvements |> Enum.map(&abs(&1 - center)) |> median()
 
@@ -194,7 +241,7 @@ defmodule Pika.Measurement do
                length(valid),
                min_valid,
                median(Enum.map(valid, & &1["candidate"])),
-               median(Enum.map(valid, & &1["baseline"])),
+               median(Enum.map(valid, & &1["target"])),
                center,
                mad
              )}
@@ -211,8 +258,8 @@ defmodule Pika.Measurement do
          valid_count,
          min_valid,
          value,
-         baseline_value,
-         improvement_ratio,
+         target_value,
+         target_relative_improvement,
          mad
        ) do
     %{
@@ -221,9 +268,13 @@ defmodule Pika.Measurement do
       unit: definition["unit"],
       direction: definition["direction"],
       role: definition["role"],
+      min_improvement_ratio: definition["min_improvement_ratio"] || 0.01,
       value: value,
-      baseline_value: baseline_value,
-      improvement_ratio: improvement_ratio,
+      target_value: target_value,
+      target_relative_improvement: target_relative_improvement,
+      best_relative_improvement: nil,
+      baseline_value: nil,
+      improvement_ratio: nil,
       mad: mad,
       noise_tolerance: if(is_nil(mad), do: 0.005, else: max(0.005, 3.0 * 1.4826 * mad)),
       pair_count: pair_count,
@@ -233,17 +284,46 @@ defmodule Pika.Measurement do
     }
   end
 
+  defp compare_with_best(metric, best_metrics) do
+    case Map.fetch(best_metrics, {metric.case_id, metric.metric_id}) do
+      {:ok, best} ->
+        best_value = best[:value] || best["value"]
+        best_noise = best[:noise_tolerance] || best["noise_tolerance"] || 0.005
+
+        best_relative =
+          cond do
+            not finite_positive?(metric.value) or not finite_positive?(best_value) ->
+              nil
+
+            metric.direction == "minimize" ->
+              (best_value - metric.value) / best_value
+
+            metric.direction == "maximize" ->
+              (metric.value - best_value) / best_value
+          end
+
+        %{
+          metric
+          | baseline_value: best_value,
+            improvement_ratio: best_relative,
+            best_relative_improvement: best_relative,
+            noise_tolerance: max(0.005, max(metric.noise_tolerance, best_noise))
+        }
+
+      :error ->
+        metric
+    end
+  end
+
   defp formal_protocol(context) do
     benchmark = Map.fetch!(context, :benchmark)
     {Map.fetch!(benchmark, "pair_count"), Map.fetch!(benchmark, "min_valid_pairs")}
   end
 
-  defp validate_record_shapes(records, context) do
+  defp validate_record_shapes(records, _context) do
     valid? =
       Enum.all?(records, fn record ->
-        record["schema_version"] == 1 and record["base_sha"] == context.base_sha and
-          record["candidate_sha"] == context.candidate_sha and
-          record["order"] in ["bc", "cb"] and is_integer(record["pair_index"])
+        record["order"] in ["tc", "ct"] and is_integer(record["pair_index"])
       end)
 
     if valid?, do: :ok, else: {:error, :invalid_sample_record}
@@ -255,13 +335,19 @@ defmodule Pika.Measurement do
       else: {:error, {:invalid_case_metric_coverage, Enum.sort(Map.keys(grouped))}}
   end
 
-  defp validate_correctness(path, expected_case_ids, candidate_sha) do
+  defp validate_correctness(path, context) do
     with {:ok, body} <- File.read(path),
          {:ok, report} <- Jason.decode(body),
-         true <- report["candidate_sha"] == candidate_sha,
+         true <- report["schema_version"] == 2,
+         true <- report["target_snapshot_id"] == context.target_snapshot_id,
+         true <- report["candidate_sha"] == context.candidate_sha,
          cases when is_list(cases) <- report["cases"],
-         true <- Enum.sort(Enum.map(cases, & &1["case_id"])) == Enum.sort(expected_case_ids),
-         true <- Enum.all?(cases, &(&1["passed"] == true)) do
+         true <- Enum.sort(Enum.map(cases, & &1["case_id"])) == Enum.sort(context.case_ids),
+         true <-
+           Enum.all?(
+             cases,
+             &(&1["target_passed"] == true and &1["candidate_passed"] == true)
+           ) do
       :ok
     else
       _ -> {:error, :correctness_failed}
@@ -273,20 +359,20 @@ defmodule Pika.Measurement do
     |> Enum.sort_by(& &1["pair_index"])
     |> Enum.with_index()
     |> Enum.all?(fn {record, index} ->
-      record["order"] == if(rem(index, 2) == 0, do: "bc", else: "cb")
+      record["order"] == if(rem(index, 2) == 0, do: "tc", else: "ct")
     end)
   end
 
   defp valid_pair?(record) do
-    record["valid"] == true and finite_positive?(record["baseline"]) and
+    record["valid"] == true and finite_positive?(record["target"]) and
       finite_positive?(record["candidate"])
   end
 
-  defp improvement(record, "minimize"),
-    do: (record["baseline"] - record["candidate"]) / record["baseline"]
+  defp target_improvement(record, "minimize"),
+    do: (record["target"] - record["candidate"]) / record["target"]
 
-  defp improvement(record, "maximize"),
-    do: (record["candidate"] - record["baseline"]) / record["baseline"]
+  defp target_improvement(record, "maximize"),
+    do: (record["candidate"] - record["target"]) / record["target"]
 
   defp read_jsonl(path) do
     path

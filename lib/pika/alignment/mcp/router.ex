@@ -140,29 +140,48 @@ defmodule Pika.Alignment.MCP.Router do
       ),
       tool(
         "submit_harness",
-        "Register Reference, correctness tests and Benchmark Harness from the setup worktree.",
+        "Register the immutable Correctness Oracle (when repository-backed), correctness tests, and Benchmark Harness from the setup worktree. The mutable Development entrypoint must not be protected.",
         %{
           "idempotency_key" => string(),
-          "reference_path" => string(),
+          "oracle_path" => %{"type" => ["string", "null"]},
           "correctness_paths" => %{"type" => "array", "items" => string()},
           "benchmark_path" => string(),
           "protected_paths" => %{"type" => "array", "items" => string()}
         },
-        ~w(idempotency_key reference_path correctness_paths benchmark_path protected_paths)
+        ~w(idempotency_key oracle_path correctness_paths benchmark_path protected_paths)
       ),
       tool(
-        "submit_reference_review",
-        "Submit a successful smoke run of the current Reference on at least one Campaign Spec Benchmark Case, with reviewable performance Metrics and a registered local output Artifact. This is review evidence, not a Baseline.",
+        "submit_implementation_bundle",
+        "Freeze the Optimization Target and bind the mutable Development implementation to a clean setup commit. External Target repositories are prepared asynchronously in workspace/refs; the frozen Target is stored under workspace/targets.",
         %{
           "idempotency_key" => string(),
-          "schema_version" => %{"type" => "integer", "const" => 1},
+          "setup_sha" => string()
+        },
+        ~w(idempotency_key setup_sha)
+      ),
+      tool(
+        "submit_implementation_review",
+        "Submit one reviewable smoke run showing that the frozen Optimization Target and Development implementation both pass the Correctness Oracle on the same Benchmark Case, plus paired performance Metrics. This is review evidence, not the full Baseline.",
+        %{
+          "idempotency_key" => string(),
+          "schema_version" => %{"type" => "integer", "const" => 2},
           "spec_revision" => %{"type" => "integer", "minimum" => 1},
-          "reference_sha256" => string(),
+          "target_snapshot_id" => string(),
+          "development_sha" => string(),
           "harness_digest" => string(),
           "case_id" => string(),
           "command" => string(),
           "environment" => string(),
           "exit_code" => %{"type" => "integer", "const" => 0},
+          "correctness" => %{
+            "type" => "object",
+            "properties" => %{
+              "target_passed" => %{"type" => "boolean", "const" => true},
+              "development_passed" => %{"type" => "boolean", "const" => true}
+            },
+            "required" => ~w(target_passed development_passed),
+            "additionalProperties" => false
+          },
           "metrics" => %{
             "type" => "array",
             "minItems" => 1,
@@ -170,18 +189,19 @@ defmodule Pika.Alignment.MCP.Router do
               "type" => "object",
               "properties" => %{
                 "metric_id" => string(),
-                "value" => %{"type" => "number"},
+                "target_value" => %{"type" => "number", "exclusiveMinimum" => 0},
+                "development_value" => %{"type" => "number", "exclusiveMinimum" => 0},
                 "unit" => string(),
                 "sample_count" => %{"type" => "integer", "minimum" => 1}
               },
-              "required" => ~w(metric_id value unit sample_count),
+              "required" => ~w(metric_id target_value development_value unit sample_count),
               "additionalProperties" => false
             }
           },
           "output_artifact" => string(),
           "summary" => string()
         },
-        ~w(idempotency_key schema_version spec_revision reference_sha256 harness_digest case_id command environment exit_code metrics output_artifact summary)
+        ~w(idempotency_key schema_version spec_revision target_snapshot_id development_sha harness_digest case_id command environment exit_code correctness metrics output_artifact summary)
       ),
       tool(
         "complete_setup_merge",
@@ -190,9 +210,10 @@ defmodule Pika.Alignment.MCP.Router do
           "idempotency_key" => string(),
           "base_sha" => string(),
           "setup_sha" => string(),
-          "best_sha" => string()
+          "best_sha" => string(),
+          "target_snapshot_id" => string()
         },
-        ~w(idempotency_key base_sha setup_sha best_sha)
+        ~w(idempotency_key base_sha setup_sha best_sha target_snapshot_id)
       ),
       tool(
         "reopen_baseline_definition",
@@ -206,26 +227,12 @@ defmodule Pika.Alignment.MCP.Router do
       ),
       tool(
         "submit_baseline",
-        "Submit one local Baseline manifest Artifact. Legacy individual Artifact references remain accepted.",
+        "Submit one local schema-v2 Baseline manifest Artifact. The large samples remain in the Workspace and are streamed from disk; do not send sample records through MCP.",
         %{
           "idempotency_key" => string(),
-          "manifest_artifact" => string(),
-          "measured_sha" => string(),
-          "samples_artifact" => string(),
-          "correctness_artifact" => string(),
-          "profiler_artifact" => string(),
-          "summary" => string()
+          "manifest_artifact" => string()
         },
-        ~w(idempotency_key),
-        %{
-          "oneOf" => [
-            %{"required" => ["manifest_artifact"]},
-            %{
-              "required" =>
-                ~w(measured_sha samples_artifact correctness_artifact profiler_artifact summary)
-            }
-          ]
-        }
+        ~w(idempotency_key manifest_artifact)
       ),
       tool(
         "submit_iteration_sample",

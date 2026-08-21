@@ -32,17 +32,24 @@ defmodule Pika.Test.AlignmentFixtures do
 
   def spec do
     %{
-      "schema_version" => 1,
+      "schema_version" => 2,
       "revision" => 1,
       "title" => "Fixture kernel",
       "target_hardware" => "H20 / sm_90a",
       "computation" => %{
         "semantics" => "identity fixture",
-        "reference_path" => "kernel/reference.py",
         "inputs" => [%{"name" => "x", "dtype" => "float16", "layout" => "contiguous"}],
         "outputs" => [%{"name" => "y", "dtype" => "float16", "layout" => "contiguous"}],
         "fusion_scope" => "single kernel",
         "correctness" => %{"rtol" => 0.001, "atol" => 0.001}
+      },
+      "implementations" => %{
+        "oracle" => %{"kind" => "optimization_target"},
+        "optimization_target" => %{
+          "source" => %{"kind" => "development_snapshot"},
+          "entrypoint" => "kernel/reference.py"
+        },
+        "development" => %{"entrypoint" => "kernel/development.py"}
       },
       "benchmark_cases" => [
         %{
@@ -80,56 +87,59 @@ defmodule Pika.Test.AlignmentFixtures do
   def create_harness(setup_root) do
     File.mkdir_p!(Path.join(setup_root, "kernel"))
     File.write!(Path.join(setup_root, "kernel/reference.py"), "def reference(x): return x\n")
+    File.write!(Path.join(setup_root, "kernel/development.py"), "def candidate(x): return x\n")
     File.write!(Path.join(setup_root, "kernel/test_correctness.py"), "assert True\n")
     File.write!(Path.join(setup_root, "kernel/bench.py"), "print('bench')\n")
 
     %{
-      "reference_path" => "kernel/reference.py",
+      "oracle_path" => nil,
       "correctness_paths" => ["kernel/test_correctness.py"],
       "benchmark_path" => "kernel/bench.py",
       "protected_paths" => [
-        "kernel/reference.py",
         "kernel/test_correctness.py",
         "kernel/bench.py"
       ]
     }
   end
 
-  def submit_reference_review(
+  def submit_implementation_review(
         token,
         workspace,
-        key \\ "fixture-reference-review",
+        key \\ "fixture-implementation-review",
         overrides \\ %{}
       ) do
+    {:ok, setup_sha} = prepare_implementation_bundle(token, workspace, "#{key}-bundle")
     snapshot = Campaign.snapshot()
-    {:ok, reference} = Campaign.reference_review()
     case_definition = List.first(snapshot.spec["benchmark_cases"])
     metric_definition = List.first(snapshot.spec["metrics"])
     safe_key = String.replace(key, ~r/[^A-Za-z0-9._-]/, "-")
-    relative_path = "artifacts/reference-review/#{safe_key}.json"
+    relative_path = "artifacts/implementation-review/#{safe_key}.json"
     absolute_path = Path.join(workspace.root, relative_path)
     File.mkdir_p!(Path.dirname(absolute_path))
 
     args =
       %{
         "idempotency_key" => key,
-        "schema_version" => 1,
+        "schema_version" => 2,
         "spec_revision" => snapshot.spec["revision"],
-        "reference_sha256" => reference.sha256,
+        "target_snapshot_id" => snapshot.target_snapshot.id,
+        "development_sha" => setup_sha,
         "harness_digest" => snapshot.harness.digest,
         "case_id" => case_definition["id"],
         "command" => "python kernel/bench.py --case #{case_definition["id"]}",
         "environment" => snapshot.spec["target_hardware"],
         "exit_code" => 0,
+        "correctness" => %{"target_passed" => true, "development_passed" => true},
         "metrics" => [
           %{
             "metric_id" => metric_definition["id"],
-            "value" => 12.5,
+            "target_value" => 10.0,
+            "development_value" => 12.5,
             "unit" => metric_definition["unit"],
             "sample_count" => 3
           }
         ],
-        "summary" => "Fixture Reference smoke run passed."
+        "summary" => "Fixture Target and Development smoke run passed."
       }
       |> Map.merge(overrides)
 
@@ -148,7 +158,7 @@ defmodule Pika.Test.AlignmentFixtures do
     {:ok, _artifact} =
       Campaign.mcp_call(token, "register_artifact", %{
         "idempotency_key" => "#{key}-artifact",
-        "kind" => "reference_review_evidence",
+        "kind" => "implementation_review_evidence",
         "relative_path" => relative_path,
         "sha256" => sha256,
         "size" => byte_size(output),
@@ -158,9 +168,37 @@ defmodule Pika.Test.AlignmentFixtures do
 
     Campaign.mcp_call(
       token,
-      "submit_reference_review",
+      "submit_implementation_review",
       Map.put(args, "output_artifact", relative_path)
     )
+  end
+
+  def prepare_implementation_bundle(token, workspace, key \\ "fixture-bundle") do
+    snapshot = Campaign.snapshot()
+    setup = Path.join([workspace.root, "setup", to_string(snapshot.spec["revision"])])
+
+    unless Git.clean?(setup) do
+      Git.run!(setup, ["add", "."])
+      Git.run!(setup, ["commit", "-m", "fixture implementation bundle"])
+    end
+
+    setup_sha = Git.run!(setup, ["rev-parse", "HEAD"])
+    snapshot = Campaign.snapshot()
+
+    if is_nil(snapshot.target_snapshot) or snapshot.prepared_setup_sha != setup_sha do
+      {:ok, _response} =
+        Campaign.mcp_call(token, "submit_implementation_bundle", %{
+          "idempotency_key" => key,
+          "setup_sha" => setup_sha
+        })
+
+      wait_until(fn ->
+        current = Campaign.snapshot()
+        is_nil(current.target_progress) and not is_nil(current.target_snapshot)
+      end)
+    end
+
+    {:ok, setup_sha}
   end
 
   def write_baseline_artifacts(
@@ -169,6 +207,7 @@ defmodule Pika.Test.AlignmentFixtures do
         skill_sha,
         valid_count \\ @fixture_pair_count
       ) do
+    target_snapshot_id = active_target_snapshot_id()
     samples_relative = "artifacts/baseline/samples.jsonl"
     correctness_relative = "artifacts/baseline/correctness.json"
     profiler_relative = "artifacts/profiles/profiler.json"
@@ -188,14 +227,12 @@ defmodule Pika.Test.AlignmentFixtures do
     records =
       for index <- 0..(@fixture_pair_count - 1) do
         %{
-          "schema_version" => 1,
-          "measured_sha" => sha,
           "case_id" => "target_case",
           "metric_id" => "latency_us",
           "pair_index" => index,
-          "order" => if(rem(index, 2) == 0, do: "ab", else: "ba"),
-          "a" => 10.0 + index / 1000,
-          "b" => 10.01 + index / 1000,
+          "order" => if(rem(index, 2) == 0, do: "tc", else: "ct"),
+          "target" => 10.0 + index / 1000,
+          "candidate" => 10.01 + index / 1000,
           "valid" => index < valid_count,
           "error" => if(index < valid_count, do: nil, else: "invalid")
         }
@@ -206,8 +243,16 @@ defmodule Pika.Test.AlignmentFixtures do
     File.write!(
       correctness,
       Jason.encode!(%{
-        "measured_sha" => sha,
-        "cases" => [%{"case_id" => "target_case", "passed" => true}]
+        "schema_version" => 2,
+        "target_snapshot_id" => target_snapshot_id,
+        "candidate_sha" => sha,
+        "cases" => [
+          %{
+            "case_id" => "target_case",
+            "target_passed" => true,
+            "candidate_passed" => true
+          }
+        ]
       })
     )
 
@@ -258,8 +303,9 @@ defmodule Pika.Test.AlignmentFixtures do
     File.write!(
       absolute_path,
       Jason.encode!(%{
-        "schema_version" => 1,
-        "measured_sha" => sha,
+        "schema_version" => 2,
+        "target_snapshot_id" => active_target_snapshot_id(),
+        "candidate_sha" => sha,
         "summary" => summary,
         "samples_artifact" => "artifacts/baseline/samples.jsonl",
         "correctness_artifact" => "artifacts/baseline/correctness.json",
@@ -269,5 +315,25 @@ defmodule Pika.Test.AlignmentFixtures do
     )
 
     relative_path
+  end
+
+  defp wait_until(fun, retries \\ 200)
+
+  defp wait_until(fun, retries) when retries > 0 do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(10)
+      wait_until(fun, retries - 1)
+    end
+  end
+
+  defp wait_until(_fun, 0), do: raise("timed out waiting for implementation bundle")
+
+  defp active_target_snapshot_id do
+    case Campaign.snapshot() do
+      %{target_snapshot: %{id: id}} when is_binary(id) -> id
+      _ -> "target-fixture"
+    end
   end
 end

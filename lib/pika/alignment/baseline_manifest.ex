@@ -32,8 +32,9 @@ defmodule Pika.Alignment.BaselineManifest do
   defp validate(workspace_root, manifest) when is_map(manifest) do
     dependencies = manifest["profiler_dependencies"]
 
-    with true <- manifest["schema_version"] == 1,
-         measured_sha when is_binary(measured_sha) <- manifest["measured_sha"],
+    with true <- manifest["schema_version"] == 2,
+         target_snapshot_id when is_binary(target_snapshot_id) <- manifest["target_snapshot_id"],
+         candidate_sha when is_binary(candidate_sha) <- manifest["candidate_sha"],
          summary when is_binary(summary) <- manifest["summary"],
          true <- String.trim(summary) != "",
          samples when is_binary(samples) <- manifest["samples_artifact"],
@@ -46,7 +47,9 @@ defmodule Pika.Alignment.BaselineManifest do
          :ok <- validate_artifact_paths(workspace_root, paths) do
       {:ok,
        %{
-         measured_sha: measured_sha,
+         schema_version: 2,
+         target_snapshot_id: target_snapshot_id,
+         candidate_sha: candidate_sha,
          summary: summary,
          samples_artifact: samples,
          correctness_artifact: correctness,

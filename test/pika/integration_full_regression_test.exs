@@ -71,12 +71,12 @@ defmodule Pika.IntegrationFullRegressionTest do
     assert AttemptStore.metrics_for_attempt(accepted_one.id)
            |> Enum.map(&{&1.case_id, &1.source})
            |> Enum.sort() ==
-             [{"guard_case", "integration_screen"}, {"target_case", "integration_screen"}]
+             [{"guard_case", "integration_screen"}, {"target_case", "integration_full"}]
 
     assert AttemptStore.metrics_for_attempt(rejected.id)
            |> Enum.map(&{&1.case_id, &1.source})
            |> Enum.sort() ==
-             [{"guard_case", "integration_full"}, {"target_case", "integration_screen"}]
+             [{"guard_case", "integration_full"}, {"target_case", "integration_full"}]
 
     guard_metric = Enum.find(rejected_receipt.metrics, &(&1["case_id"] == "guard_case"))
     assert guard_metric["source"] == "integration_full"
@@ -114,6 +114,21 @@ defmodule Pika.IntegrationFullRegressionTest do
       ]).rows
 
     assert best_revision_count == 3
+
+    [[best_target_count, best_target_id]] =
+      Repo.query!(
+        "SELECT COUNT(DISTINCT bm.target_snapshot_id), MIN(bm.target_snapshot_id) FROM best_metrics bm JOIN best_revisions br ON br.id = bm.best_revision_id WHERE br.campaign_id = ?",
+        [context.campaign.id]
+      ).rows
+
+    [[attempt_target_count, attempt_target_id]] =
+      Repo.query!(
+        "SELECT COUNT(DISTINCT am.target_snapshot_id), MIN(am.target_snapshot_id) FROM attempt_metrics am JOIN attempts a ON a.id = am.attempt_id WHERE a.campaign_id = ?",
+        [context.campaign.id]
+      ).rows
+
+    assert {best_target_count, best_target_id} == {1, context.target_snapshot.id}
+    assert {attempt_target_count, attempt_target_id} == {1, context.target_snapshot.id}
 
     [[best_notifications]] =
       Repo.query!(
@@ -180,7 +195,7 @@ defmodule Pika.IntegrationFullRegressionTest do
     assert best_revisions == 2
     assert merge_intents == 1
     assert receipts == 1
-    assert Agent.get(measurement_counter, & &1) == %{screening: 1}
+    assert Agent.get(measurement_counter, & &1) == %{escalation: 1, screening: 1}
     assert IntegrationCoordinator.snapshot(coordinator).recovery_count == 1
     assert {:error, :integration_lease_missing} = IntegrationStore.lease(context.campaign.id)
   end
@@ -246,7 +261,7 @@ defmodule Pika.IntegrationFullRegressionTest do
         ).rows
 
       assert {best_revisions, merge_intents, receipts} == {2, 1, 1}
-      assert Agent.get(measurement_counter, & &1) == %{screening: 1}
+      assert Agent.get(measurement_counter, & &1) == %{escalation: 1, screening: 1}
       assert IntegrationCoordinator.snapshot(coordinator).recovery_count == 1
       assert {:error, :integration_lease_missing} = IntegrationStore.lease(context.campaign.id)
     end

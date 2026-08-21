@@ -37,9 +37,16 @@ defmodule Pika.Baseline.GPUE2E do
         )
 
       wait!(fn -> Campaign.snapshot().status == :awaiting_confirmation end, 900_000, :alignment)
-      {:ok, reference_review} = Campaign.reference_review()
-      evidence_digest = Campaign.snapshot().reference_review_evidence.digest
-      :ok = Campaign.confirm_spec(reference_review.sha256, evidence_digest)
+      {:ok, implementation_review} = Campaign.implementation_review()
+      evidence = Campaign.snapshot().implementation_review_evidence
+
+      :ok =
+        Campaign.confirm_spec(
+          implementation_review.target_snapshot.digest,
+          evidence.development_sha,
+          evidence.digest
+        )
+
       wait!(fn -> Campaign.snapshot().status == :optimizing end, 10_800_000, :gpu_baseline)
       snapshot = Campaign.snapshot()
       best_worktree_clean = Pika.Git.clean?(workspace.repo)
@@ -91,14 +98,17 @@ defmodule Pika.Baseline.GPUE2E do
     Use committed source SHA #{source_sha}; uncommitted source-repo files are intentionally absent.
     This is the real Alignment H20 acceptance for the existing WeLM v4.5 80A3 verify-attention mega-kernel.
     Do not ask more questions. Preserve the fixed Q=6, KV=1, D=256, page=16, BF16 semantics and existing
-    fused verify-attention boundary. Create a self-contained PyTorch Reference and correctness wrapper under
-    pika_alignment/. Build a normalized Harness around the committed verify fixture/benchmark for exactly three
+    fused verify-attention boundary. Create an explicit Correctness Oracle, a runnable frozen Optimization Target,
+    an independently runnable initial Development implementation, and correctness wrapper under pika_alignment/.
+    The Target may be a snapshot of the reviewed setup commit, but its entrypoint must be distinct from mutable
+    Development. Build a normalized Harness around the committed verify fixture/benchmark for exactly three
     representative target trace cases: indices 5493, 1104 and 179. Target hardware is H20/sm_90a.
     The only performance Metric is latency_us (us, minimize, target, 1% threshold). Correctness uses the repo's
     established BF16 tolerance rtol=atol=3e-2. The user-selected measurement protocol is warmup=10,
     pair_count=#{pair_count}, min_valid_pairs=#{min_valid_pairs}, retry_limit=1.
     Stop after max_attempts=10 with mode all_goals. Do not use or copy files absent from this committed clone.
-    Submit Campaign Spec v1 and Harness through MCP; do not confirm on the user's behalf and do not push.
+    Submit Campaign Spec v2, Harness, Implementation Bundle and paired Implementation Review Evidence through
+    MCP; do not confirm on the user's behalf and do not push.
     """
   end
 

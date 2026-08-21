@@ -113,7 +113,11 @@ defmodule Pika.CampaignBootstrap do
 
   defp reference_config(workspace), do: workspace.snapshot["mutable"]["reference_catalog"] || []
 
-  defp revision(%{spec_result: %{spec: %{"revision" => value}}}) when is_integer(value), do: value
+  defp revision(%{spec_result: %{spec: spec}}) when is_map(spec) do
+    value = if is_integer(spec["revision"]), do: spec["revision"], else: 1
+    if spec["schema_version"] == 2, do: value, else: value + 1
+  end
+
   defp revision(_durable), do: 1
 
   defp resume_session_id(durable, campaign_id, backend) when is_map(durable) do

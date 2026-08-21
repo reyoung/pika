@@ -5,6 +5,7 @@ defmodule Pika.AttemptCoordinator do
   require Logger
 
   alias Pika.AgentBackend
+  alias Pika.AgentBackend.JSONLWriter
   alias Pika.AttemptTokenRegistry, as: TokenRegistry
   alias Pika.AttemptPrompt, as: Prompt
   alias Pika.AttemptStore, as: Store
@@ -67,7 +68,9 @@ defmodule Pika.AttemptCoordinator do
       last_error: nil,
       progress_log_interval_ms:
         Keyword.get(opts, :progress_log_interval_ms, @progress_log_interval_ms),
-      progress_log_level: Keyword.get(opts, :progress_log_level, :info)
+      progress_log_level: Keyword.get(opts, :progress_log_level, :info),
+      progress_log_task: nil,
+      progress_probe: Keyword.get(opts, :progress_probe, &attempt_progress/2)
     }
 
     send(self(), :recover)
@@ -194,10 +197,15 @@ defmodule Pika.AttemptCoordinator do
   end
 
   def handle_info(:log_work_snapshot, state) do
-    log_work_snapshot(state)
     schedule_progress_log(state.progress_log_interval_ms)
-    {:noreply, state}
+    {:noreply, start_progress_log(state)}
   end
+
+  def handle_info(
+        {:DOWN, monitor, :process, _pid, _reason},
+        %{progress_log_task: %{monitor: monitor}} = state
+      ),
+      do: {:noreply, %{state | progress_log_task: nil}}
 
   def handle_info({:DOWN, monitor, :process, _pid, reason}, state) do
     case Map.pop(state.monitors, monitor) do
@@ -242,6 +250,8 @@ defmodule Pika.AttemptCoordinator do
 
   @impl true
   def terminate(_reason, state) do
+    stop_progress_log(state.progress_log_task)
+
     Enum.each(state.sessions, fn {_id, session_state} ->
       TokenRegistry.delete_hash(session_state.identity.token_hash)
       safe_close(session_state.handle)
@@ -301,7 +311,13 @@ defmodule Pika.AttemptCoordinator do
   defp prepare_attempt(state, attempt) do
     with {:ok, context} <- Store.campaign_context(state.campaign_id),
          {:ok, _worktree} <-
-           Workspace.create(state.workspace, attempt.id, attempt.base_sha, context.references),
+           Workspace.create(
+             state.workspace,
+             attempt.id,
+             attempt.base_sha,
+             context.references,
+             context.target_snapshot
+           ),
          {:ok, attempt} <- Store.mark_running(attempt.id) do
       role = if context.plan_enabled, do: :plan, else: :iteration
 
@@ -755,9 +771,11 @@ defmodule Pika.AttemptCoordinator do
            Pika.Measurement.evaluate_iteration(samples_path, correctness_path, %{
              base_sha: attempt.base_sha,
              candidate_sha: args["candidate_sha"],
+             target_snapshot_id: context.target_snapshot.id,
              case_ids: context.sampled_case_ids,
              metrics: context.metrics,
-             benchmark: context.spec["benchmark"]
+             benchmark: context.spec["benchmark"],
+             best_metrics: context.best_metrics
            }),
          {:ok, _event} <- Store.record_metrics(attempt_id, metrics, args["candidate_sha"]),
          :ok <- Store.attach_artifact(attempt_id, "metrics_artifact_id", samples.id),
@@ -1005,7 +1023,11 @@ defmodule Pika.AttemptCoordinator do
   end
 
   defp backend_event_summary(event) do
-    data = Pika.JSONSafe.json_safe(event.data || %{})
+    data =
+      event.data
+      |> then(&(&1 || %{}))
+      |> JSONLWriter.redact()
+      |> Pika.JSONSafe.json_safe()
 
     value =
       first_progress_value(data) ||
@@ -1042,28 +1064,61 @@ defmodule Pika.AttemptCoordinator do
 
   defp schedule_progress_log(_interval), do: :ok
 
-  defp log_work_snapshot(state) do
+  defp start_progress_log(%{progress_log_task: nil} = state) do
+    input = %{
+      campaign_id: state.campaign_id,
+      workspace: state.workspace,
+      sessions: Enum.map(state.sessions, fn {_id, session} -> session_progress(session) end),
+      recovery_count: state.recovery_count,
+      last_error: state.last_error,
+      level: state.progress_log_level,
+      probe: state.progress_probe
+    }
+
+    case Task.start(fn -> log_work_snapshot(input) end) do
+      {:ok, pid} ->
+        %{state | progress_log_task: %{pid: pid, monitor: Process.monitor(pid)}}
+
+      {:error, reason} ->
+        %{state | last_error: inspect(reason)}
+    end
+  end
+
+  defp start_progress_log(state), do: state
+
+  defp log_work_snapshot(input) do
     attempts =
-      state.campaign_id
+      input.campaign_id
       |> Store.active_attempts()
       |> Enum.reject(&(&1.status == "ready_for_integration"))
 
-    if attempts != [] or map_size(state.sessions) > 0 or not is_nil(state.last_error) do
+    if attempts != [] or input.sessions != [] or not is_nil(input.last_error) do
       snapshot = %{
-        campaign_id: state.campaign_id,
-        attempts: Enum.map(attempts, &attempt_progress(state.workspace, &1)),
-        sessions: Enum.map(state.sessions, fn {_id, session} -> session_progress(session) end),
-        recovery_count: state.recovery_count,
-        last_error: truncate(state.last_error, 1_000)
+        campaign_id: input.campaign_id,
+        attempts: Enum.map(attempts, &input.probe.(input.workspace, &1)),
+        sessions: input.sessions,
+        recovery_count: input.recovery_count,
+        last_error: truncate(input.last_error, 1_000)
       }
 
       Logger.log(
-        state.progress_log_level,
-        "Pika attempt work snapshot " <> Jason.encode!(snapshot)
+        input.level,
+        "Pika attempt work snapshot " <>
+          (snapshot |> JSONLWriter.redact() |> Jason.encode!())
       )
     end
   rescue
-    error -> Logger.warning("Pika attempt work snapshot failed: #{Exception.message(error)}")
+    error ->
+      message = error |> Exception.message() |> JSONLWriter.redact()
+      Logger.warning("Pika attempt work snapshot failed: #{message}")
+  end
+
+  defp stop_progress_log(nil), do: :ok
+
+  defp stop_progress_log(%{pid: pid, monitor: monitor}) do
+    Process.demonitor(monitor, [:flush])
+    if Process.alive?(pid), do: Process.exit(pid, :shutdown)
+    :ok
   end
 
   defp attempt_progress(workspace, attempt) do
@@ -1148,7 +1203,7 @@ defmodule Pika.AttemptCoordinator do
           role: role,
           required_operations: Enum.sort(required),
           retry_in_ms: @recovery_retry_ms,
-          reason: truncate(inspect(reason), 2_000)
+          reason: reason |> inspect() |> JSONLWriter.redact() |> truncate(2_000)
         })
     )
   end

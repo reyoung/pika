@@ -78,28 +78,39 @@ defmodule Pika.Test.AlignmentAgentBackend do
   end
 
   defp alignment(state) do
-    attrs = AlignmentFixtures.create_harness(state.cwd)
     token = state.mcp.token
+    snapshot = Campaign.snapshot()
 
-    {:ok, _} =
-      Campaign.mcp_call(token, "submit_spec", %{
-        "idempotency_key" => "fake-spec",
-        "spec" => AlignmentFixtures.spec()
-      })
+    if is_nil(snapshot.target_snapshot) do
+      attrs = AlignmentFixtures.create_harness(state.cwd)
 
-    {:ok, _} =
-      Campaign.mcp_call(
-        token,
-        "submit_harness",
-        Map.put(attrs, "idempotency_key", "fake-harness")
-      )
+      {:ok, _} =
+        Campaign.mcp_call(token, "submit_spec", %{
+          "idempotency_key" => "fake-spec",
+          "spec" => AlignmentFixtures.spec()
+        })
 
-    {:ok, _} =
-      AlignmentFixtures.submit_reference_review(
-        token,
-        %{root: workspace_root(state)},
-        "fake-review"
-      )
+      {:ok, _} =
+        Campaign.mcp_call(
+          token,
+          "submit_harness",
+          Map.put(attrs, "idempotency_key", "fake-harness")
+        )
+
+      {:ok, _setup_sha} =
+        AlignmentFixtures.prepare_implementation_bundle(
+          token,
+          %{root: workspace_root(state)},
+          "fake-bundle"
+        )
+    else
+      {:ok, _} =
+        AlignmentFixtures.submit_implementation_review(
+          token,
+          %{root: workspace_root(state)},
+          "fake-review"
+        )
+    end
   end
 
   defp workspace_root(state), do: state.cwd |> Path.dirname() |> Path.dirname()
@@ -108,11 +119,8 @@ defmodule Pika.Test.AlignmentAgentBackend do
     snapshot = Campaign.snapshot()
     workspace = snapshot.workspace.root
     repo = Path.join(workspace, "repo")
-    setup = state.cwd
     base_sha = Git.run!(repo, ["rev-parse", "pika/best"])
-    Git.run!(setup, ["add", "."])
-    Git.run!(setup, ["commit", "-m", "fake setup"])
-    setup_sha = Git.run!(setup, ["rev-parse", "HEAD"])
+    setup_sha = snapshot.prepared_setup_sha
     Git.run!(repo, ["merge", "--squash", setup_sha])
     Git.run!(repo, ["commit", "-m", "Fake setup"])
     best_sha = Git.run!(repo, ["rev-parse", "HEAD"])
@@ -122,7 +130,8 @@ defmodule Pika.Test.AlignmentAgentBackend do
         "idempotency_key" => "fake-merge",
         "base_sha" => base_sha,
         "setup_sha" => setup_sha,
-        "best_sha" => best_sha
+        "best_sha" => best_sha,
+        "target_snapshot_id" => snapshot.target_snapshot.id
       })
   end
 

@@ -12,20 +12,19 @@ defmodule Pika.BaselineTest do
     records =
       for index <- 0..(pair_count - 1) do
         %{
-          "schema_version" => 1,
-          "measured_sha" => sha,
           "case_id" => "target_case",
           "metric_id" => "latency_us",
           "pair_index" => index,
-          "order" => if(rem(index, 2) == 0, do: "ab", else: "ba"),
-          "a" => 10.0,
-          "b" => 10.01,
+          "order" => if(rem(index, 2) == 0, do: "tc", else: "ct"),
+          "target" => 10.0,
+          "candidate" => 10.01,
           "valid" => true
         }
       end
 
     assert {:ok, [metric]} = Baseline.evaluate_records(records, spec, sha)
-    assert_in_delta metric.value, 10.005, 1.0e-9
+    assert_in_delta metric.value, 10.01, 1.0e-9
+    assert_in_delta metric.target_value, 10.0, 1.0e-9
     assert_in_delta metric.pair_delta_median, -0.001, 1.0e-9
     assert metric.noise_tolerance == 0.005
     assert metric.valid_pair_count == pair_count
@@ -39,14 +38,12 @@ defmodule Pika.BaselineTest do
     records =
       for index <- 0..(pair_count - 1) do
         %{
-          "schema_version" => 1,
-          "measured_sha" => sha,
           "case_id" => "target_case",
           "metric_id" => "latency_us",
           "pair_index" => index,
-          "order" => if(rem(index, 2) == 0, do: "ab", else: "ba"),
-          "a" => 10.0,
-          "b" => 10.0,
+          "order" => if(rem(index, 2) == 0, do: "tc", else: "ct"),
+          "target" => 10.0,
+          "candidate" => 10.0,
           "valid" => index < 4
         }
       end
@@ -63,14 +60,12 @@ defmodule Pika.BaselineTest do
     records =
       for index <- 0..(pair_count - 1) do
         %{
-          "schema_version" => 1,
-          "measured_sha" => sha,
           "case_id" => "target_case",
           "metric_id" => "latency_us",
           "pair_index" => index,
-          "order" => "ab",
-          "a" => 10.0,
-          "b" => 10.0,
+          "order" => "tc",
+          "target" => 10.0,
+          "candidate" => 10.0,
           "valid" => true
         }
       end
@@ -90,14 +85,12 @@ defmodule Pika.BaselineTest do
     records =
       for index <- 0..7 do
         %{
-          "schema_version" => 1,
-          "measured_sha" => sha,
           "case_id" => "target_case",
           "metric_id" => "latency_us",
           "pair_index" => index,
-          "order" => if(rem(index, 2) == 0, do: "ab", else: "ba"),
-          "a" => 10.0,
-          "b" => 9.8,
+          "order" => if(rem(index, 2) == 0, do: "tc", else: "ct"),
+          "target" => 10.0,
+          "candidate" => 9.8,
           "valid" => index < 6
         }
       end
@@ -129,6 +122,7 @@ defmodule Pika.BaselineTest do
                AlignmentFixtures.spec(),
                sha,
                skill_sha,
+               target_snapshot_id: "target-fixture",
                on_progress: &send(owner, {:progress, &1})
              )
 
@@ -179,7 +173,7 @@ defmodule Pika.BaselineTest do
         "name" => "Throughput",
         "unit" => "items/s",
         "direction" => "maximize",
-        "role" => "guardrail",
+        "role" => "guard",
         "min_improvement_ratio" => 0.01
       }
     ]
@@ -192,14 +186,12 @@ defmodule Pika.BaselineTest do
     records =
       for case_ <- cases, metric <- metrics, index <- 0..(AlignmentFixtures.pair_count() - 1) do
         %{
-          "schema_version" => 1,
-          "measured_sha" => sha,
           "case_id" => case_["id"],
           "metric_id" => metric["id"],
           "pair_index" => index,
-          "order" => if(rem(index, 2) == 0, do: "ab", else: "ba"),
-          "a" => 10.0 + index / 1_000,
-          "b" => 10.01 + index / 1_000,
+          "order" => if(rem(index, 2) == 0, do: "tc", else: "ct"),
+          "target" => 10.0 + index / 1_000,
+          "candidate" => 10.01 + index / 1_000,
           "valid" => true
         }
       end
@@ -210,8 +202,18 @@ defmodule Pika.BaselineTest do
     File.write!(
       Path.join(root, correctness),
       Jason.encode!(%{
-        "measured_sha" => sha,
-        "cases" => Enum.map(cases, &%{"case_id" => &1["id"], "passed" => true})
+        "schema_version" => 2,
+        "target_snapshot_id" => "target-fixture",
+        "candidate_sha" => sha,
+        "cases" =>
+          Enum.map(
+            cases,
+            &%{
+              "case_id" => &1["id"],
+              "target_passed" => true,
+              "candidate_passed" => true
+            }
+          )
       })
     )
 
@@ -225,6 +227,7 @@ defmodule Pika.BaselineTest do
                spec,
                sha,
                skill_sha,
+               target_snapshot_id: "target-fixture",
                max_concurrency: 4,
                on_progress: &send(owner, {:parallel_progress, &1})
              )
@@ -260,6 +263,7 @@ defmodule Pika.BaselineTest do
                AlignmentFixtures.spec(),
                sha,
                skill_sha,
+               target_snapshot_id: "target-fixture",
                expected_samples: %{
                  sha256: "wrong",
                  size: File.stat!(Path.join(root, samples)).size
@@ -291,7 +295,8 @@ defmodule Pika.BaselineTest do
                Path.join(root, profiler),
                AlignmentFixtures.spec(),
                sha,
-               skill_sha
+               skill_sha,
+               target_snapshot_id: "target-fixture"
              )
   end
 end

@@ -1,7 +1,8 @@
 defmodule Pika.AgentBackend.JSONLWriter do
   @moduledoc "Append-only, redacted provider wire log."
 
-  @secret_keys ~w(authorization token access_token bearer api_key)
+  @secret_keys ~w(authorization token access_token bearer api_key password passwd secret client_secret private_key)
+  @secret_key_suffixes ~w(_token _password _passwd _secret _api_key _access_key)
 
   def append(path, direction, payload) do
     File.mkdir_p!(Path.dirname(path))
@@ -57,7 +58,8 @@ defmodule Pika.AgentBackend.JSONLWriter do
     Map.new(map, fn {key, value} ->
       normalized_key = key |> to_string() |> String.downcase()
 
-      if normalized_key in @secret_keys or String.ends_with?(normalized_key, "_token") do
+      if normalized_key in @secret_keys or
+           Enum.any?(@secret_key_suffixes, &String.ends_with?(normalized_key, &1)) do
         {key, "[REDACTED]"}
       else
         {key, redact(value)}
@@ -70,7 +72,11 @@ defmodule Pika.AgentBackend.JSONLWriter do
     |> redact_replace(~r{\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@}i, "\\1[REDACTED]@")
     |> redact_replace(~r/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/i, "\\1[REDACTED]")
     |> redact_replace(
-      ~r/\b([A-Z][A-Z0-9_]*(?:TOKEN|PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY))\s*=\s*([^\s"']+)/,
+      ~r/(["']?(?:authorization|bearer|token|password|passwd|secret|api_key|access_key|client_secret|private_key|[A-Za-z][A-Za-z0-9_]*(?:_token|_password|_passwd|_secret|_api_key|_access_key))["']?\s*(?:=>|:|=)\s*)(?:"[^"]*"|'[^']*'|[^\s,}\]]+)/i,
+      "\\1[REDACTED]"
+    )
+    |> redact_replace(
+      ~r/\b([A-Z][A-Z0-9_]*(?:TOKEN|PASSWORD|PASSWD|SECRET|API_KEY|ACCESS_KEY))\s*=\s*([^\s"']+)/i,
       "\\1=[REDACTED]"
     )
     |> redact_replace(

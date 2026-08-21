@@ -52,7 +52,7 @@ defmodule Pika.ManagedWorkspaceTest do
     link = Path.join(root, "repo")
     old_inode = File.lstat!(link).inode
 
-    replace_symlink_until_inode_changes(link, repo, old_inode)
+    replace_symlink_with_distinct_inode(link, repo, old_inode)
 
     {:ok, config} = Config.load(config_path, workspace: root, repo: repo)
     assert {:error, {:workspace_identity_mismatch, _, _}} = Workspace.plan(config)
@@ -96,20 +96,11 @@ defmodule Pika.ManagedWorkspaceTest do
     %{repo: config.repo, root: config.workspace, config: config_path}
   end
 
-  defp replace_symlink_until_inode_changes(link, target, old_inode, attempts \\ 8)
-
-  defp replace_symlink_until_inode_changes(_link, _target, _old_inode, 0),
-    do: flunk("filesystem reused symlink inode repeatedly")
-
-  defp replace_symlink_until_inode_changes(link, target, old_inode, attempts) do
-    File.rm!(link)
-    File.ln_s!(target, link)
-
-    if File.lstat!(link).inode == old_inode do
-      replace_symlink_until_inode_changes(link, target, old_inode, attempts - 1)
-    else
-      :ok
-    end
+  defp replace_symlink_with_distinct_inode(link, target, old_inode) do
+    replacement = link <> ".replacement-#{System.unique_integer([:positive])}"
+    File.ln_s!(target, replacement)
+    refute File.lstat!(replacement).inode == old_inode
+    File.rename!(replacement, link)
   end
 
   defp missing_workspace do

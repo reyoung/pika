@@ -58,6 +58,10 @@ defmodule Pika.Test.AttemptAgentBackend do
 
     emit(server, :turn_started)
 
+    if output = env(state)[:progress_event_output] do
+      emit(server, :command_output, %{output: output})
+    end
+
     {:ok, task_pid} =
       Task.start(fn ->
         run(server, state, input)

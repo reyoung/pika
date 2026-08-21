@@ -29,20 +29,32 @@ Campaign Spec 在优化开始后的显式新版本；涉及语义、Shapes、Met
 _Avoid_: 全局指导、配置热更新、Plan 变更
 
 **基线（Baseline）**：
-调优任务进入迭代前，已经通过正确性验证并完成性能测量的初始实现。
-_Avoid_: Reference、第一版优化
+调优任务进入迭代前，Development Implementation 在 Full Case Set 上相对固定 Optimization Target 的首组正式正确性与性能测量；对应代码版本是首个 Best Known Revision，而不是 Target。
+_Avoid_: Optimization Target、Reference、单一“基线代码”
 
-**参考实现（Reference Implementation）**：
-用 PyTorch 表达计算语义、输入约束和正确性标准的权威实现，不承诺性能。
-_Avoid_: Baseline、Oracle Kernel
+**正确性判定器（Correctness Oracle）**：
+定义计算语义真值、用于独立判定 Optimization Target 与 Development Implementation 是否正确的实现或规则；它可以是仓库内受保护代码，也可以明确复用冻结 Target 的输出。
+_Avoid_: Optimization Target、Baseline、性能 Reference
 
-**Reference Review Evidence**：
-证明当前 Reference Implementation 能在受保护 Harness 中执行、并为当前 Campaign Spec 的至少一个 Benchmark Case 产生性能观测的审阅证据；它随 Reference、Harness 或 Spec 的变化而失效。
-_Avoid_: Baseline、完整 Benchmark、Agent 自述、未绑定源码的日志
+**优化目标（Optimization Target）**：
+Campaign 固定的性能锚点实现；它来自被审阅的 Development 快照或某个固定 SHA 的 Reference Project，在该 Target 定义未显式修订时不随 Best 推进。
+_Avoid_: Correctness Oracle、Baseline、当前 Best、Development Implementation
+
+**Target Snapshot**：
+Optimization Target 源码在 Campaign Workspace `targets/<revision>/repo` 中的不可变身份，绑定来源类型、Reference ID、commit/tree SHA、入口文件与内容 digest；worktree 只通过 Git 忽略的 `target/` 软链接读取它。
+_Avoid_: Reference Checkout、Attempt Worktree、可修改源码副本
+
+**开发实现（Development Implementation）**：
+产品仓库内持续被 Attempt 优化的实现；Alignment 必须先给出可运行入口和初始提交，之后由 Campaign Best Branch 表示其最佳已知版本。
+_Avoid_: Optimization Target、Correctness Oracle、Reference Project
+
+**Implementation Review Evidence**：
+证明同一 Benchmark Case 上 Optimization Target 与初始 Development 都通过 Correctness Oracle，并包含两者配对性能值的确认前 smoke-run 证据；它绑定 Spec、Harness、Target Snapshot、Development SHA 与本地 Artifact。
+_Avoid_: Baseline、完整 Benchmark、Agent 自述、Reference Review Evidence
 
 **受保护 Harness（Protected Harness）**：
-已随 Campaign Spec 确认的 Reference、正确性测试与 Benchmark Harness；候选尝试只能读取和执行，不能修改。
-_Avoid_: 普通测试、Iteration 代码、Profiler 配置
+已随 Campaign Spec 确认的仓库内 Correctness Oracle（若有）、正确性测试与 Benchmark Harness；候选尝试只能读取和执行，Development 入口和外部 Target Snapshot 不属于受保护产品代码。
+_Avoid_: Optimization Target、Development Implementation、普通测试、Profiler 配置
 
 **候选尝试（Optimization Attempt）**：
 在独立工作空间中执行的一次有边界的性能改进实验，最终只能被接受或拒绝。
@@ -193,8 +205,8 @@ _Avoid_: 回归测试、次要 Shape
 _Avoid_: Target Case、永远不参与门禁的 Case
 
 **配对测量（Paired Measurement）**：
-交错执行当前最佳版本和候选版本，并基于同轮测量比值判断改善与噪声的正式性能比较。
-_Avoid_: Baseline 单次测量、Agent 临时 Benchmark、非配对 Screening
+交错执行固定 Optimization Target 与某个 Development 候选，并基于同轮比值判断其相对 Target 的改善与噪声；候选对当前 Best 的比较使用同一 Case/Metric 的持久化 Development 值另行计算。
+_Avoid_: Target/Best 混用、Baseline 单次测量、Agent 临时 Benchmark、非配对 Screening
 
 **Artifact Workspace**：
 保存 Patch、Prompt、Agent 输出、日志与 Profiler 文件等文件型产物的本地目录树；结构化状态只通过相对路径引用其中的文件。

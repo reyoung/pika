@@ -9,14 +9,14 @@ defmodule Pika.AgentBackend.JSONLPortTest do
     jsonl_path = Path.join(root, "wire.jsonl")
     stderr_path = Path.join(root, "provider.stderr.log")
 
-    ruby =
-      ~S|$stdout.sync=true; $stdout.write("{\"id\":1"); sleep 0.05; $stdout.write(",\"result\":{\"ok\":true}}\n"); $stderr.write("separate-stderr\n")|
+    script =
+      ~S|printf '%s' '{"id":1'; sleep 0.05; printf '%s\n' ',"result":{"ok":true}}'; printf '%s\n' 'separate-stderr' >&2|
 
     assert {:ok, transport} =
              JSONLPort.start(
                owner: self(),
-               command: System.find_executable("ruby"),
-               args: ["-e", ruby],
+               command: System.find_executable("sh"),
+               args: ["-c", script],
                env: %{},
                stderr_path: stderr_path,
                jsonl_path: jsonl_path

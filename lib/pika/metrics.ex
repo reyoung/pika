@@ -7,7 +7,9 @@ defmodule Pika.Metrics do
     Repo.query!(
       """
       SELECT sr.revision, sr.id, bc.name, md.name, br.sequence, br.sha,
-             bm.value, bm.mad, bm.noise_tolerance, bm.valid_pair_count
+             bm.value, bm.mad, bm.noise_tolerance, bm.valid_pair_count,
+             bm.target_snapshot_id, bm.target_value,
+             bm.target_relative_improvement, bm.best_relative_improvement
       FROM best_metrics bm
       JOIN best_revisions br ON br.id = bm.best_revision_id
       JOIN spec_revisions sr ON sr.id = br.spec_revision_id
@@ -38,12 +40,20 @@ defmodule Pika.Metrics do
                               value,
                               mad,
                               noise,
-                              valid
+                              valid,
+                              target_snapshot_id,
+                              target_value,
+                              target_relative_improvement,
+                              best_relative_improvement
                             ] ->
             %{
               best_sequence: sequence,
               sha: sha,
               value: value,
+              target_snapshot_id: target_snapshot_id,
+              target_value: target_value,
+              target_relative_improvement: target_relative_improvement,
+              best_relative_improvement: best_relative_improvement,
               mad: mad,
               noise_tolerance: noise,
               valid_pair_count: valid

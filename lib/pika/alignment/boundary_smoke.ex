@@ -88,16 +88,20 @@ defmodule Pika.Alignment.BoundarySmoke do
     """
     This is a deterministic protocol smoke. Do not ask more questions. Target H20/sm_90a.
     Define a single identity PyTorch kernel: float16 contiguous input/output [1024], no extra fusion,
-    rtol=atol=0.001. Create kernel/reference.py, kernel/test_correctness.py and kernel/bench.py.
+    rtol=atol=0.001. Create runnable kernel/target.py and kernel/development.py implementations,
+    kernel/test_correctness.py and kernel/bench.py. Use the reviewed Development setup commit as the frozen
+    Optimization Target source, with target.py as its entrypoint; development.py remains mutable. Define an
+    explicit Correctness Oracle in Spec v2 and test both implementations with it.
     The only Benchmark Case is target_case (n=1024, target, frequency 1.0).
     The only Metric is latency_us (us, minimize, target, 1% threshold).
     The user-selected Harness contract is warmup=10, pair_count=#{pair_count},
     min_valid_pairs=#{min_valid_pairs}, retry_limit=1.
-    Stop after max_attempts=10 with mode all_goals. Submit the full Campaign Spec v1 and Harness via MCP.
-    This protocol smoke must not use a GPU, but it must execute the Reference through the Harness on target_case,
-    collect a real CPU latency_us observation, register the small output as reference_review_evidence, and call
-    submit_reference_review with the actual CPU environment clearly disclosed. Do not confirm for the user,
-    do not commit, and do not push.
+    Stop after max_attempts=10 with mode all_goals. Submit the full Campaign Spec v2 and Harness via MCP, commit
+    the setup tree, then call submit_implementation_bundle. This protocol smoke must not use a GPU, but it must
+    execute both the frozen Target and Development through the Oracle/Harness on target_case, collect paired real
+    CPU latency_us observations, register the small output as implementation_review_evidence, and call
+    submit_implementation_review with the actual CPU environment clearly disclosed. Do not confirm for the user
+    and do not push.
     """
   end
 

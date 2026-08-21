@@ -47,4 +47,21 @@ defmodule Pika.AgentBackend.JSONLWriterTest do
     assert :ok = JSONLWriter.scrub_file(path)
     refute File.read!(path) =~ "user:secret"
   end
+
+  test "redacts password fields and credentials embedded in inspected errors" do
+    assert %{"password" => "[REDACTED]", "nested" => %{"client_secret" => "[REDACTED]"}} =
+             JSONLWriter.redact(%{
+               "password" => "map-password",
+               "nested" => %{"client_secret" => "map-secret"}
+             })
+
+    inspected =
+      JSONLWriter.redact(
+        ~s({:backend_failed, %{token: "inspect-token", api_key: "inspect-api-key"}})
+      )
+
+    refute inspected =~ "inspect-token"
+    refute inspected =~ "inspect-api-key"
+    assert inspected =~ "[REDACTED]"
+  end
 end

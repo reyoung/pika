@@ -1,30 +1,38 @@
 defmodule Pika.Harness do
   @moduledoc false
 
-  @reference_preview_bytes 262_144
+  @source_preview_bytes 262_144
   @hash_chunk_bytes 1_048_576
 
   def validate(setup_root, attrs) do
     attrs = stringify_keys(attrs)
 
+    oracle_path = attrs["oracle_path"]
+    correctness_paths = List.wrap(attrs["correctness_paths"])
+    benchmark_path = attrs["benchmark_path"]
+
+    required_protected_paths =
+      ([oracle_path, benchmark_path] ++ correctness_paths)
+      |> Enum.reject(&is_nil/1)
+
     paths =
-      [attrs["reference_path"], attrs["benchmark_path"]] ++
-        List.wrap(attrs["correctness_paths"]) ++ List.wrap(attrs["protected_paths"])
+      required_protected_paths ++ List.wrap(attrs["protected_paths"])
 
     paths = Enum.reject(paths, &is_nil/1) |> Enum.uniq()
 
-    with true <- is_binary(attrs["reference_path"]),
-         true <- is_binary(attrs["benchmark_path"]),
-         true <- List.wrap(attrs["correctness_paths"]) != [],
+    with true <- is_nil(oracle_path) or is_binary(oracle_path),
+         true <- is_binary(benchmark_path),
+         true <- correctness_paths != [],
+         true <- Enum.all?(required_protected_paths, &(&1 in paths)),
          {:ok, files} <- validate_files(setup_root, paths) do
       manifest = Enum.map(files, fn {path, sha} -> %{"path" => path, "sha256" => sha} end)
       digest = :crypto.hash(:sha256, Jason.encode!(manifest)) |> Base.encode16(case: :lower)
 
       {:ok,
        %{
-         reference_path: attrs["reference_path"],
-         benchmark_path: attrs["benchmark_path"],
-         correctness_paths: List.wrap(attrs["correctness_paths"]),
+         oracle_path: oracle_path,
+         benchmark_path: benchmark_path,
+         correctness_paths: correctness_paths,
          protected_paths: paths,
          manifest: manifest,
          digest: digest
@@ -37,7 +45,7 @@ defmodule Pika.Harness do
 
   def verify_digest(setup_root, harness) do
     case validate(setup_root, %{
-           reference_path: harness.reference_path,
+           oracle_path: Map.get(harness, :oracle_path),
            benchmark_path: harness.benchmark_path,
            correctness_paths: harness.correctness_paths,
            protected_paths: harness.protected_paths
@@ -47,26 +55,24 @@ defmodule Pika.Harness do
     end
   end
 
-  def reference_review(setup_root, harness, opts \\ []) do
-    preview_bytes = Keyword.get(opts, :preview_bytes, @reference_preview_bytes)
+  def source_review(root, path, opts \\ []) do
+    preview_bytes = Keyword.get(opts, :preview_bytes, @source_preview_bytes)
+    expected_sha = Keyword.get(opts, :expected_sha)
 
     with :ok <- validate_preview_bytes(preview_bytes),
-         {:ok, expected_sha} <- reference_manifest_sha(harness),
-         {:ok, absolute, size} <- safe_regular_path(setup_root, harness.reference_path),
+         {:ok, absolute, size} <- safe_regular_path(root, path),
          {:ok, sha256, content} <- hash_and_preview(absolute, preview_bytes),
-         :ok <- verify_reference_sha(sha256, expected_sha),
+         :ok <- verify_optional_sha(sha256, expected_sha),
          {:ok, content} <- normalize_utf8_preview(content, size > byte_size(content)) do
       {:ok,
        %{
-         path: harness.reference_path,
+         path: path,
          sha256: sha256,
          size: size,
          content: content,
          preview_bytes: byte_size(content),
          truncated: size > byte_size(content)
        }}
-    else
-      {:error, _reason} = error -> error
     end
   end
 
@@ -160,17 +166,9 @@ defmodule Pika.Harness do
   defp validate_preview_bytes(value) when is_integer(value) and value > 0, do: :ok
   defp validate_preview_bytes(_value), do: {:error, :invalid_preview_bytes}
 
-  defp reference_manifest_sha(%{reference_path: path, manifest: manifest}) do
-    case Enum.find(manifest, &(&1["path"] == path)) do
-      %{"sha256" => sha256} when is_binary(sha256) -> {:ok, sha256}
-      _ -> {:error, :reference_not_in_harness_manifest}
-    end
-  end
-
-  defp reference_manifest_sha(_harness), do: {:error, :reference_not_in_harness_manifest}
-
-  defp verify_reference_sha(sha256, sha256), do: :ok
-  defp verify_reference_sha(_actual, _expected), do: {:error, :reference_sha_changed}
+  defp verify_optional_sha(_actual, nil), do: :ok
+  defp verify_optional_sha(sha256, sha256), do: :ok
+  defp verify_optional_sha(_actual, _expected), do: {:error, :source_sha_changed}
 
   defp normalize_utf8_preview(content, truncated?) do
     case :unicode.characters_to_binary(content, :utf8, :utf8) do
