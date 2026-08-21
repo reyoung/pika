@@ -105,6 +105,24 @@ defmodule Pika.Test.FakeJSONLProvider do
   end
 
   defp handle_cursor(%{"id" => id, "method" => "session/prompt", "params" => params}, state) do
+    if contains?(params["prompt"], "raw-output") do
+      notify_cursor(%{
+        "sessionUpdate" => "tool_call",
+        "toolCallId" => "fake-command",
+        "kind" => "execute",
+        "title" => "`echo hello`",
+        "rawInput" => %{"command" => "echo hello"},
+        "status" => "pending"
+      })
+
+      notify_cursor(%{
+        "sessionUpdate" => "tool_call_update",
+        "toolCallId" => "fake-command",
+        "status" => "completed",
+        "rawOutput" => %{"content" => "hello\n"}
+      })
+    end
+
     notify_cursor(%{
       "sessionUpdate" => "agent_message_chunk",
       "content" => %{"type" => "text", "text" => "fake"}

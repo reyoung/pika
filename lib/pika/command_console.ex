@@ -113,7 +113,8 @@ defmodule Pika.CommandConsole do
      |> Map.merge(%{
        "kind" => "output",
        "mode" => data["update_mode"] || "append",
-       "output" => output
+       "output" => output,
+       "status" => data["status"] || "running"
      })}
   end
 
@@ -128,7 +129,8 @@ defmodule Pika.CommandConsole do
        base_record(event, cwd)
        |> Map.merge(%{
          "kind" => if(type == :tool_started, do: "started", else: "completed"),
-         "command" => first_binary(item, ~w(command title name)),
+         "command" =>
+           get_in(item, ["rawInput", "command"]) || first_binary(item, ~w(command title name)),
          "cwd" => item["cwd"] || cwd,
          "status" => status,
          "exit_code" => item["exitCode"] || item["exit_code"],
@@ -156,8 +158,10 @@ defmodule Pika.CommandConsole do
   defp command_event?(%Event{type: :command_output}), do: true
   defp command_event?(%Event{data: %{item: %{"type" => "commandExecution"}}}), do: true
 
-  defp command_event?(%Event{backend: :cursor_acp, type: type})
-       when type in [:tool_started, :tool_completed], do: true
+  defp command_event?(%Event{backend: :cursor_acp, type: :tool_started, data: data}) do
+    data = stringify_keys(data)
+    data["kind"] == "execute" or is_binary(get_in(data, ["rawInput", "command"]))
+  end
 
   defp command_event?(_event), do: false
 

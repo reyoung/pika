@@ -526,8 +526,32 @@ defmodule Pika.AgentBackend.CursorACP do
       end
     end)
 
+    case cursor_raw_output(update["rawOutput"]) do
+      output when is_binary(output) ->
+        emit(state, :command_output,
+          data: %{
+            "command_id" => update["toolCallId"] || update["id"],
+            "update_mode" => "replace",
+            "output" => output,
+            "status" => status || "running"
+          }
+        )
+
+      nil ->
+        :ok
+    end
+
     state
   end
+
+  defp cursor_raw_output(output) when is_binary(output), do: output
+
+  defp cursor_raw_output(output) when is_map(output) do
+    output["content"] || output["output"] || output["stdout"] || output[:content] ||
+      output[:output] || output[:stdout]
+  end
+
+  defp cursor_raw_output(_output), do: nil
 
   defp map_session_update(%{"sessionUpdate" => "usage_update"} = update, state) do
     emit(state, :usage_updated, data: update)

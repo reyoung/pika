@@ -144,6 +144,44 @@ defmodule Pika.AgentBackend.CursorProtocolTest do
     assert "session/close" in methods
   end
 
+  test "maps Cursor rawOutput content to command output" do
+    workspace = git_workspace("cursor-raw-output-workspace")
+
+    profile = %{
+      backend: :cursor_acp,
+      command: System.find_executable("mix"),
+      args: ["run", "--no-compile", "--no-start", fake_provider(), "--"],
+      env: %{"PIKA_FAKE_PROTOCOL" => "cursor"},
+      artifact_dir: temp_dir("cursor-raw-output")
+    }
+
+    {:ok, backend} = AgentBackend.start_link(Pika.AgentBackend.CursorACP, profile, self())
+
+    assert {:ok, _session} =
+             AgentBackend.open_session(
+               backend,
+               workspace,
+               nil,
+               nil,
+               %{url: "http://127.0.0.1:1/mcp", token: "secret"},
+               [],
+               "Pika raw-output instructions"
+             )
+
+    assert {:ok, _turn} = AgentBackend.start_turn(backend, "raw-output")
+
+    assert %{
+             data: %{
+               "command_id" => "fake-command",
+               "output" => "hello\n",
+               "status" => "completed"
+             }
+           } =
+             assert_event(:command_output)
+
+    assert :ok = AgentBackend.close_session(backend)
+  end
+
   test "loads a persisted ACP session when the provider advertises loadSession" do
     workspace = git_workspace("cursor-resume-workspace")
 

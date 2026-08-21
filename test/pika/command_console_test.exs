@@ -56,7 +56,9 @@ defmodule Pika.CommandConsoleTest do
       event(:tool_started, :cursor_acp, "session", "turn", %{
         "sessionUpdate" => "tool_call",
         "toolCallId" => "tool-1",
-        "title" => "Run command"
+        "title" => "Run command",
+        "kind" => "execute",
+        "rawInput" => %{"command" => "echo secret"}
       })
 
     first =
@@ -80,6 +82,19 @@ defmodule Pika.CommandConsoleTest do
     assert {:ok, ^ref} = CommandConsole.capture(second, root, "/workspace")
     assert {:ok, console} = CommandConsole.load(ref, roots: [root])
     assert console.output == "TOKEN=[REDACTED]\nstep 2"
+    assert console.command == "echo secret"
+  end
+
+  test "ignores non-terminal Cursor tools", %{root: root} do
+    edit =
+      event(:tool_started, :cursor_acp, "session", "turn", %{
+        "sessionUpdate" => "tool_call",
+        "toolCallId" => "edit-1",
+        "title" => "Edit File",
+        "kind" => "edit"
+      })
+
+    assert :ignore = CommandConsole.capture(edit, root, "/workspace")
   end
 
   test "rejects refs that could escape the artifact directory" do

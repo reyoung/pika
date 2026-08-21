@@ -836,7 +836,7 @@ defmodule PikaWeb.ControlLive do
   defp activity_merge_key(event) do
     data = event["data"] || %{}
     item = data["item"] || %{}
-    item_id = item["id"] || data["itemId"] || data["item_id"]
+    item_id = item["id"] || data["itemId"] || data["item_id"] || data["toolCallId"]
 
     if item_id,
       do: {event["session_id"], event["turn_id"], item_id},
@@ -853,7 +853,8 @@ defmodule PikaWeb.ControlLive do
 
     command? =
       item["type"] == "commandExecution" or event["type"] == "command_output" or
-        (event["backend"] == "cursor_acp" and event["type"] in ~w(tool_started tool_completed))
+        (event["backend"] == "cursor_acp" and event["type"] == "tool_started" and
+           (data["kind"] == "execute" or is_binary(get_in(data, ["rawInput", "command"]))))
 
     if command? and command_id,
       do: Pika.CommandConsole.ref(event["session_id"], event["turn_id"], command_id),
