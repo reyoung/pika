@@ -49,7 +49,12 @@ defmodule Pika.IntegrationCoordinator do
       last_error: nil
     }
 
-    state = cleanup_terminal_worktrees(state)
+    state =
+      state
+      |> repair_legacy_target_gate_rejections()
+      |> interrupt_orphaned_sessions()
+      |> cleanup_terminal_worktrees()
+
     send(self(), :scan)
     {:ok, state}
   end
@@ -716,6 +721,18 @@ defmodule Pika.IntegrationCoordinator do
     |> Enum.each(&IntegrationWorkspace.cleanup(state.workspace, &1))
 
     state
+  end
+
+  defp interrupt_orphaned_sessions(state) do
+    _ = AttemptStore.interrupt_active_sessions_for_role(state.campaign_id, :integration)
+    state
+  end
+
+  defp repair_legacy_target_gate_rejections(state) do
+    case IntegrationStore.repair_legacy_target_gate_rejections(state.campaign_id) do
+      :ok -> state
+      {:error, reason} -> %{state | last_error: inspect(reason)}
+    end
   end
 
   defp persist_event(state, event) do

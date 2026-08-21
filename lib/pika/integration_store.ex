@@ -289,6 +289,54 @@ defmodule Pika.IntegrationStore do
     end
   end
 
+  def repair_legacy_target_gate_rejections(campaign_id) do
+    transaction =
+      Repo.transaction(fn ->
+        receipt_ids =
+          Repo.query!(
+            """
+            SELECT id FROM full_regression_receipts
+            WHERE campaign_id = ? AND status = 'rejected'
+              AND regressed_case_ids_json = '["__target__"]'
+            """,
+            [campaign_id]
+          ).rows
+          |> List.flatten()
+
+        if receipt_ids != [] do
+          placeholders = Enum.map_join(receipt_ids, ",", fn _ -> "?" end)
+
+          Repo.query!(
+            "DELETE FROM full_regression_receipts WHERE id IN (#{placeholders})",
+            receipt_ids
+          )
+
+          Repo.query!(
+            "UPDATE integration_leases SET state = 'lease_acquired' WHERE campaign_id = ? AND state = 'receipt_issued'",
+            [campaign_id]
+          )
+
+          insert_event!("campaign", campaign_id, "legacy_target_gate_rejections_discarded", %{
+            receipt_ids: receipt_ids
+          })
+        else
+          nil
+        end
+      end)
+
+    case transaction do
+      {:ok, nil} ->
+        :ok
+
+      {:ok, event} ->
+        publish(event)
+        :ok
+
+      {:error, reason} ->
+        {:error, {:legacy_target_gate_repair_failed, reason}}
+    end
+  end
+
   defp acquire_or_recover_lease!(campaign, attempt, session_id) do
     case lease(campaign.campaign_id) do
       {:error, :integration_lease_missing} ->

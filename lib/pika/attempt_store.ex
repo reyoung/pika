@@ -259,6 +259,29 @@ defmodule Pika.AttemptStore do
     error -> {:error, {:agent_session_update_failed, Exception.message(error)}}
   end
 
+  def interrupt_active_sessions_for_attempt(attempt_id) do
+    interrupt_active_sessions("attempt_id = ?", [attempt_id])
+  end
+
+  def interrupt_active_sessions_for_role(campaign_id, role) do
+    interrupt_active_sessions("campaign_id = ? AND role = ?", [campaign_id, to_string(role)])
+  end
+
+  defp interrupt_active_sessions(where, params) do
+    Repo.query!(
+      """
+      UPDATE agent_sessions
+      SET status = 'interrupted', ended_at = COALESCE(ended_at, ?)
+      WHERE #{where} AND status IN ('starting', 'running', 'awaiting_report')
+      """,
+      [now_us() | params]
+    )
+
+    :ok
+  rescue
+    error -> {:error, {:agent_session_interrupt_failed, Exception.message(error)}}
+  end
+
   def session(session_id) do
     case Repo.query!(
            "SELECT id, campaign_id, attempt_id, role, slot_index, backend, backend_protocol, model, reasoning_effort, status, required_operations_json, started_at, ended_at FROM agent_sessions WHERE id = ?",

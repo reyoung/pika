@@ -45,14 +45,11 @@ defmodule Pika.Measurement do
          {:ok, full} <- evaluate_escalations(full_path, escalated, context),
          {:ok, final, regressions, target_improvement?} <-
            combine_integration(screening, full, escalated, best_metrics) do
-      gate_failures =
-        if target_improvement?, do: [], else: [{"__target__", "improvement_required"}]
-
       {:ok,
        %{
          metrics: final,
          escalated: escalated,
-         regressions: regressions ++ gate_failures,
+         regressions: regressions,
          target_improvement?: target_improvement?
        }}
     end

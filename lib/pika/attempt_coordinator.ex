@@ -334,6 +334,8 @@ defmodule Pika.AttemptCoordinator do
   defp recover_attempts(state) do
     Store.active_attempts(state.campaign_id)
     |> Enum.reduce(state, fn attempt, acc ->
+      _ = Store.interrupt_active_sessions_for_attempt(attempt.id)
+
       cond do
         attempt.status == "ready_for_integration" ->
           acc

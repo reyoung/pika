@@ -224,12 +224,32 @@ defmodule Pika.MeasurementTest do
 
     assert result.escalated == [{"target_case", "latency_us"}]
 
-    assert result.regressions == [
-             {"target_case", "latency_us"},
-             {"__target__", "improvement_required"}
-           ]
+    assert result.regressions == [{"target_case", "latency_us"}]
 
     assert [%{role: "informational", source: "integration_full"}] = result.metrics
+  end
+
+  test "accepts a Best improvement even when Development remains behind the Optimization Target",
+       context do
+    write_pairs(context.samples, context.context, 5, fn _index -> {1.0, 9.0, true} end)
+
+    assert {:ok, result} =
+             Measurement.evaluate_integration(
+               context.samples,
+               nil,
+               context.correctness,
+               context.context,
+               context.context.best_metrics
+             )
+
+    assert result.regressions == []
+    refute result.target_improvement?
+
+    assert [%{best_relative_improvement: improvement, target_relative_improvement: target_gap}] =
+             result.metrics
+
+    assert improvement > 0
+    assert target_gap < 0
   end
 
   defp write_pairs(path, _context, count, values, order \\ nil) do

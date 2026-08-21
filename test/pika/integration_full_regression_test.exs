@@ -180,6 +180,90 @@ defmodule Pika.IntegrationFullRegressionTest do
     send(task_pid, :release)
   end
 
+  test "marks orphaned Integration sessions interrupted before recovery opens a replacement" do
+    context = ready_attempts(1)
+    [attempt] = AttemptStore.attempts(context.campaign.id, limit: 1)
+
+    session = %Pika.AgentBackend.Session{
+      id: Ecto.UUID.generate(),
+      backend: :codex_app_server,
+      backend_protocol: "codex-app-server",
+      backend_session_id: "orphaned-integration-session",
+      cwd: context.workspace.repo,
+      model: "gpt-test",
+      reasoning_effort: :high,
+      jsonl_path: "/dev/null"
+    }
+
+    assert :ok =
+             AttemptStore.insert_session(
+               context.campaign.id,
+               %{
+                 session_id: session.id,
+                 attempt_id: attempt.id,
+                 role: :integration,
+                 slot_index: nil,
+                 token_hash: String.duplicate("f", 64)
+               },
+               session,
+               %{},
+               ["acquire_integration_lease"]
+             )
+
+    assert :ok =
+             AttemptStore.interrupt_active_sessions_for_role(context.campaign.id, :integration)
+
+    assert {:ok, %{status: "interrupted", ended_at: ended_at}} = AttemptStore.session(session.id)
+    assert is_integer(ended_at)
+  end
+
+  test "discards a legacy target-only rejection so Integration can measure again" do
+    context = ready_attempts(1)
+    [attempt] = AttemptStore.attempts(context.campaign.id, limit: 1)
+    [session | _rest] = AttemptStore.sessions(context.campaign.id)
+
+    [artifact | _rest] =
+      AttemptStore.artifacts_for_owner(context.campaign.id, "attempt", attempt.id)
+
+    lease_id = Ecto.UUID.generate()
+    receipt_id = Ecto.UUID.generate()
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      "INSERT INTO integration_leases(singleton_key, id, campaign_id, backend_session_id, attempt_id, expected_best_sha, state, acquired_at) VALUES (1, ?, ?, ?, ?, ?, 'receipt_issued', ?)",
+      [lease_id, context.campaign.id, session.id, attempt.id, context.best_sha, now]
+    )
+
+    Repo.query!(
+      "INSERT INTO full_regression_receipts(id, campaign_id, attempt_id, lease_id, base_sha, candidate_sha, harness_digest, status, regressed_case_ids_json, metrics_json, correctness_artifact_id, screening_artifact_id, full_artifact_id, issued_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'rejected', '[\"__target__\"]', '[]', ?, ?, ?, ?)",
+      [
+        receipt_id,
+        context.campaign.id,
+        attempt.id,
+        lease_id,
+        attempt.base_sha,
+        attempt.candidate_sha,
+        "legacy-target-gate",
+        artifact.id,
+        artifact.id,
+        artifact.id,
+        now
+      ]
+    )
+
+    assert :ok = IntegrationStore.repair_legacy_target_gate_rejections(context.campaign.id)
+    assert {:error, :receipt_missing} = IntegrationStore.receipt_for_attempt(attempt.id)
+
+    assert [["lease_acquired"]] =
+             Repo.query!("SELECT state FROM integration_leases WHERE id = ?", [lease_id]).rows
+
+    assert [[1]] =
+             Repo.query!(
+               "SELECT COUNT(*) FROM domain_events WHERE aggregate_type = 'campaign' AND aggregate_id = ? AND event_type = 'legacy_target_gate_rejections_discarded'",
+               [context.campaign.id]
+             ).rows
+  end
+
   test "a crash after squash recovers the durable Lease, Receipt, and Intent without a second merge" do
     context = ready_attempts(1)
     {:ok, crash_counter} = Agent.start_link(fn -> 0 end)
