@@ -168,6 +168,7 @@ defmodule PikaWeb.ControlLiveTest do
       live_isolated(conn, PikaWeb.ControlLive, session: %{"pika_auth" => marker})
 
     assert html =~ "Attempts"
+    assert html =~ "Development Baseline"
     assert html =~ "Stop Now"
     assert html =~ "Agent 对话"
     assert html =~ "Integration Agent"
@@ -332,6 +333,35 @@ defmodule PikaWeb.ControlLiveTest do
     assert String.starts_with?(message, "BEGIN OF LONG RESPONSE")
     assert String.ends_with?(message, "END OF LONG RESPONSE")
     assert length(detail.agent_events) <= 500
+  end
+
+  test "exposes the accepted Attempt used as an Attempt base", %{context: context} do
+    {:ok, parent} = Pika.AttemptStore.create_attempt(context.campaign.id, 0)
+    parent_sha = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+
+    Pika.Repo.query!(
+      "UPDATE attempts SET status = 'accepted', accepted_sha = ? WHERE id = ?",
+      [parent_sha, parent.id]
+    )
+
+    Pika.Repo.query!("UPDATE campaigns SET best_sha = ? WHERE id = ?", [
+      parent_sha,
+      context.campaign.id
+    ])
+
+    assert {:ok, child} = Pika.AttemptStore.create_attempt(context.campaign.id, 1)
+
+    snapshot = Pika.Dashboard.snapshot(context.campaign.id)
+    displayed = Enum.find(snapshot.attempts, &(&1.id == child.id))
+
+    assert displayed.base_attempt == %{
+             id: parent.id,
+             ordinal: parent.ordinal,
+             accepted_sha: parent_sha
+           }
+
+    assert {:ok, detail} = Pika.Dashboard.attempt(context.campaign.id, child.id)
+    assert detail.base_attempt == displayed.base_attempt
   end
 
   test "JSON API is bearer protected, idempotent, and excludes MCP credentials", %{

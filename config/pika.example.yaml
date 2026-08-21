@@ -16,6 +16,9 @@ backend:
 campaign:
   plan: false
   max_attempts: null
+  # New Iteration dispatch pauses once this many completed candidates await Integration.
+  # 0 means wait for every completed candidate to finish Integration before dispatching again.
+  max_unverified_attempts: 0
   history_n: 10
   iteration_agents:
     - name: codex-1

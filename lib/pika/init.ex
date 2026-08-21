@@ -127,6 +127,7 @@ defmodule Pika.Init do
     campaign:
       plan: false
       max_attempts: #{max_attempts}
+      max_unverified_attempts: #{settings.max_unverified_attempts}
       history_n: 10
       iteration_agents:
     #{agents}
@@ -293,6 +294,14 @@ defmodule Pika.Init do
              "",
              &parse_optional_non_negative_integer/1
            ),
+         {:ok, max_unverified_attempts} <-
+           choose(
+             opts,
+             :max_unverified_attempts,
+             "Maximum unverified attempts before dispatch pauses",
+             0,
+             &parse_non_negative_integer/1
+           ),
          {:ok, sync} <- collect_sync(opts, mode, repo) do
       {:ok,
        %{
@@ -319,6 +328,7 @@ defmodule Pika.Init do
          integration_sandbox_policy: integration_sandbox_policy,
          iteration_agents: iteration_agents,
          max_attempts: max_attempts,
+         max_unverified_attempts: max_unverified_attempts,
          sync: sync
        }}
     end
@@ -906,6 +916,9 @@ defmodule Pika.Init do
 
   defp parse_positive_integer(value),
     do: parse_integer(value, 1..1_000_000, "expected a positive integer")
+
+  defp parse_non_negative_integer(value),
+    do: parse_integer(value, 0..1_000_000_000, "expected a non-negative integer")
 
   defp parse_optional_non_negative_integer(value) when value in [nil, ""], do: {:ok, nil}
 

@@ -95,7 +95,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 ## 已确认的并发与归并边界
 
 - 一个调优任务允许多个候选尝试并行执行。
-- 用户只配置 Iteration Agent 并发度；Pika 不暴露全局并发度或 Boundary、Plan、Integration 等其他角色的并发参数。
+- 用户配置 Iteration Agent 并发度和 `max_unverified_attempts`；后者限制等待或执行 Integration 的完成候选队列深度。默认 `0`，即初始批次启动后，只要已有候选待验证就暂停新派发。Pika 不暴露 Boundary、Plan、Integration 等其他角色的并发参数。
 - Iteration 开发 Agent 可以自由运行 Benchmark；Pika 不提供独立 Benchmark Lease 或 Benchmark 并发限制。
 - 并发候选尝试的归并有明确先后顺序；归并阶段只有一个并发。
 - 排队期间最佳已知版本发生变化的候选，必须由编码 Agent 在最新版本上重放、解决冲突并重新运行正确性与 Metrics 测试。只有相对最新版本仍满足接受条件时才能归并。
@@ -126,6 +126,7 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 ## 已确认的停止语义
 
 - `max_attempts` 在创建候选尝试时计数；Accepted 和 Rejected 都计入，Plan、恢复会话和 Integration 不重复计数。
+- `max_unverified_attempts` 仅计入 `ready_for_integration`、`refreshing` 与 `integrating` 的完成候选，不中断已经运行的 Iteration；验证完成后调度自动恢复。
 - 达到尝试预算或性能目标后停止创建新候选，但已经运行或进入归并队列的候选继续完成。
 - 多个性能目标默认必须全部达到；Campaign 可以显式配置为任一目标达到即停止。
 - 默认不因连续若干次无提升而提前停止；只有用户显式配置时才启用 Plateau 条件。

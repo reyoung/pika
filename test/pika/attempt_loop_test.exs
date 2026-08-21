@@ -100,6 +100,31 @@ defmodule Pika.AttemptLoopTest do
     assert AttemptCoordinator.snapshot(coordinator).last_error == nil
   end
 
+  test "does not dispatch while completed candidates await Integration by default" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 3)
+
+    assert {:ok, first} = AttemptStore.create_attempt(context.campaign.id, 0)
+
+    Repo.query!(
+      "UPDATE attempts SET status = 'ready_for_integration' WHERE id = ?",
+      [first.id]
+    )
+
+    coordinator =
+      start_coordinator(
+        context,
+        profiles(1, %{test_pid: self(), barrier: true}),
+        auto_dispatch: false,
+        max_unverified_attempts: 0
+      )
+
+    assert :ok = AttemptCoordinator.dispatch(coordinator)
+    refute_receive {:attempt_started, _, _, _, _}, 200
+    assert [attempt] = AttemptStore.attempts(context.campaign.id, limit: 10)
+    assert attempt.id == first.id
+    assert attempt.status == "ready_for_integration"
+  end
+
   test "MCP authentication is available while the Backend Session is opening" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 1)
 
@@ -661,6 +686,7 @@ defmodule Pika.AttemptLoopTest do
         mcp_url: "http://127.0.0.1:18080/mcp"
       ]
       |> Keyword.merge(opts)
+      |> Keyword.put_new(:max_unverified_attempts, 100)
 
     {:ok, coordinator} =
       AttemptCoordinator.start_link(coordinator_opts)

@@ -68,6 +68,7 @@ defmodule Pika.CLI do
           effort: :string,
           iteration_agents: :integer,
           max_attempts: :integer,
+          max_unverified_attempts: :integer,
           sync_remote: :string,
           sync_branch: :string,
           no_sync: :boolean,
@@ -196,6 +197,10 @@ defmodule Pika.CLI do
       |> maybe_cli_error(
         not is_nil(opts[:max_attempts]) and opts[:max_attempts] < 0,
         "--max-attempts must be non-negative"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:max_unverified_attempts]) and opts[:max_unverified_attempts] < 0,
+        "--max-unverified-attempts must be non-negative"
       )
 
     case errors do

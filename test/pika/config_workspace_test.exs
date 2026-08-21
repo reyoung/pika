@@ -14,6 +14,7 @@ defmodule Pika.ConfigWorkspaceTest do
     assert config.backend["type"] == "codex_app_server"
     assert config.backend["approval_policy"] == "never"
     assert config.backend["sandbox_policy"] == "danger_full_access"
+    assert config.campaign["max_unverified_attempts"] == 0
     assert config.campaign["history_n"] == 7
 
     assert [iteration] = config.campaign["iteration_agents"]
@@ -144,6 +145,7 @@ defmodule Pika.ConfigWorkspaceTest do
     campaign:
       plan: yes
       max_attempts: -2
+      max_unverified_attempts: -1
       history_n: -1
       reference_catalog: nope
       stop_conditions:
@@ -165,6 +167,7 @@ defmodule Pika.ConfigWorkspaceTest do
     assert Enum.any?(errors, &String.contains?(&1, "backend.reasoning_effort"))
     assert Enum.any?(errors, &String.contains?(&1, "campaign.plan"))
     assert Enum.any?(errors, &String.contains?(&1, "campaign.max_attempts"))
+    assert Enum.any?(errors, &String.contains?(&1, "campaign.max_unverified_attempts"))
     assert Enum.any?(errors, &String.contains?(&1, "campaign.history_n"))
     assert Enum.any?(errors, &String.contains?(&1, "campaign.reference_catalog"))
     assert Enum.any?(errors, &String.contains?(&1, "campaign.stop_conditions.mode"))

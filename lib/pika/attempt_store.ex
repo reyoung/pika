@@ -311,6 +311,23 @@ defmodule Pika.AttemptStore do
     |> Enum.map(&attempt_from_row/1)
   end
 
+  def unverified_attempt_count(campaign_id) do
+    case Repo.query!(
+           """
+           SELECT COUNT(*)
+           FROM attempts
+           WHERE campaign_id = ?
+             AND status IN ('ready_for_integration', 'refreshing', 'integrating')
+           """,
+           [campaign_id]
+         ).rows do
+      [[count]] when is_integer(count) -> {:ok, count}
+      _ -> {:error, :unverified_attempt_count_unavailable}
+    end
+  rescue
+    error -> {:error, {:unverified_attempt_count_failed, Exception.message(error)}}
+  end
+
   def attempts(campaign_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 100)
     before = Keyword.get(opts, :before_ordinal)
@@ -334,6 +351,18 @@ defmodule Pika.AttemptStore do
       [row] -> {:ok, attempt_from_row(row)}
       [] -> {:error, :attempt_not_found}
     end
+  end
+
+  def accepted_attempt_by_sha(campaign_id, sha) when is_binary(sha) do
+    case Repo.query!(
+           "SELECT #{attempt_columns()} FROM attempts WHERE accepted_sha = ? AND campaign_id = ? AND status = 'accepted' LIMIT 1",
+           [sha, campaign_id]
+         ).rows do
+      [row] -> {:ok, attempt_from_row(row)}
+      [] -> {:error, :attempt_not_found}
+    end
+  rescue
+    error -> {:error, {:accepted_attempt_lookup_failed, Exception.message(error)}}
   end
 
   def record_metrics(attempt_id, metrics, candidate_sha, source \\ "iteration") do

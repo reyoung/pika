@@ -45,6 +45,7 @@ defmodule Pika.InitTest do
                    integration_sandbox_policy: "workspace_write",
                    iteration_agents: 2,
                    max_attempts: 7,
+                   max_unverified_attempts: 3,
                    sync_remote: "origin",
                    sync_branch: "main",
                    yes: true
@@ -72,6 +73,7 @@ defmodule Pika.InitTest do
     assert config.backend["approval_policy"] == "auto_review"
     assert config.backend["sandbox_policy"] == "enabled"
     assert config.campaign["max_attempts"] == 7
+    assert config.campaign["max_unverified_attempts"] == 3
 
     assert Enum.map(config.campaign["iteration_agents"], & &1["name"]) ==
              ~w(codex-1 codex-2)
@@ -134,6 +136,7 @@ defmodule Pika.InitTest do
         "3",
         "2",
         "",
+        "0",
         "n"
       ]
       |> Enum.join("\n")

@@ -85,6 +85,8 @@ defmodule Pika.PreviewAuthCLITest do
                "3",
                "--max-attempts",
                "12",
+               "--max-unverified-attempts",
+               "2",
                "--no-sync",
                "--yes"
              ])
@@ -107,6 +109,7 @@ defmodule Pika.PreviewAuthCLITest do
     assert opts[:integration_sandbox_policy] == "enabled"
     assert opts[:iteration_agents] == 3
     assert opts[:max_attempts] == 12
+    assert opts[:max_unverified_attempts] == 2
     assert opts[:yes]
 
     assert {:error, message} = CLI.parse_init(["--owned", "--repo", "/tmp/repo"])
@@ -118,6 +121,8 @@ defmodule Pika.PreviewAuthCLITest do
     assert {:error, _message} = CLI.parse_init(["--iteration-effort", "infinite"])
     assert {:error, _message} = CLI.parse_init(["--integration-backend", "unknown"])
     assert {:error, _message} = CLI.parse_init(["--integration-effort", "infinite"])
+    assert {:error, message} = CLI.parse_init(["--max-unverified-attempts", "-1"])
+    assert message =~ "--max-unverified-attempts must be non-negative"
 
     assert {:error, _message} =
              CLI.parse_init([

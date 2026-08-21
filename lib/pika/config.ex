@@ -7,7 +7,7 @@ defmodule Pika.Config do
   @root_fields ~w(server backend campaign prompts sync)
   @server_fields ~w(host port)
   @backend_fields ~w(type command model reasoning_effort approval_policy sandbox_policy protocol_config)
-  @campaign_fields ~w(plan max_attempts history_n iteration_agents integration_agent reference_catalog stop_conditions)
+  @campaign_fields ~w(plan max_attempts max_unverified_attempts history_n iteration_agents integration_agent reference_catalog stop_conditions)
   @prompt_fields ~w(alignment setup_merge baseline plan iteration integration sync)
   @sync_fields ~w(remote branch)
   @agent_profile_fields ~w(name backend command model reasoning_effort approval_policy sandbox_policy env protocol_config)
@@ -147,6 +147,7 @@ defmodule Pika.Config do
     protocol_config = backend["protocol_config"] || %{}
     plan = Map.get(campaign, "plan", false)
     max_attempts = Map.get(campaign, "max_attempts")
+    max_unverified_attempts = Map.get(campaign, "max_unverified_attempts", 0)
     history_n = Map.get(campaign, "history_n", 10)
     iteration_agents = Map.get(campaign, "iteration_agents", default_iteration_agents(type))
     integration_agent = Map.get(campaign, "integration_agent", default_integration_agent(type))
@@ -169,6 +170,7 @@ defmodule Pika.Config do
         validate_campaign(
           plan,
           max_attempts,
+          max_unverified_attempts,
           history_n,
           iteration_agents,
           integration_agent,
@@ -207,6 +209,7 @@ defmodule Pika.Config do
       mutable = %{
         "plan" => plan,
         "max_attempts" => max_attempts,
+        "max_unverified_attempts" => max_unverified_attempts,
         "history_n" => history_n,
         "iteration_agents" => normalize_iteration_agents(iteration_agents, type, command),
         "integration_agent" => normalize_integration_agent(integration_agent, type, command),
@@ -346,6 +349,7 @@ defmodule Pika.Config do
   defp validate_campaign(
          plan,
          max_attempts,
+         max_unverified_attempts,
          history_n,
          iteration_agents,
          integration_agent,
@@ -361,6 +365,10 @@ defmodule Pika.Config do
     |> maybe_error(
       not (is_nil(max_attempts) or (is_integer(max_attempts) and max_attempts >= 0)),
       "campaign.max_attempts: must be null or a non-negative integer"
+    )
+    |> maybe_error(
+      not (is_integer(max_unverified_attempts) and max_unverified_attempts >= 0),
+      "campaign.max_unverified_attempts: must be a non-negative integer"
     )
     |> maybe_error(
       not (is_integer(history_n) and history_n >= 0),

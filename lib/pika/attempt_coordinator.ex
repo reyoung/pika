@@ -61,6 +61,8 @@ defmodule Pika.AttemptCoordinator do
       start_backends: Keyword.get(opts, :start_backends, true),
       auto_dispatch: Keyword.get(opts, :auto_dispatch, true),
       recovery_enabled: campaign.status not in ~w(stopped blocked completed),
+      max_unverified_attempts:
+        Keyword.get(opts, :max_unverified_attempts, max_unverified_attempts(workspace)),
       sessions: %{},
       tokens: %{},
       monitors: %{},
@@ -291,20 +293,26 @@ defmodule Pika.AttemptCoordinator do
   end
 
   defp dispatch_slot(slot_index, state) do
-    occupied? =
-      Store.active_attempts(state.campaign_id)
-      |> Enum.any?(&(&1.slot_index == slot_index and &1.status != "ready_for_integration"))
+    with {:ok, unverified_count} <- Store.unverified_attempt_count(state.campaign_id),
+         true <- unverified_dispatch_allowed?(unverified_count, state.max_unverified_attempts) do
+      occupied? =
+        Store.active_attempts(state.campaign_id)
+        |> Enum.any?(&(&1.slot_index == slot_index and &1.status != "ready_for_integration"))
 
-    if occupied? do
-      state
-    else
-      case Store.create_attempt(state.campaign_id, slot_index) do
-        {:ok, attempt} -> prepare_attempt(state, attempt)
-        {:error, :attempt_budget_exhausted} -> state
-        {:error, {:attempt_budget_exhausted, _}} -> state
-        {:error, {:slot_busy, _}} -> state
-        {:error, reason} -> %{state | last_error: inspect(reason)}
+      if occupied? do
+        state
+      else
+        case Store.create_attempt(state.campaign_id, slot_index) do
+          {:ok, attempt} -> prepare_attempt(state, attempt)
+          {:error, :attempt_budget_exhausted} -> state
+          {:error, {:attempt_budget_exhausted, _}} -> state
+          {:error, {:slot_busy, _}} -> state
+          {:error, reason} -> %{state | last_error: inspect(reason)}
+        end
       end
+    else
+      false -> state
+      {:error, reason} -> %{state | last_error: inspect(reason)}
     end
   end
 
@@ -1538,6 +1546,16 @@ defmodule Pika.AttemptCoordinator do
   defp profiles(workspace) do
     get_in(workspace.snapshot, ["mutable", "iteration_agents"]) || [default_profile(workspace)]
   end
+
+  defp max_unverified_attempts(workspace) do
+    get_in(workspace.snapshot, ["mutable", "max_unverified_attempts"]) || 0
+  end
+
+  # A completely empty validation queue must be able to start the first batch even
+  # with the strict default of zero. After that, the configured value is the queue
+  # depth tolerated before new Iteration work is paused.
+  defp unverified_dispatch_allowed?(0, _limit), do: true
+  defp unverified_dispatch_allowed?(count, limit), do: count < limit
 
   defp default_profile(workspace) do
     backend = get_in(workspace.snapshot, ["immutable", "backend"])

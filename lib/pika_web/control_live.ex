@@ -269,7 +269,7 @@ defmodule PikaWeb.ControlLive do
           <div class="attempt-list">
             <button :for={attempt <- @snapshot.attempts} class={"attempt-list-item #{if @selected_attempt_id == attempt.id, do: "selected"}"} phx-click="select_attempt" phx-value-id={attempt.id}>
               <span class="attempt-ordinal">#{attempt.ordinal}</span>
-              <span><strong>{attempt_title(attempt)}</strong><small>Slot {attempt.slot_index + 1} · {attempt.status}</small></span>
+              <span><strong>{attempt_title(attempt)}</strong><small>Slot {attempt.slot_index + 1} · {attempt.status} · {attempt_base_label(attempt)}</small></span>
               <b title="相对固定 Optimization Target">{target_delta(attempt.metrics)}</b>
             </button>
             <p :if={@snapshot.attempts == []} class="empty-copy">尚未创建 Attempt。</p>
@@ -284,7 +284,7 @@ defmodule PikaWeb.ControlLive do
             </div>
             <div class="context-strip">
               <div><span>Status</span><strong>{@selected_attempt.status}</strong></div>
-              <div><span>Base</span><code>{short_sha(@selected_attempt.base_sha)}</code></div>
+              <div><span>Base</span><code>{short_sha(@selected_attempt.base_sha)}</code><small>{attempt_base_label(@selected_attempt)}</small></div>
               <div><span>Candidate</span><code>{short_sha(@selected_attempt.candidate_sha)}</code></div>
               <div><span>Worktree</span><strong>{@selected_attempt.worktree_relative_path}</strong></div>
             </div>
@@ -609,6 +609,11 @@ defmodule PikaWeb.ControlLive do
       else: snapshot.attempts |> List.last() |> then(&(&1 && &1.id))
   end
 
+  defp attempt_base_label(%{base_attempt: %{ordinal: ordinal}}),
+    do: "继承自 Attempt ##{ordinal}"
+
+  defp attempt_base_label(_attempt), do: "Development Baseline"
+
   defp filtered_metrics(assigns) do
     Enum.filter(assigns.snapshot.metrics, fn point ->
       (assigns.metric_filter == "all" or point.metric_id == assigns.metric_filter) and
@@ -627,7 +632,7 @@ defmodule PikaWeb.ControlLive do
       kind: :system,
       label: "Pika",
       content:
-        "Attempt ##{attempt.ordinal} 已从固定 Best #{short_sha(attempt.base_sha)} 启动；Agent 只在独立 worktree 中工作。",
+        "Attempt ##{attempt.ordinal} 已从 #{attempt_base_label(attempt)}（#{short_sha(attempt.base_sha)}）启动；Agent 只在独立 worktree 中工作。",
       at: started_at
     }
 

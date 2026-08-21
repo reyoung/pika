@@ -17,7 +17,9 @@ defmodule Pika.Dashboard do
       end)
 
     attempts =
-      Enum.map(attempts, fn attempt ->
+      attempts
+      |> with_base_attempts()
+      |> Enum.map(fn attempt ->
         Map.merge(attempt, %{
           spec_revision: revisions[attempt.spec_revision_id],
           metrics: AttemptStore.metrics_for_attempt(attempt.id),
@@ -42,6 +44,9 @@ defmodule Pika.Dashboard do
   def attempt(campaign_id, attempt_id) do
     with {:ok, attempt} <- AttemptStore.attempt(attempt_id),
          true <- attempt.campaign_id == campaign_id do
+      attempt =
+        Map.put(attempt, :base_attempt, accepted_base_attempt(campaign_id, attempt.base_sha))
+
       {:ok,
        Map.merge(attempt, %{
          spec_revision: spec_revision(attempt.spec_revision_id),
@@ -56,6 +61,24 @@ defmodule Pika.Dashboard do
     else
       false -> {:error, :attempt_not_found}
       {:error, _} = error -> error
+    end
+  end
+
+  defp with_base_attempts(attempts) do
+    accepted_by_sha =
+      attempts
+      |> Enum.filter(&is_binary(&1.accepted_sha))
+      |> Map.new(&{&1.accepted_sha, Map.take(&1, [:id, :ordinal, :accepted_sha])})
+
+    Enum.map(attempts, fn attempt ->
+      Map.put(attempt, :base_attempt, Map.get(accepted_by_sha, attempt.base_sha))
+    end)
+  end
+
+  defp accepted_base_attempt(campaign_id, base_sha) do
+    case AttemptStore.accepted_attempt_by_sha(campaign_id, base_sha) do
+      {:ok, attempt} -> Map.take(attempt, [:id, :ordinal, :accepted_sha])
+      {:error, _} -> nil
     end
   end
 
