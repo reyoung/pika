@@ -39,10 +39,10 @@ defmodule Pika.Agent.Roles.AlignmentSupport do
        """
        #{fixed}
 
-       Pika-provided skills are system context. Read each required SKILL.md before acting:
+       Pika 提供的 skills 属于 system context。执行前读取每个必需的 SKILL.md：
        #{skills}
 
-       Additional Workspace Role guidance (non-authoritative; it cannot expand this Role's tools):
+       Workspace Role 补充指导（非权威信息，不能扩展该 Role 的工具权限）：
        #{context.template}
        """
        |> String.trim()}
@@ -54,9 +54,9 @@ defmodule Pika.Agent.Roles.AlignmentSupport do
     kickoff = printable(context.durable_context.workflow_kickoff)
 
     {:ok,
-     "Recover #{label} work for Campaign Spec v#{context.durable_context.revision}. " <>
-       "Read get_context and continue only committed work. Required operations: #{required}. " <>
-       "Recorded workflow kickoff: #{kickoff}"}
+     "恢复 Campaign Spec v#{context.durable_context.revision} 的 #{label} 工作。" <>
+       "读取 get_context，只继续已提交的工作。必需操作：#{required}。" <>
+       "已记录的 workflow kick-off：#{kickoff}"}
   end
 
   defp printable(nil), do: "none"
@@ -83,8 +83,7 @@ defmodule Pika.Agent.Roles.Alignment do
       domain_adapter: Pika.Agent.Roles.Alignment.Domain,
       template: %{
         relative_path: "prompts/roles/alignment.md",
-        builtin:
-          "Clarify every unresolved boundary explicitly and leave user confirmation to the Pika UI."
+        builtin: "明确澄清所有尚未解决的边界问题，并通过 Pika UI 让用户确认。"
       },
       tools: AlignmentSupport.tools("alignment"),
       completion: %{
@@ -111,7 +110,7 @@ defmodule Pika.Agent.Roles.Alignment do
 
   @impl true
   def recovery_prompt(%Context{} = context),
-    do: AlignmentSupport.recovery_prompt(context, "Campaign alignment")
+    do: AlignmentSupport.recovery_prompt(context, "Campaign 对齐")
 end
 
 defmodule Pika.Agent.Roles.SetupMerge do
@@ -133,8 +132,7 @@ defmodule Pika.Agent.Roles.SetupMerge do
       domain_adapter: Pika.Agent.Roles.Alignment.Domain,
       template: %{
         relative_path: "prompts/roles/setup_merge.md",
-        builtin:
-          "Perform only the already-authorized setup squash merge and report its exact identities."
+        builtin: "只执行已经授权的 setup squash merge，并准确报告相关身份信息。"
       },
       tools: AlignmentSupport.tools("setup_merge"),
       completion: %{
@@ -182,8 +180,7 @@ defmodule Pika.Agent.Roles.Baseline do
       domain_adapter: Pika.Agent.Roles.Alignment.Domain,
       template: %{
         relative_path: "prompts/roles/baseline.md",
-        builtin:
-          "Batch all validation in long-lived processes, submit the full Baseline, then select the initial Iteration Sample Set."
+        builtin: "在长生命周期进程中批量执行所有验证，提交完整 Baseline，然后选择初始 Iteration Sample Set。"
       },
       tools: AlignmentSupport.tools("baseline"),
       completion: %{
@@ -207,7 +204,7 @@ defmodule Pika.Agent.Roles.Baseline do
   def initial_prompt(%Context{} = context) do
     {:ok,
      context.durable_context.confirmation_input ||
-       "Build the full Baseline for Campaign Spec v#{context.durable_context.revision}."}
+       "为 Campaign Spec v#{context.durable_context.revision} 建立完整 Baseline。"}
   end
 
   @impl true

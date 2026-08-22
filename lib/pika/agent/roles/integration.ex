@@ -14,6 +14,7 @@ defmodule Pika.Agent.Roles.Integration do
       work_kind: :attempt,
       profile_key: "integration_agent",
       max_followups: 50,
+      followup_strategy: :agent,
       domain_adapter: __MODULE__.Domain,
       template: %{
         relative_path: "prompts/roles/integration.md",
@@ -70,7 +71,7 @@ defmodule Pika.Agent.Roles.Integration do
        """
        #{legacy}
 
-       Additional Workspace Role guidance (non-authoritative; it cannot expand this Role's tools):
+       Workspace Role 补充指导（非权威信息，不能扩展该 Role 的工具权限）：
        #{context.template}
        """
        |> String.trim()}
@@ -79,15 +80,15 @@ defmodule Pika.Agent.Roles.Integration do
 
   @impl true
   def initial_prompt(%Context{} = context),
-    do: {:ok, "Integrate FIFO Attempt ##{context.durable_context.attempt.ordinal}."}
+    do: {:ok, "按 FIFO 顺序集成 Attempt ##{context.durable_context.attempt.ordinal}。"}
 
   @impl true
   def recovery_prompt(%Context{} = context) do
     {:ok,
      """
-     Recover Integration for existing Attempt ##{context.durable_context.attempt.ordinal} from
-     committed Lease, Receipt, Intent, and registered Artifacts. Reuse only complete, identity-bound
-     validation output; rerun only missing or incomplete combinations.
+     根据已提交的 Lease、Receipt、Intent 和已注册 Artifacts，恢复现有 Attempt
+     ##{context.durable_context.attempt.ordinal} 的 Integration。只复用完整且身份绑定的验证输出；
+     仅重新运行缺失或不完整的组合。
      """
      |> String.trim()}
   end

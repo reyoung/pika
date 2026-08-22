@@ -29,6 +29,19 @@ defmodule Pika.AttemptLoopTest do
                String.contains?(start.instructions, context.best_sha)
            end)
 
+    Enum.each(AttemptStore.sessions(context.campaign.id), fn session ->
+      artifacts =
+        AttemptStore.artifacts_for_owner(context.campaign.id, "agent_session", session.id)
+
+      assert Enum.any?(artifacts, &(&1.kind == "agent_instructions"))
+
+      assert %{relative_path: kickoff_path} =
+               Enum.find(artifacts, &(&1.kind == "agent_kickoff_prompt"))
+
+      assert File.read!(Path.join(context.workspace.root, kickoff_path)) =~
+               "执行 Attempt #"
+    end)
+
     assert_attempt_mcp_gateway(hd(starts).token)
     assert_mailbox_idempotency(coordinator, starts, context.campaign.id)
     Enum.each(starts, &send(&1.task_pid, :release))

@@ -25,6 +25,10 @@ defmodule Pika.ConfigWorkspaceTest do
     assert config.campaign["integration_agent"]["backend"] == "codex_app_server"
     assert config.campaign["integration_agent"]["reasoning_effort"] == "high"
     assert config.campaign["progress_summary"]["enabled"] == false
+
+    assert config.campaign["integration_followup_agent"] ==
+             config.campaign["integration_agent"]
+
     assert config.campaign["progress_summary"]["interval_minutes"] == 10
   end
 
@@ -279,7 +283,7 @@ defmodule Pika.ConfigWorkspaceTest do
     assert File.read!(Path.join(root, "foreign-file")) == "do not touch"
   end
 
-  test "rejects immutable listen and backend changes but accepts mutable Campaign settings" do
+  test "allows reconfigurable listen/backend settings while preserving Workspace identity" do
     root = CampaignFixtures.workspace()
     initial_path = CampaignFixtures.config_file()
     {:ok, config} = Config.load(initial_path, workspace: root)
@@ -293,12 +297,12 @@ defmodule Pika.ConfigWorkspaceTest do
     assert {:ok, changed} = Config.load(CampaignFixtures.config_file(mutable), workspace: root)
     assert changed.campaign["history_n"] == 23
 
-    immutable = CampaignFixtures.default_config(18_081)
+    reconfigured = CampaignFixtures.default_config(18_081)
 
-    assert {:error, {:immutable_config_changed, differences}} =
-             Config.load(CampaignFixtures.config_file(immutable), workspace: root)
+    assert {:ok, changed} =
+             Config.load(CampaignFixtures.config_file(reconfigured), workspace: root)
 
-    assert Enum.any?(differences, &String.contains?(&1, "listen.port"))
+    assert changed.port == 18_081
   end
 
   test "adds the foreground serve command to an assembled Elixir Release" do
@@ -319,8 +323,10 @@ defmodule Pika.ConfigWorkspaceTest do
     assert generated =~ "serve)"
     assert generated =~ "Pika.CLI.main([\"init\" | System.argv()])"
     assert generated =~ "Pika.CLI.main([\"serve\" | System.argv()])"
+    assert generated =~ "Pika.CLI.main([\"reconfiguration\" | System.argv()])"
     assert generated =~ ~s(--boot "$REL_VSN_DIR/$RELEASE_BOOT_SCRIPT_CLEAN")
     assert generated =~ "init           Interactively initializes a Pika Workspace"
     assert generated =~ "serve          Starts Pika Server in the foreground"
+    assert generated =~ "reconfiguration  Updates mutable Pika Workspace configuration"
   end
 end

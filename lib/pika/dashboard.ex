@@ -7,7 +7,7 @@ defmodule Pika.Dashboard do
 
   def snapshot(campaign_id \\ current_campaign_id(), opts \\ []) do
     attempts = AttemptStore.attempts(campaign_id, limit: 1_000) |> Enum.sort_by(& &1.ordinal)
-    sessions = AttemptStore.sessions(campaign_id)
+    sessions = AttemptStore.sessions(campaign_id) |> Enum.map(&with_prompts/1)
     revisions = spec_revisions(campaign_id)
     guidance = guidance_by_attempt(campaign_id)
 
@@ -53,7 +53,9 @@ defmodule Pika.Dashboard do
          spec_revision: spec_revision(attempt.spec_revision_id),
          metrics: AttemptStore.metrics_for_attempt(attempt_id),
          sessions:
-           Enum.filter(AttemptStore.sessions(campaign_id), &(&1.attempt_id == attempt_id)),
+           AttemptStore.sessions(campaign_id)
+           |> Enum.filter(&(&1.attempt_id == attempt_id))
+           |> Enum.map(&with_prompts/1),
          guidance: Map.get(guidance_by_attempt(campaign_id), attempt_id, []),
          events: events_for("attempt", attempt_id),
          agent_events: agent_events(attempt_id),
@@ -161,6 +163,42 @@ defmodule Pika.Dashboard do
         created_at: created_at
       }
     end)
+  end
+
+  defp with_prompts(%{role: "iteration"} = session) do
+    prompt_artifacts = artifacts("agent_session", session.id)
+
+    Map.put(session, :prompts, %{
+      system: prompt(prompt_artifacts, "agent_instructions"),
+      kickoff: prompt(prompt_artifacts, "agent_kickoff_prompt")
+    })
+  end
+
+  defp with_prompts(session), do: Map.put(session, :prompts, %{system: nil, kickoff: nil})
+
+  defp prompt(artifacts, kind) do
+    with %{relative_path: relative_path} <- Enum.find(artifacts, &(&1.kind == kind)),
+         {:ok, content} <- read_workspace_file(relative_path) do
+      %{content: content, first_line: first_line(content)}
+    else
+      _ -> nil
+    end
+  end
+
+  defp read_workspace_file(relative_path) do
+    root = Repo.config()[:database] |> Path.dirname()
+    path = Path.expand(relative_path, root)
+
+    if String.starts_with?(path, root <> "/") and File.regular?(path),
+      do: File.read(path),
+      else: {:error, :prompt_not_found}
+  end
+
+  defp first_line(content) do
+    content
+    |> String.split(~r/\R/u, parts: 2)
+    |> hd()
+    |> String.trim()
   end
 
   defp agent_events(attempt_id) do

@@ -5,6 +5,7 @@ defmodule Pika.Agent.RoleRegistry do
     "alignment" => Pika.Agent.Roles.Alignment,
     "baseline" => Pika.Agent.Roles.Baseline,
     "integration" => Pika.Agent.Roles.Integration,
+    "integration_followup" => Pika.Agent.Roles.IntegrationFollowup,
     "iteration" => Pika.Agent.Roles.Iteration,
     "plan" => Pika.Agent.Roles.Plan,
     "progress_summary" => Pika.Agent.Roles.ProgressSummary,

@@ -110,7 +110,7 @@ defmodule Pika.Agent.SymphonyTest do
     assert :ok = Symphony.reconcile(symphony)
     assert_receive {:symphony_session_opened, first_session, _mcp, _instructions}
     assert_receive {:symphony_turn_started, first_prompt}
-    refute first_prompt =~ "Recover this interrupted"
+    refute first_prompt =~ "恢复这次中断"
 
     assert [{work, first_actor}] = Symphony.active(symphony)
     assert work.id == request.id
@@ -129,7 +129,7 @@ defmodule Pika.Agent.SymphonyTest do
     assert first_session.id != second_session.id
     assert recovery_instructions =~ "Progress Summary Actor"
     assert_receive {:symphony_turn_started, recovery_prompt}
-    assert recovery_prompt =~ "Recover this interrupted"
+    assert recovery_prompt =~ "恢复这次中断"
 
     assert [["interrupted"], ["running"]] =
              Repo.query!(
@@ -196,6 +196,7 @@ defmodule Pika.Agent.SymphonyTest do
     assert :ok = Symphony.reconcile(symphony)
     assert [{^work, ^actor}] = Symphony.active(symphony)
     refute_receive {:symphony_session_opened, _session, _mcp, _instructions}, 100
+
     assert Repo.query!("SELECT COUNT(*) FROM agent_sessions WHERE work_id = ?", [request.id]).rows ==
              [[1]]
   end

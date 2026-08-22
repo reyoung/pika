@@ -82,6 +82,36 @@ defmodule PikaWeb.ControlLiveTest do
                []
              )
 
+    assert {:ok, _system_prompt} =
+             Pika.ArtifactStore.write(
+               context.workspace,
+               "artifacts/prompts/agent-sessions/#{session.id}-system.md",
+               "Iteration system first line\nSystem prompt full second line\n",
+               %{
+                 campaign_id: context.campaign.id,
+                 owner_type: "agent_session",
+                 owner_id: session.id,
+                 kind: "agent_instructions",
+                 mime_type: "text/markdown",
+                 metadata: %{}
+               }
+             )
+
+    assert {:ok, _kickoff_prompt} =
+             Pika.ArtifactStore.write(
+               context.workspace,
+               "artifacts/prompts/agent-sessions/#{session.id}-kickoff.md",
+               "Kick-off first line\nKick-off full second line\n",
+               %{
+                 campaign_id: context.campaign.id,
+                 owner_type: "agent_session",
+                 owner_id: session.id,
+                 kind: "agent_kickoff_prompt",
+                 mime_type: "text/markdown",
+                 metadata: %{}
+               }
+             )
+
     log_path = "artifacts/logs/#{attempt.id}/#{session.id}.jsonl"
 
     assert {:ok, _artifact} =
@@ -172,6 +202,10 @@ defmodule PikaWeb.ControlLiveTest do
     assert html =~ "Development Baseline"
     assert html =~ "Stop Now"
     assert html =~ "Agent 对话"
+    assert html =~ "System Prompt"
+    assert html =~ "Kick-off User Prompt"
+    assert html =~ "System prompt full second line"
+    assert html =~ "Kick-off full second line"
     assert html =~ "Integration Agent"
     assert html =~ "Inspecting the kernel"
     assert html =~ "Profiling now."
@@ -184,6 +218,19 @@ defmodule PikaWeb.ControlLiveTest do
     assert html =~ "Agent 正在处理 Attempt"
     assert html =~ ~s(id="attempt-message-form")
     assert html =~ log_path
+
+    assert has_element?(
+             view,
+             "details.agent-prompt:not([open]) summary span",
+             "Iteration system first line"
+           )
+
+    assert has_element?(
+             view,
+             "details.agent-prompt:not([open]) summary span",
+             "Kick-off first line"
+           )
+
     metrics_html = view |> element("button[phx-value-tab='metrics']") |> render_click()
     assert metrics_html =~ "Metrics Timeline"
     assert metrics_html =~ "Spec Revision"

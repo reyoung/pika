@@ -38,6 +38,10 @@ Backend Session 的临时 Token，tool catalog 与授权来自 Role Definition�
   独立 Role；Role 变化会创建新 Actor、Backend Session 与 Token。
 - Progress Summary 先持久化 Progress Summary Request，再由 `submit_progress_summary` MCP operation
   提交结果；Pika 不再把 Backend 自然语言输出拼接成权威 Summary。
+- Integration Turn 在缺少终态操作时不再由 Actor 拼接固定催促文本。Actor 先持久化 Integration
+  FollowUp Request；least-privilege Integration FollowUp Role 读取目标 Session 的最近历史和 committed
+  facts，并且只能通过 `submit_followup_message` 提交一条消息。消息提交后持久化并由原 Integration
+  Actor 恢复消费；FollowUp Actor 不获取 Integration Lease，也不能调用 Integration 写操作。
 - Workspace 可以定制 Role 工作指导和 Agent Profile，但不能定义新 Role、扩大 MCP 权限或改变
   completion graph。Workspace Role 模板使用无代码执行的受限变量语法；Pika-owned 固定 Instructions
   资源和旧配置路径继续兼容，不把可执行 EEx 暴露为新的 Workspace 扩展面。

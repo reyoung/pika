@@ -54,7 +54,7 @@ defmodule Pika.Agent.Roles.AttemptSupport do
        """
        #{legacy}
 
-       Additional Workspace Role guidance (non-authoritative; it cannot expand this Role's tools):
+       Workspace Role 补充指导（非权威信息，不能扩展该 Role 的工具权限）：
        #{context.template}
        #{recovery}
        """
@@ -82,8 +82,7 @@ defmodule Pika.Agent.Roles.Plan do
       domain_adapter: Pika.Agent.Roles.Attempt.Domain,
       template: %{
         relative_path: "prompts/roles/plan.md",
-        builtin:
-          "Produce one focused optimization plan. Do not implement or benchmark the candidate."
+        builtin: "制定一个聚焦的优化计划；不要实现或 benchmark 候选方案。"
       },
       tools:
         AttemptSupport.shared_tools() ++
@@ -111,9 +110,7 @@ defmodule Pika.Agent.Roles.Plan do
 
   @impl true
   def initial_prompt(%Context{} = context),
-    do:
-      {:ok,
-       "Prepare the focused optimization plan for Attempt ##{context.durable_context.attempt.ordinal}."}
+    do: {:ok, "为 Attempt ##{context.durable_context.attempt.ordinal} 制定聚焦的优化计划。"}
 
   @impl true
   def recovery_prompt(%Context{} = context),
@@ -122,8 +119,8 @@ defmodule Pika.Agent.Roles.Plan do
   defp recovery_prompt_text(context, role) do
     required = context.facts |> Pika.Agent.Roles.Attempt.Domain.required_operations()
 
-    "Recover #{role} work for the existing Attempt ##{context.durable_context.attempt.ordinal}; complete: " <>
-      Enum.join(required, ", ") <> "."
+    "恢复现有 Attempt ##{context.durable_context.attempt.ordinal} 的 #{role} 工作；完成以下操作：" <>
+      Enum.join(required, ", ") <> "。"
   end
 end
 
@@ -146,8 +143,7 @@ defmodule Pika.Agent.Roles.Iteration do
       domain_adapter: Pika.Agent.Roles.Attempt.Domain,
       template: %{
         relative_path: "prompts/roles/iteration.md",
-        builtin:
-          "Optimize only the Attempt worktree. Batch validation in long-lived processes and reject early when committed evidence proves the candidate is not worthwhile."
+        builtin: "只优化 Attempt worktree。在长生命周期进程中批量验证；当已提交证据证明候选方案不值得继续时尽早 reject。"
       },
       tools:
         AttemptSupport.shared_tools() ++
@@ -198,15 +194,15 @@ defmodule Pika.Agent.Roles.Iteration do
   def initial_prompt(%Context{} = context),
     do:
       {:ok,
-       "Run Attempt ##{context.durable_context.attempt.ordinal} from its fixed Best and Sampling Revision."}
+       "基于固定的 Best 和 Sampling Revision 执行 Attempt ##{context.durable_context.attempt.ordinal}。"}
 
   @impl true
   def recovery_prompt(%Context{} = context) do
     required = context.facts |> Pika.Agent.Roles.Attempt.Domain.required_operations()
 
     {:ok,
-     "Recover iteration work for the existing Attempt ##{context.durable_context.attempt.ordinal}; complete: " <>
-       Enum.join(required, ", ") <> "."}
+     "恢复现有 Attempt ##{context.durable_context.attempt.ordinal} 的 iteration 工作；完成以下操作：" <>
+       Enum.join(required, ", ") <> "。"}
   end
 end
 

@@ -26,6 +26,7 @@ defmodule Pika.PromptCatalogTest do
     assert alignment =~ "ask_questions"
     assert alignment =~ "required user decisions"
     assert alignment =~ "formal_pair_protocol"
+    assert alignment =~ "用户可见文本必须使用中文"
 
     assert alignment =~
              "It is not a Case count, dataset size, record count, batch size or shape count"
@@ -41,6 +42,8 @@ defmodule Pika.PromptCatalogTest do
     assert alignment =~ "submit_implementation_bundle"
     assert alignment =~ "submit_implementation_review"
     assert alignment =~ "not the full Baseline"
+    assert alignment =~ "workload-weighted aggregate"
+    assert alignment =~ "equal Case weights"
     refute alignment =~ "call ask_question with"
 
     assert {:ok, setup} =
@@ -74,6 +77,9 @@ defmodule Pika.PromptCatalogTest do
     assert baseline =~ "do not manufacture a larger JSONL"
     assert baseline =~ "call reopen_baseline_definition exactly once"
     assert baseline =~ "do not ask for revision only in prose"
+    assert baseline =~ "20 microseconds"
+    assert baseline =~ "multi-Case weighted aggregate"
+    assert baseline =~ "用户可见文本必须使用中文"
 
     benchmark = %{"pair_count" => 8, "min_valid_pairs" => 6}
 
@@ -120,6 +126,8 @@ defmodule Pika.PromptCatalogTest do
 
     assert iteration =~ "must not enter Integration or acquire an Integration lease"
     assert iteration =~ "recovery requires only `reject_attempt`"
+    assert iteration =~ "A 1% budget applies to that aggregate"
+    assert iteration =~ "用户可见文本必须使用中文"
 
     assert {:ok, integration} =
              PromptCatalog.render(:integration, %{
@@ -130,6 +138,9 @@ defmodule Pika.PromptCatalogTest do
              })
 
     assert integration =~ ~r/independent\s+8 Pair run/
+    assert integration =~ "1% per-Case latency cutoff"
+    assert integration =~ "equal Case weights"
+    assert integration =~ "用户可见文本必须使用中文"
 
     assert {:ok, sync} =
              PromptCatalog.render(:sync, %{

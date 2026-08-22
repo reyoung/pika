@@ -94,6 +94,7 @@ defmodule Pika.Agent.ActorTest do
         activation: :automatic,
         work_kind: :blocking_test,
         profile_key: "blocking_test",
+        followup_strategy: :agent,
         domain_adapter: Pika.Agent.ActorTest.BlockingDomain,
         template: %{relative_path: "prompts/roles/blocking_test.md", builtin: "Wait safely."},
         tools: [
@@ -106,7 +107,7 @@ defmodule Pika.Agent.ActorTest do
         ],
         completion: %{
           terminals: [{:completed, {:fact, :done}}],
-          suggestions: []
+          suggestions: [{"wait", {:eq, :done, false}}]
         }
       }
     end
@@ -119,6 +120,87 @@ defmodule Pika.Agent.ActorTest do
 
     @impl true
     def recovery_prompt(%Context{}), do: {:ok, "Recover waiting."}
+  end
+
+  test "an agent follow-up request replaces the Actor's hard-coded retry prompt", context do
+    profile = %{
+      "backend" => :fake,
+      "model" => "fake-model",
+      "reasoning_effort" => "medium",
+      "env" => %{test_pid: self()}
+    }
+
+    work = %Work{
+      role_id: "blocking_test",
+      kind: :blocking_test,
+      id: Ecto.UUID.generate(),
+      campaign_id: context.campaign.id
+    }
+
+    assert {:ok, actor} =
+             Actor.start_link(
+               work: work,
+               role: BlockingRole,
+               workspace: context.workspace,
+               profile: profile,
+               directory: context.directory,
+               backend_modules: %{fake: Backend}
+             )
+
+    assert_receive {:actor_backend_opened, _mcp, [], _instructions, session}
+    assert_receive {:actor_turn_started, "Start waiting.", turn_id}
+
+    send(
+      actor,
+      {:pika_backend_event,
+       Pika.AgentBackend.Event.new(:turn_completed, :fake, session.id, %{turn_id: turn_id})}
+    )
+
+    assert eventually(fn ->
+             Repo.query!(
+               "SELECT status, required_operations_json, context_json FROM agent_followup_requests WHERE target_session_id = ?",
+               [session.id]
+             ).rows
+             |> case do
+               [["requested", required, context_json]] ->
+                 Jason.decode!(required) == ["wait"] and
+                   Jason.decode!(context_json)["recent_history"] != nil
+
+               _ ->
+                 false
+             end
+           end)
+
+    refute_receive {:actor_turn_started, _, _}, 100
+
+    [[request_id]] =
+      Repo.query!(
+        "SELECT id FROM agent_followup_requests WHERE target_session_id = ?",
+        [session.id]
+      ).rows
+
+    assert {:ok, %{status: "completed"}} =
+             Pika.AgentFollowupStore.submit(
+               request_id,
+               "H20 全量回归仍在运行；等待 identity-bound artifact 完整后再提交。"
+             )
+
+    assert_receive {:actor_turn_started, message, _}, 1_000
+    assert message =~ "等待 identity-bound artifact 完整"
+    refute message =~ "The turn ended before"
+    assert :ok = Actor.stop(actor)
+  end
+
+  defp eventually(fun, attempts \\ 50)
+  defp eventually(fun, 0), do: fun.()
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(fun, attempts - 1)
+    end
   end
 
   setup do
@@ -185,6 +267,7 @@ defmodule Pika.Agent.ActorTest do
     assert_receive {:actor_backend_opened, mcp, [], instructions, session}
     assert mcp.url == "http://127.0.0.1:8080/mcp"
     assert instructions =~ "Progress Summary Actor"
+    assert instructions =~ "中文总结"
     assert {:ok, binding} = Directory.lookup(mcp.token, context.directory)
     assert binding.actor == actor
     assert binding.work == work

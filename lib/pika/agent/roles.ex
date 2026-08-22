@@ -155,6 +155,7 @@ defmodule Pika.Agent.Roles do
       {definition.activation in [:automatic, :await_user_kickoff], :invalid_activation},
       {is_integer(definition.max_followups) and definition.max_followups >= 0,
        :invalid_max_followups},
+      {definition.followup_strategy in [:direct, :agent], :invalid_followup_strategy},
       {is_atom(definition.work_kind), :invalid_work_kind},
       {Code.ensure_loaded?(definition.domain_adapter), :domain_adapter_unavailable},
       {function_exported?(definition.domain_adapter, :prepare, 2), :invalid_domain_adapter},

@@ -16,6 +16,15 @@ defmodule Pika.Agent.WorkSources.ProgressSummary do
     do: Pika.ProgressSummaryStore.runnable_work(campaign_id)
 end
 
+defmodule Pika.Agent.WorkSources.AgentFollowup do
+  @moduledoc false
+  @behaviour Pika.Agent.WorkSource
+
+  @impl true
+  def runnable_work(campaign_id, _workspace),
+    do: Pika.AgentFollowupStore.runnable_work(campaign_id)
+end
+
 defmodule Pika.Agent.WorkSources.Sync do
   @moduledoc false
 

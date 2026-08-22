@@ -7,7 +7,7 @@ defmodule Pika.Config do
   @root_fields ~w(server backend campaign prompts sync)
   @server_fields ~w(host port)
   @backend_fields ~w(type command model reasoning_effort approval_policy sandbox_policy protocol_config)
-  @campaign_fields ~w(plan max_attempts max_unverified_attempts history_n iteration_agents integration_agent progress_summary reference_catalog stop_conditions)
+  @campaign_fields ~w(plan max_attempts max_unverified_attempts history_n iteration_agents integration_agent integration_followup_agent progress_summary reference_catalog stop_conditions)
   @prompt_fields ~w(alignment setup_merge baseline plan iteration integration sync)
   @sync_fields ~w(remote branch)
   @agent_profile_fields ~w(name backend command model reasoning_effort approval_policy sandbox_policy env protocol_config)
@@ -151,6 +151,10 @@ defmodule Pika.Config do
     history_n = Map.get(campaign, "history_n", 10)
     iteration_agents = Map.get(campaign, "iteration_agents", default_iteration_agents(type))
     integration_agent = Map.get(campaign, "integration_agent", default_integration_agent(type))
+
+    integration_followup_agent =
+      Map.get(campaign, "integration_followup_agent", integration_agent)
+
     progress_summary = Map.get(campaign, "progress_summary", %{"enabled" => false})
     reference_catalog = Map.get(campaign, "reference_catalog", [])
     stop_conditions = Map.get(campaign, "stop_conditions", %{})
@@ -175,6 +179,7 @@ defmodule Pika.Config do
           history_n,
           iteration_agents,
           integration_agent,
+          integration_followup_agent,
           progress_summary,
           reference_catalog,
           stop_conditions,
@@ -215,6 +220,8 @@ defmodule Pika.Config do
         "history_n" => history_n,
         "iteration_agents" => normalize_iteration_agents(iteration_agents, type, command),
         "integration_agent" => normalize_integration_agent(integration_agent, type, command),
+        "integration_followup_agent" =>
+          normalize_integration_agent(integration_followup_agent, type, command),
         "progress_summary" => normalize_progress_summary(progress_summary, type, command),
         "reference_catalog" => reference_catalog,
         "stop_conditions" => stop_conditions,
@@ -293,14 +300,11 @@ defmodule Pika.Config do
 
   defp immutable_comparison(immutable) do
     managed = immutable["managed_repo"]
-    backend = Map.take(immutable["backend"] || %{}, ~w(type command protocol_config))
 
     %{
       "workspace" => immutable["workspace"],
       "repo_mode" => immutable["repo_mode"],
       "managed_repo" => if(managed, do: Map.take(managed, ["canonical_path"]), else: nil),
-      "listen" => immutable["listen"],
-      "backend" => backend,
       "prompts" => immutable["prompts"] || %{}
     }
   end
@@ -356,6 +360,7 @@ defmodule Pika.Config do
          history_n,
          iteration_agents,
          integration_agent,
+         integration_followup_agent,
          progress_summary,
          references,
          stop_conditions,
@@ -380,6 +385,13 @@ defmodule Pika.Config do
     )
     |> Kernel.++(validate_iteration_agents(iteration_agents, default_backend))
     |> Kernel.++(validate_integration_agent(integration_agent, default_backend))
+    |> Kernel.++(
+      validate_agent_profile(
+        integration_followup_agent,
+        default_backend,
+        "campaign.integration_followup_agent"
+      )
+    )
     |> Kernel.++(validate_progress_summary(progress_summary, default_backend))
     |> maybe_error(not is_list(references), "campaign.reference_catalog: must be a list")
     |> maybe_error(not is_map(stop_conditions), "campaign.stop_conditions: must be a mapping")
@@ -466,6 +478,31 @@ defmodule Pika.Config do
 
   defp validate_integration_agent(_agent, _default_backend),
     do: ["campaign.integration_agent: must be a mapping"]
+
+  defp validate_agent_profile(agent, default_backend, prefix) when is_map(agent) do
+    agent = stringify_keys(agent)
+    backend = agent["backend"] || default_backend
+
+    unknown_fields(agent, @agent_profile_fields, prefix) ++
+      validate_optional_backend(agent["backend"], prefix) ++
+      validate_optional_command(agent["command"], prefix) ++
+      validate_optional_string(agent["name"], "#{prefix}.name") ++
+      validate_optional_string(agent["model"], "#{prefix}.model") ++
+      validate_effort(agent["reasoning_effort"], prefix) ++
+      validate_permission(backend, :approval_policy, agent["approval_policy"], prefix) ++
+      validate_permission(backend, :sandbox_policy, agent["sandbox_policy"], prefix) ++
+      if(is_nil(agent["env"]) or is_map(agent["env"]),
+        do: [],
+        else: ["#{prefix}.env: must be a mapping"]
+      ) ++
+      if(is_nil(agent["protocol_config"]) or is_map(agent["protocol_config"]),
+        do: [],
+        else: ["#{prefix}.protocol_config: must be a mapping"]
+      )
+  end
+
+  defp validate_agent_profile(_agent, _default_backend, prefix),
+    do: ["#{prefix}: must be a mapping"]
 
   defp validate_progress_summary(summary, default_backend) when is_map(summary) do
     prefix = "campaign.progress_summary"

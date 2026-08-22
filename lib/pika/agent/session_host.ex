@@ -151,7 +151,8 @@ defmodule Pika.Agent.SessionHost do
                  template_sha256: prepared.instructions.template_sha256
                }
              }
-           ) do
+           ),
+         :ok <- persist_kickoff_prompt(prepared, session) do
       now = System.system_time(:microsecond)
       capabilities = AgentBackend.capabilities(handle)
 
@@ -200,6 +201,30 @@ defmodule Pika.Agent.SessionHost do
   rescue
     error -> {:error, {:agent_session_persist_failed, Exception.message(error)}}
   end
+
+  defp persist_kickoff_prompt(%Prepared{activation: {:start_turn, prompt}} = prepared, session)
+       when is_binary(prompt) do
+    relative =
+      Path.join(["artifacts", "prompts", "agent-sessions", "#{session.id}-kickoff.md"])
+
+    case ArtifactStore.write(prepared.workspace, relative, prompt <> "\n", %{
+           campaign_id: prepared.work.campaign_id,
+           owner_type: "agent_session",
+           owner_id: session.id,
+           kind: "agent_kickoff_prompt",
+           mime_type: "text/markdown",
+           metadata: %{
+             role: prepared.definition.id,
+             work_kind: prepared.work.kind,
+             work_id: prepared.work.id
+           }
+         }) do
+      {:ok, _artifact} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp persist_kickoff_prompt(%Prepared{activation: :await_user_kickoff}, _session), do: :ok
 
   defp update_status(session_id, status, progress, increments \\ []) do
     ended_at =

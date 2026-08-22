@@ -7,6 +7,7 @@ defmodule Pika.Agent.Symphony do
   alias Pika.Repo
 
   @default_sources [
+    Pika.Agent.WorkSources.AgentFollowup,
     Pika.Agent.WorkSources.ProgressSummary,
     Pika.Agent.WorkSources.Sync,
     Pika.Agent.WorkSources.Integration,

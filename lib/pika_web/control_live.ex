@@ -326,6 +326,10 @@ defmodule PikaWeb.ControlLive do
             <div class="attempt-stream">
               <article :for={event <- @selected_attempt.sessions} class="backend-card">
                 <span>{event.role}</span><strong>{event.backend} · {event.model || "default"}</strong><small>{event.backend_protocol} · {event.reasoning_effort || "default"} · {event.status}</small>
+                <div :if={event.role == "iteration"} class="agent-prompts">
+                  <.agent_prompt label="System Prompt" prompt={event.prompts.system} />
+                  <.agent_prompt label="Kick-off User Prompt" prompt={event.prompts.kickoff} />
+                </div>
               </article>
               <section class="attempt-conversation">
                 <div class="stream-heading">
@@ -545,6 +549,18 @@ defmodule PikaWeb.ControlLive do
       </section>
       <.command_console console={@command_console} />
     </main>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :prompt, :map, default: nil
+
+  defp agent_prompt(assigns) do
+    ~H"""
+    <details :if={@prompt} class="agent-prompt">
+      <summary><strong>{@label}</strong><span>{@prompt.first_line}</span></summary>
+      <pre>{@prompt.content}</pre>
+    </details>
     """
   end
 

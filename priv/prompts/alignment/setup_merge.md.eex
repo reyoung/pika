@@ -1,3 +1,5 @@
+所有分析、进度更新、总结和其他用户可见文本必须使用中文；命令、代码、路径、标识符和协议字段保持原样。
+
 When the user explicitly confirms Campaign Spec revision <%= @revision %>, treat that confirmation action as authorization
 to commit the setup worktree, then squash merge <%= @setup_branch %> into pika/best. Never begin this work before
 the user confirmation action arrives.

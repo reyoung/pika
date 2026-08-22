@@ -59,6 +59,14 @@ defmodule Pika.Init do
     integration_sandbox_policy =
       Map.get(settings, :integration_sandbox_policy, integration_permissions.sandbox_policy)
 
+    followup_permissions = PermissionPolicy.defaults(settings.followup_backend)
+
+    followup_approval_policy =
+      Map.get(settings, :followup_approval_policy, followup_permissions.approval_policy)
+
+    followup_sandbox_policy =
+      Map.get(settings, :followup_sandbox_policy, followup_permissions.sandbox_policy)
+
     summary_permissions = PermissionPolicy.defaults(settings.summary_backend)
 
     summary_model =
@@ -92,6 +100,11 @@ defmodule Pika.Init do
     integration_model =
       if settings.integration_model,
         do: "\n    model: #{yaml_string(settings.integration_model)}",
+        else: ""
+
+    followup_model =
+      if settings.followup_model,
+        do: "\n    model: #{yaml_string(settings.followup_model)}",
         else: ""
 
     sync =
@@ -144,6 +157,12 @@ defmodule Pika.Init do
         reasoning_effort: #{settings.integration_effort}
         approval_policy: #{integration_approval_policy}
         sandbox_policy: #{integration_sandbox_policy}
+      integration_followup_agent:
+        name: integration-followup
+        backend: #{settings.followup_backend}#{followup_model}
+        reasoning_effort: #{settings.followup_effort}
+        approval_policy: #{followup_approval_policy}
+        sandbox_policy: #{followup_sandbox_policy}
       progress_summary:
         enabled: #{settings.progress_summary}
         interval_minutes: #{settings.summary_interval_minutes}
@@ -293,6 +312,45 @@ defmodule Pika.Init do
              "Integration Agent",
              "high"
            ),
+         {:ok, followup_backend} <-
+           collect_backend(
+             inherit_backend(opts, :followup_backend),
+             :followup_backend,
+             "Integration FollowUp Agent",
+             backend_label(integration_backend)
+           ),
+         {:ok, followup_approval_policy} <-
+           collect_permission(
+             opts,
+             :followup_approval_policy,
+             followup_backend,
+             "Integration FollowUp Agent",
+             :approval_policy
+           ),
+         {:ok, followup_sandbox_policy} <-
+           collect_permission(
+             opts,
+             :followup_sandbox_policy,
+             followup_backend,
+             "Integration FollowUp Agent",
+             :sandbox_policy
+           ),
+         followup_opts <- inherit_option(opts, :followup_model, :integration_model),
+         {:ok, followup_model, model_cache} <-
+           collect_model(
+             followup_opts,
+             :followup_model,
+             followup_backend,
+             "Integration FollowUp Agent",
+             model_cache
+           ),
+         {:ok, followup_effort} <-
+           collect_effort(
+             inherit_option(opts, :followup_effort, :integration_effort),
+             :followup_effort,
+             "Integration FollowUp Agent",
+             "medium"
+           ),
          progress_summary <- Keyword.get(opts, :progress_summary, false),
          {:ok, summary_backend} <-
            if(progress_summary,
@@ -383,6 +441,11 @@ defmodule Pika.Init do
          integration_effort: integration_effort,
          integration_approval_policy: integration_approval_policy,
          integration_sandbox_policy: integration_sandbox_policy,
+         followup_backend: followup_backend,
+         followup_model: followup_model,
+         followup_effort: followup_effort,
+         followup_approval_policy: followup_approval_policy,
+         followup_sandbox_policy: followup_sandbox_policy,
          progress_summary: progress_summary,
          summary_backend: summary_backend,
          summary_model: summary_model,

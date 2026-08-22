@@ -211,16 +211,14 @@ defmodule Pika.Alignment.CampaignTest do
     confirmed = Campaign.snapshot()
 
     assert {:error, "invalid_state",
-            "submit_spec is only allowed before the Campaign Spec is confirmed",
-            %{}} =
+            "submit_spec is only allowed before the Campaign Spec is confirmed", %{}} =
              Campaign.mcp_call(@token, "submit_spec", %{
                "idempotency_key" => "late-spec",
                "spec" => put_in(AlignmentFixtures.spec(), ["title"], "late replacement")
              })
 
     assert {:error, "invalid_state",
-            "submit_harness is only allowed before the Campaign Spec is confirmed",
-            %{}} =
+            "submit_harness is only allowed before the Campaign Spec is confirmed", %{}} =
              Campaign.mcp_call(
                @token,
                "submit_harness",

@@ -40,7 +40,7 @@ defmodule Pika.Agent.Role.Definition do
     :tools,
     :completion
   ]
-  defstruct @enforce_keys ++ [max_followups: 3]
+  defstruct @enforce_keys ++ [max_followups: 3, followup_strategy: :direct]
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -50,6 +50,7 @@ defmodule Pika.Agent.Role.Definition do
           profile_key: String.t(),
           domain_adapter: module(),
           max_followups: non_neg_integer(),
+          followup_strategy: :direct | :agent,
           template: %{required(:relative_path) => Path.t(), required(:builtin) => String.t()},
           tools: [Pika.Agent.Role.Tool.t()],
           completion: map()

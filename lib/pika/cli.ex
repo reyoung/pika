@@ -29,6 +29,23 @@ defmodule Pika.CLI do
     end
   end
 
+  def main([command | argv]) when command in ["reconfiguration", "reconfigure"] do
+    case parse_reconfiguration(argv) do
+      {:ok, opts} ->
+        if opts[:help] do
+          IO.puts(reconfiguration_usage())
+        else
+          case Pika.Reconfiguration.run(opts) do
+            {:ok, _result} -> :ok
+            {:error, reason} -> abort(format_error("reconfiguration", reason))
+          end
+        end
+
+      {:error, message} ->
+        abort(message <> "\n\n" <> reconfiguration_usage())
+    end
+  end
+
   def main(["preview", repo | argv]) do
     case parse_preview(argv) do
       {:ok, opts} -> run_preview(repo, opts)
@@ -64,6 +81,11 @@ defmodule Pika.CLI do
           integration_effort: :string,
           integration_approval_policy: :string,
           integration_sandbox_policy: :string,
+          followup_backend: :string,
+          followup_model: :string,
+          followup_effort: :string,
+          followup_approval_policy: :string,
+          followup_sandbox_policy: :string,
           progress_summary: :boolean,
           summary_backend: :string,
           summary_model: :string,
@@ -125,6 +147,10 @@ defmodule Pika.CLI do
         "--integration-backend must be codex or cursor"
       )
       |> maybe_cli_error(
+        not is_nil(opts[:followup_backend]) and opts[:followup_backend] not in ~w(codex cursor),
+        "--followup-backend must be codex or cursor"
+      )
+      |> maybe_cli_error(
         not is_nil(opts[:summary_backend]) and opts[:summary_backend] not in ~w(codex cursor),
         "--summary-backend must be codex or cursor"
       )
@@ -151,6 +177,15 @@ defmodule Pika.CLI do
         not is_nil(opts[:summary_effort]) and
           opts[:summary_effort] not in ~w(low medium high xhigh max ultra),
         "invalid --summary-effort"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:followup_backend]) and opts[:followup_backend] not in ~w(codex cursor),
+        "--followup-backend must be codex or cursor"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:followup_effort]) and
+          opts[:followup_effort] not in ~w(low medium high xhigh max ultra),
+        "invalid --followup-effort"
       )
       |> maybe_cli_error(
         not valid_init_permission?(
@@ -271,6 +306,87 @@ defmodule Pika.CLI do
 
       values ->
         {:error, Enum.join(values, "\n")}
+    end
+  end
+
+  def parse_reconfiguration(argv) do
+    {opts, args, invalid} =
+      OptionParser.parse(argv,
+        strict: [
+          workspace: :string,
+          config: :string,
+          host: :string,
+          port: :integer,
+          alignment_backend: :string,
+          alignment_model: :string,
+          alignment_effort: :string,
+          alignment_approval_policy: :string,
+          alignment_sandbox_policy: :string,
+          iteration_backend: :string,
+          iteration_model: :string,
+          iteration_effort: :string,
+          iteration_approval_policy: :string,
+          iteration_sandbox_policy: :string,
+          iteration_agents: :integer,
+          integration_backend: :string,
+          integration_model: :string,
+          integration_effort: :string,
+          integration_approval_policy: :string,
+          integration_sandbox_policy: :string,
+          progress_summary: :boolean,
+          summary_backend: :string,
+          summary_model: :string,
+          summary_effort: :string,
+          summary_interval_minutes: :integer,
+          followup_backend: :string,
+          followup_model: :string,
+          followup_effort: :string,
+          followup_approval_policy: :string,
+          followup_sandbox_policy: :string,
+          max_attempts: :integer,
+          max_unverified_attempts: :integer,
+          sync_remote: :string,
+          sync_branch: :string,
+          sync_enabled: :boolean,
+          yes: :boolean,
+          help: :boolean
+        ],
+        aliases: [y: :yes, h: :help]
+      )
+
+    cwd = invocation_cwd()
+    workspace = expand_from(opts[:workspace], cwd) || discover_workspace(cwd)
+    config = expand_from(opts[:config], cwd) || default_workspace_config(workspace)
+
+    errors =
+      []
+      |> maybe_cli_error(invalid != [], "invalid options: #{inspect(invalid)}")
+      |> maybe_cli_error(args != [], "unexpected arguments: #{inspect(args)}")
+      |> maybe_cli_error(
+        is_nil(workspace),
+        "--workspace is required when not running inside a Pika Workspace"
+      )
+      |> maybe_cli_error(
+        is_nil(config),
+        "--config is required when WORKSPACE/pika.yaml does not exist"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:summary_backend]) and opts[:summary_backend] not in ~w(codex cursor),
+        "--summary-backend must be codex or cursor"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:summary_effort]) and
+          opts[:summary_effort] not in ~w(low medium high xhigh max ultra),
+        "invalid --summary-effort"
+      )
+      |> maybe_cli_error(
+        not is_nil(opts[:summary_interval_minutes]) and opts[:summary_interval_minutes] < 1,
+        "--summary-interval-minutes must be positive"
+      )
+
+    case errors do
+      [] -> {:ok, opts |> Keyword.put(:workspace, workspace) |> Keyword.put(:config, config)}
+      values -> {:error, Enum.join(values, "\n")}
     end
   end
 
@@ -525,6 +641,10 @@ defmodule Pika.CLI do
 
     From an initialized Workspace containing pika.yaml, simply run: pika serve
 
+    Usage: pika reconfiguration [options]
+
+      Interactively updates mutable Workspace configuration.
+
     Usage: pika preview <repo> [options]
 
       --backend codex|cursor
@@ -534,6 +654,46 @@ defmodule Pika.CLI do
       --port PORT
       --workspace EMPTY_DIRECTORY
       --skill-root PATH
+    """
+  end
+
+  defp reconfiguration_usage do
+    """
+    Usage: pika reconfiguration [options]
+
+      --workspace PATH              Pika Workspace (auto-detected by default)
+      --config PATH                 Configuration file (default WORKSPACE/pika.yaml)
+      --host IP                     Listen host (requires serve restart)
+      --port PORT                   Listen port (requires serve restart)
+      --alignment-backend B         Alignment/Baseline backend
+      --alignment-model MODEL       Alignment/Baseline model
+      --alignment-effort E          Alignment/Baseline reasoning effort
+      --iteration-backend B         Iteration backend
+      --iteration-model MODEL       Iteration model
+      --iteration-effort E          Iteration reasoning effort
+      --iteration-agents N          Concurrent Iteration Agents
+      --integration-backend B       Integration backend
+      --integration-model MODEL     Integration model
+      --integration-effort E        Integration reasoning effort
+      --progress-summary            Enable periodic AI progress summaries
+      --no-progress-summary         Disable periodic AI progress summaries
+      --summary-backend B           Summary backend: codex|cursor
+      --summary-model MODEL         Summary model (default: provider default)
+      --summary-effort E            low|medium|high|xhigh|max|ultra
+      --summary-interval-minutes N  Summary interval in minutes
+      --followup-backend B          Integration FollowUp backend: codex|cursor
+      --followup-model MODEL        Integration FollowUp model
+      --followup-effort E           low|medium|high|xhigh|max|ultra
+      --followup-approval-policy P  Backend-specific approval policy
+      --followup-sandbox-policy P   Backend-specific sandbox policy
+      --max-attempts N              Maximum attempts
+      --max-unverified-attempts N   Maximum unverified attempts
+      --sync-remote NAME            Sync remote
+      --sync-branch NAME            Sync branch
+      --sync-enabled                Enable Sync configuration
+      --no-sync-enabled             Disable Sync configuration
+      -y, --yes                     Keep current values for unspecified settings
+      -h, --help                    Show this help
     """
   end
 
@@ -560,6 +720,9 @@ defmodule Pika.CLI do
                                Backend-specific Iteration approval policy
       --iteration-sandbox-policy P
                                Backend-specific Iteration sandbox policy
+      --followup-backend B     Integration FollowUp backend: codex|cursor
+      --followup-model MODEL   Integration FollowUp model (default: Integration model)
+      --followup-effort E      Integration FollowUp reasoning effort (default medium)
       Codex approval P         never|on_request|untrusted
       Codex sandbox P          danger_full_access|workspace_write|read_only
       Cursor approval P        force|auto_review

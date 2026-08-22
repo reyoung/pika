@@ -169,4 +169,35 @@ defmodule Pika.PreviewAuthCLITest do
       assert message =~ "--config is required"
     end)
   end
+
+  test "discovers and validates reconfiguration options" do
+    workspace = CampaignFixtures.workspace()
+    config = Path.join(workspace, "pika.yaml")
+    File.write!(config, "campaign:\n  history_n: 10\n")
+
+    File.cd!(workspace, fn ->
+      assert {:ok, opts} =
+               CLI.parse_reconfiguration([
+                 "--progress-summary",
+                 "--summary-backend",
+                 "cursor",
+                 "--summary-interval-minutes",
+                 "5"
+               ])
+
+      assert opts[:workspace] == workspace
+      assert opts[:config] == config
+      assert opts[:progress_summary]
+    end)
+
+    assert {:error, message} =
+             CLI.parse_reconfiguration([
+               "--workspace",
+               workspace,
+               "--summary-interval-minutes",
+               "0"
+             ])
+
+    assert message =~ "must be positive"
+  end
 end

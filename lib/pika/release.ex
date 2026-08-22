@@ -51,9 +51,33 @@ defmodule Pika.Release do
         contents
       end
 
+    reconfiguration_command = """
+    case $1 in
+      reconfiguration|reconfigure)
+        shift
+        export_release_sys_config
+        exec "$REL_VSN_DIR/elixir" \\
+             --cookie "$RELEASE_COOKIE" \\
+             --erl-config "$RELEASE_SYS_CONFIG" \\
+             --boot "$REL_VSN_DIR/$RELEASE_BOOT_SCRIPT_CLEAN" \\
+             --boot-var RELEASE_LIB "$RELEASE_ROOT/lib" \\
+             --vm-args "$RELEASE_VM_ARGS" \\
+             --eval 'Pika.CLI.main(["reconfiguration" | System.argv()])' -- "$@"
+        ;;
+
+    """
+
+    contents =
+      unless String.contains?(contents, "Pika.CLI.main([\"reconfiguration\" | System.argv()])") do
+        String.replace(contents, "case $1 in\n", reconfiguration_command, global: false)
+      else
+        contents
+      end
+
     contents =
       contents
       |> add_known_command("    init           Interactively initializes a Pika Workspace\n")
+      |> add_known_command("    reconfiguration  Updates mutable Pika Workspace configuration\n")
       |> add_known_command("    serve          Starts Pika Server in the foreground\n")
 
     File.write!(executable, contents)

@@ -405,6 +405,13 @@ code { color: #8ee8ff; }
 .backend-card span { color: #80945e; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
 .backend-card strong { margin-top: 6px; font-size: 12px; }
 .backend-card small { margin-top: 4px; color: #667984; font-size: 9px; }
+.agent-prompts { display: grid; gap: 6px; margin-top: 10px; }
+.agent-prompt { border-top: 1px solid #263a42; padding-top: 7px; }
+.agent-prompt summary { cursor: pointer; list-style: none; min-width: 0; }
+.agent-prompt summary::-webkit-details-marker { display: none; }
+.agent-prompt summary strong { display: inline; margin: 0 8px 0 0; color: #9eb0b8; font-size: 10px; }
+.agent-prompt summary span { display: inline; color: #667984; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.agent-prompt pre { margin: 8px 0 0; max-height: 420px; overflow: auto; white-space: pre-wrap; color: #b8c6cc; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .summary-card { grid-column: 1 / -1; }
 .summary-card p { color: #aab9bf; font-size: 12px; line-height: 1.6; }
 .summary-card dl { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }

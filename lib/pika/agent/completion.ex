@@ -57,8 +57,8 @@ defmodule Pika.Agent.Completion do
          {outcome, expression} when outcome in @outcomes -> valid_expression?(expression)
          _ -> false
        end),
-      do: :ok,
-      else: {:error, :invalid_completion_terminal}
+       do: :ok,
+       else: {:error, :invalid_completion_terminal}
   end
 
   defp validate_suggestions(suggestions, tools) do
@@ -69,8 +69,8 @@ defmodule Pika.Agent.Completion do
          _ ->
            false
        end),
-      do: :ok,
-      else: {:error, :invalid_completion_suggestion}
+       do: :ok,
+       else: {:error, :invalid_completion_suggestion}
   end
 
   defp valid_expression?(value) when is_boolean(value), do: true
@@ -78,8 +78,9 @@ defmodule Pika.Agent.Completion do
   defp valid_expression?({:eq, path, _value}), do: valid_path?(path)
   defp valid_expression?({:not, expression}), do: valid_expression?(expression)
 
-  defp valid_expression?({operator, expressions}) when operator in [:all, :any] and is_list(expressions),
-    do: expressions != [] and Enum.all?(expressions, &valid_expression?/1)
+  defp valid_expression?({operator, expressions})
+       when operator in [:all, :any] and is_list(expressions),
+       do: expressions != [] and Enum.all?(expressions, &valid_expression?/1)
 
   defp valid_expression?(_expression), do: false
 

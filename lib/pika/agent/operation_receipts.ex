@@ -29,10 +29,14 @@ defmodule Pika.Agent.OperationReceipts do
     transaction =
       Repo.transaction(fn ->
         case lookup(work, role_id, invocation) do
-          nil -> execute_and_record(work, role_id, invocation, request_sha256, operation)
+          nil ->
+            execute_and_record(work, role_id, invocation, request_sha256, operation)
+
           {^request_sha256, response_json} ->
             replay_recorded(response_json, replay)
-          {_other_sha256, _response_json} -> Repo.rollback(:idempotency_conflict)
+
+          {_other_sha256, _response_json} ->
+            Repo.rollback(:idempotency_conflict)
         end
       end)
 

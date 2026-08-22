@@ -494,7 +494,7 @@ defmodule Pika.IntegrationFullRegressionTest do
     refute_receive {:integration_started, _, _, _}, 150
   end
 
-  test "an unresponsive Integration Agent is rejected after fifty forced follow-ups" do
+  test "an unresponsive Integration Agent delegates its next message to FollowUp Work" do
     context = ready_attempts(1)
 
     _coordinator =
@@ -503,16 +503,17 @@ defmodule Pika.IntegrationFullRegressionTest do
         integration_profile(%{test_pid: self(), unresponsive: true})
       )
 
-    starts = receive_integrations(51)
-    assert starts |> Enum.map(& &1.attempt_id) |> Enum.uniq() |> length() == 1
-    assert starts |> Enum.map(& &1.token) |> Enum.uniq() |> length() == 1
+    [start] = receive_integrations(1)
 
     eventually(fn ->
-      match?({:ok, %{status: "rejected"}}, AttemptStore.attempt(hd(starts).attempt_id))
+      Repo.query!(
+        "SELECT status FROM agent_followup_requests WHERE campaign_id = ? AND target_work_id = ?",
+        [context.campaign.id, start.attempt_id]
+      ).rows == [["requested"]]
     end)
 
-    assert {:ok, rejected} = AttemptStore.attempt(hd(starts).attempt_id)
-    assert rejected.outcome_reason == "integration agent exceeded 50 forced follow-ups"
+    assert {:ok, %{status: status}} = AttemptStore.attempt(start.attempt_id)
+    refute status == "rejected"
     refute_receive {:integration_started, _, _, _}, 150
   end
 

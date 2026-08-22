@@ -21,6 +21,7 @@ defmodule Pika.Agent.RoleOwnershipTest do
              "alignment" => :actor,
              "baseline" => :actor,
              "integration" => :actor,
+             "integration_followup" => :actor,
              "iteration" => :actor,
              "plan" => :actor,
              "progress_summary" => :actor,

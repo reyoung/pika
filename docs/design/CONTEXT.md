@@ -104,6 +104,10 @@ _Avoid_: 领域状态机、Integration Queue、全局 Backend Session Manager
 可选定时汇总到期时先行持久化、由 Progress Summary Role 处理的 Agent 工作；同一时刻至多存在一个活动 Request，其提交结果是持久化 Progress Summary，而不是从 Backend 自然语言输出推断。
 _Avoid_: Backend Session、临时定时器、Agent 消息拼接
 
+**Integration FollowUp Request**：
+Integration Agent 的一个 Turn 结束但工作尚未终态时创建的持久化辅助 Agent 工作；专用 Integration FollowUp Role 只读取目标 Session 的最近历史与 committed facts，并通过 `submit_followup_message` 提交一条具体消息，随后由原 Integration Actor 恢复消费。
+_Avoid_: 硬编码 required operation 催促、Integration 重试 Turn、第二个 Integration Lease
+
 **Agent Profile**：
 为一次 Agent 会话选择 Agent Backend、模型、reasoning effort、环境和权限行为的命名配置。
 _Avoid_: Benchmark Harness、Campaign Spec、Backend Session

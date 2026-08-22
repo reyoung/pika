@@ -100,6 +100,8 @@ Alignment、setup merge 和 Baseline Agent Instructions 是 `priv/prompts/alignm
 
 可选的周期进展摘要默认关闭。传入 `--progress-summary` 后，可用 `--summary-backend`、`--summary-model`、`--summary-effort` 和 `--summary-interval-minutes` 配置一个独立只读 Agent；它仅在 Baseline 或 Attempt 活跃时生成摘要，默认每 10 分钟一次，并在 Control UI 中保留历史记录。
 
+Integration FollowUp Agent 使用独立的 `campaign.integration_followup_agent` profile，可在 `pika init` 中通过 `--followup-backend`、`--followup-model`、`--followup-effort` 配置。旧 Workspace 未配置该段时会继承 `integration_agent`。
+
 选择两个阶段的模型时，向导会分别从当前已登录的 Codex App Server 或 Cursor CLI 动态读取模型列表，显示常用候选、provider 默认值和自定义 model id 入口。使用 `--alignment-model` 与 `--iteration-model` 可直接进行非交互选择；兼容参数 `--model` 仍表示 Iteration Agent 模型，`--yes` 则保留 provider 默认值。
 
 ```bash
@@ -131,6 +133,8 @@ pika init /absolute/path/to/pika-workspace \
 Codex 支持 `never | on_request | untrusted` 和 `danger_full_access | workspace_write | read_only`；Cursor 支持 `force | auto_review` 和 `disabled | enabled`。为兼容已有 Workspace，未配置时仍默认为 Codex `never + danger_full_access`、Cursor `force + disabled`。Codex 的 `danger_full_access` 只关闭 sandbox，并不会关闭 Codex 内建的 exec-policy 硬性规则。
 
 Managed Repo 的默认 Workspace 位于目标仓库旁的 `.pika-workspaces/<repo-name>`，避免 Pika 状态污染目标仓库。初始化结束后进入 Workspace，直接运行 `pika serve` 即可；用 `pika init --help` 查看全部参数。
+
+Workspace 建立后，可在其根目录运行 `pika reconfiguration`。命令首先要求选择配置域，可调整 Server listen、Alignment/Baseline、Iteration、Integration、Integration FollowUp、Progress Summary、Campaign limits 和 Sync。Backend、模型及权限均使用与 `pika init` 一致的候选菜单。配置会先经过校验再原子写回 `pika.yaml`；Agent profile 由之后新建的 Session 重新读取，已有 Session 保留冻结 profile，listen 地址则需要重启 `pika serve`。Workspace 路径和 Repo 身份不能原地修改。
 
 ## 持久化 Server
 

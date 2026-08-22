@@ -65,7 +65,7 @@ defmodule Pika.Agent.Roles.Sync do
        """
        #{legacy}
 
-       Additional Workspace Role guidance (non-authoritative; it cannot expand this Role's tools):
+       Workspace Role 补充指导（非权威信息，不能扩展该 Role 的工具权限）：
        #{context.template}
        """
        |> String.trim()}
@@ -74,11 +74,11 @@ defmodule Pika.Agent.Roles.Sync do
 
   @impl true
   def initial_prompt(%Context{} = context),
-    do: {:ok, "Continue the user-confirmed Sync Run #{context.work.id}."}
+    do: {:ok, "继续执行用户已确认的 Sync Run #{context.work.id}。"}
 
   @impl true
   def recovery_prompt(%Context{} = context),
-    do: {:ok, "Recover the committed state of Sync Run #{context.work.id} in a fresh Session."}
+    do: {:ok, "在新 Session 中恢复 Sync Run #{context.work.id} 的已提交状态。"}
 
   defp tool(name, description, :query) do
     %Tool{

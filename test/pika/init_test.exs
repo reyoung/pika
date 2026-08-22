@@ -43,6 +43,11 @@ defmodule Pika.InitTest do
                    integration_effort: "max",
                    integration_approval_policy: "on_request",
                    integration_sandbox_policy: "workspace_write",
+                   followup_backend: "cursor",
+                   followup_model: "followup-test-model",
+                   followup_effort: "low",
+                   followup_approval_policy: "auto_review",
+                   followup_sandbox_policy: "enabled",
                    progress_summary: true,
                    summary_backend: "cursor",
                    summary_model: "summary-test-model",
@@ -103,6 +108,10 @@ defmodule Pika.InitTest do
              "protocol_config" => %{}
            }
 
+    assert config.campaign["integration_followup_agent"]["backend"] == "cursor_acp"
+    assert config.campaign["integration_followup_agent"]["model"] == "followup-test-model"
+    assert config.campaign["integration_followup_agent"]["reasoning_effort"] == "low"
+
     assert config.campaign["progress_summary"]["enabled"]
     assert config.campaign["progress_summary"]["interval_minutes"] == 12
     assert config.campaign["progress_summary"]["backend"] == "cursor_acp"
@@ -158,6 +167,11 @@ defmodule Pika.InitTest do
       capture_io(input, fn ->
         assert {:ok, result} =
                  Init.run(
+                   followup_backend: "codex",
+                   followup_model: "codex-test-model",
+                   followup_effort: "medium",
+                   followup_approval_policy: "on_request",
+                   followup_sandbox_policy: "read_only",
                    model_catalog: fn
                      "cursor_acp" ->
                        {:ok,
