@@ -43,14 +43,14 @@ defmodule Pika.Measurement do
            ),
          escalated <- escalation_keys(screening, best_metrics),
          {:ok, full} <- evaluate_escalations(full_path, escalated, context),
-         {:ok, final, regressions, target_improvement?} <-
+         {:ok, final, regressions, best_improvement?} <-
            combine_integration(screening, full, escalated, best_metrics) do
       {:ok,
        %{
          metrics: final,
          escalated: escalated,
          regressions: regressions,
-         target_improvement?: target_improvement?
+         best_improvement?: best_improvement?
        }}
     end
   end
@@ -94,12 +94,7 @@ defmodule Pika.Measurement do
         MapSet.subset?(MapSet.new(required_target_keys), MapSet.new(observed_keys))
 
       meaningful_improvement? =
-        Enum.any?(metrics, fn metric ->
-          metric.role == "target" and metric.case_id in context.target_case_ids and
-            is_number(metric.target_relative_improvement) and
-            metric.target_relative_improvement >=
-              max(metric.min_improvement_ratio, metric.noise_tolerance)
-        end)
+        Enum.any?(metrics, &meaningful_best_improvement?(&1, context.target_case_ids))
 
       cond do
         candidate_badcases != [] ->
@@ -114,7 +109,7 @@ defmodule Pika.Measurement do
           {:ok, %{metrics: metrics, regressions: regressions, reason: "confirmed regression"}}
 
         target_coverage? and not meaningful_improvement? ->
-          {:ok, %{metrics: metrics, regressions: [], reason: "no meaningful target improvement"}}
+          {:ok, %{metrics: metrics, regressions: [], reason: "no meaningful Best improvement"}}
 
         true ->
           {:error, :fast_rejection_not_proven}
@@ -211,36 +206,31 @@ defmodule Pika.Measurement do
       end)
       |> Enum.map(&{&1.case_id, &1.metric_id})
 
-    target_case_ids = MapSet.new(Map.get(best_metrics, :target_case_ids, []))
+    target_case_ids = Map.get(best_metrics, :target_case_ids, [])
+    best_improvement? = Enum.any?(final, &meaningful_best_improvement?(&1, target_case_ids))
 
-    target_improvement? =
-      Enum.any?(final, fn metric ->
-        metric.role == "target" and
-          (MapSet.size(target_case_ids) == 0 or MapSet.member?(target_case_ids, metric.case_id)) and
-          is_number(metric.target_relative_improvement) and
-          metric.target_relative_improvement >=
-            max(metric.min_improvement_ratio, metric.noise_tolerance)
-      end)
-
-    {:ok, final, regressions, target_improvement?}
+    {:ok, final, regressions, best_improvement?}
   end
 
   defp escalation_keys(screening, best_metrics) do
     screening
     |> Enum.filter(
       &(&1.insufficient? or confirmed_regression?(&1, best_metrics) or
-          target_goal_candidate?(&1, best_metrics))
+          best_improvement_candidate?(&1, best_metrics))
     )
     |> Enum.map(&{&1.case_id, &1.metric_id})
   end
 
-  defp target_goal_candidate?(metric, best_metrics) do
-    target_case_ids = MapSet.new(Map.get(best_metrics, :target_case_ids, []))
+  defp best_improvement_candidate?(metric, best_metrics),
+    do: meaningful_best_improvement?(metric, Map.get(best_metrics, :target_case_ids, []))
 
-    (MapSet.size(target_case_ids) == 0 or MapSet.member?(target_case_ids, metric.case_id)) and
-      metric.role == "target" and is_number(metric.target_relative_improvement) and
-      metric.target_relative_improvement >=
-        max(metric.min_improvement_ratio, metric.noise_tolerance)
+  defp meaningful_best_improvement?(metric, target_case_ids) do
+    target_case_ids = MapSet.new(target_case_ids)
+
+    metric.role == "target" and
+      (MapSet.size(target_case_ids) == 0 or MapSet.member?(target_case_ids, metric.case_id)) and
+      is_number(metric.best_relative_improvement) and
+      metric.best_relative_improvement >= (metric.noise_tolerance || 0.005)
   end
 
   defp confirmed_regression?(metric, _best_metrics) do

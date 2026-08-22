@@ -39,6 +39,12 @@ Sampling Revision: <%= @attempt.sampling_revision_id %>
 Protected paths: <%= Enum.join(@context.protected_paths, ", ") %>
 Stop conditions: <%= Jason.encode!(@context.spec["stopping"] || %{}) %>
 
+Campaign 的停止目标与单次 Attempt 的合入门槛是不同概念。`stopping.metric_goals` 描述当前 Best
+相对固定 Optimization Target 累积达到什么水平后停止整个 Campaign；不得要求单个 Attempt
+独自达到该目标，也不得仅因候选尚未达到该目标而 `skip/reject`。单次 Attempt 应比较当前候选与
+当前 Best：只要正确性通过、没有确认回退，并且至少一个 Target Case × target-role Metric 相对
+当前 Best 的改善超过配对测量噪声，就应推荐 `integrate`，让多个小而可靠的收益逐步累积。
+
 Campaign Spec:
 <%= Jason.encode!(@context.spec, pretty: true) %>
 
@@ -70,7 +76,7 @@ do not repeat SHA identity in every record. Correctness JSON must bind schema_ve
 target_snapshot_id=<%= @context.target_snapshot.id %>, the exact candidate_sha, and report target_passed=true plus
 candidate_passed=true for each Case under the configured Oracle. Register the raw JSONL and correctness Artifacts,
 call `record_metrics` and call `submit_attempt_summary`. If correctness fails, a clear bad case is found, or the
-formal measurements show no worthwhile improvement, set recommended_outcome to `skip` or `reject` and call
+formal measurements show no improvement over the current Best beyond paired noise, set recommended_outcome to `skip` or `reject` and call
 `reject_attempt` with a concrete reason; this terminates the Attempt without Integration. Otherwise leave a clean
 committed worktree and call `complete_attempt`. Pika computes both relative-to-Target and relative-to-current-Best
 values. Only Integration can mark an Attempt Accepted.

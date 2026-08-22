@@ -245,7 +245,9 @@ defmodule Pika.Test.IntegrationAgentBackend do
             metric <- context.metrics,
             index <- 0..4 do
           improvement =
-            if regression? and benchmark_case["id"] == "guard_case", do: -0.02, else: 0.02
+            if regression? and benchmark_case["id"] == "guard_case",
+              do: -0.02,
+              else: improvement_for(context.attempt.ordinal, state)
 
           pair(context, benchmark_case["id"], metric["id"], index, improvement)
         end
@@ -266,7 +268,9 @@ defmodule Pika.Test.IntegrationAgentBackend do
             metric <- context.metrics,
             index <- 0..(pair_count - 1) do
           improvement =
-            if regression? and benchmark_case["id"] == "guard_case", do: -0.02, else: 0.02
+            if regression? and benchmark_case["id"] == "guard_case",
+              do: -0.02,
+              else: improvement_for(context.attempt.ordinal, state)
 
           pair(context, benchmark_case["id"], metric["id"], index, improvement)
         end
@@ -323,6 +327,12 @@ defmodule Pika.Test.IntegrationAgentBackend do
 
     Git.run!(context.best_worktree, ["commit", "-m", message])
     Git.run!(context.best_worktree, ["rev-parse", "HEAD"])
+  end
+
+  defp improvement_for(ordinal, state) do
+    env(state)
+    |> Map.get(:improvements_by_ordinal, %{})
+    |> Map.get(ordinal, 0.02)
   end
 
   defp reusable_jsonl?(path, _context, expected_keys, pair_count) do

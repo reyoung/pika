@@ -127,6 +127,8 @@ defmodule Pika.PromptCatalogTest do
     assert iteration =~ "must not enter Integration or acquire an Integration lease"
     assert iteration =~ "recovery requires only `reject_attempt`"
     assert iteration =~ "A 1% budget applies to that aggregate"
+    assert iteration =~ "不得要求单个 Attempt"
+    assert iteration =~ ~r/相对\s*当前 Best 的改善超过配对测量噪声/
     assert iteration =~ "用户可见文本必须使用中文"
 
     assert {:ok, integration} =
@@ -140,6 +142,8 @@ defmodule Pika.PromptCatalogTest do
     assert integration =~ ~r/independent\s+8 Pair run/
     assert integration =~ "1% per-Case latency cutoff"
     assert integration =~ "equal Case weights"
+    assert integration =~ "不是单次 Attempt 的合入门槛"
+    assert integration =~ "improves over the current Best"
     assert integration =~ "用户可见文本必须使用中文"
 
     assert {:ok, sync} =

@@ -245,7 +245,7 @@ defmodule Pika.MeasurementTest do
   end
 
   test "formal target coverage can prove no meaningful improvement", context do
-    write_pairs(context.samples, context.context, 7, fn _index -> {10.0, 9.95, true} end)
+    write_pairs(context.samples, context.context, 7, fn _index -> {10.0, 9.98, true} end)
 
     assert {:ok, result} =
              Measurement.evaluate_fast_rejection(
@@ -255,7 +255,7 @@ defmodule Pika.MeasurementTest do
                context.context.best_metrics
              )
 
-    assert result.reason == "no meaningful target improvement"
+    assert result.reason == "no meaningful Best improvement"
     assert result.regressions == []
   end
 
@@ -327,25 +327,52 @@ defmodule Pika.MeasurementTest do
 
   test "accepts a Best improvement even when Development remains behind the Optimization Target",
        context do
+    full = Path.join(context.root, "best-improvement-full.jsonl")
     write_pairs(context.samples, context.context, 5, fn _index -> {1.0, 9.0, true} end)
+    write_pairs(full, context.context, 7, fn _index -> {1.0, 9.0, true} end)
 
     assert {:ok, result} =
              Measurement.evaluate_integration(
                context.samples,
-               nil,
+               full,
                context.correctness,
                context.context,
                context.context.best_metrics
              )
 
     assert result.regressions == []
-    refute result.target_improvement?
+    assert result.best_improvement?
 
     assert [%{best_relative_improvement: improvement, target_relative_improvement: target_gap}] =
              result.metrics
 
     assert improvement > 0
     assert target_gap < 0
+  end
+
+  test "Attempt acceptance does not require the Campaign target improvement threshold", context do
+    full = Path.join(context.root, "below-campaign-goal-full.jsonl")
+
+    configured = %{
+      context.context
+      | metrics: put_in(context.context.metrics, [Access.at(0), "min_improvement_ratio"], 0.30)
+    }
+
+    write_pairs(context.samples, configured, 5, fn _index -> {10.0, 9.8, true} end)
+    write_pairs(full, configured, 7, fn _index -> {10.0, 9.8, true} end)
+
+    assert {:ok, result} =
+             Measurement.evaluate_integration(
+               context.samples,
+               full,
+               context.correctness,
+               configured,
+               configured.best_metrics
+             )
+
+    assert result.regressions == []
+    assert result.best_improvement?
+    assert Enum.all?(result.metrics, &(&1.target_relative_improvement < 0.30))
   end
 
   defp write_pairs(path, _context, count, values, order \\ nil) do

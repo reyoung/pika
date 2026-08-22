@@ -17,6 +17,46 @@ defmodule Pika.IntegrationFullRegressionTest do
     :ok
   end
 
+  test "accepted Best advance closes dispatch when the cumulative Campaign goal is reached" do
+    context = ready_attempts(1)
+
+    [[spec_json]] =
+      Repo.query!("SELECT spec_json FROM spec_revisions WHERE id = ?", [
+        context.campaign.current_spec_revision_id
+      ]).rows
+
+    spec =
+      spec_json
+      |> Jason.decode!()
+      |> put_in(
+        ["stopping", "metric_goals"],
+        [
+          %{
+            "metric_id" => "latency_us",
+            "aggregation" => "geometric_mean_over_cases",
+            "min_improvement_ratio" => 0.01
+          }
+        ]
+      )
+
+    Repo.query!("UPDATE spec_revisions SET spec_json = ? WHERE id = ?", [
+      Jason.encode!(spec),
+      context.campaign.current_spec_revision_id
+    ])
+
+    _coordinator = start_integration(context, integration_profile(%{test_pid: self()}))
+    [start] = receive_integrations(1)
+    send(start.task_pid, :release)
+
+    eventually(fn ->
+      campaign = Pika.Persistence.current_campaign()
+      {:ok, attempt} = AttemptStore.attempt(start.attempt_id)
+
+      attempt.status == "accepted" and campaign.status == "draining" and
+        campaign.dispatch_gate == "metric_goals"
+    end)
+  end
+
   test "FIFO Integration refreshes stale bases, rejects regressions before Git, and advances Best safely" do
     context = ready_attempts(3) |> OptimizationFixtures.add_guard_case()
     attempts = AttemptStore.attempts(context.campaign.id, limit: 10) |> Enum.sort_by(& &1.ordinal)
@@ -25,7 +65,12 @@ defmodule Pika.IntegrationFullRegressionTest do
     coordinator =
       start_integration(
         context,
-        integration_profile(%{test_pid: self(), barrier: true, regress_ordinals: [3]})
+        integration_profile(%{
+          test_pid: self(),
+          barrier: true,
+          regress_ordinals: [3],
+          improvements_by_ordinal: %{1 => 0.02, 2 => 0.04, 3 => 0.06}
+        })
       )
 
     [first] = receive_integrations(1)

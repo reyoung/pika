@@ -1,7 +1,7 @@
 defmodule Pika.IntegrationStore do
   @moduledoc false
 
-  alias Pika.{AttemptStore, Persistence, Repo}
+  alias Pika.{AttemptStore, CampaignGoals, Persistence, Repo}
 
   def queue_head(campaign_id) do
     case Repo.query!(
@@ -245,7 +245,7 @@ defmodule Pika.IntegrationStore do
     do: "full regression confirmed: #{Enum.join(case_ids, ", ")}"
 
   defp rejection_outcome([], reason) when is_binary(reason) and reason != "", do: reason
-  defp rejection_outcome([], _reason), do: "no meaningful target improvement"
+  defp rejection_outcome([], _reason), do: "no meaningful Best improvement"
 
   defp active_integration_session?(campaign_id, attempt_id, session_id) do
     Repo.query!(
@@ -711,6 +711,7 @@ defmodule Pika.IntegrationStore do
 
   defp accept_merge!(campaign, attempt, receipt, intent, new_sha) do
     now = now_us()
+    goal_evaluation = CampaignGoals.evaluate(spec!(attempt.spec_revision_id), receipt.metrics)
 
     [[sequence]] =
       Repo.query!(
@@ -773,10 +774,17 @@ defmodule Pika.IntegrationStore do
       )
     end)
 
-    Repo.query!(
-      "UPDATE campaigns SET best_sha = ?, updated_at = ?, lock_version = lock_version + 1 WHERE id = ?",
-      [new_sha, now, campaign.campaign_id]
-    )
+    if goal_evaluation.reached? do
+      Repo.query!(
+        "UPDATE campaigns SET best_sha = ?, status = 'draining', dispatch_gate = 'metric_goals', updated_at = ?, lock_version = lock_version + 1 WHERE id = ?",
+        [new_sha, now, campaign.campaign_id]
+      )
+    else
+      Repo.query!(
+        "UPDATE campaigns SET best_sha = ?, updated_at = ?, lock_version = lock_version + 1 WHERE id = ?",
+        [new_sha, now, campaign.campaign_id]
+      )
+    end
 
     Repo.query!(
       "UPDATE attempts SET status = 'accepted', accepted_sha = ?, completed_at = ? WHERE id = ?",
@@ -796,6 +804,7 @@ defmodule Pika.IntegrationStore do
       attempt_id: attempt.id,
       spec_revision_id: attempt.spec_revision_id,
       sampling_revision_id: attempt.sampling_revision_id,
+      campaign_goal_evaluation: goal_evaluation,
       metric_deltas:
         Enum.map(receipt.metrics, fn metric ->
           %{
@@ -817,6 +826,13 @@ defmodule Pika.IntegrationStore do
          ]).rows do
       [[id]] when is_binary(id) -> id
       _ -> Repo.rollback(:target_snapshot_missing)
+    end
+  end
+
+  defp spec!(spec_revision_id) do
+    case Repo.query!("SELECT spec_json FROM spec_revisions WHERE id = ?", [spec_revision_id]).rows do
+      [[json]] -> Jason.decode!(json)
+      _ -> Repo.rollback(:spec_revision_missing)
     end
   end
 

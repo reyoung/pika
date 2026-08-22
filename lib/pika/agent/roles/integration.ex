@@ -593,7 +593,7 @@ defmodule Pika.Agent.Roles.Integration.Domain do
       harness_digest: context.spec_revision.protected_digest,
       metrics: result.metrics,
       regressions: result.regressions,
-      force_reject: not result.target_improvement?,
+      force_reject: not result.best_improvement?,
       correctness_artifact_id: correctness.id,
       screening_artifact_id: screening.id,
       full_artifact_id: full && full.id

@@ -133,8 +133,12 @@ _Avoid_: Agent stdout、Backend 原始事件流、自然语言结果解析
 _Avoid_: Worker、Benchmark Agent
 
 **已接受尝试（Accepted Attempt）**：
-至少一个目标指标改善超过验收阈值，且所有保护指标均未退化的候选尝试。
+至少一个目标 Case 的目标指标相对当前 Best 取得超过配对噪声的有效增量，且所有保护指标均未确认退化的候选尝试；不要求单次 Attempt 达到 Campaign 的累计停止目标。
 _Avoid_: 成功运行、最快版本
+
+**Campaign 指标停止目标（Campaign Metric Goal）**：
+当前 Best 在完整 Case 集上相对固定 Optimization Target 的累计聚合改善目标；达到后停止创建新 Attempt。它可以由多个 Accepted Attempt 的增量共同实现，不能作为单次 Attempt 的合入门槛。
+_Avoid_: Attempt 最小收益、单 Case 合入阈值、相对当前 Best 的增量
 
 **已拒绝尝试（Rejected Attempt）**：
 未通过正确性验证、未达到改善阈值，或导致任一保护指标退化的候选尝试。
