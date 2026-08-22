@@ -193,11 +193,66 @@ defmodule Pika.IntegrationStore do
     error -> {:error, {:attempt_reject_failed, Exception.message(error)}}
   end
 
+  def reject_stalled_attempt(campaign_id, attempt_id, session_id, reason)
+      when is_binary(reason) and reason != "" do
+    transaction =
+      Repo.transaction(fn ->
+        attempt = AttemptStore.attempt(attempt_id) |> unwrap!()
+
+        cond do
+          attempt.campaign_id != campaign_id ->
+            Repo.rollback(:attempt_campaign_mismatch)
+
+          attempt.status == "rejected" ->
+            {attempt, nil}
+
+          attempt.status not in ~w(ready_for_integration refreshing integrating) ->
+            Repo.rollback({:invalid_attempt_state, attempt.status})
+
+          not active_integration_session?(campaign_id, attempt_id, session_id) ->
+            Repo.rollback(:integration_session_not_active)
+
+          true ->
+            now = now_us()
+
+            Repo.query!(
+              "UPDATE attempts SET status = 'rejected', outcome_reason = ?, completed_at = ? WHERE id = ?",
+              [reason, now, attempt_id]
+            )
+
+            Repo.query!(
+              "DELETE FROM integration_leases WHERE campaign_id = ? AND attempt_id = ?",
+              [campaign_id, attempt_id]
+            )
+
+            event =
+              insert_event!("attempt", attempt_id, "attempt_rejected", %{
+                source: "integration_followup_limit",
+                reason: reason,
+                backend_session_id: session_id
+              })
+
+            {AttemptStore.attempt(attempt_id) |> unwrap!(), event}
+        end
+      end)
+
+    publish_transaction(transaction)
+  rescue
+    error -> {:error, {:attempt_reject_failed, Exception.message(error)}}
+  end
+
   defp rejection_outcome([_ | _] = case_ids, _reason),
     do: "full regression confirmed: #{Enum.join(case_ids, ", ")}"
 
   defp rejection_outcome([], reason) when is_binary(reason) and reason != "", do: reason
   defp rejection_outcome([], _reason), do: "no meaningful target improvement"
+
+  defp active_integration_session?(campaign_id, attempt_id, session_id) do
+    Repo.query!(
+      "SELECT 1 FROM agent_sessions WHERE id = ? AND campaign_id = ? AND role = 'integration' AND work_kind = 'attempt' AND work_id = ? AND status IN ('running', 'awaiting_report') LIMIT 1",
+      [session_id, campaign_id, attempt_id]
+    ).rows != []
+  end
 
   def complete_merge(lease_id, session_id, attempt_id, receipt_id, intent_id, new_sha) do
     transaction =

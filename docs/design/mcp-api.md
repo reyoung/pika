@@ -46,7 +46,7 @@ Backend-specific 注入方式：
 
 ### `query_attempt_history`
 
-参数：`limit`、可选 `before_ordinal`、`outcome`、`tags`。返回 Description、Summary、Outcome、Metric delta、Base/Result SHA 与关键失败原因；不返回其他 Agent 的秘密环境或完整 SQLite 行。
+参数：`limit`、可选 `before_ordinal`、`outcome`、`tags`。返回 Description、Summary、Outcome、逐 case Metrics、Base/Result SHA 与关键失败原因；不返回其他 Agent 的秘密环境或完整 SQLite 行。Prompt 中的 compact 摘要不改变或替代本工具，Agent 仍可用它查询超出 prompt N 限制的完整终态历史。
 
 ### `get_attempt`
 
@@ -148,7 +148,7 @@ Alignment 在 DraftingSpec 的完成门禁要求 `submit_spec`、`submit_harness
 
 参数：`sampling_revision_id`、`base_sha`、`candidate_sha`、worktree status、最新 commit。完成前要求采样版本 Metric、Summary、Patch 可生成、无 protected path 修改和 clean worktree。成功后 Attempt 进入 `ready_for_integration`。
 
-Backend Turn 结束但缺少任一必需工具时，Actor 根据最新 committed facts 发送 follow-up。单个 Session 使用有界 follow-up 防止坏会话永久占用；达到边界只会把 Work 标记为可恢复的中断，Symphony 用新的 Session 继续，不能凭此制造领域终态。
+Backend Turn 结束但缺少任一必需工具时，Actor 根据最新 committed facts 发送 follow-up。单个 Session 使用有界 follow-up 防止坏会话永久占用；通常达到边界只会把 Work 标记为可恢复的中断，Symphony 用新的 Session 继续。Integration 是显式例外：单个 Integration Session 最多强制 follow-up 50 次，仍无领域进展时直接拒绝对应 Attempt，避免无响应 Agent 被无限恢复。
 
 ## 6. Integration Role
 
@@ -158,7 +158,7 @@ Backend Turn 结束但缺少任一必需工具时，Actor 根据最新 committed
 
 ### `submit_full_regression`
 
-参数：Lease ID、`base_sha`、`candidate_sha`、全量正确性 Artifact、每个 Full Case/Metric 的 5 Pair Screening Artifact，以及异常组合按 Campaign Spec 正式 Pair 数生成的独立 Artifact。Pika 重算结果：Screening 至少 4/5 有效；中位数回退超过当前 Best noise tolerance 或样本无效的组合必须出现在完整 Artifact；完整测量必须达到 Spec 的 `min_valid_pairs`。任一组合确认回退即拒绝候选，否则生成只能用于该 Lease/Base/Candidate 的 Full Regression Receipt。
+参数：Lease ID、`base_sha`、`candidate_sha`、全量正确性 Artifact、每个 Full Case/Metric 的 5 Pair Screening Artifact，以及异常组合按 Campaign Spec 正式 Pair 数生成的独立 Artifact。Pika 重算结果：Screening 至少 4/5 有效；中位数回退超过当前 Best noise tolerance 或样本无效的组合必须出现在完整 Artifact；完整测量必须达到 Spec 的 `min_valid_pairs`。任一组合确认回退即拒绝候选，否则生成只能用于该 Lease/Base/Candidate 的 Full Regression Receipt。若 Full Regression 的正确性校验返回 `correctness_failed`（包括正确性失败或 Full Case 覆盖不完整），Pika 原子签发 rejected Receipt 并直接拒绝 Attempt，不要求 Agent 再调用 `reject_attempt`。
 
 ### `submit_sampling_feedback`
 

@@ -101,6 +101,7 @@ defmodule Pika.PromptCatalogTest do
                attempt: attempt,
                context: context,
                history: [],
+               history_summary: "",
                guidance: [],
                important_events: []
              })

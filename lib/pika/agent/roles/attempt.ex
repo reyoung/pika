@@ -14,7 +14,8 @@ defmodule Pika.Agent.Roles.AttemptSupport do
     {"register_artifact", "Register an existing Workspace Artifact.", :command}
   ]
 
-  def shared_tools, do: Enum.map(@shared_tools, fn {name, description, kind} -> tool(name, description, kind) end)
+  def shared_tools,
+    do: Enum.map(@shared_tools, fn {name, description, kind} -> tool(name, description, kind) end)
 
   def tool(name, description, :query) do
     %Tool{
@@ -43,7 +44,7 @@ defmodule Pika.Agent.Roles.AttemptSupport do
     attempt = context.durable_context.attempt
     campaign = context.durable_context.campaign
 
-    with {:ok, legacy} <- Pika.AttemptPrompt.render(role, attempt, campaign) do
+    with {:ok, legacy} <- Pika.AttemptPrompt.render(role, attempt, campaign, context.workspace) do
       recovery =
         if context.session_mode == :recovering,
           do: Pika.Agent.Roles.AttemptRecovery.instructions(context),
@@ -81,11 +82,18 @@ defmodule Pika.Agent.Roles.Plan do
       domain_adapter: Pika.Agent.Roles.Attempt.Domain,
       template: %{
         relative_path: "prompts/roles/plan.md",
-        builtin: "Produce one focused optimization plan. Do not implement or benchmark the candidate."
+        builtin:
+          "Produce one focused optimization plan. Do not implement or benchmark the candidate."
       },
       tools:
         AttemptSupport.shared_tools() ++
-          [AttemptSupport.tool("submit_plan", "Atomically publish the Attempt plan Markdown.", :command)],
+          [
+            AttemptSupport.tool(
+              "submit_plan",
+              "Atomically publish the Attempt plan Markdown.",
+              :command
+            )
+          ],
       completion: %{
         terminals: [
           {:completed, {:fact, :plan_submitted}},
@@ -98,11 +106,14 @@ defmodule Pika.Agent.Roles.Plan do
   end
 
   @impl true
-  def build_system_instructions(%Context{} = context), do: AttemptSupport.instructions(context, :plan)
+  def build_system_instructions(%Context{} = context),
+    do: AttemptSupport.instructions(context, :plan)
 
   @impl true
   def initial_prompt(%Context{} = context),
-    do: {:ok, "Prepare the focused optimization plan for Attempt ##{context.durable_context.attempt.ordinal}."}
+    do:
+      {:ok,
+       "Prepare the focused optimization plan for Attempt ##{context.durable_context.attempt.ordinal}."}
 
   @impl true
   def recovery_prompt(%Context{} = context),
@@ -141,10 +152,26 @@ defmodule Pika.Agent.Roles.Iteration do
       tools:
         AttemptSupport.shared_tools() ++
           [
-            AttemptSupport.tool("record_metrics", "Submit formal alternating-pair measurements.", :command),
-            AttemptSupport.tool("submit_attempt_summary", "Submit the structured Attempt summary.", :command),
-            AttemptSupport.tool("reject_attempt", "Reject this Attempt directly and skip Integration.", :command),
-            AttemptSupport.tool("complete_attempt", "Run the completion gate for this Attempt.", :command)
+            AttemptSupport.tool(
+              "record_metrics",
+              "Submit formal alternating-pair measurements.",
+              :command
+            ),
+            AttemptSupport.tool(
+              "submit_attempt_summary",
+              "Submit the structured Attempt summary.",
+              :command
+            ),
+            AttemptSupport.tool(
+              "reject_attempt",
+              "Reject this Attempt directly and skip Integration.",
+              :command
+            ),
+            AttemptSupport.tool(
+              "complete_attempt",
+              "Run the completion gate for this Attempt.",
+              :command
+            )
           ],
       completion: %{
         terminals: [
@@ -169,7 +196,9 @@ defmodule Pika.Agent.Roles.Iteration do
 
   @impl true
   def initial_prompt(%Context{} = context),
-    do: {:ok, "Run Attempt ##{context.durable_context.attempt.ordinal} from its fixed Best and Sampling Revision."}
+    do:
+      {:ok,
+       "Run Attempt ##{context.durable_context.attempt.ordinal} from its fixed Best and Sampling Revision."}
 
   @impl true
   def recovery_prompt(%Context{} = context) do
@@ -271,7 +300,12 @@ defmodule Pika.Agent.Roles.Attempt.Domain do
     do: {:ok, AttemptStore.sessions(campaign_id)}
 
   def invoke(_work, "read_agent_messages", args, meta),
-    do: AttemptStore.read_messages(meta.session_id, args["after_sequence"] || 0, args["limit"] || 100)
+    do:
+      AttemptStore.read_messages(
+        meta.session_id,
+        args["after_sequence"] || 0,
+        args["limit"] || 100
+      )
 
   def invoke(_work, "ack_agent_messages", args, meta),
     do: AttemptStore.ack_messages(meta.session_id, args["through_sequence"] || 0)
@@ -281,8 +315,12 @@ defmodule Pika.Agent.Roles.Attempt.Domain do
     priority = args["priority"] || "normal"
 
     cond do
-      body == "" -> {:error, :message_body_required}
-      priority not in ~w(normal high) -> {:error, :invalid_message_priority}
+      body == "" ->
+        {:error, :message_body_required}
+
+      priority not in ~w(normal high) ->
+        {:error, :invalid_message_priority}
+
       true ->
         AttemptStore.send_message(
           campaign_id,
@@ -405,7 +443,11 @@ defmodule Pika.Agent.Roles.Attempt.Domain do
 
     if reason == "",
       do: {:error, :rejection_reason_required},
-      else: with({:ok, rejected} <- AttemptStore.reject_from_iteration(work.id, reason), do: {:ok, enrich_attempt(rejected)})
+      else:
+        with(
+          {:ok, rejected} <- AttemptStore.reject_from_iteration(work.id, reason),
+          do: {:ok, enrich_attempt(rejected)}
+        )
   end
 
   def invoke(%Work{role_id: "iteration"} = work, "complete_attempt", args, meta) do
@@ -424,7 +466,8 @@ defmodule Pika.Agent.Roles.Attempt.Domain do
          {:ok, artifact} <- write_patch(meta.workspace, work, attempt, patch),
          :ok <- AttemptStore.attach_artifact(work.id, "patch_artifact_id", artifact.id),
          expected <- AttemptStore.expected_metric_count(work.id),
-         {:ok, completed} <- AttemptStore.complete_attempt(work.id, args["candidate_sha"], expected) do
+         {:ok, completed} <-
+           AttemptStore.complete_attempt(work.id, args["candidate_sha"], expected) do
       {:ok, enrich_attempt(completed)}
     end
   end
@@ -438,8 +481,11 @@ defmodule Pika.Agent.Roles.Attempt.Domain do
       {:ok, %{status: status}} when status in ~w(queued interrupted awaiting_report) ->
         AttemptStore.mark_running(attempt_id) |> normalize_event_result()
 
-      {:ok, _attempt} -> :ok
-      {:error, _reason} = error -> error
+      {:ok, _attempt} ->
+        :ok
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -448,8 +494,11 @@ defmodule Pika.Agent.Roles.Attempt.Domain do
       {:ok, %{status: status}} when status in ~w(running awaiting_report) ->
         AttemptStore.mark_awaiting_report(attempt_id, required) |> normalize_event_result()
 
-      {:ok, _attempt} -> :ok
-      {:error, _reason} = error -> error
+      {:ok, _attempt} ->
+        :ok
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -458,8 +507,11 @@ defmodule Pika.Agent.Roles.Attempt.Domain do
       {:ok, %{status: status}} when status in ~w(running awaiting_report interrupted) ->
         AttemptStore.mark_interrupted(attempt_id, details) |> normalize_event_result()
 
-      {:ok, _attempt} -> :ok
-      {:error, _reason} = error -> error
+      {:ok, _attempt} ->
+        :ok
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -487,15 +539,20 @@ defmodule Pika.Agent.Roles.Attempt.Domain do
 
   defp facts("iteration", campaign, attempt) do
     terminal? = attempt.status in ~w(ready_for_integration accepted rejected cancelled)
-    reject? = not terminal? and attempt.recommended_outcome in ~w(skip reject) and not is_nil(attempt.summary)
+
+    reject? =
+      not terminal? and attempt.recommended_outcome in ~w(skip reject) and
+        not is_nil(attempt.summary)
 
     %{
       attempt_status: attempt.status,
       campaign_status: campaign.status,
-      needs_metrics: not terminal? and not reject? and AttemptStore.metrics_for_attempt(attempt.id) == [],
+      needs_metrics:
+        not terminal? and not reject? and AttemptStore.metrics_for_attempt(attempt.id) == [],
       needs_summary: not terminal? and not reject? and is_nil(attempt.summary),
       needs_reject: reject?,
-      needs_completion: not terminal? and not reject? and attempt.status != "ready_for_integration"
+      needs_completion:
+        not terminal? and not reject? and attempt.status != "ready_for_integration"
     }
   end
 
@@ -521,7 +578,9 @@ defmodule Pika.Agent.Roles.Attempt.Domain do
     end
   end
 
-  defp verify_attempt_artifact(%{owner_type: "attempt", owner_id: attempt_id}, attempt_id), do: :ok
+  defp verify_attempt_artifact(%{owner_type: "attempt", owner_id: attempt_id}, attempt_id),
+    do: :ok
+
   defp verify_attempt_artifact(_artifact, _attempt_id), do: {:error, :artifact_identity_mismatch}
 
   defp write_patch(workspace, work, attempt, patch) do

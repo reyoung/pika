@@ -40,7 +40,7 @@ defmodule Pika.Agent.Role.Definition do
     :tools,
     :completion
   ]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++ [max_followups: 3]
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -49,6 +49,7 @@ defmodule Pika.Agent.Role.Definition do
           work_kind: atom(),
           profile_key: String.t(),
           domain_adapter: module(),
+          max_followups: non_neg_integer(),
           template: %{required(:relative_path) => Path.t(), required(:builtin) => String.t()},
           tools: [Pika.Agent.Role.Tool.t()],
           completion: map()
@@ -181,9 +182,14 @@ defmodule Pika.Agent.Role.DomainAdapter do
 
   @callback session_event(Work.t(), atom(), map()) :: :ok | {:error, term()}
 
+  @callback handle_exhaustion(Work.t(), term(), map()) :: {:ok, term()} | {:error, term()}
+
   @callback operation_receipts() :: module()
 
-  @optional_callbacks replay: 5, session_event: 3, operation_receipts: 0
+  @optional_callbacks replay: 5,
+                      session_event: 3,
+                      handle_exhaustion: 3,
+                      operation_receipts: 0
 end
 
 defmodule Pika.Agent.Role do

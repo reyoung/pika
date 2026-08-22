@@ -118,6 +118,33 @@ defmodule Pika.Agent.Roles do
       {:error, error(:completion, {:exception, Exception.message(error)}, prepared.work)}
   end
 
+  def handle_exhaustion(%Prepared{} = prepared, reason, session_id) do
+    adapter = prepared.definition.domain_adapter
+
+    if function_exported?(adapter, :handle_exhaustion, 3) do
+      with {:ok, _value} <-
+             adapter.handle_exhaustion(
+               prepared.work,
+               reason,
+               lifecycle_meta(prepared, session_id)
+             ),
+           {:ok, domain} <- adapter.prepare(prepared.work, prepared.workspace) do
+        {:ok, Completion.evaluate(prepared.definition.completion, domain.facts)}
+      else
+        {:error, %Error{} = error} ->
+          {:error, error}
+
+        {:error, exhaustion_reason} ->
+          {:error, error(:exhaustion, exhaustion_reason, prepared.work)}
+      end
+    else
+      {:error, error(:exhaustion, :unsupported_role_exhaustion, prepared.work)}
+    end
+  rescue
+    error ->
+      {:error, error(:exhaustion, {:exception, Exception.message(error)}, prepared.work)}
+  end
+
   def validate_definition(role, %Definition{} = definition) when is_atom(role) do
     tool_names = Enum.map(definition.tools, & &1.name)
 
@@ -126,6 +153,8 @@ defmodule Pika.Agent.Roles do
       {is_integer(definition.contract_revision) and definition.contract_revision > 0,
        :invalid_contract_revision},
       {definition.activation in [:automatic, :await_user_kickoff], :invalid_activation},
+      {is_integer(definition.max_followups) and definition.max_followups >= 0,
+       :invalid_max_followups},
       {is_atom(definition.work_kind), :invalid_work_kind},
       {Code.ensure_loaded?(definition.domain_adapter), :domain_adapter_unavailable},
       {function_exported?(definition.domain_adapter, :prepare, 2), :invalid_domain_adapter},
@@ -280,6 +309,16 @@ defmodule Pika.Agent.Roles do
       session_id: invocation.session_id,
       idempotency_key: invocation.idempotency_key,
       request_sha256: request_sha256,
+      workspace: prepared.workspace,
+      domain_options: prepared.domain_options
+    }
+  end
+
+  defp lifecycle_meta(prepared, session_id) do
+    %{
+      role_id: prepared.definition.id,
+      contract_revision: prepared.definition.contract_revision,
+      session_id: session_id,
       workspace: prepared.workspace,
       domain_options: prepared.domain_options
     }

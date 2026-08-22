@@ -502,6 +502,67 @@ defmodule Pika.AttemptStore do
     end)
   end
 
+  def iteration_metrics_for_attempt(attempt, workspace \\ nil) do
+    persisted = metrics_for_attempt(attempt.id) |> Enum.filter(&(&1.source == "iteration"))
+
+    if (persisted == [] and workspace) && attempt.metrics_artifact_id &&
+         attempt.correctness_artifact_id do
+      recover_iteration_metrics(attempt, workspace)
+    else
+      persisted
+    end
+  end
+
+  defp recover_iteration_metrics(attempt, workspace) do
+    with {:ok, samples} <- artifact_by_id(attempt.metrics_artifact_id),
+         {:ok, correctness} <- artifact_by_id(attempt.correctness_artifact_id),
+         {:ok, samples_path} <- Pika.ArtifactStore.resolve(workspace, samples.relative_path),
+         {:ok, correctness_path} <-
+           Pika.ArtifactStore.resolve(workspace, correctness.relative_path),
+         {:ok, spec} <- current_spec(attempt.spec_revision_id),
+         {:ok, result} <-
+           Pika.Measurement.evaluate_iteration(samples_path, correctness_path, %{
+             base_sha: attempt.base_sha,
+             candidate_sha: attempt.candidate_sha,
+             target_snapshot_id: spec.target_snapshot_id,
+             case_ids: sampled_case_ids(attempt.sampling_revision_id),
+             metrics: metrics(attempt.spec_revision_id),
+             benchmark: Jason.decode!(spec.spec_json)["benchmark"],
+             best_metrics: best_metrics_for_sha(attempt.campaign_id, attempt.base_sha)
+           }) do
+      result
+    else
+      _ -> []
+    end
+  end
+
+  defp artifact_by_id(id) do
+    case Repo.query!("SELECT relative_path FROM artifacts WHERE id = ?", [id]).rows do
+      [[relative_path]] -> {:ok, %{relative_path: relative_path}}
+      [] -> {:error, :artifact_not_registered}
+    end
+  end
+
+  defp best_metrics_for_sha(campaign_id, sha) do
+    Repo.query!(
+      """
+      SELECT bc.name, md.name, bm.value, bm.noise_tolerance
+      FROM best_metrics bm
+      JOIN best_revisions br ON br.id = bm.best_revision_id
+      JOIN benchmark_cases bc ON bc.id = bm.benchmark_case_id
+      JOIN metric_definitions md ON md.id = bm.metric_definition_id
+      WHERE br.id = (
+        SELECT id FROM best_revisions
+        WHERE campaign_id = ? AND sha = ? ORDER BY sequence DESC LIMIT 1
+      )
+      """,
+      [campaign_id, sha]
+    ).rows
+    |> Map.new(fn [case_id, metric_id, value, noise] ->
+      {{case_id, metric_id}, %{value: value, noise_tolerance: noise}}
+    end)
+  end
+
   defp target_snapshot_id!(spec_revision_id) do
     case Repo.query!("SELECT target_snapshot_id FROM spec_revisions WHERE id = ?", [
            spec_revision_id

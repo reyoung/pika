@@ -194,7 +194,8 @@ Pika 是一个常驻 HTTP 服务。它协调 Codex、Cursor 等外部编码 Agen
 - 缺失必需 MCP 提交没有领域层面的隐式失败转换；单 Session follow-up 使用技术上限，达到上限后把 Work 作为中断交给新的 Actor，而不是伪造完成或拒绝。
 - Backend Session 或进程失效时，自动恢复流程使用新会话继续同一 Agent Work，不因此消耗新的优化 Iteration。
 - Pika 不从 Agent 的自然语言最终回答中猜测 Metrics、Commit 或完成状态。
-- 新 Plan/Iteration Prompt 默认注入最近 10 个终态 Attempt 的 Description、Summary、Outcome、Metric delta 和关键失败原因；N 可在 Server 启动配置中修改。
+- 新 Plan/Iteration Prompt 默认注入最近 N 个终态 Attempt 的 compact、只读历史摘要。Iteration sampling 与 Full Regression 分栏展示 case 数、direction-aware geomean、相对 Best/固定 Target 的结果、top gains/regressions、正确性和失败原因；缺失 evidence 显式为 `unknown`。Rejected 只表示最终 outcome，不会抹掉可复用的局部收益。N 由 Campaign `history_limit` 控制。
+- 历史 Description、Summary 和 Outcome reason 被标记为不可信引用数据并转义、截断，不能覆盖当前 Role 的 System Instructions。
 - 未读 BestAdvanced、Sampling Advanced 和用户指导不受 N 限制，必须全部注入；完整历史通过 `query_attempt_history` 查询。
 
 ## 已确认的 Pika MCP 传输与权限

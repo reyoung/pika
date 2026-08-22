@@ -57,7 +57,7 @@ Sync 不替换 Campaign 主状态，而设置 `dispatch_gate=sync`。这允许�
 | `rejected` | 正确性、性能、protected path 或测量门禁失败 | 终态 |
 | `cancelled` | 用户 Stop 或显式取消 | 终态，可保留 worktree |
 
-`awaiting_report` 没有领域超时或隐式失败转换。Actor 会在单个 Backend Session 内对缺失操作做有界 follow-up；坏 Session 达到技术边界后进入 `interrupted`，Symphony 再以同一 Agent Work、最新配置和新的 provider Session 继续。只有 committed domain facts、用户取消或 Campaign 停止条件可以形成终态。
+`awaiting_report` 没有通用领域超时或隐式失败转换。Actor 会在单个 Backend Session 内对缺失操作做有界 follow-up；通常坏 Session 达到技术边界后进入 `interrupted`，Symphony 再以同一 Agent Work、最新配置和新的 provider Session 继续。Integration Role 是显式领域策略：最多允许 50 次强制 follow-up，第 50 次后仍无领域进展便记录原因并拒绝 Attempt，防止同一坏工作跨恢复 Session 无限循环。
 
 Attempt 创建时即消耗 `max_attempts`。Plan Session、恢复 Session、Integration 和 Sync 不消耗 Attempt 预算。
 

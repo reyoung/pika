@@ -13,6 +13,7 @@ defmodule Pika.Agent.Roles.Integration do
       activation: :automatic,
       work_kind: :attempt,
       profile_key: "integration_agent",
+      max_followups: 50,
       domain_adapter: __MODULE__.Domain,
       template: %{
         relative_path: "prompts/roles/integration.md",
@@ -22,9 +23,17 @@ defmodule Pika.Agent.Roles.Integration do
       tools: [
         tool("get_integration_context", "Read the current Integration state.", :query),
         tool("register_artifact", "Register an Integration Artifact.", :command),
-        tool("acquire_integration_lease", "Acquire or recover the FIFO Integration Lease.", :command),
+        tool(
+          "acquire_integration_lease",
+          "Acquire or recover the FIFO Integration Lease.",
+          :command
+        ),
         tool("complete_refresh", "Commit a stale-base Attempt refresh.", :command),
-        tool("submit_fast_rejection", "Submit sufficient formal evidence for early rejection.", :command),
+        tool(
+          "submit_fast_rejection",
+          "Submit sufficient formal evidence for early rejection.",
+          :command
+        ),
         tool("submit_full_regression", "Submit Full Case Set regression evidence.", :command),
         tool("reject_attempt", "Reject the Attempt using its durable Receipt.", :command),
         tool("create_merge_intent", "Persist the merge intent before changing Best.", :command),
@@ -140,7 +149,12 @@ defmodule Pika.Agent.Roles.Integration.Domain do
   end
 
   @impl true
-  def invoke(%Work{id: attempt_id, campaign_id: campaign_id}, "get_integration_context", _args, meta) do
+  def invoke(
+        %Work{id: attempt_id, campaign_id: campaign_id},
+        "get_integration_context",
+        _args,
+        meta
+      ) do
     with {:ok, context} <- IntegrationStore.integration_context(campaign_id, attempt_id) do
       flags = next_flags(context, meta.session_id)
 
@@ -312,6 +326,22 @@ defmodule Pika.Agent.Roles.Integration.Domain do
     do: {:error, {:unsupported_integration_operation, operation}}
 
   @impl true
+  def handle_exhaustion(%Work{id: attempt_id, campaign_id: campaign_id}, :followup_limit, meta) do
+    result =
+      IntegrationStore.reject_stalled_attempt(
+        campaign_id,
+        attempt_id,
+        meta.session_id,
+        "integration agent exceeded 50 forced follow-ups"
+      )
+
+    cleanup_terminal(result, meta.workspace)
+  end
+
+  def handle_exhaustion(_work, reason, _meta),
+    do: {:error, {:unsupported_integration_exhaustion, reason}}
+
+  @impl true
   def replay(work, "acquire_integration_lease", args, _stored, meta),
     do: invoke(work, "acquire_integration_lease", args, meta)
 
@@ -420,13 +450,56 @@ defmodule Pika.Agent.Roles.Integration.Domain do
          {:ok, samples_path} <- Pika.ArtifactStore.resolve(meta.workspace, samples.relative_path),
          {:ok, correctness_path} <-
            Pika.ArtifactStore.resolve(meta.workspace, correctness.relative_path),
-         {:ok, full_path} <- optional_path(meta.workspace, full),
-         {:ok, result} <- evaluate_regression(mode, samples_path, full_path, correctness_path, context, attempt),
-         {:ok, receipt} <-
+         {:ok, full_path} <- optional_path(meta.workspace, full) do
+      case evaluate_regression(
+             mode,
+             samples_path,
+             full_path,
+             correctness_path,
+             context,
+             attempt
+           ) do
+        {:ok, result} ->
+          issue_regression_receipt(
+            mode,
+            args,
+            meta,
+            context,
+            attempt,
+            result,
+            correctness,
+            samples,
+            full
+          )
+
+        {:error, :correctness_failed} when mode == :full ->
+          reject_correctness_failure(args, meta, context, attempt, correctness, samples, full)
+
+        {:error, _reason} = error ->
+          error
+      end
+    else
+      false -> {:error, :full_regression_identity_mismatch}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp issue_regression_receipt(
+         mode,
+         args,
+         meta,
+         context,
+         attempt,
+         result,
+         correctness,
+         samples,
+         full
+       ) do
+    with {:ok, receipt} <-
            IntegrationStore.issue_receipt(
              args["lease_id"],
              meta.session_id,
-             attempt_id,
+             attempt.id,
              receipt_attrs(mode, context, attempt, result, correctness, samples, full)
            ) do
       response =
@@ -436,10 +509,43 @@ defmodule Pika.Agent.Roles.Integration.Domain do
         end
 
       {:ok, response}
-    else
-      false -> {:error, :full_regression_identity_mismatch}
-      {:error, _reason} = error -> error
     end
+  end
+
+  defp reject_correctness_failure(args, meta, context, attempt, correctness, screening, full) do
+    attrs = %{
+      candidate_sha: attempt.candidate_sha,
+      harness_digest: context.spec_revision.protected_digest,
+      metrics: [],
+      regressions: [],
+      force_reject: true,
+      correctness_artifact_id: correctness.id,
+      screening_artifact_id: screening.id,
+      full_artifact_id: full && full.id
+    }
+
+    result =
+      with {:ok, receipt} <-
+             IntegrationStore.issue_receipt(
+               args["lease_id"],
+               meta.session_id,
+               attempt.id,
+               attrs
+             ),
+           {:ok, rejected} <-
+             IntegrationStore.reject_attempt(
+               args["lease_id"],
+               meta.session_id,
+               attempt.id,
+               receipt.id,
+               [],
+               %{},
+               "full regression correctness failed"
+             ) do
+        {:ok, rejected}
+      end
+
+    cleanup_terminal(result, meta.workspace)
   end
 
   defp evaluate_regression(:full, screening_path, full_path, correctness_path, context, attempt) do
@@ -538,7 +644,9 @@ defmodule Pika.Agent.Roles.Integration.Domain do
     do: registered_artifact(campaign_id, path, attempt_id)
 
   defp optional_path(_workspace, nil), do: {:ok, nil}
-  defp optional_path(workspace, artifact), do: Pika.ArtifactStore.resolve(workspace, artifact.relative_path)
+
+  defp optional_path(workspace, artifact),
+    do: Pika.ArtifactStore.resolve(workspace, artifact.relative_path)
 
   defp own_artifact(%{owner_type: "attempt", owner_id: id}, id), do: :ok
   defp own_artifact(_artifact, _attempt_id), do: {:error, :artifact_identity_mismatch}

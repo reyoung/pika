@@ -199,7 +199,7 @@ defmodule Pika.IntegrationCoordinator do
   defp actor_opts(opts) do
     base = [
       backend_modules: Keyword.get(opts, :backend_modules, %{}),
-      max_followups: 8
+      max_followups: 50
     ]
 
     base =

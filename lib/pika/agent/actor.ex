@@ -32,7 +32,7 @@ defmodule Pika.Agent.Actor do
       host: nil,
       phase: :preparing,
       followups: 0,
-      max_followups: Keyword.get(opts, :max_followups, 3),
+      max_followups: Keyword.get(opts, :max_followups),
       notify: Keyword.get(opts, :notify),
       terminal_status: nil,
       pending_invocation: nil,
@@ -331,7 +331,14 @@ defmodule Pika.Agent.Actor do
              Keyword.merge(opts, session_mode: session_mode)
            ),
          {:ok, host, phase} <- activate(host, prepared.activation) do
-      state = %{state | prepared: prepared, host: host, phase: phase}
+      state = %{
+        state
+        | prepared: prepared,
+          host: host,
+          phase: phase,
+          max_followups: state.max_followups || prepared.definition.max_followups
+      }
+
       notify(state, {:agent_actor_started, state.work, host.session.id})
       {:ok, state}
     else
@@ -385,10 +392,7 @@ defmodule Pika.Agent.Actor do
         end
 
       {:ok, progress} ->
-        stop_interrupted(
-          %{state | prepared: %{state.prepared | progress: progress}},
-          :followup_limit
-        )
+        handle_followup_limit(%{state | prepared: %{state.prepared | progress: progress}})
 
       {:error, reason} ->
         stop_interrupted(state, reason)
@@ -401,6 +405,23 @@ defmodule Pika.Agent.Actor do
     SessionHost.close(state.host, "interrupted", state.prepared.progress)
     notify(state, {:agent_actor_interrupted, state.work, reason})
     {:stop, {:shutdown, reason}, %{state | host: nil, phase: :interrupted}}
+  end
+
+  defp handle_followup_limit(state) do
+    case Roles.handle_exhaustion(state.prepared, :followup_limit, state.host.session.id) do
+      {:ok, %{state: {:terminal, _}} = progress} ->
+        send(self(), {:finish_after_reply, progress})
+        {:noreply, %{state | prepared: %{state.prepared | progress: progress}}}
+
+      {:ok, progress} ->
+        stop_interrupted(
+          %{state | prepared: %{state.prepared | progress: progress}},
+          :followup_limit_not_terminal
+        )
+
+      {:error, reason} ->
+        stop_interrupted(state, {:followup_limit, reason})
+    end
   end
 
   defp refresh_from_domain(state) do

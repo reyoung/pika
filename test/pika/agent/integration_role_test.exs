@@ -11,6 +11,7 @@ defmodule Pika.Agent.IntegrationRoleTest do
     assert definition.work_kind == :attempt
     assert definition.activation == :automatic
     assert definition.profile_key == "integration_agent"
+    assert definition.max_followups == 50
     assert :ok = Roles.validate_definition(role, definition)
 
     assert Enum.map(definition.tools, &{&1.name, &1.kind}) == [

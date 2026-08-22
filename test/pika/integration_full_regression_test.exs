@@ -471,6 +471,51 @@ defmodule Pika.IntegrationFullRegressionTest do
     assert {:error, :integration_lease_missing} = IntegrationStore.lease(context.campaign.id)
   end
 
+  test "a Full Regression correctness failure immediately rejects the Attempt" do
+    context = ready_attempts(1)
+
+    _coordinator =
+      start_integration(
+        context,
+        integration_profile(%{test_pid: self(), correctness_failure: true})
+      )
+
+    [start] = receive_integrations(1)
+
+    eventually(fn ->
+      match?({:ok, %{status: "rejected"}}, AttemptStore.attempt(start.attempt_id))
+    end)
+
+    assert {:ok, %{status: "rejected"}} =
+             IntegrationStore.receipt_for_attempt(start.attempt_id)
+
+    assert {:ok, rejected} = AttemptStore.attempt(start.attempt_id)
+    assert rejected.outcome_reason == "full regression correctness failed"
+    refute_receive {:integration_started, _, _, _}, 150
+  end
+
+  test "an unresponsive Integration Agent is rejected after fifty forced follow-ups" do
+    context = ready_attempts(1)
+
+    _coordinator =
+      start_integration(
+        context,
+        integration_profile(%{test_pid: self(), unresponsive: true})
+      )
+
+    starts = receive_integrations(51)
+    assert starts |> Enum.map(& &1.attempt_id) |> Enum.uniq() |> length() == 1
+    assert starts |> Enum.map(& &1.token) |> Enum.uniq() |> length() == 1
+
+    eventually(fn ->
+      match?({:ok, %{status: "rejected"}}, AttemptStore.attempt(hd(starts).attempt_id))
+    end)
+
+    assert {:ok, rejected} = AttemptStore.attempt(hd(starts).attempt_id)
+    assert rejected.outcome_reason == "integration agent exceeded 50 forced follow-ups"
+    refute_receive {:integration_started, _, _, _}, 150
+  end
+
   defp ready_attempts(count) do
     context = OptimizationFixtures.setup_campaign(max_attempts: count)
 

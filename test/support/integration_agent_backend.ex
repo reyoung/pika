@@ -86,6 +86,15 @@ defmodule Pika.Test.IntegrationAgentBackend do
 
   defp run(server, state) do
     notify(state)
+
+    if env(state)[:unresponsive] do
+      complete_turn(server)
+    else
+      run_integration(server, state)
+    end
+  end
+
+  defp run_integration(server, state) do
     maybe_wait(state)
     {:ok, context} = mcp(state, "get_integration_context", %{})
 
@@ -104,6 +113,16 @@ defmodule Pika.Test.IntegrationAgentBackend do
     receipt = context.receipt || full_regression(server, state, context, lease)
     if is_nil(context.receipt), do: maybe_crash(server, state, :after_receipt)
 
+    if receipt.status == "rejected" and receipt.id == state.mcp.attempt_id do
+      :ok
+    else
+      finish_integration(server, state, context, lease, receipt)
+    end
+
+    complete_turn(server)
+  end
+
+  defp finish_integration(server, state, context, lease, receipt) do
     if receipt.status == "rejected" do
       {:ok, _} =
         mcp(state, "reject_attempt", %{
@@ -146,8 +165,6 @@ defmodule Pika.Test.IntegrationAgentBackend do
 
       maybe_crash(server, state, :after_sqlite_commit)
     end
-
-    complete_turn(server)
   end
 
   defp then_create_intent(state, lease_id, receipt_id) do
@@ -272,7 +289,7 @@ defmodule Pika.Test.IntegrationAgentBackend do
             %{
               "case_id" => benchmark_case["id"],
               "target_passed" => true,
-              "candidate_passed" => true
+              "candidate_passed" => env(state)[:correctness_failure] != true
             }
           end)
       })
