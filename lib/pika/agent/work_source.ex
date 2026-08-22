@@ -105,6 +105,7 @@ defmodule Pika.Agent.WorkSources.Plan do
       AttemptStore.active_attempts(campaign_id)
       |> Enum.filter(fn attempt ->
         attempt.status in ~w(running awaiting_report interrupted) and
+          attempt.resume_state != "queued" and
           is_nil(attempt.plan_artifact_id)
       end)
       |> Enum.map(&work(&1, campaign_id))
@@ -131,6 +132,7 @@ defmodule Pika.Agent.WorkSources.Iteration do
       AttemptStore.active_attempts(campaign_id)
       |> Enum.filter(fn attempt ->
         attempt.status in ~w(running awaiting_report interrupted) and
+          attempt.resume_state != "queued" and
           (not context.plan_enabled or not is_nil(attempt.plan_artifact_id))
       end)
       |> Enum.map(&work(&1, campaign_id))

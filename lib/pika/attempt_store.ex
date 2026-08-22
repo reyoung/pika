@@ -160,7 +160,7 @@ defmodule Pika.AttemptStore do
 
     transition_attempt(
       attempt_id,
-      ~w(running awaiting_report refreshing integrating interrupted),
+      ~w(queued running awaiting_report refreshing integrating interrupted),
       "interrupted",
       "attempt_interrupted",
       %{reason: inspect(reason)},

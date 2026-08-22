@@ -113,6 +113,54 @@ defmodule Pika.AttemptLoopTest do
     assert AttemptCoordinator.snapshot(coordinator).last_error == nil
   end
 
+  test "Attempt preparation failure does not leave the Attempt queued forever" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+
+    manifest =
+      Path.join([
+        context.workspace.root,
+        Path.dirname(context.target_snapshot.checkout_relative_path),
+        "manifest.json"
+      ])
+
+    original_manifest = File.read!(manifest)
+    File.write!(manifest, "{}")
+
+    coordinator =
+      start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}))
+
+    eventually(fn ->
+      case AttemptStore.attempts(context.campaign.id, limit: 1) do
+        [%{status: "interrupted", resume_state: "queued"}] -> true
+        _ -> false
+      end
+    end)
+
+    refute_receive {:attempt_started, _, _, _, _}, 100
+
+    assert AttemptCoordinator.snapshot(coordinator).last_error =~
+             "target_snapshot_identity_mismatch"
+
+    assert Enum.any?(AttemptStore.events(context.campaign.id, 0, 100), fn event ->
+             event.event_type == "attempt_interrupted" and
+               event.aggregate_id == hd(AttemptStore.attempts(context.campaign.id, limit: 1)).id
+           end)
+
+    GenServer.stop(coordinator)
+    File.write!(manifest, original_manifest)
+
+    recovered =
+      start_coordinator(context, profiles(1, %{test_pid: self(), barrier: true}),
+        auto_dispatch: false
+      )
+
+    [start] = receive_starts(1)
+    assert start.attempt_id == hd(AttemptStore.attempts(context.campaign.id, limit: 1)).id
+    assert {:ok, %{status: "running", resume_state: nil}} = AttemptStore.attempt(start.attempt_id)
+    assert AttemptCoordinator.snapshot(recovered).last_error == nil
+    send(start.task_pid, :release)
+  end
+
   test "does not dispatch while completed candidates await Integration by default" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 3)
 

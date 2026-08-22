@@ -300,18 +300,24 @@ defmodule Pika.AttemptCoordinator do
   defp recover_existing_attempts(state) do
     Store.active_attempts(state.campaign_id)
     |> Enum.reduce(state, fn attempt, acc ->
-      if integration_owned_attempt?(attempt) or attempt.status == "ready_for_integration" do
-        acc
-      else
-        _ = Store.interrupt_active_sessions_for_attempt(attempt.id)
+      cond do
+        integration_owned_attempt?(attempt) or attempt.status == "ready_for_integration" ->
+          acc
 
-        if attempt.status != "interrupted",
-          do: Store.mark_interrupted(attempt.id, :server_recovery)
+        attempt.status == "queued" or
+            (attempt.status == "interrupted" and attempt.resume_state == "queued") ->
+          prepare_attempt(acc, attempt)
 
-        case Store.mark_running(attempt.id) do
-          {:ok, _running} -> acc
-          {:error, reason} -> %{acc | last_error: inspect(reason)}
-        end
+        true ->
+          _ = Store.interrupt_active_sessions_for_attempt(attempt.id)
+
+          if attempt.status != "interrupted",
+            do: Store.mark_interrupted(attempt.id, :server_recovery)
+
+          case Store.mark_running(attempt.id) do
+            {:ok, _running} -> acc
+            {:error, reason} -> %{acc | last_error: inspect(reason)}
+          end
       end
     end)
   end
