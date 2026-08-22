@@ -65,5 +65,13 @@ formal measurements show no worthwhile improvement, set recommended_outcome to `
 committed worktree and call `complete_attempt`. Pika computes both relative-to-Target and relative-to-current-Best
 values. Only Integration can mark an Attempt Accepted.
 
-Completion paths: `record_metrics` + `submit_attempt_summary` + `complete_attempt`, or
-`submit_attempt_summary` + `reject_attempt` when further measurement/Integration is clearly wasteful.
+Required operation order after formal measurement:
+
+- integrate: `record_metrics -> submit_attempt_summary -> complete_attempt`
+- skip/reject: `record_metrics -> submit_attempt_summary -> reject_attempt`
+
+The submitted `recommended_outcome` selects the terminal operation. With `recommended_outcome=integrate`, finish
+metrics and summary, then call `complete_attempt`. An Attempt with `recommended_outcome=skip/reject` must call
+`reject_attempt` after its summary. `recommended_outcome=skip/reject` must never call `complete_attempt`; it must not enter Integration or acquire an Integration lease.
+If a Session is recovering and the persisted summary already has
+`recommended_outcome=skip/reject`, recovery requires only `reject_attempt` and must not repeat completed operations.

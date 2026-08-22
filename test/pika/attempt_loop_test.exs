@@ -212,6 +212,30 @@ defmodule Pika.AttemptLoopTest do
     assert IntegrationStore.queue_head(context.campaign.id) == {:error, :integration_queue_empty}
   end
 
+  test "a skipped Attempt cannot complete into the Integration queue" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+    assert {:ok, attempt} = AttemptStore.create_attempt(context.campaign.id, 0)
+    assert {:ok, _attempt} = AttemptStore.mark_running(attempt.id)
+
+    assert {:ok, _event} =
+             AttemptStore.submit_summary(attempt.id, %{
+               description: "Skip this candidate",
+               summary: "The measured result should not enter Integration.",
+               modification_scope: [],
+               risks: [],
+               profiler_summary: nil,
+               recommended_outcome: "skip"
+             })
+
+    assert {:error, {:invalid_recommended_outcome, "skip"}} =
+             AttemptStore.complete_attempt(attempt.id, context.best_sha, 0)
+
+    assert {:ok, %{status: "running", recommended_outcome: "skip"}} =
+             AttemptStore.attempt(attempt.id)
+
+    assert IntegrationStore.queue_head(context.campaign.id) == {:error, :integration_queue_empty}
+  end
+
   test "recovery directs a skipped Attempt to reject instead of Integration" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 1)
     assert {:ok, attempt} = AttemptStore.create_attempt(context.campaign.id, 0)

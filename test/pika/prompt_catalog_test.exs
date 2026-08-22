@@ -109,6 +109,18 @@ defmodule Pika.PromptCatalogTest do
     assert iteration =~ "exactly 8 alternating"
     assert iteration =~ ~r/at least\s+6 valid Pairs/
 
+    assert iteration =~
+             "integrate: `record_metrics -> submit_attempt_summary -> complete_attempt`"
+
+    assert iteration =~
+             "skip/reject: `record_metrics -> submit_attempt_summary -> reject_attempt`"
+
+    assert iteration =~
+             "recommended_outcome=skip/reject` must never call `complete_attempt`"
+
+    assert iteration =~ "must not enter Integration or acquire an Integration lease"
+    assert iteration =~ "recovery requires only `reject_attempt`"
+
     assert {:ok, integration} =
              PromptCatalog.render(:integration, %{
                attempt: attempt,

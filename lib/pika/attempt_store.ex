@@ -696,6 +696,9 @@ defmodule Pika.AttemptStore do
           is_nil(attempt.summary) or String.trim(attempt.summary) == "" ->
             Repo.rollback(:missing_summary)
 
+          attempt.recommended_outcome != "integrate" ->
+            Repo.rollback({:invalid_recommended_outcome, attempt.recommended_outcome})
+
           is_nil(attempt.patch_artifact_id) ->
             Repo.rollback(:missing_patch_artifact)
 
