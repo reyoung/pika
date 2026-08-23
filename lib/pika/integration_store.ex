@@ -292,24 +292,28 @@ defmodule Pika.IntegrationStore do
   def block(campaign_id, attempt_id, reason) do
     transaction =
       Repo.transaction(fn ->
-        [[status, resume_state]] =
-          Repo.query!("SELECT status, resume_state FROM campaigns WHERE id = ?", [campaign_id]).rows
+        [[status]] = Repo.query!("SELECT status FROM campaigns WHERE id = ?", [campaign_id]).rows
 
-        resume_state = if(status == "blocked", do: resume_state, else: status)
-        now = now_us()
+        value = %{campaign_id: campaign_id, status: "blocked", attempt_id: attempt_id}
 
-        Repo.query!(
-          "UPDATE campaigns SET status = 'blocked', resume_state = ?, dispatch_gate = 'blocked', updated_at = ?, lock_version = lock_version + 1 WHERE id = ?",
-          [resume_state, now, campaign_id]
-        )
+        if status == "blocked" do
+          {value, nil}
+        else
+          now = now_us()
 
-        event =
-          insert_event!("campaign", campaign_id, "integration_blocked", %{
-            attempt_id: attempt_id,
-            reason: inspect(reason)
-          })
+          Repo.query!(
+            "UPDATE campaigns SET status = 'blocked', resume_state = ?, dispatch_gate = 'blocked', updated_at = ?, lock_version = lock_version + 1 WHERE id = ?",
+            [status, now, campaign_id]
+          )
 
-        {%{campaign_id: campaign_id, status: "blocked", attempt_id: attempt_id}, event}
+          event =
+            insert_event!("campaign", campaign_id, "integration_blocked", %{
+              attempt_id: attempt_id,
+              reason: inspect(reason)
+            })
+
+          {value, event}
+        end
       end)
 
     publish_transaction(transaction)

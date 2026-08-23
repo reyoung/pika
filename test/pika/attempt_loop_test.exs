@@ -161,6 +161,38 @@ defmodule Pika.AttemptLoopTest do
     send(start.task_pid, :release)
   end
 
+  test "Attempt summaries decode JSON Unicode escapes submitted as literal text" do
+    context = OptimizationFixtures.setup_campaign(max_attempts: 1)
+    assert {:ok, attempt} = AttemptStore.create_attempt(context.campaign.id, 0)
+
+    assert {:ok, event} =
+             AttemptStore.submit_summary(attempt.id, %{
+               description: ~S(H20 \u6b63 result),
+               summary: ~S(H20 \u6b63\u5f0f \uD83D\uDE80; invalid \uZZZZ; path C:\users),
+               modification_scope: [~S(\u4fee\u6539 kernel)],
+               risks: [~S(\uZZZZ remains literal), ~S(escaped \\u6b63 remains literal)],
+               profiler_summary: ~S(\u70ed\u70b9),
+               recommended_outcome: "integrate"
+             })
+
+    assert {:ok, stored} = AttemptStore.attempt(attempt.id)
+    assert stored.description == "H20 正 result"
+    assert stored.summary == "H20 正式 🚀; invalid \\uZZZZ; path C:\\users"
+    assert stored.modification_scope == ["修改 kernel"]
+    assert stored.risks == ["\\uZZZZ remains literal", "escaped \\\\u6b63 remains literal"]
+    assert stored.profiler_summary == "热点"
+    assert event.payload.summary == stored.summary
+
+    expected_summary = stored.summary
+
+    assert [[^expected_summary]] =
+             Repo.query!("SELECT summary FROM attempts WHERE id = ?", [attempt.id]).rows
+
+    Repo.query!("UPDATE attempts SET summary = ? WHERE id = ?", [~S(旧记录：\u4e2d\u6587), attempt.id])
+
+    assert {:ok, %{summary: "旧记录：中文"}} = AttemptStore.attempt(attempt.id)
+  end
+
   test "does not dispatch while completed candidates await Integration by default" do
     context = OptimizationFixtures.setup_campaign(max_attempts: 3)
 

@@ -52,7 +52,15 @@ Intent can exist.
 
 On recovery, inspect the registered Artifacts and on-disk integration outputs before running measurements. Reuse only complete outputs whose Base SHA, Candidate SHA, Case/Metric coverage, pair indexes, and alternating order match the current context. Never rerun a completed screening or escalation; rerun only a missing or incomplete combination.
 
-If the Attempt base is stale, refresh only its Attempt branch onto the current Best and repeat its fixed Sampling Revision measurement. If regression is confirmed, do not touch Best; submit representative feedback when requested. If validation passes, squash the Reference-free candidate Patch onto the current Best with Attempt/Spec/Sampling trailers, then call `complete_merge` with the Receipt and Intent.
+If the Attempt base is stale, refresh only its Attempt branch onto the current Best and repeat its fixed Sampling Revision measurement. If regression is confirmed, do not touch Best; submit representative feedback when requested. If validation passes, squash the Reference-free candidate Patch onto the current Best. The commit message must contain these exact protocol trailer field names and values; `Attempt`, `Spec`, or `Sampling` without the `Pika-` prefix is invalid:
+
+```
+Pika-Attempt: <%= @attempt.id %>
+Pika-Spec-Revision: <%= @attempt.spec_revision_id %>
+Pika-Sampling-Revision: <%= @attempt.sampling_revision_id %>
+```
+
+Only after the commit contains those exact trailers, call `complete_merge` with the Receipt and Intent.
 
 Attempt: <%= Jason.encode!(@attempt, pretty: true) %>
 Campaign context: <%= Jason.encode!(@context, pretty: true) %>

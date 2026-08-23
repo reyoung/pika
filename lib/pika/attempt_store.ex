@@ -574,6 +574,7 @@ defmodule Pika.AttemptStore do
 
   def submit_summary(attempt_id, attrs) do
     attempt = attempt_row!(attempt_id)
+    attrs = normalize_summary_text(attrs)
 
     Repo.transaction(fn ->
       Repo.query!(
@@ -601,6 +602,72 @@ defmodule Pika.AttemptStore do
   rescue
     error -> {:error, {:summary_persist_failed, Exception.message(error)}}
   end
+
+  defp normalize_summary_text(attrs) do
+    %{
+      attrs
+      | description: decode_json_unicode_escapes(attrs.description),
+        summary: decode_json_unicode_escapes(attrs.summary),
+        modification_scope: decode_json_unicode_escape_list(attrs.modification_scope),
+        risks: decode_json_unicode_escape_list(attrs.risks),
+        profiler_summary: decode_json_unicode_escapes(attrs.profiler_summary)
+    }
+  end
+
+  defp decode_json_unicode_escapes(nil), do: nil
+  defp decode_json_unicode_escapes(value) when not is_binary(value), do: value
+  defp decode_json_unicode_escapes(value), do: decode_json_unicode_escapes(value, [])
+
+  defp decode_json_unicode_escape_list(values),
+    do: Enum.map(values, &decode_json_unicode_escapes/1)
+
+  defp decode_json_unicode_escapes(value, acc) do
+    case :binary.match(value, "\\u") do
+      :nomatch ->
+        acc |> Enum.reverse([value]) |> IO.iodata_to_binary()
+
+      {index, 2} ->
+        prefix = binary_part(value, 0, index)
+        rest = binary_part(value, index + 2, byte_size(value) - index - 2)
+
+        if String.ends_with?(prefix, "\\") do
+          decode_json_unicode_escapes(rest, ["\\u", prefix | acc])
+        else
+          case decode_escaped_codepoint(rest) do
+            {:ok, codepoint, consumed} ->
+              tail = binary_part(rest, consumed, byte_size(rest) - consumed)
+              decode_json_unicode_escapes(tail, [codepoint, prefix | acc])
+
+            :error ->
+              decode_json_unicode_escapes(rest, ["\\u", prefix | acc])
+          end
+        end
+    end
+  end
+
+  defp decode_escaped_codepoint(<<hex::binary-size(4), rest::binary>>) do
+    case Integer.parse(hex, 16) do
+      {high, ""} when high in 0xD800..0xDBFF -> decode_surrogate_pair(high, rest)
+      {low, ""} when low in 0xDC00..0xDFFF -> :error
+      {codepoint, ""} -> {:ok, <<codepoint::utf8>>, 4}
+      _ -> :error
+    end
+  end
+
+  defp decode_escaped_codepoint(_value), do: :error
+
+  defp decode_surrogate_pair(high, <<"\\u", low_hex::binary-size(4), _rest::binary>>) do
+    case Integer.parse(low_hex, 16) do
+      {low, ""} when low in 0xDC00..0xDFFF ->
+        codepoint = 0x10000 + (high - 0xD800) * 0x400 + low - 0xDC00
+        {:ok, <<codepoint::utf8>>, 10}
+
+      _ ->
+        :error
+    end
+  end
+
+  defp decode_surrogate_pair(_high, _rest), do: :error
 
   def attach_artifact(attempt_id, column, artifact_id)
       when column in ~w(patch_artifact_id plan_artifact_id correctness_artifact_id metrics_artifact_id) do
@@ -1289,13 +1356,13 @@ defmodule Pika.AttemptStore do
       candidate_sha: candidate_sha,
       branch_name: branch_name,
       worktree_relative_path: worktree,
-      description: description,
-      summary: summary,
-      modification_scope: Jason.decode!(scope),
-      risks: Jason.decode!(risks),
-      profiler_summary: profiler,
+      description: decode_json_unicode_escapes(description),
+      summary: decode_json_unicode_escapes(summary),
+      modification_scope: scope |> Jason.decode!() |> decode_json_unicode_escape_list(),
+      risks: risks |> Jason.decode!() |> decode_json_unicode_escape_list(),
+      profiler_summary: decode_json_unicode_escapes(profiler),
       recommended_outcome: recommended,
-      outcome_reason: reason,
+      outcome_reason: decode_json_unicode_escapes(reason),
       patch_artifact_id: patch,
       plan_artifact_id: plan,
       correctness_artifact_id: correctness,

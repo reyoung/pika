@@ -323,6 +323,7 @@ defmodule Pika.SyncCoordinator do
     if Process.whereis(Pika.PubSub) do
       Phoenix.PubSub.subscribe(Pika.PubSub, Pika.Persistence.topic(campaign_id))
       Phoenix.PubSub.subscribe(Pika.PubSub, "pika:sync:events")
+      Phoenix.PubSub.subscribe(Pika.PubSub, "pika:agent-lifecycle:#{campaign_id}")
     end
   end
 

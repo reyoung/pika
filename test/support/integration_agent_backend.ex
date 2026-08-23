@@ -147,7 +147,12 @@ defmodule Pika.Test.IntegrationAgentBackend do
 
       new_sha =
         if current_best_head == context.best_sha,
-          do: squash_merge(context, state.mcp.attempt_id),
+          do:
+            squash_merge(
+              context,
+              state.mcp.attempt_id,
+              env(state)[:merge_trailers] || :pika
+            ),
           else: current_best_head
 
       if current_best_head == context.best_sha, do: maybe_crash(server, state, :after_squash)
@@ -316,14 +321,25 @@ defmodule Pika.Test.IntegrationAgentBackend do
     receipt
   end
 
-  defp squash_merge(context, attempt_id) do
+  defp squash_merge(context, attempt_id, trailer_style) do
     Git.run!(context.best_worktree, ["apply", "--index", context.patch_path])
+
+    trailers =
+      case trailer_style do
+        :unprefixed ->
+          "Attempt: #{attempt_id}\n" <>
+            "Spec: #{context.attempt.spec_revision_id}\n" <>
+            "Sampling: #{context.attempt.sampling_revision_id}"
+
+        :pika ->
+          "Pika-Attempt: #{attempt_id}\n" <>
+            "Pika-Spec-Revision: #{context.attempt.spec_revision_id}\n" <>
+            "Pika-Sampling-Revision: #{context.attempt.sampling_revision_id}"
+      end
 
     message =
       "Accept Pika Attempt #{attempt_id}\n\n" <>
-        "Pika-Attempt: #{attempt_id}\n" <>
-        "Pika-Spec-Revision: #{context.attempt.spec_revision_id}\n" <>
-        "Pika-Sampling-Revision: #{context.attempt.sampling_revision_id}"
+        trailers
 
     Git.run!(context.best_worktree, ["commit", "-m", message])
     Git.run!(context.best_worktree, ["rev-parse", "HEAD"])

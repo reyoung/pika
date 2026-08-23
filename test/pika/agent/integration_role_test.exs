@@ -58,4 +58,12 @@ defmodule Pika.Agent.IntegrationRoleTest do
     assert Completion.evaluate(graph, %{campaign_status: "blocked", _revision: 9}).state ==
              {:terminal, :blocked}
   end
+
+  test "the Integration prompt requires the exact recoverable merge trailers" do
+    prompt = File.read!("priv/prompts/integration/integration.md.eex")
+
+    assert prompt =~ "Pika-Attempt:"
+    assert prompt =~ "Pika-Spec-Revision:"
+    assert prompt =~ "Pika-Sampling-Revision:"
+  end
 end

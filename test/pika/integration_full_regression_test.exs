@@ -347,6 +347,40 @@ defmodule Pika.IntegrationFullRegressionTest do
     assert {:error, :integration_lease_missing} = IntegrationStore.lease(context.campaign.id)
   end
 
+  test "malformed merge trailers block recovery after the Integration Actor stops" do
+    context = ready_attempts(1)
+    {:ok, crash_counter} = Agent.start_link(fn -> 0 end)
+
+    coordinator =
+      start_integration(
+        context,
+        integration_profile(%{
+          test_pid: self(),
+          crash_stage: :after_squash,
+          crash_counter: crash_counter,
+          merge_trailers: :unprefixed
+        })
+      )
+
+    [start] = receive_integrations(1)
+    attempt_id = start.attempt_id
+
+    eventually(fn -> Pika.Persistence.current_campaign().status == "blocked" end)
+    refute_receive {:integration_started, ^attempt_id, _, _}, 150
+
+    snapshot = IntegrationCoordinator.snapshot(coordinator)
+    assert snapshot.session == nil
+    assert snapshot.last_error =~ "missing_merge_trailers"
+
+    [[blocked_events]] =
+      Repo.query!(
+        "SELECT COUNT(*) FROM domain_events WHERE aggregate_id = ? AND event_type = 'integration_blocked'",
+        [context.campaign.id]
+      ).rows
+
+    assert blocked_events == 1
+  end
+
   test "MCP authentication is available while the Integration Session is opening" do
     context = ready_attempts(1)
 
@@ -478,6 +512,34 @@ defmodule Pika.IntegrationFullRegressionTest do
       ).rows
 
     assert blocked_events == 1
+  end
+
+  test "Integration WorkSource persists an unrecoverable Best error instead of polling it forever" do
+    context = ready_attempts(1)
+    unexpected_path = Path.join(context.workspace.repo, "unexpected.txt")
+    File.write!(unexpected_path, "external mutation\n")
+    Git.run!(context.workspace.repo, ["add", "unexpected.txt"])
+    Git.run!(context.workspace.repo, ["commit", "-m", "Unexpected external mutation"])
+
+    assert [] ==
+             Pika.Agent.WorkSources.Integration.runnable_work(
+               context.campaign.id,
+               context.workspace
+             )
+
+    assert Pika.Persistence.current_campaign().status == "blocked"
+
+    assert [] ==
+             Pika.Agent.WorkSources.Integration.runnable_work(
+               context.campaign.id,
+               context.workspace
+             )
+
+    assert [[1]] =
+             Repo.query!(
+               "SELECT COUNT(*) FROM domain_events WHERE aggregate_id = ? AND event_type = 'integration_blocked'",
+               [context.campaign.id]
+             ).rows
   end
 
   test "recovers during the user-sized escalation and rejects before mutating Best" do

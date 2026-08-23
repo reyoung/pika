@@ -68,16 +68,22 @@ defmodule Pika.Agent.WorkSources.Integration do
 
     with status when status not in ~w(paused stopped blocked completed) <-
            campaign_status(campaign_id),
-         {:ok, attempt} <- IntegrationStore.queue_head(campaign_id),
-         :ok <- Domain.ensure_recoverable_best(workspace, attempt) do
-      [
-        %Work{
-          role_id: "integration",
-          kind: :attempt,
-          id: attempt.id,
-          campaign_id: campaign_id
-        }
-      ]
+         {:ok, attempt} <- IntegrationStore.queue_head(campaign_id) do
+      case Domain.ensure_recoverable_best(workspace, attempt) do
+        :ok ->
+          [
+            %Work{
+              role_id: "integration",
+              kind: :attempt,
+              id: attempt.id,
+              campaign_id: campaign_id
+            }
+          ]
+
+        {:error, reason} ->
+          _ = IntegrationStore.block(campaign_id, attempt.id, reason)
+          []
+      end
     else
       _ -> []
     end
