@@ -15,8 +15,18 @@ defmodule Pika.CampaignStore do
            "SELECT state_blob FROM campaign_runtime_snapshots WHERE campaign_id = ?",
            [campaign_id]
          ).rows do
-      [[blob]] -> decode_snapshot(blob)
-      [] -> :none
+      [[blob]] ->
+        with {:ok, durable} <- decode_snapshot(blob) do
+          {:ok,
+           Map.put(
+             durable,
+             :best_sha,
+             loaded_best_sha!(campaign_id, Map.get(durable, :best_sha))
+           )}
+        end
+
+      [] ->
+        :none
     end
   rescue
     error -> {:error, {:runtime_snapshot_load_failed, Exception.message(error)}}
@@ -35,8 +45,6 @@ defmodule Pika.CampaignStore do
 
   def persist(state) do
     campaign_id = state.campaign_id
-    durable = Map.take(state, @durable_fields)
-    blob = :erlang.term_to_binary(durable, compressed: 6)
     now = System.system_time(:microsecond)
 
     Repo.transaction(fn ->
@@ -47,12 +55,16 @@ defmodule Pika.CampaignStore do
       persist_artifacts!(campaign_id, state, now)
       persist_agent_session!(campaign_id, state, now)
 
+      best_sha = canonical_best_sha!(campaign_id, state.best_sha)
       status = persisted_campaign_status(state.status)
+      persist_campaign_state!(campaign_id, state.status, status, best_sha, spec_revision_id, now)
 
-      Repo.query!(
-        "UPDATE campaigns SET status = ?, best_sha = ?, current_spec_revision_id = ?, updated_at = ? WHERE id = ?",
-        [status, state.best_sha, spec_revision_id, now, campaign_id]
-      )
+      durable =
+        state
+        |> Map.take(@durable_fields)
+        |> Map.put(:best_sha, best_sha)
+
+      blob = :erlang.term_to_binary(durable, compressed: 6)
 
       Repo.query!(
         """
@@ -70,6 +82,68 @@ defmodule Pika.CampaignStore do
     end
   rescue
     error -> {:error, {:campaign_persist_failed, Exception.message(error)}}
+  end
+
+  defp persist_campaign_state!(
+         campaign_id,
+         :optimizing,
+         _status,
+         best_sha,
+         _spec_revision_id,
+         now
+       ) do
+    case Repo.query!("SELECT status FROM campaigns WHERE id = ?", [campaign_id]).rows do
+      [["selecting_iteration_sample"]] ->
+        Repo.query!(
+          "UPDATE campaigns SET status = 'optimizing', best_sha = ?, updated_at = ? WHERE id = ?",
+          [best_sha, now, campaign_id]
+        )
+
+      [[_domain_owned_status]] ->
+        Repo.query!(
+          "UPDATE campaigns SET best_sha = ?, updated_at = ? WHERE id = ?",
+          [best_sha, now, campaign_id]
+        )
+    end
+  end
+
+  defp persist_campaign_state!(
+         campaign_id,
+         _alignment_status,
+         status,
+         best_sha,
+         spec_revision_id,
+         now
+       ) do
+    Repo.query!(
+      "UPDATE campaigns SET status = ?, best_sha = ?, current_spec_revision_id = ?, updated_at = ? WHERE id = ?",
+      [status, best_sha, spec_revision_id, now, campaign_id]
+    )
+  end
+
+  defp canonical_best_sha!(campaign_id, fallback) do
+    latest_best_revision_sha!(campaign_id) || fallback
+  end
+
+  defp loaded_best_sha!(campaign_id, fallback) do
+    latest_best_revision_sha!(campaign_id) || campaign_best_sha!(campaign_id, fallback)
+  end
+
+  defp latest_best_revision_sha!(campaign_id) do
+    case Repo.query!(
+           "SELECT sha FROM best_revisions WHERE campaign_id = ? ORDER BY sequence DESC LIMIT 1",
+           [campaign_id]
+         ).rows do
+      [[sha]] -> sha
+      [] -> nil
+    end
+  end
+
+  defp campaign_best_sha!(campaign_id, fallback) do
+    case Repo.query!("SELECT best_sha FROM campaigns WHERE id = ?", [campaign_id]).rows do
+      [[sha]] when is_binary(sha) -> sha
+      [] -> fallback
+    end
   end
 
   def counts(campaign_id) do

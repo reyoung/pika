@@ -109,6 +109,19 @@ defmodule Pika.IntegrationCoordinator do
   def handle_info(:scan, %{recovery_enabled: true} = state), do: {:noreply, scan(state)}
   def handle_info(:scan, state), do: {:noreply, state}
 
+  def handle_info(
+        {event_kind, %{event_type: "integration_blocked", payload: payload}},
+        state
+      )
+      when event_kind in [:domain_event, :integration_event] do
+    {:noreply,
+     %{
+       state
+       | recovery_enabled: false,
+         last_error: Map.get(payload, :reason) || Map.get(payload, "reason")
+     }}
+  end
+
   def handle_info({:domain_event, _event}, state), do: {:noreply, trigger_scan(state)}
   def handle_info({:integration_event, _event}, state), do: {:noreply, trigger_scan(state)}
 

@@ -90,6 +90,38 @@ defmodule Pika.AlignmentPersistenceTest do
     assert "campaign-kernels" in Campaign.snapshot().spec["reference_ids"]
   end
 
+  test "restoring an optimizing Alignment snapshot cannot roll back canonical Campaign state",
+       context do
+    pid = start_campaign(context)
+    assert {:ok, durable} = Store.load(context.campaign.id)
+    GenServer.stop(pid)
+
+    pid = start_campaign(context, %{durable | status: :optimizing})
+    GenServer.stop(pid)
+
+    repo = context.stage_workspace.repo
+    File.write!(Path.join(repo, "accepted.txt"), "accepted\n")
+    Git.run!(repo, ["add", "accepted.txt"])
+    Git.run!(repo, ["commit", "-m", "Accepted optimization"])
+    advanced_best = Git.run!(repo, ["rev-parse", "HEAD"])
+
+    Repo.query!(
+      "UPDATE campaigns SET status = 'blocked', resume_state = 'optimizing', dispatch_gate = 'blocked', best_sha = ? WHERE id = ?",
+      [advanced_best, context.campaign.id]
+    )
+
+    assert {:ok, recovered_durable} = Store.load(context.campaign.id)
+    _pid = start_campaign(context, recovered_durable)
+
+    assert Campaign.snapshot().best_sha == advanced_best
+
+    assert [["blocked", "optimizing", "blocked", ^advanced_best]] =
+             Repo.query!(
+               "SELECT status, resume_state, dispatch_gate, best_sha FROM campaigns WHERE id = ?",
+               [context.campaign.id]
+             ).rows
+  end
+
   test "persists and restores normalized Alignment through Baseline state", context do
     pid = start_campaign(context)
     harness_args = AlignmentFixtures.create_harness(context.stage_workspace.setup_worktree)
@@ -187,6 +219,11 @@ defmodule Pika.AlignmentPersistenceTest do
                "best_sha" => best_sha,
                "target_snapshot_id" => Campaign.snapshot().target_snapshot.id
              })
+
+    assert [[^best_sha]] =
+             Repo.query!("SELECT best_sha FROM campaigns WHERE id = ?", [context.campaign.id]).rows
+
+    assert {:ok, %{best_sha: ^best_sha}} = Store.load(context.campaign.id)
 
     AlignmentFixtures.write_baseline_artifacts(
       context.stage_workspace,
