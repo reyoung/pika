@@ -142,12 +142,17 @@ defmodule Pika.Optimization.SchemaValidatorTest do
           "id" => "accuracy",
           "unit" => "ratio",
           "direction" => "maximize",
-          "role" => "guard"
+          "role" => "guard",
+          "max_regression_ratio" => 0.01
         }
       ]
     }
 
     assert :ok = SchemaValidator.validate(metric, schema(schemas.metrics))
+
+    invalid = put_in(metric, ["metrics", Access.at(0), "max_regression_ratio"], -0.01)
+    assert {:error, errors} = SchemaValidator.validate(invalid, schema(schemas.metrics))
+    assert Enum.any?(errors, &(&1.path == "/metrics/0/max_regression_ratio"))
   end
 
   defp baseline_definition do

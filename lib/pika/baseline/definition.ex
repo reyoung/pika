@@ -129,10 +129,24 @@ defmodule Pika.Baseline.Definition do
   defp validate_metrics(metrics) do
     ids = Enum.map(metrics, & &1["id"])
 
+    invalid_guard_option =
+      Enum.find(
+        metrics,
+        &(Map.has_key?(&1, "max_regression_ratio") and &1["role"] != "guard")
+      )
+
     cond do
-      Enum.uniq(ids) != ids -> {:error, :duplicate_metric_ids}
-      not Enum.any?(metrics, &(&1["role"] == "primary")) -> {:error, :primary_metric_missing}
-      true -> :ok
+      Enum.uniq(ids) != ids ->
+        {:error, :duplicate_metric_ids}
+
+      invalid_guard_option ->
+        {:error, {:max_regression_ratio_requires_guard, invalid_guard_option["id"]}}
+
+      not Enum.any?(metrics, &(&1["role"] == "primary")) ->
+        {:error, :primary_metric_missing}
+
+      true ->
+        :ok
     end
   end
 

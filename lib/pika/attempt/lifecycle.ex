@@ -163,13 +163,14 @@ defmodule Pika.Attempt.Lifecycle do
         metrics =
           Repo.query!(
             """
-            SELECT metric_id, unit, direction, role
+            SELECT metric_id, unit, direction, role, aggregation_json
             FROM metric_definitions WHERE baseline_revision_id = ? ORDER BY rowid
             """,
             [baseline_revision_id]
           ).rows
-          |> Enum.map(fn [id, unit, direction, role] ->
+          |> Enum.map(fn [id, unit, direction, role, aggregation_json] ->
             %{"id" => id, "unit" => unit, "direction" => direction, "role" => role}
+            |> Map.merge(Jason.decode!(aggregation_json))
           end)
 
         workspace = Persistence.current().workspace_canonical_path

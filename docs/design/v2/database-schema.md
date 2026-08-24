@@ -35,7 +35,7 @@ singleton root：`id`、repo/workspace identity、status、resume status、initi
 
 ### `benchmark_cases` / `metric_definitions`
 
-Case 使用 `(baseline_revision_id, integer_case_id)` 唯一键；保存 display metadata、weight、critical 与详细 JSON。Metric 保存 direction、unit、role 和聚合规则。
+Case 使用 `(baseline_revision_id, integer_case_id)` 唯一键；保存 display metadata、weight、critical 与详细 JSON。Metric 保存 direction、unit、role 和聚合规则；`guard.max_regression_ratio` 保存在 `aggregation_json`，缺省空对象表示配置容差为 0。
 
 ### `sampling_revisions` / `sampling_revision_cases`
 

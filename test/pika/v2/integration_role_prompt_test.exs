@@ -32,6 +32,7 @@ defmodule Pika.Agent.IntegrationRolePromptTest do
     assert prompt =~ "./verify_cases.sh --case-id 0,1,4,9"
     assert prompt =~ "./benchmark_cases.sh --case-id 0,1,4,9"
     assert prompt =~ "每个 `guard` Metric"
+    assert prompt =~ "max(max_regression_ratio, Noise Tolerance)"
     assert prompt =~ "prepare_best_update(validation_path, idempotency_key)"
     assert prompt =~ "finish_integration(result_path, idempotency_key)"
     assert prompt =~ "[integration-validation.schema.json](<#{schemas.integration_validation}>)"

@@ -36,7 +36,8 @@ defmodule Pika.Agent.BaselineAlignmentRolePromptTest do
     assert prompt =~ "./verify_cases.sh --case-id 0,1,2,3"
     assert prompt =~ "./benchmark_cases.sh --case-id 0,1,2,3"
     assert prompt =~ "`guard`"
-    assert prompt =~ "任一 Case 超过 Noise Tolerance 的回退都会硬拒绝"
+    assert prompt =~ "`max_regression_ratio`"
+    assert prompt =~ "例如 `0.01` 表示 1%"
 
     schemas
     |> Map.from_struct()

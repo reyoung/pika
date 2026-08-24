@@ -96,6 +96,76 @@ defmodule Pika.Integration.DecisionTest do
     assert decision.outcome == :accepted
   end
 
+  test "uses a guard Metric max regression ratio above the measured noise" do
+    metrics =
+      @metrics ++
+        [
+          %{
+            "id" => "accuracy",
+            "direction" => "maximize",
+            "role" => "guard",
+            "max_regression_ratio" => 0.01
+          }
+        ]
+
+    best = best() ++ [best_stat(0, "accuracy"), best_stat(1, "accuracy")]
+
+    allowed = [
+      stat(0, 0.90),
+      stat(1, 0.99),
+      stat(0, 1.00, "accuracy"),
+      stat(1, 0.992, "accuracy")
+    ]
+
+    assert {:ok, accepted} = Decision.evaluate(allowed, best, @cases, metrics, [])
+    assert accepted.outcome == :accepted
+
+    guard = Enum.find(accepted.metrics, &(&1.case_id == 1 and &1.metric_id == "accuracy"))
+    assert guard.significant_regression
+    refute guard.guard_regression
+    assert guard.max_regression_ratio == 0.01
+    assert guard.guard_tolerance == 0.01
+
+    rejected =
+      Enum.map(allowed, fn
+        %{case_id: 1, metric_id: "accuracy"} = statistic ->
+          %{statistic | normalized_ratio: 0.98}
+
+        statistic ->
+          statistic
+      end)
+
+    assert {:ok, decision} = Decision.evaluate(rejected, best, @cases, metrics, [])
+    assert decision.outcome == :rejected
+    assert decision.reason == "guard Metric accuracy regressed on Case 1"
+  end
+
+  test "keeps the critical Case noise gate stricter than a guard allowance" do
+    metrics =
+      @metrics ++
+        [
+          %{
+            "id" => "accuracy",
+            "direction" => "maximize",
+            "role" => "guard",
+            "max_regression_ratio" => 0.01
+          }
+        ]
+
+    candidate = [
+      stat(0, 0.90),
+      stat(1, 0.99),
+      stat(0, 0.992, "accuracy"),
+      stat(1, 1.00, "accuracy")
+    ]
+
+    best = best() ++ [best_stat(0, "accuracy"), best_stat(1, "accuracy")]
+
+    assert {:ok, decision} = Decision.evaluate(candidate, best, @cases, metrics, [])
+    assert decision.outcome == :rejected
+    assert decision.reason == "critical Case 0/accuracy regressed"
+  end
+
   test "does not count a guard Metric improvement as the required primary improvement" do
     metrics =
       @metrics ++ [%{"id" => "accuracy", "direction" => "maximize", "role" => "guard"}]

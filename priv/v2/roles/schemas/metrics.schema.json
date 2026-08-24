@@ -14,7 +14,8 @@
           "id": {"type": "string", "minLength": 1},
           "unit": {"type": "string", "minLength": 1},
           "direction": {"enum": ["minimize", "maximize"]},
-          "role": {"enum": ["primary", "guard", "informational"]}
+          "role": {"enum": ["primary", "guard", "informational"]},
+          "max_regression_ratio": {"type": "number", "minimum": 0}
         },
         "required": ["id", "unit", "direction", "role"],
         "additionalProperties": false

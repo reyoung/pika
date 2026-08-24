@@ -41,7 +41,9 @@ defmodule Pika.Integration.Decision do
         _minimize -> (best.normalized_ratio - candidate.normalized_ratio) / best.normalized_ratio
       end
 
-    tolerance = max(candidate.noise_tolerance, best.noise_tolerance)
+    noise_tolerance = max(candidate.noise_tolerance, best.noise_tolerance)
+    max_regression_ratio = metric["max_regression_ratio"] || 0.0
+    guard_tolerance = max(noise_tolerance, max_regression_ratio)
 
     %{
       case_id: candidate.case_id,
@@ -50,9 +52,12 @@ defmodule Pika.Integration.Decision do
       critical: case_["critical"],
       weight: case_["weight"],
       best_relative_improvement: improvement,
-      noise_tolerance: tolerance,
-      significant_improvement: improvement > tolerance,
-      significant_regression: improvement < -tolerance,
+      noise_tolerance: noise_tolerance,
+      max_regression_ratio: max_regression_ratio,
+      guard_tolerance: guard_tolerance,
+      significant_improvement: improvement > noise_tolerance,
+      significant_regression: improvement < -noise_tolerance,
+      guard_regression: metric["role"] == "guard" and improvement < -guard_tolerance,
       judgement: judgement,
       candidate: candidate,
       best: best
@@ -99,7 +104,7 @@ defmodule Pika.Integration.Decision do
 
   defp decide(evaluated, aggregates) do
     guard_regression =
-      Enum.find(evaluated, &(&1.role == "guard" and &1.significant_regression))
+      Enum.find(evaluated, & &1.guard_regression)
 
     critical_regression = Enum.find(evaluated, &(&1.critical and &1.significant_regression))
 

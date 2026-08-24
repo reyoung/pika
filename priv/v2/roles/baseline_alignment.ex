@@ -58,7 +58,7 @@ defmodule Pika.Agent.RolePrompts.BaselineAlignment do
     - `cases.json` 符合 #{schema_link(schemas.cases)}
     - `metrics.json` 符合 #{schema_link(schemas.metrics)}
 
-    Metric `role` 的语义必须与用户对齐：`primary` 是需要改善且参与加权聚合门禁的优化目标；`guard` 不要求改善，但任一 Case 超过 Noise Tolerance 的回退都会硬拒绝；`informational` 只提供观察和普通回退判断。至少要有一个 `primary` Metric，不能把“只有 guard 维持不变”当作一次可接受的优化。
+    Metric `role` 的语义必须与用户对齐：`primary` 是需要改善且参与加权聚合门禁的优化目标；`guard` 不要求改善，可以用 `max_regression_ratio` 指定最大允许回退比例（例如 `0.01` 表示 1%，缺省为 0），任一普通 Case 超过配置值与 Noise Tolerance 较大者的回退都会硬拒绝；`informational` 只提供观察和普通回退判断。`max_regression_ratio` 只能用于 `guard`。至少要有一个 `primary` Metric，不能把“只有 guard 维持不变”当作一次可接受的优化。
 
     完成条件：每个 JSON 文件都通过对应 Schema 校验，文件之间的引用完整。
 

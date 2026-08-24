@@ -171,10 +171,20 @@ follow-ups/<target-role>/<work-id>/<sequence>/
 `metrics.json` 中每个 Metric 的 `role` 有三种：
 
 - `primary`：优化目标。至少一个 `primary` Case/Metric 必须改善超过噪声，并且每个 `primary` Metric 都参与 workload-weighted `<1%` 回退门禁。
-- `guard`：硬性不退化约束。它不承担“必须改善”的要求，也不进入 primary 加权聚合；任一 Case 相对当前 Best 回退超过 Noise Tolerance 都会拒绝 Candidate。
+- `guard`：硬性回退约束。它不承担“必须改善”的要求，也不进入 primary 加权聚合；可以用非负的 `max_regression_ratio` 指定最大允许回退比例，例如 `0.01` 表示 1%，缺省为 0。普通 Case 的有效门限是 `max(max_regression_ratio, Noise Tolerance)`。
 - `informational`：观察指标。它不承担改善要求或 primary 加权聚合，普通 Case 上超过噪声的回退由 Integration Agent 给出结构化判断；critical Case 门禁仍适用。
 
-“维持不变”按 Noise Tolerance 定义，不要求测量值逐位相等。一次可接受的优化至少需要一个 `primary` Metric，不能只包含 `guard` Metric。
+`max_regression_ratio` 只能出现在 `guard` Metric。critical Case 仍使用更严格的 Noise Tolerance 门禁，不因 guard 配置放宽。一次可接受的优化至少需要一个 `primary` Metric，不能只包含 `guard` Metric。
+
+```json
+{
+  "id": "accuracy",
+  "unit": "ratio",
+  "direction": "maximize",
+  "role": "guard",
+  "max_regression_ratio": 0.01
+}
+```
 
 `stopping.mode` 是 `manual`、`attempt_limit`、`duration` 或 `attempt_or_duration`；对应上限是已审阅 Definition 的一部分。达到自动上限后停止创建新 Attempt，已有 Iteration 和 Integration 进入 Draining 并继续完成。
 
@@ -253,7 +263,7 @@ Integration 硬门禁：
 
 1. Full Case Set 正确性与性能覆盖完整。
 2. 所有数值、Pair count、顺序与 identity 合法。
-3. 每个 `guard` Metric 在任一 Case 都没有超过 Noise Tolerance 的回退。
+3. 每个 `guard` Metric 在普通 Case 上都没有超过 `max(max_regression_ratio, Noise Tolerance)` 的回退。
 4. critical Case 的任一 Metric 没有超过噪声的回退。
 5. 至少一个主要 Case 的 `primary` Metric 相对 Best 改善超过噪声。
 6. 对每个 `primary` Metric，按生产权重计算相对回退的算术加权平均；无权重时等权；结果 `<1%`。

@@ -160,7 +160,7 @@ defmodule Pika.Agent.RolePrompts.Iteration do
 
     保持脚本的标准 interface，不写另一个只有本 Attempt 理解的正式 Harness。避免每个 Case/Pair 启动新的重量级进程；保证 Pair 是独立交替执行。
 
-    你需要检查正确性、性能、数值稳定性、工作目录状态和 protected files。Pika会从原始输出重算 Metrics，不要伪造平均提升或删掉不利样本。`guard` Metric 不要求改善，但任一正式 Case 超过 Noise Tolerance 的回退都会在 Integration 被硬拒绝。
+    你需要检查正确性、性能、数值稳定性、工作目录状态和 protected files。Pika会从原始输出重算 Metrics，不要伪造平均提升或删掉不利样本。`guard` Metric 不要求改善，但普通 Case 超过 `max(max_regression_ratio, Noise Tolerance)` 的回退会在 Integration 被硬拒绝；critical Case 仍执行更严格的 Noise Tolerance 门禁。
 
     ## 结果选择
 

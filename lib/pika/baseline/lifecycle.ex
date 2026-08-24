@@ -854,14 +854,15 @@ defmodule Pika.Baseline.Lifecycle do
         """
         INSERT INTO metric_definitions(
           baseline_revision_id, metric_id, unit, direction, role, aggregation_json
-        ) VALUES (?, ?, ?, ?, ?, '{}')
+        ) VALUES (?, ?, ?, ?, ?, ?)
         """,
         [
           baseline_revision_id,
           metric["id"],
           metric["unit"],
           metric["direction"],
-          metric["role"]
+          metric["role"],
+          metric |> Map.take(["max_regression_ratio"]) |> Jason.encode!()
         ]
       )
     end)

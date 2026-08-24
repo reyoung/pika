@@ -22,6 +22,7 @@ defmodule Pika.Integration.LifecycleTest do
     workspace = Path.join(root, "workspace")
     File.mkdir_p!(workspace)
     baseline = V2BaselineFixtures.create_work_root(workspace, 0)
+    configure_guard_metric(baseline.root, 0.01)
     config_path = Path.join(root, "pika.yaml")
     File.write!(config_path, yaml(baseline.repo, workspace))
     assert {:ok, config} = Config.load(config_path)
@@ -172,6 +173,39 @@ defmodule Pika.Integration.LifecycleTest do
     assert Repo.query!("SELECT COUNT(*) FROM integration_runs").rows == [[0]]
     assert Repo.query!("SELECT COUNT(*) FROM operation_intents").rows == [[0]]
     assert Git.run!(baseline.repo, ["rev-parse", "pika/best"]) == attempt.base_sha
+  end
+
+  test "uses the persisted guard max regression ratio during Integration", %{
+    baseline: baseline,
+    config: config,
+    workspace: workspace
+  } do
+    %{attempt: attempt, paths: paths} = ready_attempt(config, workspace)
+
+    write_validation(
+      paths,
+      baseline,
+      attempt,
+      benchmark([0, 1], :allowed_guard_regression),
+      "accepted"
+    )
+
+    assert {:ok, prepared} =
+             IntegrationLifecycle.prepare_best_update(
+               attempt.id,
+               paths.root,
+               "integration-validation.json"
+             )
+
+    guard =
+      Enum.find(
+        prepared.decision.metrics,
+        &(&1.case_id == 1 and &1.metric_id == "bandwidth_gbps")
+      )
+
+    assert guard.significant_regression
+    refute guard.guard_regression
+    assert guard.max_regression_ratio == 0.01
   end
 
   test "an accepted validation monotonically feeds a noisy regressed Case into future Sampling",
@@ -556,6 +590,7 @@ defmodule Pika.Integration.LifecycleTest do
         case {outcome, case_id, metric_id} do
           {:critical_regression, 0, "latency_us"} -> target + 3.0
           {:ordinary_regression, 1, "latency_us"} -> target + 2.1
+          {:allowed_guard_regression, 1, "bandwidth_gbps"} -> target + 9.0
           {_, _, "latency_us"} -> target - 1.0
           _ -> target + 15.0
         end
@@ -572,6 +607,25 @@ defmodule Pika.Integration.LifecycleTest do
         "error" => nil
       }
     end
+  end
+
+  defp configure_guard_metric(root, max_regression_ratio) do
+    metrics = V2BaselineFixtures.read_json(root, "metrics.json")
+
+    metrics =
+      update_in(metrics, ["metrics"], fn definitions ->
+        Enum.map(definitions, fn
+          %{"id" => "bandwidth_gbps"} = metric ->
+            metric
+            |> Map.put("role", "guard")
+            |> Map.put("max_regression_ratio", max_regression_ratio)
+
+          metric ->
+            metric
+        end)
+      end)
+
+    V2BaselineFixtures.write_json(root, "metrics.json", metrics)
   end
 
   defp identity(root, path), do: V2BaselineFixtures.file_identity(root, path)

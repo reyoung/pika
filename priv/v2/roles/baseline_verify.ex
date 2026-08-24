@@ -60,7 +60,7 @@ defmodule Pika.Agent.RolePrompts.BaselineVerify do
     - Target 与 Development 对每个 Case 的正确性；
     - 独立 Oracle 或 target equivalence 的结果；
     - 每个 Case × Metric 的 Pair 数、交替顺序和有效样本；
-    - Metric role 合理：`primary` 是优化目标，`guard` 是所有 Case 上不得超过 Noise Tolerance 回退的硬约束，`informational` 仅用于观察和普通回退判断；
+    - Metric role 合理：`primary` 是优化目标；`guard` 是硬约束，其可选 `max_regression_ratio` 是非负比例且只用于 `guard`，普通 Case 的有效门限是它与 Noise Tolerance 的较大者；`informational` 仅用于观察和普通回退判断；
     - stdout schema、stderr 日志和退出码一致；
     - 测量不是复制、插值或缓存误用；
     - Target 与 Development 身份匹配已审阅 digest；

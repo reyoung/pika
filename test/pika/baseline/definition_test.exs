@@ -54,11 +54,26 @@ defmodule Pika.Baseline.DefinitionTest do
 
   test "accepts guard Metrics alongside a primary Metric", %{root: root} do
     metrics = read_json(root, "metrics.json")
-    metrics = put_in(metrics, ["metrics", Access.at(1), "role"], "guard")
+
+    metrics =
+      metrics
+      |> put_in(["metrics", Access.at(1), "role"], "guard")
+      |> put_in(["metrics", Access.at(1), "max_regression_ratio"], 0.01)
+
     write_json(root, "metrics.json", metrics)
 
     assert {:ok, definition} = Definition.validate(root, "baseline-definition.json")
     assert Enum.map(definition.metrics, & &1["role"]) == ["primary", "guard"]
+    assert Enum.at(definition.metrics, 1)["max_regression_ratio"] == 0.01
+  end
+
+  test "rejects max_regression_ratio on a non-guard Metric", %{root: root} do
+    metrics = read_json(root, "metrics.json")
+    metrics = put_in(metrics, ["metrics", Access.at(1), "max_regression_ratio"], 0.01)
+    write_json(root, "metrics.json", metrics)
+
+    assert {:error, {:max_regression_ratio_requires_guard, "bandwidth_gbps"}} =
+             Definition.validate(root, "baseline-definition.json")
   end
 
   test "requires at least one primary Metric", %{root: root} do

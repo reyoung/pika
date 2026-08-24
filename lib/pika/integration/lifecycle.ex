@@ -612,11 +612,12 @@ defmodule Pika.Integration.Lifecycle do
 
     metrics =
       Repo.query!(
-        "SELECT metric_id, unit, direction, role FROM metric_definitions WHERE baseline_revision_id = ? ORDER BY rowid",
+        "SELECT metric_id, unit, direction, role, aggregation_json FROM metric_definitions WHERE baseline_revision_id = ? ORDER BY rowid",
         [baseline_revision_id]
       ).rows
-      |> Enum.map(fn [id, unit, direction, role] ->
+      |> Enum.map(fn [id, unit, direction, role, aggregation_json] ->
         %{"id" => id, "unit" => unit, "direction" => direction, "role" => role}
+        |> Map.merge(Jason.decode!(aggregation_json))
       end)
 
     [[work_relative_path]] =
