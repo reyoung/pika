@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pika://v2/baseline-definition.schema.json",
+  "title": "Pika v2 Baseline Definition",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": 1},
+    "summary": {"type": "string", "minLength": 1},
+    "optimization_target": {
+      "type": "object",
+      "properties": {
+        "manifest_path": {"type": "string", "minLength": 1},
+        "entrypoint": {"type": "string", "minLength": 1}
+      },
+      "required": ["manifest_path", "entrypoint"],
+      "additionalProperties": false
+    },
+    "development_baseline": {
+      "type": "object",
+      "properties": {
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        },
+        "entrypoint": {"type": "string", "minLength": 1}
+      },
+      "required": ["commit_sha", "entrypoint"],
+      "additionalProperties": false
+    },
+    "correctness": {
+      "type": "object",
+      "properties": {
+        "mode": {"enum": ["target_equivalence", "independent_oracle"]},
+        "oracle_entrypoint": {"type": ["string", "null"]}
+      },
+      "required": ["mode"],
+      "additionalProperties": false
+    },
+    "verify": {
+      "type": "object",
+      "properties": {
+        "script": {"const": "verify_cases.sh"},
+        "output_schema_version": {"const": 1}
+      },
+      "required": ["script", "output_schema_version"],
+      "additionalProperties": false
+    },
+    "benchmark": {
+      "type": "object",
+      "properties": {
+        "script": {"const": "benchmark_cases.sh"},
+        "output_schema_version": {"const": 1}
+      },
+      "required": ["script", "output_schema_version"],
+      "additionalProperties": false
+    },
+    "cases_path": {"type": "string", "minLength": 1},
+    "metrics_path": {"type": "string", "minLength": 1},
+    "measurement": {
+      "type": "object",
+      "properties": {
+        "warmup": {"type": "integer", "minimum": 0},
+        "pair_count": {"type": "integer", "minimum": 1},
+        "min_valid_pairs": {"type": "integer", "minimum": 1}
+      },
+      "required": ["warmup", "pair_count", "min_valid_pairs"],
+      "additionalProperties": false
+    },
+    "smoke_verify_path": {"type": "string", "minLength": 1},
+    "smoke_benchmark_path": {"type": "string", "minLength": 1}
+  },
+  "required": [
+    "schema_version",
+    "summary",
+    "optimization_target",
+    "development_baseline",
+    "correctness",
+    "verify",
+    "benchmark",
+    "cases_path",
+    "metrics_path",
+    "measurement",
+    "smoke_verify_path",
+    "smoke_benchmark_path"
+  ],
+  "additionalProperties": false
+}

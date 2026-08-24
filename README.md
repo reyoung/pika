@@ -23,6 +23,7 @@ Pika 是一个常驻的单租户 HTTP 服务，用多个 Coding Agent 并行完�
 ## 设计文档
 
 - [设计索引](docs/design/README.md)
+- [v2 下一版本设计审阅稿](docs/design/v2/README.md)
 - [主设计](docs/design/kernel-optimization-agent.md)
 - [领域语言](docs/design/CONTEXT.md)
 - [架构与监督树](docs/design/architecture.md)

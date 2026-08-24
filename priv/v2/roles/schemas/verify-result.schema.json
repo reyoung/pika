@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pika://v2/verify-result.schema.json",
+  "title": "Pika v2 Verify Result",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": 1},
+    "requested_case_ids": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "case_id": {"type": "integer", "minimum": 0},
+          "target": {"$ref": "#/$defs/check"},
+          "candidate": {"$ref": "#/$defs/check"},
+          "comparison": {
+            "type": "object",
+            "properties": {
+              "passed": {"type": "boolean"},
+              "max_abs_error": {"type": ["number", "null"]},
+              "max_rel_error": {"type": ["number", "null"]}
+            },
+            "required": ["passed"],
+            "additionalProperties": false
+          },
+          "error": {"type": ["string", "null"]}
+        },
+        "required": ["case_id", "target", "candidate", "comparison", "error"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "properties": {"passed": {"type": "boolean"}},
+      "required": ["passed"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["schema_version", "requested_case_ids", "cases"],
+  "additionalProperties": false
+}

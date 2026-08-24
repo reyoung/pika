@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pika://v2/iteration-result.schema.json",
+  "title": "Pika v2 Iteration Result",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": 1},
+    "role": {"const": "iteration"},
+    "work_id": {"type": "string", "minLength": 1},
+    "outcome": {"enum": ["ready_for_integration", "rejected"]},
+    "summary": {"type": "string", "minLength": 1},
+    "files": {
+      "type": "object",
+      "properties": {
+        "verify": {"$ref": "#/$defs/file"},
+        "benchmark": {"$ref": "#/$defs/file"},
+        "patch": {"$ref": "#/$defs/file"}
+      },
+      "additionalProperties": false
+    },
+    "details": {"type": "object"}
+  },
+  "required": ["schema_version", "role", "work_id", "outcome", "summary", "files", "details"],
+  "allOf": [
+    {
+      "if": {
+        "properties": {"outcome": {"const": "ready_for_integration"}},
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "files": {"required": ["verify", "benchmark", "patch"]},
+          "details": {"$ref": "#/$defs/ready_details"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"outcome": {"const": "rejected"}},
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "details": {"$ref": "#/$defs/rejected_details"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "file": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "required": ["path", "sha256"],
+      "additionalProperties": false
+    },
+    "identity_properties": {
+      "attempt_id": {"type": "integer", "minimum": 1},
+      "iteration_round": {"type": "integer", "minimum": 1},
+      "base_sha": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+      },
+      "sampling_revision": {"type": "integer", "minimum": 0},
+      "hypothesis": {"type": "string", "minLength": 1},
+      "changes": {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1}
+      },
+      "risks": {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1}
+      }
+    },
+    "ready_details": {
+      "type": "object",
+      "properties": {
+        "attempt_id": {"$ref": "#/$defs/identity_properties/attempt_id"},
+        "iteration_round": {"$ref": "#/$defs/identity_properties/iteration_round"},
+        "base_sha": {"$ref": "#/$defs/identity_properties/base_sha"},
+        "candidate_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        },
+        "sampling_revision": {"$ref": "#/$defs/identity_properties/sampling_revision"},
+        "hypothesis": {"$ref": "#/$defs/identity_properties/hypothesis"},
+        "changes": {"$ref": "#/$defs/identity_properties/changes"},
+        "risks": {"$ref": "#/$defs/identity_properties/risks"},
+        "failure_reason": {"type": "null"}
+      },
+      "required": [
+        "attempt_id",
+        "iteration_round",
+        "base_sha",
+        "candidate_sha",
+        "sampling_revision",
+        "hypothesis",
+        "changes",
+        "risks",
+        "failure_reason"
+      ],
+      "additionalProperties": false
+    },
+    "rejected_details": {
+      "type": "object",
+      "properties": {
+        "attempt_id": {"$ref": "#/$defs/identity_properties/attempt_id"},
+        "iteration_round": {"$ref": "#/$defs/identity_properties/iteration_round"},
+        "base_sha": {"$ref": "#/$defs/identity_properties/base_sha"},
+        "candidate_sha": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        },
+        "sampling_revision": {"$ref": "#/$defs/identity_properties/sampling_revision"},
+        "hypothesis": {"$ref": "#/$defs/identity_properties/hypothesis"},
+        "changes": {"$ref": "#/$defs/identity_properties/changes"},
+        "risks": {"$ref": "#/$defs/identity_properties/risks"},
+        "failure_reason": {"type": "string", "minLength": 1}
+      },
+      "required": [
+        "attempt_id",
+        "iteration_round",
+        "base_sha",
+        "candidate_sha",
+        "sampling_revision",
+        "hypothesis",
+        "changes",
+        "risks",
+        "failure_reason"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

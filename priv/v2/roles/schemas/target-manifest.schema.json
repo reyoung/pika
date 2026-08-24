@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pika://v2/target-manifest.schema.json",
+  "title": "Pika v2 Optimization Target Manifest",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": 1},
+    "source_kind": {
+      "enum": ["development_snapshot", "generated_bundle", "external_git"]
+    },
+    "source_description": {"type": "string", "minLength": 1},
+    "source_commit_sha": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+    },
+    "entrypoint": {"type": "string", "minLength": 1},
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "size": {"type": "integer", "minimum": 0}
+        },
+        "required": ["path", "sha256", "size"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_kind",
+    "source_description",
+    "entrypoint",
+    "files"
+  ],
+  "additionalProperties": false
+}

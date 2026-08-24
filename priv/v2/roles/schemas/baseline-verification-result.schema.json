@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pika://v2/baseline-verification-result.schema.json",
+  "title": "Pika v2 Baseline Verification Result",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": 1},
+    "role": {"const": "baseline_verify"},
+    "work_id": {"type": "string", "minLength": 1},
+    "outcome": {"enum": ["accepted", "definition_rejected"]},
+    "summary": {"type": "string", "minLength": 1},
+    "files": {
+      "type": "object",
+      "properties": {
+        "verify": {"$ref": "#/$defs/file"},
+        "benchmark": {"$ref": "#/$defs/file"}
+      },
+      "additionalProperties": false
+    },
+    "details": {"type": "object"}
+  },
+  "required": ["schema_version", "role", "work_id", "outcome", "summary", "files", "details"],
+  "allOf": [
+    {
+      "if": {
+        "properties": {"outcome": {"const": "accepted"}},
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "files": {"required": ["verify", "benchmark"]},
+          "details": {"$ref": "#/$defs/accepted_details"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"outcome": {"const": "definition_rejected"}},
+        "required": ["outcome"]
+      },
+      "then": {
+        "properties": {
+          "details": {"$ref": "#/$defs/rejected_details"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "file": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "required": ["path", "sha256"],
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "properties": {
+        "baseline_revision": {"type": "integer", "minimum": 0},
+        "definition_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "development_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        }
+      },
+      "required": ["baseline_revision", "definition_sha256", "development_sha"]
+    },
+    "case_metric": {
+      "type": "object",
+      "properties": {
+        "case_id": {"type": "integer", "minimum": 0},
+        "metric_id": {"type": "string", "minLength": 1},
+        "unit": {"type": "string", "minLength": 1},
+        "target_value": {"type": "number"},
+        "development_value": {"type": "number"},
+        "relative_difference": {"type": "number"},
+        "noise_tolerance": {"type": "number", "minimum": 0},
+        "valid_pair_count": {"type": "integer", "minimum": 1}
+      },
+      "required": [
+        "case_id",
+        "metric_id",
+        "unit",
+        "target_value",
+        "development_value",
+        "relative_difference",
+        "noise_tolerance",
+        "valid_pair_count"
+      ],
+      "additionalProperties": false
+    },
+    "case_selection": {
+      "type": "object",
+      "properties": {
+        "case_id": {"type": "integer", "minimum": 0},
+        "reason": {"type": "string", "minLength": 1}
+      },
+      "required": ["case_id", "reason"],
+      "additionalProperties": false
+    },
+    "accepted_details": {
+      "allOf": [
+        {"$ref": "#/$defs/identity"},
+        {
+          "type": "object",
+          "properties": {
+            "baseline_revision": {"type": "integer", "minimum": 0},
+            "definition_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "development_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+            },
+            "initial_iteration_case_ids": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 10,
+              "uniqueItems": true,
+              "items": {"type": "integer", "minimum": 0}
+            },
+            "case_selection_reasons": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"$ref": "#/$defs/case_selection"}
+            },
+            "case_metrics": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"$ref": "#/$defs/case_metric"}
+            },
+            "judgement": {
+              "type": "object",
+              "properties": {
+                "reasonable": {"const": true},
+                "reason": {"type": "string", "minLength": 1}
+              },
+              "required": ["reasonable", "reason"],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "baseline_revision",
+            "definition_sha256",
+            "development_sha",
+            "initial_iteration_case_ids",
+            "case_selection_reasons",
+            "case_metrics",
+            "judgement"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "rejected_details": {
+      "allOf": [
+        {"$ref": "#/$defs/identity"},
+        {
+          "type": "object",
+          "properties": {
+            "baseline_revision": {"type": "integer", "minimum": 0},
+            "definition_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "development_sha": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+            },
+            "failure_kind": {
+              "enum": ["definition", "correctness", "benchmark", "infrastructure"]
+            },
+            "reason": {"type": "string", "minLength": 1},
+            "requested_changes": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1}
+            }
+          },
+          "required": [
+            "baseline_revision",
+            "definition_sha256",
+            "development_sha",
+            "failure_kind",
+            "reason",
+            "requested_changes"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

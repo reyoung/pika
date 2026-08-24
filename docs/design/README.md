@@ -1,10 +1,11 @@
-# Pika v1 设计文档
+# Pika 设计文档
 
-## 状态
+## 当前版本
 
-v1 设计已于 2026-08-18 冻结，并由 ADR-0028 修订 Agent Backend 协议、ADR-0029 修订 Benchmark/Integration 语义。当前仓库包含 Phase 0 与 Stage0 Preview；Attempt/Integration 仍按 Phase 文档实现。
+- [v2 设计审阅稿](./v2/README.md)：删除 Campaign 与 Sync，以单 Optimization、Symphony 角色调度、文件型 Agent Context/MCP Result 和 Baseline Alignment → Verify → Iteration → Integration 为主线。v2 是下一版本的目标架构，尚未表示运行时代码已经完成切换。
+- v1 设计已于 2026-08-18 冻结。下面的文档与 ADR 保留为现有实现和历史决策的依据。
 
-## 阅读顺序
+## v1 阅读顺序
 
 1. [主设计](./kernel-optimization-agent.md)：产品边界与全部已确认规则。
 2. [领域语言](./CONTEXT.md)：Campaign、Attempt、Best、Guidance、Sync 等规范术语。

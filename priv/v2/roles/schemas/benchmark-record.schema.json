@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pika://v2/benchmark-record.schema.json",
+  "title": "Pika v2 Benchmark Pair Record",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": 1},
+    "case_id": {"type": "integer", "minimum": 0},
+    "metric_id": {"type": "string", "minLength": 1},
+    "pair_index": {"type": "integer", "minimum": 0},
+    "order": {"enum": ["target_candidate", "candidate_target"]},
+    "target": {"type": "number"},
+    "candidate": {"type": "number"},
+    "valid": {"type": "boolean"},
+    "error": {"type": ["string", "null"]}
+  },
+  "required": [
+    "schema_version",
+    "case_id",
+    "metric_id",
+    "pair_index",
+    "order",
+    "target",
+    "candidate",
+    "valid",
+    "error"
+  ],
+  "additionalProperties": false
+}
