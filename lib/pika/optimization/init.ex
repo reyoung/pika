@@ -15,6 +15,7 @@ defmodule Pika.Optimization.Init do
          :ok <- prepare_workspace(workspace, config_path),
          contents <- ConfigFile.new(config_path, repo, workspace, opts) |> ConfigFile.render(),
          :ok <- FileSystem.atomic_write(config_path, contents),
+         :ok <- File.chmod(config_path, 0o600),
          {:ok, config} <- Config.load(config_path) do
       {:ok, config}
     end

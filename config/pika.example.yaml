@@ -1,6 +1,7 @@
 version: 2
 repo: /path/to/clean/git/repo
 workspace: /path/to/pika-workspace
+token: replace-with-a-long-random-token
 
 agents:
   baseline_alignment: &writer

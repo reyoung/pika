@@ -25,6 +25,7 @@ defmodule Pika.Optimization.InteractiveConfig do
     default_agent = ConfigFile.agent(backend, model, effort)
     followup_agent = %{default_agent | reasoning_effort: "medium"}
     summary_agent = reader_agent(%{default_agent | reasoning_effort: "low"})
+    random_token = Pika.Auth.random_token()
 
     IO.puts("Pika v2 Workspace initializer")
 
@@ -32,6 +33,7 @@ defmodule Pika.Optimization.InteractiveConfig do
          workspace_default <- Path.join(cwd, "pika-workspace"),
          {:ok, workspace} <-
            path(opts[:workspace], "Workspace path", workspace_default, interactive?),
+         {:ok, token} <- token(opts[:token], random_token, interactive?),
          {:ok, baseline_alignment, cache} <-
            collect_agent("Baseline Alignment Agent", default_agent, opts, %{}, interactive?),
          {:ok, baseline_verify, cache} <-
@@ -94,6 +96,7 @@ defmodule Pika.Optimization.InteractiveConfig do
        %{
          workspace: workspace,
          repo: repo,
+         token: token,
          agents: %{
            baseline_alignment: baseline_alignment,
            baseline_verify: baseline_verify,
@@ -509,6 +512,19 @@ defmodule Pika.Optimization.InteractiveConfig do
   end
 
   defp path(nil, label, _default, false), do: {:error, {:missing_required_path, label}}
+
+  defp token(value, _default, _interactive?) when is_binary(value) do
+    if String.trim(value) == "", do: {:error, :empty_access_token}, else: {:ok, value}
+  end
+
+  defp token(nil, default, false), do: {:ok, default}
+
+  defp token(nil, default, true) do
+    case prompt("Access token", default) do
+      "" -> {:error, :empty_access_token}
+      value -> {:ok, value}
+    end
+  end
 
   defp update_agent(current, backend, model, effort) do
     if current.backend == backend do

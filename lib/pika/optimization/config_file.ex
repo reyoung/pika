@@ -21,6 +21,7 @@ defmodule Pika.Optimization.ConfigFile do
       source_path: Path.expand(source_path),
       repo: Path.expand(repo),
       workspace: Path.expand(workspace),
+      token: Keyword.get(opts, :token) || Pika.Auth.random_token(),
       baseline_alignment: %Role{
         agent: Map.get(configured, :baseline_alignment, default_agent)
       },
@@ -69,6 +70,8 @@ defmodule Pika.Optimization.ConfigFile do
       "version: 2\n",
       "repo: #{scalar(config.repo)}\n",
       "workspace: #{scalar(config.workspace)}\n\n",
+      optional("token", config.token, ""),
+      if(config.token, do: "\n", else: ""),
       "agents:\n",
       role("baseline_alignment", config.baseline_alignment),
       role("baseline_verify", config.baseline_verify,

@@ -11,6 +11,8 @@ defmodule Pika.CLITest do
                workspace,
                "--repo",
                repo,
+               "--token",
+               "fixed-token",
                "--iteration-agents",
                "3",
                "--progress-summary"
@@ -18,6 +20,7 @@ defmodule Pika.CLITest do
 
     assert init.workspace == Path.expand(workspace)
     assert init.repo == Path.expand(repo)
+    assert init.token == "fixed-token"
     assert init.iteration_agents == 3
     assert init.progress_summary
 

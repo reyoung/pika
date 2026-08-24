@@ -98,7 +98,7 @@ defmodule Pika.Optimization.Config do
 
   alias Pika.Optimization.Config.{Agent, Iteration, ProgressSummary, Role}
 
-  @root_fields ~w(version repo workspace agents)
+  @root_fields ~w(version repo workspace token agents)
   @reserved_agent_fields ~w(
     backend command model reasoning_effort approval_policy sandbox env protocol_config
     max_followups generator_max_attempts regression_feedback_cases interval timezone agents
@@ -117,6 +117,7 @@ defmodule Pika.Optimization.Config do
   ]
   defstruct @enforce_keys ++
               [
+                :token,
                 :baseline_verify_followup,
                 :iteration_followup,
                 :integration_followup,
@@ -127,6 +128,7 @@ defmodule Pika.Optimization.Config do
           source_path: Path.t(),
           repo: Path.t(),
           workspace: Path.t(),
+          token: String.t() | nil,
           baseline_alignment: Role.t(),
           baseline_verify: Role.t(),
           baseline_verify_followup: Role.t() | nil,
@@ -200,6 +202,7 @@ defmodule Pika.Optimization.Config do
          :ok <- require_equal(yaml["version"], 2, "version: must be 2"),
          {:ok, repo} <- path_value(yaml["repo"], source_path, "repo"),
          {:ok, workspace} <- path_value(yaml["workspace"], source_path, "workspace"),
+         {:ok, token} <- access_token(yaml["token"]),
          {:ok, agents} <- required_map(yaml["agents"], "agents"),
          {:ok, baseline_alignment} <- required_role(agents, "baseline_alignment", []),
          {:ok, baseline_verify} <-
@@ -215,6 +218,7 @@ defmodule Pika.Optimization.Config do
          source_path: source_path,
          repo: repo,
          workspace: workspace,
+         token: token,
          baseline_alignment: baseline_alignment,
          baseline_verify: baseline_verify,
          baseline_verify_followup: baseline_verify_followup,
@@ -499,6 +503,16 @@ defmodule Pika.Optimization.Config do
   defp optional_string(nil, _path), do: {:ok, nil}
   defp optional_string(value, _path) when is_binary(value) and value != "", do: {:ok, value}
   defp optional_string(_value, path), do: error("#{path}: must be a non-empty string")
+
+  defp access_token(nil), do: {:ok, nil}
+
+  defp access_token(value) when is_binary(value) do
+    if String.trim(value) == "",
+      do: error("token: must be a non-empty string"),
+      else: {:ok, value}
+  end
+
+  defp access_token(_value), do: error("token: must be a non-empty string")
 
   defp string_map(value, path) when is_map(value) do
     if Enum.all?(value, fn {key, item} -> is_binary(key) and is_binary(item) end),

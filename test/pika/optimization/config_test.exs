@@ -11,6 +11,7 @@ defmodule Pika.Optimization.ConfigTest do
     assert {:ok, config} = Config.load(path)
     assert config.repo == Path.expand("repo", Path.dirname(path))
     assert config.workspace == Path.expand("workspace", Path.dirname(path))
+    assert config.token == "fixed-token"
 
     assert config.baseline_alignment.agent.backend == :codex_app_server
     assert config.baseline_verify.max_followups == 8
@@ -54,6 +55,7 @@ defmodule Pika.Optimization.ConfigTest do
     assert is_nil(config.iteration_followup)
     assert is_nil(config.integration_followup)
     assert is_nil(config.progress_summary)
+    assert is_nil(config.token)
 
     assert RoleRegistry.enabled(config) |> Enum.map(& &1.id) |> Enum.sort() ==
              ~w(baseline_alignment baseline_verify integration iteration)
@@ -110,6 +112,14 @@ defmodule Pika.Optimization.ConfigTest do
              missing |> config_file() |> Config.load()
   end
 
+  test "rejects an empty configured access token" do
+    yaml =
+      String.replace(minimal_yaml(), "workspace: workspace", "workspace: workspace\ntoken: \" \"")
+
+    assert {:error, {:invalid_v2_config, ["token: must be a non-empty string"]}} =
+             yaml |> config_file() |> Config.load()
+  end
+
   defp config_file(contents) do
     directory =
       Path.join(System.tmp_dir!(), "pika-v2-config-#{System.unique_integer([:positive])}")
@@ -126,6 +136,7 @@ defmodule Pika.Optimization.ConfigTest do
     version: 2
     repo: repo
     workspace: workspace
+    token: fixed-token
 
     agents:
       baseline_alignment: &writer

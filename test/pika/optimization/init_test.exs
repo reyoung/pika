@@ -28,12 +28,16 @@ defmodule Pika.Optimization.InitTest do
     assert %Config{} = config
     assert length(config.iteration.agents) == 2
     assert config.progress_summary.time_zone == "Asia/Shanghai"
+    assert is_binary(config.token)
+    assert byte_size(config.token) >= 43
     assert File.regular?(Path.join(workspace, "pika.yaml"))
+    assert Bitwise.band(File.stat!(Path.join(workspace, "pika.yaml")).mode, 0o777) == 0o600
     contents = File.read!(Path.join(workspace, "pika.yaml"))
     refute contents =~ "campaign"
     refute contents =~ "sync"
     refute contents =~ "profile"
     assert contents =~ "max_pending_attempts: 0"
+    assert contents =~ "token: #{Jason.encode!(config.token)}"
 
     assert {:error, {:v2_config_already_exists, _path}} = Init.run(workspace, repo)
   end

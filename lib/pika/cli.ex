@@ -44,6 +44,7 @@ defmodule Pika.CLI do
       OptionParser.parse(argv,
         strict: [
           repo: :string,
+          token: :string,
           backend: :string,
           model: :string,
           reasoning_effort: :string,
@@ -89,6 +90,7 @@ defmodule Pika.CLI do
          help: opts[:help] == true,
          workspace: args |> List.first() |> expand_optional(),
          repo: expand_optional(opts[:repo]),
+         token: opts[:token],
          backend: opts[:backend],
          model: opts[:model],
          reasoning_effort: opts[:reasoning_effort],
@@ -228,7 +230,10 @@ defmodule Pika.CLI do
     result =
       with {:ok, settings} <- InteractiveConfig.collect_init(opts),
            {:ok, config} <-
-             Init.run(settings.workspace, settings.repo, agents: settings.agents) do
+             Init.run(settings.workspace, settings.repo,
+               token: settings.token,
+               agents: settings.agents
+             ) do
         {:ok, config}
       end
 
@@ -261,14 +266,18 @@ defmodule Pika.CLI do
              {:error, {:config_must_be_workspace_pika_yaml, config.workspace}},
          :ok <- configure_endpoint(opts.host, opts.port),
          :ok <- configure_runtime(config),
-         %{token: token} <- Pika.Auth.generate(),
+         %{token: token} <- Pika.Auth.configure(config.token),
          {:ok, _apps} <- Application.ensure_all_started(:pika),
          snapshot <- Bootstrap.snapshot() do
       browser_host = if opts.host in ["0.0.0.0", "::"], do: "127.0.0.1", else: opts.host
       IO.puts("Pika Workspace: #{config.workspace}")
       IO.puts("Pika Repo: #{config.repo}")
       IO.puts("Pika Optimization: #{snapshot.optimization.id} (#{snapshot.recovery})")
-      IO.puts("Pika URL: http://#{browser_host}:#{opts.port}/?token=#{token}")
+
+      IO.puts(
+        "Pika URL: http://#{browser_host}:#{opts.port}/?token=#{URI.encode_www_form(token)}"
+      )
+
       wait()
     else
       {:error, reason} -> abort("pika serve failed: #{inspect(reason)}")
@@ -351,6 +360,7 @@ defmodule Pika.CLI do
     must be a clean Git worktree. Pika never pushes or merges to a remote branch.
 
       --backend codex|cursor       Default Backend for Agent prompts
+      --token TOKEN                Fixed access token (default: random 256-bit token)
       --model MODEL                Default provider model for Agent prompts
       --reasoning-effort EFFORT    Default effort: low|medium|high|xhigh|max|ultra
       --iteration-agents N         Iteration concurrency; every Agent is configured separately

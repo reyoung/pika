@@ -4,11 +4,20 @@ defmodule Pika.Auth do
   @key {__MODULE__, :token_hash}
 
   def generate do
-    token = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
+    random_token() |> configure()
+  end
+
+  def random_token do
+    :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
+  end
+
+  def configure(token) when is_binary(token) and token != "" do
     marker = hash(token)
     :persistent_term.put(@key, marker)
     %{token: token, marker: marker}
   end
+
+  def configure(nil), do: generate()
 
   def authenticate(token) when is_binary(token) do
     marker = hash(token)

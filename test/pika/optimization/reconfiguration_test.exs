@@ -53,6 +53,8 @@ defmodule Pika.Optimization.ReconfigurationTest do
 
     assert config.baseline_verify.agent.backend == :codex_app_server
     assert config.baseline_verify.agent.model == "original-model"
+    assert is_binary(config.token)
+    assert Bitwise.band(File.stat!(context.config_path).mode, 0o777) == 0o600
     assert output =~ "cursor-16"
     assert output =~ "active Sessions are unchanged"
   end

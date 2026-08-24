@@ -24,6 +24,8 @@ defmodule Pika.Optimization.InteractiveConfigTest do
     input =
       Enum.join(
         [
+          # Accept a fixed access token instead of the random default
+          "fixed-interactive-token",
           # Baseline Alignment: codex / codex-1 / low
           "1",
           "2",
@@ -67,6 +69,7 @@ defmodule Pika.Optimization.InteractiveConfigTest do
       end)
 
     assert_receive {:settings, settings}
+    assert settings.token == "fixed-interactive-token"
     assert settings.agents.baseline_alignment.backend == :codex_app_server
     assert settings.agents.baseline_alignment.model == "codex-1"
     assert settings.agents.baseline_alignment.reasoning_effort == "low"
@@ -119,5 +122,35 @@ defmodule Pika.Optimization.InteractiveConfigTest do
     assert Enum.all?(configured, &(&1.backend == :cursor_acp))
     assert Enum.all?(configured, &(&1.model == "cursor-model"))
     assert length(settings.agents.iteration) == 2
+    assert is_binary(settings.token)
+    assert byte_size(settings.token) >= 43
+  end
+
+  test "interactive init accepts the generated random token by default" do
+    parent = self()
+
+    output =
+      capture_io("\n", fn ->
+        assert {:ok, settings} =
+                 InteractiveConfig.collect_init(
+                   workspace: "/tmp/pika-workspace",
+                   repo: "/tmp/pika-repo",
+                   backend: "codex",
+                   model: "codex-model",
+                   reasoning_effort: "high",
+                   iteration_agents: 1,
+                   baseline_verify_followup: false,
+                   iteration_followup: false,
+                   integration_followup: false,
+                   progress_summary: false
+                 )
+
+        send(parent, {:random_token, settings.token})
+      end)
+
+    assert_receive {:random_token, token}
+    assert byte_size(token) >= 43
+    assert output =~ "Access token"
+    assert output =~ token
   end
 end

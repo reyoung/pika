@@ -8,13 +8,15 @@
 - 其他已配置 Role 的并发度固定为 1；不同 Role 可以并行。
 - Follow-up 与 Progress Summary Role 可省略。
 - Session 创建时冻结当前完整配置；更新只影响以后创建的 Session。
+- 根级 `token` 是 Web/API 访问 token。新 Workspace 默认生成随机 256-bit token；也可在初始化时固定。`serve` 在启动时读取它，手工修改后需要重启。旧配置省略该字段时，每次 `serve` 启动仍临时生成随机 token。
 
 ## 2. 交互式配置
 
 `pika init` 默认逐一配置每个 Agent 位置。每个必选 Role、每个 Iteration Agent，以及
 启用的可选 Follow-up/Progress Summary Role 都独立选择 Backend、该 Backend 动态返回的
 完整模型列表和 `low|medium|high|xhigh|max|ultra` reasoning effort。`--yes` 用于脚本化的
-非交互初始化。
+非交互初始化。向导生成随机 token 作为默认值，也接受用户输入的固定 token；包含 token 的
+Workspace `pika.yaml` 以 `0600` 权限写入。
 
 Workspace 创建后，可在其目录运行 `pika reconfiguration`（或 `pika reconfigure`）。命令
 可修改一个 Role 或全部 Agent；对于 Iteration，会逐个修改展开后的 Agent。写入前会重新
@@ -27,6 +29,7 @@ version: 2
 
 repo: /path/to/repo
 workspace: /path/to/workspace
+token: replace-with-a-long-random-token
 
 agents:
   baseline_alignment: &codex_writer

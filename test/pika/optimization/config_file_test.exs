@@ -41,6 +41,7 @@ defmodule Pika.Optimization.ConfigFileTest do
 
     File.write!(path, ConfigFile.render(configured))
     assert {:ok, loaded} = Config.load(path)
+    assert loaded.token == configured.token
 
     assert Config.Agent.snapshot(loaded.baseline_alignment.agent) ==
              Config.Agent.snapshot(rich_agent)

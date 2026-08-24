@@ -69,4 +69,13 @@ defmodule PikaWeb.AuthTest do
            |> post("/mcp", request)
            |> response(401) =~ "unauthorized"
   end
+
+  test "configures a fixed token and replaces the previous token", %{token: old_token} do
+    %{token: "fixed-workspace-token", marker: marker} =
+      Auth.configure("fixed-workspace-token")
+
+    assert Auth.authenticated_marker?(marker)
+    assert {:ok, ^marker} = Auth.authenticate("fixed-workspace-token")
+    assert {:error, :unauthorized} = Auth.authenticate(old_token)
+  end
 end

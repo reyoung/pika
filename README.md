@@ -32,7 +32,7 @@ mix release
   --workspace /absolute/path/to/workspace
 ```
 
-`pika init` 默认启动交互式向导。每个必选 Role、每个 Iteration Agent，以及启用的可选 Role 都可以分别选择 Codex/Cursor、provider 返回的完整模型列表和 reasoning effort。脚本中可加 `--yes`，用命令行参数和默认值非交互初始化。
+`pika init` 默认启动交互式向导。向导首先生成一个随机 256-bit 访问 token，可直接回车接受，也可输入固定 token；最终 token 会写入权限为 `0600` 的 Workspace `pika.yaml`，因此重启 `pika serve` 后保持不变。手工修改 token 后需要重启 `pika serve`。每个必选 Role、每个 Iteration Agent，以及启用的可选 Role 都可以分别选择 Codex/Cursor、provider 返回的完整模型列表和 reasoning effort。脚本中可加 `--yes`，用命令行参数和默认值非交互初始化。
 
 在 Workspace 目录内运行 `pika reconfiguration`（也可用 `pika reconfigure`）可以交互式修改某个 Role 或全部 Agent 配置；修改只影响之后创建的 Session。`pika init` 和 `pika reconfiguration --help` 列出了相应的非交互参数。
 

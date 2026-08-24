@@ -19,6 +19,7 @@ defmodule Pika.Optimization.Reconfiguration do
          contents <- ConfigFile.render(updated),
          :ok <- validate_candidate(contents),
          :ok <- FileSystem.atomic_write(config_path, contents),
+         :ok <- File.chmod(config_path, 0o600),
          {:ok, persisted} <- Config.load(config_path) do
       IO.puts("Updated #{config_path}")
       IO.puts("New Agent Sessions will use this configuration; active Sessions are unchanged.")
