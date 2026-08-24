@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pika://v2/integration-validation.schema.json",
+  "title": "Pika v2 Integration Validation",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": 1},
+    "role": {"const": "integration"},
+    "work_id": {"type": "string", "minLength": 1},
+    "attempt_id": {"type": "integer", "minimum": 1},
+    "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"},
+    "candidate_sha": {"type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"},
+    "sampling_revision": {"type": "integer", "minimum": 0},
+    "recommended_outcome": {"enum": ["accepted", "rejected"]},
+    "files": {
+      "type": "object",
+      "properties": {
+        "verify": {"$ref": "#/$defs/file"},
+        "benchmark": {"$ref": "#/$defs/file"}
+      },
+      "required": ["verify", "benchmark"],
+      "additionalProperties": false
+    },
+    "judgements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "case_id": {"type": "integer", "minimum": 0},
+          "metric_id": {"type": "string", "minLength": 1},
+          "classification": {"enum": ["improvement", "noise", "regression"]},
+          "reason": {"type": "string", "minLength": 1}
+        },
+        "required": ["case_id", "metric_id", "classification", "reason"],
+        "additionalProperties": false
+      }
+    },
+    "weighted_aggregates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "metric_id": {"type": "string", "minLength": 1},
+          "regression_ratio": {"type": "number"}
+        },
+        "required": ["metric_id", "regression_ratio"],
+        "additionalProperties": false
+      }
+    },
+    "sampling_feedback_case_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "summary": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "required": ["path", "sha256"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "role",
+    "work_id",
+    "attempt_id",
+    "base_sha",
+    "candidate_sha",
+    "sampling_revision",
+    "recommended_outcome",
+    "files",
+    "judgements",
+    "weighted_aggregates",
+    "sampling_feedback_case_ids",
+    "summary"
+  ],
+  "additionalProperties": false
+}

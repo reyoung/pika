@@ -1,8 +1,3 @@
-project_root = Path.expand("../../..", __DIR__)
-
-Code.require_file(Path.join(project_root, "priv/v2/roles/role_prompt.ex"))
-Code.require_file(Path.join(project_root, "priv/v2/roles/iteration.ex"))
-
 defmodule Pika.Agent.IterationRolePromptTest do
   use ExUnit.Case, async: true
 

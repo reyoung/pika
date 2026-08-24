@@ -1,20 +1,21 @@
-project_root = Path.expand("../../..", __DIR__)
-
-Code.require_file(Path.join(project_root, "priv/v2/roles/role_prompt.ex"))
-Code.require_file(Path.join(project_root, "priv/v2/roles/integration.ex"))
-
 defmodule Pika.Agent.IntegrationRolePromptTest do
   use ExUnit.Case, async: true
 
   alias Pika.Agent.RolePrompt.{FileRef, Section}
+  alias Pika.Agent.RolePromptRegistry
   alias Pika.Agent.RolePrompts.Integration
   alias Pika.Agent.RolePrompts.Integration.Input
 
   @project_root Path.expand("../../..", __DIR__)
   @fixture_dir Path.join(@project_root, "test/fixtures/v2/roles/integration")
 
-  test "renders concrete Full Case IDs without a title" do
-    result = Integration.system_prompt(%Input{full_case_ids: [0, 1, 4, 9]})
+  setup_all do
+    assert {:ok, schemas} = RolePromptRegistry.schemas()
+    %{schemas: schemas}
+  end
+
+  test "renders concrete Full Case IDs without a title", %{schemas: schemas} do
+    result = Integration.system_prompt(input(schemas, [0, 1, 4, 9]))
 
     assert {:ok, prompt} = result
 
@@ -32,13 +33,15 @@ defmodule Pika.Agent.IntegrationRolePromptTest do
     assert prompt =~ "./benchmark_cases.sh --case-id 0,1,4,9"
     assert prompt =~ "prepare_best_update(validation_path, idempotency_key)"
     assert prompt =~ "finish_integration(result_path, idempotency_key)"
+    assert prompt =~ "[integration-validation.schema.json](<#{schemas.integration_validation}>)"
+    assert prompt =~ "[integration-result.schema.json](<#{schemas.integration_result}>)"
   end
 
-  test "renders multiple recovery directories and files" do
+  test "renders multiple recovery directories and files", %{schemas: schemas} do
     sections = [recovery_section(0), recovery_section(1)]
 
     assert {:ok, prompt} =
-             Integration.system_prompt(%Input{full_case_ids: [0, 1], sections: sections})
+             Integration.system_prompt(input(schemas, [0, 1], sections))
 
     assert prompt =~ "## recover 0"
     assert prompt =~ "## recover 1"
@@ -51,12 +54,21 @@ defmodule Pika.Agent.IntegrationRolePromptTest do
     end
   end
 
-  test "rejects empty or duplicate Full Case IDs" do
+  test "rejects empty or duplicate Full Case IDs", %{schemas: schemas} do
     assert {:error, :invalid_full_case_ids} =
-             Integration.system_prompt(%Input{full_case_ids: []})
+             Integration.system_prompt(input(schemas, []))
 
     assert {:error, :invalid_full_case_ids} =
-             Integration.system_prompt(%Input{full_case_ids: [0, 1, 1]})
+             Integration.system_prompt(input(schemas, [0, 1, 1]))
+  end
+
+  defp input(schemas, case_ids, sections \\ []) do
+    %Input{
+      full_case_ids: case_ids,
+      validation_schema: schemas.integration_validation,
+      result_schema: schemas.integration_result,
+      sections: sections
+    }
   end
 
   defp recovery_section(index) do

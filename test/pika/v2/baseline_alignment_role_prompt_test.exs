@@ -1,8 +1,3 @@
-project_root = Path.expand("../../..", __DIR__)
-
-Code.require_file(Path.join(project_root, "priv/v2/roles/role_prompt.ex"))
-Code.require_file(Path.join(project_root, "priv/v2/roles/baseline_alignment.ex"))
-
 defmodule Pika.Agent.BaselineAlignmentRolePromptTest do
   use ExUnit.Case, async: true
 
@@ -71,7 +66,7 @@ defmodule Pika.Agent.BaselineAlignmentRolePromptTest do
     missing_dir = Path.join(System.tmp_dir!(), "pika-v2-missing-schemas")
 
     assert {:error, {:missing_schema_files, missing}} = Schemas.from_dir(missing_dir)
-    assert length(missing) == 8
+    assert length(missing) == 10
   end
 
   test "requires reading previous Baseline Verification failures", %{schemas: schemas} do

@@ -6,6 +6,8 @@ defmodule Pika.Application do
   @impl true
   def start(_type, _args) do
     :ok = Pika.Agent.RoleRegistry.validate!()
+    :ok = Pika.Agent.RolePromptRegistry.validate!()
+    :ok = Pika.Optimization.RoleRegistry.validate!()
     mode = Application.get_env(:pika, :runtime_mode, :preview)
     children = children(mode)
     strategy = if mode == :serve, do: :rest_for_one, else: :one_for_one

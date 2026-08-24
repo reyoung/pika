@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pika://v2/integration-result.schema.json",
+  "title": "Pika v2 Integration Result",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": 1},
+    "role": {"const": "integration"},
+    "work_id": {"type": "string", "minLength": 1},
+    "attempt_id": {"type": "integer", "minimum": 1},
+    "outcome": {"enum": ["accepted", "rejected"]},
+    "summary": {"type": "string", "minLength": 1},
+    "details": {"type": "object"}
+  },
+  "required": ["schema_version", "role", "work_id", "attempt_id", "outcome", "summary", "details"],
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "accepted"}}, "required": ["outcome"]},
+      "then": {"properties": {"details": {"$ref": "#/$defs/accepted_details"}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "rejected"}}, "required": ["outcome"]},
+      "then": {"properties": {"details": {"$ref": "#/$defs/rejected_details"}}}
+    }
+  ],
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"},
+    "accepted_details": {
+      "type": "object",
+      "properties": {
+        "intent_id": {"type": "string", "minLength": 1},
+        "best_before_sha": {"$ref": "#/$defs/sha"},
+        "best_after_sha": {"$ref": "#/$defs/sha"},
+        "squash_sha": {"$ref": "#/$defs/sha"},
+        "trailers": {
+          "type": "object",
+          "properties": {
+            "Pika-Attempt": {"type": "string", "minLength": 1},
+            "Pika-Baseline-Revision": {"type": "string", "minLength": 1},
+            "Pika-Sampling-Revision": {"type": "string", "minLength": 1}
+          },
+          "required": ["Pika-Attempt", "Pika-Baseline-Revision", "Pika-Sampling-Revision"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["intent_id", "best_before_sha", "best_after_sha", "squash_sha", "trailers"],
+      "additionalProperties": false
+    },
+    "rejected_details": {
+      "type": "object",
+      "properties": {
+        "reason": {"type": "string", "minLength": 1},
+        "regressed_case_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 0}
+        },
+        "sampling_feedback": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "case_id": {"type": "integer", "minimum": 0},
+              "reason": {"type": "string", "minLength": 1}
+            },
+            "required": ["case_id", "reason"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["reason", "regressed_case_ids", "sampling_feedback"],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

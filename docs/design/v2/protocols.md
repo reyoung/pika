@@ -299,7 +299,7 @@ Progress Summary 是 Result Manifest Envelope 的例外。Agent只写尽量不�
 
 | Role | Query | Command |
 |---|---|---|
-| Baseline Alignment | `get_context` | `submit_baseline_definition` |
+| Baseline Alignment | `get_context`, `ask_questions` | `submit_baseline_definition` |
 | Baseline Verify | `get_context` | `finish_baseline_verification` |
 | Baseline Verify Follow-up |  | `submit_followup_message` |
 | Iteration | `get_context`, `query_attempt_history` | `finish_iteration` |

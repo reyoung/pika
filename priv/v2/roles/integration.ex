@@ -3,11 +3,13 @@ defmodule Pika.Agent.RolePrompts.Integration.Input do
 
   alias Pika.Agent.RolePrompt.Section
 
-  @enforce_keys [:full_case_ids]
+  @enforce_keys [:full_case_ids, :validation_schema, :result_schema]
   defstruct @enforce_keys ++ [sections: []]
 
   @type t :: %__MODULE__{
           full_case_ids: [non_neg_integer()],
+          validation_schema: Path.t(),
+          result_schema: Path.t(),
           sections: [Section.t()]
         }
 end
@@ -23,14 +25,16 @@ defmodule Pika.Agent.RolePrompts.Integration do
   @impl true
   def system_prompt(%Input{} = input) do
     with {:ok, rendered_sections} <- Sections.render(input.sections),
-         :ok <- validate_case_ids(input.full_case_ids) do
+         :ok <- validate_case_ids(input.full_case_ids),
+         :ok <- validate_schema(input.validation_schema),
+         :ok <- validate_schema(input.result_schema) do
       case_ids = Enum.join(input.full_case_ids, ",")
 
       {:ok,
        [
          intro(),
          rendered_sections,
-         instructions(case_ids)
+         instructions(case_ids, input.validation_schema, input.result_schema)
        ]
        |> IO.iodata_to_binary()
        |> String.trim()}
@@ -48,7 +52,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
     |> String.trim()
   end
 
-  defp instructions(case_ids) do
+  defp instructions(case_ids, validation_schema, result_schema) do
     """
 
 
@@ -92,7 +96,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
 
     ## Reject
 
-    正确性失败、硬门禁失败、明显回退或工程风险不可接受时，写 `integration-result.json`，outcome=`rejected`。同一文件包含：
+    正确性失败、硬门禁失败、明显回退或工程风险不可接受时，写符合 #{schema_link(result_schema)} 的 `integration-result.json`，outcome=`rejected`。同一文件包含：
 
     - 具体 reason；
     - 所有 regressed Case IDs；
@@ -103,7 +107,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
 
     ## Accept 与 Git mutation
 
-    先写 `integration-validation.json`，引用 Full Verify/Benchmark、per-Case judgement、聚合结果、推荐 outcome 和 feedback。调用：
+    先写符合 #{schema_link(validation_schema)} 的 `integration-validation.json`，引用 Full Verify/Benchmark、per-Case judgement、聚合结果、推荐 outcome 和 feedback。调用：
 
         prepare_best_update(validation_path, idempotency_key)
 
@@ -117,7 +121,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
     6. 写入 Pika要求的 Attempt、Baseline Revision、Sampling Revision trailers；
     7. 检查实际 HEAD 与 worktree。
 
-    然后写 accepted `integration-result.json`，包含 Intent、Best before/after SHA、squash commit 和 trailers，调用：
+    然后写符合 #{schema_link(result_schema)} 的 accepted `integration-result.json`，包含 Intent、Best before/after SHA、squash commit 和 trailers，调用：
 
         finish_integration(result_path, idempotency_key)
 
@@ -138,4 +142,10 @@ defmodule Pika.Agent.RolePrompts.Integration do
   end
 
   defp validate_case_ids(_case_ids), do: {:error, :invalid_full_case_ids}
+
+  defp validate_schema(path) do
+    if File.regular?(path), do: :ok, else: {:error, {:missing_schema_files, [path]}}
+  end
+
+  defp schema_link(path), do: "[#{Path.basename(path)}](<#{path}>)"
 end

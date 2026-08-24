@@ -6,6 +6,7 @@ defmodule Pika.MixProject do
       app: :pika,
       version: "0.0.1",
       elixir: "~> 1.18",
+      elixirc_paths: ["lib", "priv/v2/roles"],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
