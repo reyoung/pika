@@ -9,7 +9,18 @@
 - Follow-up 与 Progress Summary Role 可省略。
 - Session 创建时冻结当前完整配置；更新只影响以后创建的 Session。
 
-## 2. 完整示例
+## 2. 交互式配置
+
+`pika init` 默认逐一配置每个 Agent 位置。每个必选 Role、每个 Iteration Agent，以及
+启用的可选 Follow-up/Progress Summary Role 都独立选择 Backend、该 Backend 动态返回的
+完整模型列表和 `low|medium|high|xhigh|max|ultra` reasoning effort。`--yes` 用于脚本化的
+非交互初始化。
+
+Workspace 创建后，可在其目录运行 `pika reconfiguration`（或 `pika reconfigure`）。命令
+可修改一个 Role 或全部 Agent；对于 Iteration，会逐个修改展开后的 Agent。写入前会重新
+校验候选 `pika.yaml`。运行时为每个新 Session 重新读取该文件，已有 Session 的冻结配置不变。
+
+## 3. 完整示例
 
 ```yaml
 version: 2
@@ -76,7 +87,7 @@ agents:
     max_followups: 3
 ```
 
-## 3. 校验
+## 4. 校验
 
 缺少 `baseline_alignment`、`baseline_verify`、非空 `iteration.agents` 或 `integration` 时拒绝启动。可选 Role一旦出现就必须包含完整合法 Backend 配置。
 

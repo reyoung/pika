@@ -43,5 +43,53 @@ defmodule Pika.CLITest do
   test "help parsing does not require paths" do
     assert {:ok, %{help: true}} = Pika.CLI.parse_init(["--help"])
     assert {:ok, %{help: true}} = Pika.CLI.parse_serve(["--help"])
+    assert {:ok, %{help: true}} = Pika.CLI.parse_reconfiguration(["--help"])
+  end
+
+  test "interactive init accepts omitted paths while --yes requires them" do
+    assert {:ok, %{workspace: nil, repo: nil, yes: false}} = Pika.CLI.parse_init([])
+    assert {:error, message} = Pika.CLI.parse_init(["--yes"])
+    assert message =~ "WORKSPACE is required with --yes"
+    assert message =~ "--repo PATH is required with --yes"
+  end
+
+  test "discovers reconfiguration config and parses per-Agent choices" do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "pika-reconfiguration-cli-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(root)
+    File.write!(Path.join(root, "pika.yaml"), "version: 2\n")
+    previous = System.get_env("PIKA_CLI_CWD")
+    System.put_env("PIKA_CLI_CWD", root)
+
+    on_exit(fn ->
+      File.rm_rf!(root)
+
+      if previous,
+        do: System.put_env("PIKA_CLI_CWD", previous),
+        else: System.delete_env("PIKA_CLI_CWD")
+    end)
+
+    assert {:ok, opts} =
+             Pika.CLI.parse_reconfiguration([
+               "--role",
+               "integration",
+               "--backend",
+               "cursor",
+               "--model",
+               "cursor-model",
+               "--reasoning-effort",
+               "ultra",
+               "--yes"
+             ])
+
+    assert opts.workspace == Path.expand(root)
+    assert opts.config == Path.join(Path.expand(root), "pika.yaml")
+    assert opts.role == "integration"
+    assert opts.backend == "cursor"
+    assert opts.reasoning_effort == "ultra"
   end
 end

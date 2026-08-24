@@ -26,16 +26,17 @@ mix assets.build
 mix release
 
 ./_build/prod/rel/pika/bin/pika init /absolute/path/to/workspace \
-  --repo /absolute/path/to/clean/git/repo \
-  --backend codex \
-  --iteration-agents 2 \
-  --progress-summary
+  --repo /absolute/path/to/clean/git/repo
 
 ./_build/prod/rel/pika/bin/pika serve \
   --workspace /absolute/path/to/workspace
 ```
 
-`pika init` 生成完整展开的 v2 `pika.yaml`。也可以从 [config/pika.example.yaml](config/pika.example.yaml) 开始；YAML anchor 只负责书写复用，运行时不存在 Agent Profile registry。
+`pika init` 默认启动交互式向导。每个必选 Role、每个 Iteration Agent，以及启用的可选 Role 都可以分别选择 Codex/Cursor、provider 返回的完整模型列表和 reasoning effort。脚本中可加 `--yes`，用命令行参数和默认值非交互初始化。
+
+在 Workspace 目录内运行 `pika reconfiguration`（也可用 `pika reconfigure`）可以交互式修改某个 Role 或全部 Agent 配置；修改只影响之后创建的 Session。`pika init` 和 `pika reconfiguration --help` 列出了相应的非交互参数。
+
+初始化会生成完整展开的 v2 `pika.yaml`。也可以从 [config/pika.example.yaml](config/pika.example.yaml) 开始；YAML anchor 只负责书写复用，运行时不存在 Agent Profile registry。
 
 ## 核心契约
 

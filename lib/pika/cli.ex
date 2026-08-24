@@ -1,7 +1,16 @@
 defmodule Pika.CLI do
   @moduledoc false
 
-  alias Pika.Optimization.{Bootstrap, Config, Init, Persistence}
+  alias Pika.Optimization.{
+    Bootstrap,
+    Config,
+    Init,
+    InteractiveConfig,
+    Persistence,
+    Reconfiguration
+  }
+
+  @reasoning_efforts ~w(low medium high xhigh max ultra)
 
   def main([command | argv]) when command in ["init", "init-v2"] do
     case parse_init(argv) do
@@ -19,6 +28,14 @@ defmodule Pika.CLI do
     end
   end
 
+  def main([command | argv]) when command in ["reconfiguration", "reconfigure"] do
+    case parse_reconfiguration(argv) do
+      {:ok, %{help: true}} -> IO.puts(reconfiguration_usage())
+      {:ok, opts} -> run_reconfiguration(opts)
+      {:error, message} -> abort(message <> "\n\n" <> reconfiguration_usage())
+    end
+  end
+
   def main([flag]) when flag in ["--help", "-h", "help"], do: IO.puts(usage())
   def main(_argv), do: abort(usage())
 
@@ -31,25 +48,39 @@ defmodule Pika.CLI do
           model: :string,
           reasoning_effort: :string,
           iteration_agents: :integer,
+          baseline_verify_followup: :boolean,
+          iteration_followup: :boolean,
+          integration_followup: :boolean,
           progress_summary: :boolean,
+          yes: :boolean,
           help: :boolean
         ],
-        aliases: [h: :help]
+        aliases: [y: :yes, h: :help]
       )
 
     errors =
       []
       |> maybe_error(invalid != [], "invalid options: #{inspect(invalid)}")
-      |> maybe_error(length(args) > 1, "expected exactly one WORKSPACE argument")
-      |> maybe_error(opts[:help] != true and args == [], "WORKSPACE is required")
-      |> maybe_error(opts[:help] != true and is_nil(opts[:repo]), "--repo PATH is required")
+      |> maybe_error(length(args) > 1, "expected at most one WORKSPACE argument")
       |> maybe_error(
-        Keyword.get(opts, :backend, "codex") not in ~w(codex cursor),
+        not is_nil(opts[:backend]) and opts[:backend] not in ~w(codex cursor),
         "--backend must be codex or cursor"
       )
       |> maybe_error(
-        Keyword.get(opts, :iteration_agents, 1) < 1,
+        not is_nil(opts[:reasoning_effort]) and opts[:reasoning_effort] not in @reasoning_efforts,
+        "--reasoning-effort must be one of #{Enum.join(@reasoning_efforts, ", ")}"
+      )
+      |> maybe_error(
+        not is_nil(opts[:iteration_agents]) and opts[:iteration_agents] < 1,
         "--iteration-agents must be positive"
+      )
+      |> maybe_error(
+        opts[:help] != true and opts[:yes] == true and args == [],
+        "WORKSPACE is required with --yes"
+      )
+      |> maybe_error(
+        opts[:help] != true and opts[:yes] == true and is_nil(opts[:repo]),
+        "--repo PATH is required with --yes"
       )
 
     if errors == [] do
@@ -58,11 +89,87 @@ defmodule Pika.CLI do
          help: opts[:help] == true,
          workspace: args |> List.first() |> expand_optional(),
          repo: expand_optional(opts[:repo]),
-         backend: Keyword.get(opts, :backend, "codex"),
+         backend: opts[:backend],
          model: opts[:model],
-         reasoning_effort: Keyword.get(opts, :reasoning_effort, "high"),
-         iteration_agents: Keyword.get(opts, :iteration_agents, 1),
-         progress_summary: opts[:progress_summary] == true
+         reasoning_effort: opts[:reasoning_effort],
+         iteration_agents: opts[:iteration_agents],
+         baseline_verify_followup: opts[:baseline_verify_followup],
+         iteration_followup: opts[:iteration_followup],
+         integration_followup: opts[:integration_followup],
+         progress_summary: opts[:progress_summary],
+         yes: opts[:yes] == true
+       }}
+    else
+      {:error, Enum.join(errors, "\n")}
+    end
+  end
+
+  def parse_reconfiguration(argv) do
+    {opts, args, invalid} =
+      OptionParser.parse(argv,
+        strict: [
+          workspace: :string,
+          config: :string,
+          role: :string,
+          all: :boolean,
+          backend: :string,
+          model: :string,
+          reasoning_effort: :string,
+          iteration_agents: :integer,
+          enable: :boolean,
+          yes: :boolean,
+          help: :boolean
+        ],
+        aliases: [y: :yes, h: :help]
+      )
+
+    cwd = invocation_cwd()
+    workspace = expand_from(opts[:workspace], cwd) || discover_workspace(cwd)
+    config_path = expand_from(opts[:config], cwd) || default_config(workspace)
+
+    errors =
+      []
+      |> maybe_error(invalid != [], "invalid options: #{inspect(invalid)}")
+      |> maybe_error(args != [], "unexpected arguments: #{inspect(args)}")
+      |> maybe_error(
+        opts[:help] != true and is_nil(workspace),
+        "--workspace is required outside a v2 Workspace"
+      )
+      |> maybe_error(
+        opts[:help] != true and is_nil(config_path),
+        "WORKSPACE/pika.yaml is required"
+      )
+      |> maybe_error(
+        opts[:all] == true and not is_nil(opts[:role]),
+        "--all and --role cannot be combined"
+      )
+      |> maybe_error(
+        not is_nil(opts[:backend]) and opts[:backend] not in ~w(codex cursor),
+        "--backend must be codex or cursor"
+      )
+      |> maybe_error(
+        not is_nil(opts[:reasoning_effort]) and opts[:reasoning_effort] not in @reasoning_efforts,
+        "--reasoning-effort must be one of #{Enum.join(@reasoning_efforts, ", ")}"
+      )
+      |> maybe_error(
+        not is_nil(opts[:iteration_agents]) and opts[:iteration_agents] < 1,
+        "--iteration-agents must be positive"
+      )
+
+    if errors == [] do
+      {:ok,
+       %{
+         help: opts[:help] == true,
+         workspace: workspace,
+         config: config_path,
+         role: opts[:role],
+         all: opts[:all] == true,
+         backend: opts[:backend],
+         model: opts[:model],
+         reasoning_effort: opts[:reasoning_effort],
+         iteration_agents: opts[:iteration_agents],
+         enabled: opts[:enable],
+         yes: opts[:yes] == true
        }}
     else
       {:error, Enum.join(errors, "\n")}
@@ -118,15 +225,14 @@ defmodule Pika.CLI do
   end
 
   defp run_init(opts) do
-    init_opts = [
-      backend: opts.backend,
-      model: opts.model,
-      reasoning_effort: opts.reasoning_effort,
-      iteration_agents: opts.iteration_agents,
-      progress_summary: opts.progress_summary
-    ]
+    result =
+      with {:ok, settings} <- InteractiveConfig.collect_init(opts),
+           {:ok, config} <-
+             Init.run(settings.workspace, settings.repo, agents: settings.agents) do
+        {:ok, config}
+      end
 
-    case Init.run(opts.workspace, opts.repo, init_opts) do
+    case result do
       {:ok, config} ->
         IO.puts("Created Pika v2 Workspace: #{config.workspace}")
         IO.puts("Configuration: #{config.source_path}")
@@ -134,6 +240,13 @@ defmodule Pika.CLI do
 
       {:error, reason} ->
         abort("pika init failed: #{inspect(reason)}")
+    end
+  end
+
+  defp run_reconfiguration(opts) do
+    case Reconfiguration.run(opts.workspace, opts.config, opts) do
+      {:ok, _config} -> :ok
+      {:error, reason} -> abort("pika reconfiguration failed: #{inspect(reason)}")
     end
   end
 
@@ -227,20 +340,25 @@ defmodule Pika.CLI do
   defp maybe_error(errors, true, message), do: errors ++ [message]
   defp maybe_error(errors, false, _message), do: errors
 
-  defp usage, do: init_usage() <> "\n" <> serve_usage()
+  defp usage, do: init_usage() <> "\n" <> serve_usage() <> "\n" <> reconfiguration_usage()
 
   defp init_usage do
     """
-    Usage: pika init WORKSPACE --repo PATH [options]
+    Usage: pika init [WORKSPACE] [--repo PATH] [options]
 
     Creates a new, incompatible v2 Workspace for exactly one repository and Optimization.
-    The repository must be a clean Git worktree. Pika never pushes or merges to a remote branch.
+    Without --yes, starts an interactive wizard for every Agent configuration. The repository
+    must be a clean Git worktree. Pika never pushes or merges to a remote branch.
 
-      --backend codex|cursor       Backend for required Roles (default codex)
-      --model MODEL                Optional provider model
-      --reasoning-effort EFFORT    Default reasoning effort (default high)
-      --iteration-agents N         Iteration concurrency; each entry is expanded (default 1)
+      --backend codex|cursor       Default Backend for Agent prompts
+      --model MODEL                Default provider model for Agent prompts
+      --reasoning-effort EFFORT    Default effort: low|medium|high|xhigh|max|ultra
+      --iteration-agents N         Iteration concurrency; every Agent is configured separately
+      --baseline-verify-followup   Enable the optional Baseline Verify Follow-up Agent
+      --iteration-followup         Enable the optional Iteration Follow-up Agent
+      --integration-followup       Enable the optional Integration Follow-up Agent
       --progress-summary           Enable five-minute Progress Summary in Asia/Shanghai
+      -y, --yes                    Non-interactive; accept defaults for unspecified settings
       -h, --help
     """
   end
@@ -257,6 +375,27 @@ defmodule Pika.CLI do
       --config PATH      Must resolve to WORKSPACE/pika.yaml
       --host IP          Listen host (default 127.0.0.1)
       --port PORT        Listen port (default 8080)
+      -h, --help
+    """
+  end
+
+  defp reconfiguration_usage do
+    """
+    Usage: pika reconfiguration [options]
+
+    Interactively updates Backend, provider model, and reasoning effort for any configured
+    Agent Role. New Sessions reload pika.yaml; active Sessions keep their frozen configuration.
+
+      --workspace PATH             Auto-detected when the current directory has pika.yaml
+      --config PATH                Must resolve to WORKSPACE/pika.yaml
+      --role ROLE                  Configure one Role without the section menu
+      --all                        Configure every Agent Role
+      --backend codex|cursor       Use this Backend for the selected Agent(s)
+      --model MODEL                Use a model id; "default" selects the provider default
+      --reasoning-effort EFFORT    low|medium|high|xhigh|max|ultra
+      --iteration-agents N         Change Iteration concurrency
+      --enable, --no-enable        Enable or disable a selected optional Role
+      -y, --yes                    Keep current values for unspecified settings
       -h, --help
     """
   end
