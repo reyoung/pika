@@ -1,7 +1,7 @@
 {
   "private": true,
   "dependencies": {
-    "echarts": "6.0.0",
+    "echarts": "6.1.0",
     "highlight.js": "11.11.1"
   }
 }

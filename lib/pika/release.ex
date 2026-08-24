@@ -51,9 +51,9 @@ defmodule Pika.Release do
         contents
       end
 
-    reconfiguration_command = """
+    help_command = """
     case $1 in
-      reconfiguration|reconfigure)
+      help|-h|--help)
         shift
         export_release_sys_config
         exec "$REL_VSN_DIR/elixir" \\
@@ -62,23 +62,23 @@ defmodule Pika.Release do
              --boot "$REL_VSN_DIR/$RELEASE_BOOT_SCRIPT_CLEAN" \\
              --boot-var RELEASE_LIB "$RELEASE_ROOT/lib" \\
              --vm-args "$RELEASE_VM_ARGS" \\
-             --eval 'Pika.CLI.main(["reconfiguration" | System.argv()])' -- "$@"
+             --eval 'Pika.CLI.main(["--help"])' -- "$@"
         ;;
 
     """
 
     contents =
-      unless String.contains?(contents, "Pika.CLI.main([\"reconfiguration\" | System.argv()])") do
-        String.replace(contents, "case $1 in\n", reconfiguration_command, global: false)
+      unless String.contains?(contents, "Pika.CLI.main([\"--help\"])") do
+        String.replace(contents, "case $1 in\n", help_command, global: false)
       else
         contents
       end
 
     contents =
       contents
-      |> add_known_command("    init           Interactively initializes a Pika Workspace\n")
-      |> add_known_command("    reconfiguration  Updates mutable Pika Workspace configuration\n")
-      |> add_known_command("    serve          Starts Pika Server in the foreground\n")
+      |> add_known_command("    init           Initializes a Pika v2 Workspace\n")
+      |> add_known_command("    serve          Starts the Pika v2 Server in the foreground\n")
+      |> add_known_command("    help           Shows Pika v2 CLI help\n")
 
     File.write!(executable, contents)
 

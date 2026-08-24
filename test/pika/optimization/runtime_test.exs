@@ -70,6 +70,17 @@ defmodule Pika.Optimization.RuntimeTest do
     assert Persistence.current().status == "failed"
   end
 
+  test "Stop Now cancels active Attempts and aborts pending Git intents" do
+    insert_active_attempt_and_intent()
+    runtime = start_supervised!({Runtime, name: nil})
+    assert {:ok, %{status: "stopped"}} = Runtime.stop_now(runtime, "operator")
+
+    assert [["cancelled", "rejected", "operator"]] =
+             Repo.query!("SELECT status, outcome, failure_reason FROM attempts WHERE id = 1").rows
+
+    assert [["aborted"]] = Repo.query!("SELECT state FROM operation_intents").rows
+  end
+
   test "rejects invalid transitions" do
     runtime = start_supervised!({Runtime, name: nil})
     assert {:error, {:cannot_pause, "aligning_baseline"}} = Runtime.pause(runtime)
@@ -79,6 +90,47 @@ defmodule Pika.Optimization.RuntimeTest do
 
   defp set_status(status) do
     Repo.query!("UPDATE optimizations SET status = ? WHERE id = 'optimization'", [status])
+  end
+
+  defp insert_active_attempt_and_intent do
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      "INSERT INTO baseline_revisions(optimization_id, revision, status, work_relative_path, inserted_at, updated_at) VALUES ('optimization', 0, 'accepted', 'baseline/revisions/000000', ?, ?)",
+      [now, now]
+    )
+
+    [[baseline_id]] = Repo.query!("SELECT last_insert_rowid()").rows
+
+    Repo.query!(
+      "INSERT INTO sampling_revisions(optimization_id, baseline_revision_id, sequence, cause, created_at) VALUES ('optimization', ?, 0, 'test', ?)",
+      [baseline_id, now]
+    )
+
+    [[sampling_id]] = Repo.query!("SELECT last_insert_rowid()").rows
+
+    Repo.query!(
+      """
+      INSERT INTO attempts(
+        id, optimization_id, status, work_relative_path, branch, slot_index,
+        base_best_revision, base_sha, sampling_revision_id, current_iteration_round,
+        inserted_at, updated_at
+      ) VALUES (1, 'optimization', 'iterating', 'attempts/000001',
+                'pika/attempt/000001', 0, 0, ?, ?, 1, ?, ?)
+      """,
+      [@initial_sha, sampling_id, now, now]
+    )
+
+    Repo.query!(
+      """
+      INSERT INTO operation_intents(
+        id, optimization_id, kind, owner_type, owner_id, state,
+        idempotency_key, created_at, updated_at
+      ) VALUES ('intent-1', 'optimization', 'best_update', 'attempt', '1', 'pending',
+                'intent-key', ?, ?)
+      """,
+      [now, now]
+    )
   end
 
   defp yaml(repo, workspace) do

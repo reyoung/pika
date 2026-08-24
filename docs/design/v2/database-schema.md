@@ -19,11 +19,15 @@ singleton root：`id`、repo/workspace identity、status、resume status、initi
 
 ### `target_snapshots`
 
-保存 Baseline Revision、normalized Target provenance、root Artifact/digest、entrypoint 和 immutable identity。一个 approved Revision 恰有一个 Snapshot。
+保存 Baseline Revision、独立 Snapshot 相对路径、normalized Target provenance、root Artifact/digest、entrypoint 和 immutable identity。一个 approved Revision 恰有一个 Snapshot；Attempt spawn 与 Integration 会重新核验其文件 digest。
 
 ### `baseline_reviews`
 
 保存 revision、decision、绑定的 Definition/commit/dependency digest、用户 feedback 与时间。旧 digest 不得复用 Review。
+
+### `baseline_question_batches`
+
+保存 Alignment Agent 通过 `ask_questions` 提交的整批问题、所属 Revision/Session、用户整批答案和终态；同一 Revision 同时最多一个 pending Batch。
 
 ### `baseline_verifications`
 

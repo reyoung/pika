@@ -96,11 +96,6 @@ button {
   border-bottom-color: #b8f35a;
   outline: none;
 }
-.campaign-status {
-  flex: 0 1 auto;
-  min-width: 0;
-  text-align: right;
-}
 .alignment-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.12fr) minmax(440px, .88fr);
@@ -2022,12 +2017,6 @@ code {
   color: #d5e0e4;
   border-bottom-color: #b8f35a;
 }
-.campaign-controls {
-  display: flex;
-  gap: 7px;
-  align-items: center;
-  justify-content: flex-end;
-}
 .compact {
   padding: 6px 9px;
   font-size: 10px;
@@ -2236,6 +2225,50 @@ code {
   margin-top: 4px;
   color: #667984;
   font-size: 9px;
+}
+.agent-prompts {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+.agent-prompt {
+  border-top: 1px solid #263a42;
+  padding-top: 7px;
+}
+.agent-prompt summary {
+  cursor: pointer;
+  list-style: none;
+  min-width: 0;
+}
+.agent-prompt summary::-webkit-details-marker {
+  display: none;
+}
+.agent-prompt summary strong {
+  display: inline;
+  margin: 0 8px 0 0;
+  color: #9eb0b8;
+  font-size: 10px;
+}
+.agent-prompt summary span {
+  display: inline;
+  color: #667984;
+  font:
+    9px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+.agent-prompt pre {
+  margin: 8px 0 0;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: #b8c6cc;
+  font:
+    10px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
 }
 .summary-card {
   grid-column: 1 / -1;
@@ -2487,8 +2520,7 @@ code {
   resize: vertical;
 }
 .btw-form textarea,
-.btw-form select,
-.sync-form input {
+.btw-form select {
   width: 100%;
   padding: 10px;
   border: 1px solid #30434d;
@@ -2656,8 +2688,7 @@ code {
 .command-console.collapsed > pre {
   display: none;
 }
-.metrics-workspace,
-.sync-workspace {
+.metrics-workspace {
   padding: 22px;
 }
 .metrics-heading {
@@ -2791,75 +2822,6 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.sync-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(320px, .75fr);
-  gap: 14px;
-  max-width: 1100px;
-  margin: 0 auto;
-}
-.sync-form {
-  display: grid;
-  gap: 12px;
-  padding: 20px;
-}
-.sync-form label {
-  color: #758891;
-  font-size: 10px;
-}
-.sync-form input {
-  display: block;
-  margin-top: 6px;
-}
-.sync-preview,
-.sync-status > dl,
-.spec-confirmation {
-  margin: 0 20px 20px;
-  padding: 16px;
-  border: 1px solid #30434b;
-  border-radius: 10px;
-  background: #ffffff03;
-}
-.sync-preview dl,
-.sync-status dl {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 9px;
-}
-.sync-preview dl div,
-.sync-status dl div {
-  min-width: 0;
-  padding: 9px;
-  border-radius: 7px;
-  background: #ffffff04;
-}
-.sync-preview dt,
-.sync-status dt {
-  color: #657780;
-  font-size: 8px;
-  text-transform: uppercase;
-}
-.sync-preview dd,
-.sync-status dd {
-  margin: 5px 0 0;
-  overflow: hidden;
-  color: #a8b7bd;
-  font-size: 10px;
-  text-overflow: ellipsis;
-}
-.sync-preview p,
-.spec-confirmation p {
-  color: #7c8e96;
-  font-size: 10px;
-  line-height: 1.6;
-}
-.spec-confirmation {
-  border-color: #665735;
-}
-.spec-confirmation button {
-  width: 100%;
-  margin-top: 7px;
-}
 .error-copy {
   margin: 20px;
   color: #e89595;
@@ -2885,9 +2847,6 @@ code {
     grid-row: 2;
     overflow-x: auto;
   }
-  .campaign-controls {
-    flex-wrap: wrap;
-  }
   .attempt-workspace {
     grid-template-columns: 240px minmax(0, 1fr);
     height: auto;
@@ -2907,11 +2866,7 @@ code {
   .control-header {
     padding: 10px 12px;
   }
-  .campaign-controls {
-    justify-content: flex-start;
-  }
-  .attempt-workspace,
-  .sync-grid {
+  .attempt-workspace {
     grid-template-columns: 1fr;
   }
   .attempt-sidebar {
@@ -2919,9 +2874,7 @@ code {
   }
   .attempt-stream,
   .summary-card dl,
-  .metric-point-card,
-  .sync-preview dl,
-  .sync-status dl {
+  .metric-point-card {
     grid-template-columns: 1fr;
   }
   .attempt-conversation {

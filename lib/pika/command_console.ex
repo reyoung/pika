@@ -1,36 +1,29 @@
 defmodule Pika.CommandConsole do
-  @moduledoc "Persistent, provider-neutral command output used by the web console."
+  @moduledoc "Persistent, provider-neutral command output captured under Backend Session artifacts."
 
   alias Pika.AgentBackend.{Event, JSONLWriter}
 
   @ref_pattern ~r/\A[0-9a-f]{64}\z/
 
   def capture(%Event{} = event, artifact_dir, cwd) do
-    do_capture(event, artifact_dir, cwd)
-  rescue
-    error -> {:error, error}
-  end
-
-  defp do_capture(event, artifact_dir, cwd) do
     with {:ok, record} <- normalize(event, cwd),
          ref when is_binary(ref) <- ref(event) do
       path = Path.join([Path.expand(artifact_dir), "commands", ref <> ".jsonl"])
       :ok = JSONLWriter.append(path, "command", record)
 
-      if Process.whereis(Pika.PubSub) do
-        Phoenix.PubSub.broadcast(Pika.PubSub, topic(ref), {:command_console_event, ref, record})
-      end
+      if Process.whereis(Pika.PubSub),
+        do:
+          Phoenix.PubSub.broadcast(Pika.PubSub, topic(ref), {:command_console_event, ref, record})
 
       {:ok, ref}
     else
-      _ -> :ignore
+      _other -> :ignore
     end
+  rescue
+    error -> {:error, error}
   end
 
-  def ref(%Event{} = event) do
-    command_id = command_id(event)
-    ref(event.session_id, event.turn_id, command_id)
-  end
+  def ref(%Event{} = event), do: ref(event.session_id, event.turn_id, command_id(event))
 
   def ref(session_id, turn_id, command_id) when not is_nil(command_id) do
     Jason.encode!([session_id, turn_id, command_id])
@@ -39,9 +32,7 @@ defmodule Pika.CommandConsole do
   end
 
   def ref(_session_id, _turn_id, nil), do: nil
-
   def command?(%Event{} = event), do: command_id(event) != nil and command_event?(event)
-
   def topic(ref), do: "command_console:" <> ref
 
   def load(ref, opts \\ []) when is_binary(ref) do
@@ -99,21 +90,20 @@ defmodule Pika.CommandConsole do
       {"completed", _, output} when is_binary(output) and console.output == "" ->
         set_output(console, output)
 
-      _ ->
+      _other ->
         console
     end
   end
 
   defp normalize(%Event{type: :command_output} = event, cwd) do
     data = stringify_keys(event.data)
-    output = first_binary(data, ~w(delta output text content)) || ""
 
     {:ok,
      base_record(event, cwd)
      |> Map.merge(%{
        "kind" => "output",
        "mode" => data["update_mode"] || "append",
-       "output" => output,
+       "output" => first_binary(data, ~w(delta output text content)) || "",
        "status" => data["status"] || "running"
      })}
   end
@@ -123,8 +113,6 @@ defmodule Pika.CommandConsole do
     item = data["item"] || data
 
     if command_event?(event) do
-      status = item["status"] || if(type == :tool_started, do: "running", else: "completed")
-
       {:ok,
        base_record(event, cwd)
        |> Map.merge(%{
@@ -132,7 +120,8 @@ defmodule Pika.CommandConsole do
          "command" =>
            get_in(item, ["rawInput", "command"]) || first_binary(item, ~w(command title name)),
          "cwd" => item["cwd"] || cwd,
-         "status" => status,
+         "status" =>
+           item["status"] || if(type == :tool_started, do: "running", else: "completed"),
          "exit_code" => item["exitCode"] || item["exit_code"],
          "duration_ms" => item["durationMs"] || item["duration_ms"],
          "output" => item["aggregatedOutput"]
@@ -177,21 +166,18 @@ defmodule Pika.CommandConsole do
   end
 
   defp artifact_roots do
-    case Application.get_env(:pika, :workspace_plan) do
-      %{artifacts: artifacts} when is_binary(artifacts) -> [artifacts]
-      _ -> []
+    case Pika.Optimization.Persistence.current() do
+      %{workspace_canonical_path: workspace} -> [Path.join(workspace, "agent-sessions")]
+      _other -> []
     end
+  rescue
+    _error -> []
   end
 
-  defp first_binary(map, keys),
-    do: Enum.find_value(keys, fn key -> if is_binary(map[key]), do: map[key] end)
-
+  defp first_binary(map, keys), do: Enum.find_value(keys, &if(is_binary(map[&1]), do: map[&1]))
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
-
-  defp set_output(console, raw_output) do
-    %{console | raw_output: raw_output, output: terminal_text(raw_output)}
-  end
+  defp set_output(console, raw), do: %{console | raw_output: raw, output: terminal_text(raw)}
 
   defp terminal_text(output) do
     output

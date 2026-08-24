@@ -1,217 +1,26 @@
+Code.require_file(Path.expand("../../support/fake_agent_backend.exs", __DIR__))
+Code.require_file(Path.expand("../../support/v2_baseline_fixtures.ex", __DIR__))
+
 defmodule Pika.Agent.ActorTest do
   use ExUnit.Case, async: false
 
-  alias Pika.Agent.{Actor, Directory}
-  alias Pika.Agent.Role.{Context, Definition, DomainContext, Tool, Work}
-  alias Pika.Agent.Roles.ProgressSummary
-  alias Pika.AgentBackend.Session
-  alias Pika.Test.CampaignFixtures
-  alias Pika.{Config, Persistence, ProgressSummaryStore, Repo, Workspace}
-
-  defmodule Backend do
-    @behaviour Pika.AgentBackend
-
-    def start_link(profile, sink), do: Agent.start_link(fn -> %{profile: profile, sink: sink} end)
-
-    def open_session(server, cwd, model, effort, mcp, skill_roots, instructions) do
-      state = Agent.get(server, & &1)
-
-      session = %Session{
-        id: Ecto.UUID.generate(),
-        backend: :fake,
-        backend_protocol: "fake-v1",
-        backend_session_id: Ecto.UUID.generate(),
-        cwd: cwd,
-        model: model,
-        reasoning_effort: effort,
-        jsonl_path: "/dev/null"
-      }
-
-      Agent.update(server, &Map.put(&1, :session, session))
-
-      send(
-        state.profile.env.test_pid,
-        {:actor_backend_opened, mcp, skill_roots, instructions, session}
-      )
-
-      {:ok, session}
-    end
-
-    def start_turn(server, prompt) do
-      state = Agent.get(server, & &1)
-      turn_id = Ecto.UUID.generate()
-      send(state.profile.env.test_pid, {:actor_turn_started, prompt, turn_id})
-      {:ok, turn_id}
-    end
-
-    def steer(_server, _input), do: {:error, :unsupported}
-    def interrupt(_server), do: :ok
-
-    def close_session(server) do
-      if Process.alive?(server) do
-        state = Agent.get(server, & &1)
-        send(state.profile.env.test_pid, :actor_backend_closed)
-      end
-
-      :ok
-    end
-
-    def capabilities(_server), do: %{protocol: "fake-v1"}
-  end
-
-  defmodule BlockingDomain do
-    @behaviour Pika.Agent.Role.DomainAdapter
-
-    @impl true
-    def prepare(%Work{}, workspace) do
-      {:ok,
-       %DomainContext{
-         facts: %{done: false, _revision: 1},
-         durable_context: %{},
-         cwd: workspace.root,
-         skill_roots: []
-       }}
-    end
-
-    @impl true
-    def invoke(%Work{}, "wait", %{"test_pid" => test_pid}, _meta) do
-      send(test_pid, {:blocking_role_waiting, self()})
-
-      receive do
-        :release -> {:ok, %{released: true}}
-      end
-    end
-  end
-
-  defmodule BlockingRole do
-    @behaviour Pika.Agent.Role
-
-    @impl true
-    def definition do
-      %Definition{
-        id: "blocking_test",
-        contract_revision: 1,
-        activation: :automatic,
-        work_kind: :blocking_test,
-        profile_key: "blocking_test",
-        followup_strategy: :agent,
-        domain_adapter: Pika.Agent.ActorTest.BlockingDomain,
-        template: %{relative_path: "prompts/roles/blocking_test.md", builtin: "Wait safely."},
-        tools: [
-          %Tool{
-            name: "wait",
-            description: "Wait for an external answer.",
-            kind: :query,
-            input_schema: %{"type" => "object", "additionalProperties" => true}
-          }
-        ],
-        completion: %{
-          terminals: [{:completed, {:fact, :done}}],
-          suggestions: [{"wait", {:eq, :done, false}}]
-        }
-      }
-    end
-
-    @impl true
-    def build_system_instructions(%Context{} = context), do: {:ok, context.template}
-
-    @impl true
-    def initial_prompt(%Context{}), do: {:ok, "Start waiting."}
-
-    @impl true
-    def recovery_prompt(%Context{}), do: {:ok, "Recover waiting."}
-  end
-
-  test "an agent follow-up request replaces the Actor's hard-coded retry prompt", context do
-    profile = %{
-      "backend" => :fake,
-      "model" => "fake-model",
-      "reasoning_effort" => "medium",
-      "env" => %{test_pid: self()}
-    }
-
-    work = %Work{
-      role_id: "blocking_test",
-      kind: :blocking_test,
-      id: Ecto.UUID.generate(),
-      campaign_id: context.campaign.id
-    }
-
-    assert {:ok, actor} =
-             Actor.start_link(
-               work: work,
-               role: BlockingRole,
-               workspace: context.workspace,
-               profile: profile,
-               directory: context.directory,
-               backend_modules: %{fake: Backend}
-             )
-
-    assert_receive {:actor_backend_opened, _mcp, [], _instructions, session}
-    assert_receive {:actor_turn_started, "Start waiting.", turn_id}
-
-    send(
-      actor,
-      {:pika_backend_event,
-       Pika.AgentBackend.Event.new(:turn_completed, :fake, session.id, %{turn_id: turn_id})}
-    )
-
-    assert eventually(fn ->
-             Repo.query!(
-               "SELECT status, required_operations_json, context_json FROM agent_followup_requests WHERE target_session_id = ?",
-               [session.id]
-             ).rows
-             |> case do
-               [["requested", required, context_json]] ->
-                 Jason.decode!(required) == ["wait"] and
-                   Jason.decode!(context_json)["recent_history"] != nil
-
-               _ ->
-                 false
-             end
-           end)
-
-    refute_receive {:actor_turn_started, _, _}, 100
-
-    [[request_id]] =
-      Repo.query!(
-        "SELECT id FROM agent_followup_requests WHERE target_session_id = ?",
-        [session.id]
-      ).rows
-
-    assert {:ok, %{status: "completed"}} =
-             Pika.AgentFollowupStore.submit(
-               request_id,
-               "H20 全量回归仍在运行；等待 identity-bound artifact 完整后再提交。"
-             )
-
-    assert_receive {:actor_turn_started, message, _}, 1_000
-    assert message =~ "等待 identity-bound artifact 完整"
-    refute message =~ "The turn ended before"
-    assert :ok = Actor.stop(actor)
-  end
-
-  defp eventually(fun, attempts \\ 50)
-  defp eventually(fun, 0), do: fun.()
-
-  defp eventually(fun, attempts) do
-    if fun.() do
-      true
-    else
-      Process.sleep(10)
-      eventually(fun, attempts - 1)
-    end
-  end
+  alias Pika.Agent.{ConversationJournal, Actor, Directory, Work}
+  alias Pika.Baseline.Lifecycle
+  alias Pika.Optimization.{Config, Persistence}
+  alias Pika.Test.{FakeAgentBackend, V2BaselineFixtures}
+  alias Pika.Repo
 
   setup do
-    root = CampaignFixtures.workspace()
-    config_path = CampaignFixtures.config_file()
-    {:ok, config} = Config.load(config_path, workspace: root)
-    {:ok, plan} = Workspace.plan(config)
-    {:ok, workspace} = Workspace.activate(plan)
+    root = Path.join(System.tmp_dir!(), "pika-v2-actor-#{System.unique_integer([:positive])}")
+    workspace = Path.join(root, "workspace")
+    File.mkdir_p!(workspace)
+    baseline = V2BaselineFixtures.create_work_root(workspace, 0)
+    config_path = Path.join(workspace, "pika.yaml")
+    File.write!(config_path, yaml(baseline.repo, workspace))
+    assert {:ok, config} = Config.load(config_path)
 
     Application.put_env(:pika, Repo,
-      database: workspace.database,
+      database: Path.join(workspace, "pika.sqlite3"),
       pool_size: 1,
       journal_mode: :wal,
       synchronous: :full,
@@ -221,127 +30,155 @@ defmodule Pika.Agent.ActorTest do
 
     start_supervised!(Repo)
     assert :ok = Persistence.migrate()
-    assert {:ok, campaign, :initialized} = Persistence.initialize_or_recover(workspace)
 
+    assert {:ok, _optimization, :initialized} =
+             Persistence.initialize_or_recover(config, baseline.development_sha)
+
+    assert {:ok, draft} = Lifecycle.ensure_draft(baseline.root)
     directory = start_supervised!({Directory, name: nil})
 
-    %{workspace: workspace, campaign: campaign, directory: directory}
+    work = %Work{
+      role_id: "baseline_alignment",
+      kind: :baseline_revision,
+      id: to_string(draft.id)
+    }
+
+    opts = [
+      work: work,
+      workspace: workspace,
+      directory: directory,
+      backend_modules: %{codex_app_server: FakeAgentBackend},
+      mcp_url: "http://127.0.0.1:4000/mcp",
+      notify: self()
+    ]
+
+    on_exit(fn -> File.rm_rf!(root) end)
+    %{baseline: baseline, directory: directory, opts: opts, work: work, workspace: workspace}
   end
 
-  test "Actor owns one frozen Session, routes Role calls, then revokes its token", context do
-    profile = %{
-      "backend" => :fake,
-      "model" => "fake-model",
-      "reasoning_effort" => "medium",
-      "env" => %{test_pid: self()}
-    }
+  test "opens a frozen Session, waits for user kickoff, and completes only after terminal MCP", %{
+    opts: opts,
+    work: work
+  } do
+    actor = start_supervised!({Actor, opts})
+    assert_receive {:agent_actor_started, ^work, session_id}, 2_000
 
-    assert {:ok, request} =
-             ProgressSummaryStore.request(
-               context.campaign.id,
-               %{phase: "attempts", observed_at: "2026-08-22T01:00:00Z"},
-               profile
-             )
+    assert %{phase: :awaiting_user_kickoff, session_id: ^session_id} = Actor.status(actor)
+    assert :ok = Actor.kickoff(actor, "请开始梳理 Baseline")
+    assert eventually(fn -> Actor.status(actor).phase == :awaiting_user end)
 
-    work = %Work{
-      role_id: "progress_summary",
-      kind: :progress_summary,
-      id: request.id,
-      campaign_id: context.campaign.id
-    }
-
-    assert {:ok, actor} =
-             Actor.start_link(
-               work: work,
-               role: ProgressSummary,
-               workspace: context.workspace,
-               profile: profile,
-               directory: context.directory,
-               backend_modules: %{fake: Backend},
-               mcp_url: "http://127.0.0.1:8080/mcp",
-               notify: self()
-             )
+    assert {:ok, context} = Actor.invoke(actor, "get_context", %{})
+    assert context.context_file =~ "/agent-sessions/#{session_id}/context/context.json"
 
     monitor = Process.monitor(actor)
 
-    assert_receive {:actor_backend_opened, mcp, [], instructions, session}
-    assert mcp.url == "http://127.0.0.1:8080/mcp"
-    assert instructions =~ "Progress Summary Actor"
-    assert instructions =~ "中文总结"
-    assert {:ok, binding} = Directory.lookup(mcp.token, context.directory)
-    assert binding.actor == actor
-    assert binding.work == work
-    assert binding.session_id == session.id
+    assert {:ok, %{"status" => "awaiting_review"}} =
+             Actor.invoke(actor, "submit_baseline_definition", %{
+               "definition_path" => "baseline-definition.json",
+               "idempotency_key" => "definition-1"
+             })
 
-    assert_receive {:actor_turn_started, prompt, _turn_id}
-    assert prompt =~ "attempts"
-
-    assert {:ok, outcome} =
-             Actor.invoke(
-               actor,
-               "submit_progress_summary",
-               %{
-                 "idempotency_key" => "actor-summary",
-                 "content" => "The attempt is active."
-               }
-             )
-
-    assert outcome.actor_directive == :finish
-    assert_receive :actor_backend_closed
-    assert_receive {:DOWN, ^monitor, :process, ^actor, :normal}
-    assert {:error, :unauthorized} = Directory.lookup(mcp.token, context.directory)
-
-    request_id = request.id
-
-    assert [["completed", "progress_summary", "progress_summary", ^request_id, 1]] =
-             Repo.query!(
-               "SELECT status, role, work_kind, work_id, role_contract_revision FROM agent_sessions WHERE id = ?",
-               [session.id]
-             ).rows
+    assert_receive {:agent_actor_completed, ^work}, 2_000
+    assert_receive {:DOWN, ^monitor, :process, ^actor, :normal}, 2_000
+    assert ConversationJournal.session(session_id).status == "completed"
   end
 
-  test "a long domain interaction does not block status or Stop", context do
-    profile = %{
-      "backend" => :fake,
-      "model" => "fake-model",
-      "reasoning_effort" => "medium",
-      "env" => %{test_pid: self()}
-    }
+  test "a killed Actor is replaced by a new Backend Session with recovery-01", %{
+    directory: directory,
+    opts: opts,
+    work: work,
+    workspace: workspace
+  } do
+    actor = start_supervised!({Actor, opts})
+    assert_receive {:agent_actor_started, ^work, first_session_id}, 2_000
+    assert :ok = Actor.kickoff(actor, "第一轮对话")
+    assert eventually(fn -> Actor.status(actor).phase == :awaiting_user end)
 
-    work = %Work{
-      role_id: "blocking_test",
-      kind: :blocking_test,
-      id: Ecto.UUID.generate(),
-      campaign_id: context.campaign.id
-    }
+    Process.exit(actor, :kill)
 
-    assert {:ok, actor} =
-             Actor.start_link(
-               work: work,
-               role: BlockingRole,
-               workspace: context.workspace,
-               profile: profile,
-               directory: context.directory,
-               backend_modules: %{fake: Backend},
-               mcp_url: "http://127.0.0.1:8080/mcp"
-             )
+    assert eventually(fn ->
+             Directory.lookup_work(work.role_id, work.kind, work.id, directory) ==
+               {:error, :not_found}
+           end)
 
-    assert_receive {:actor_backend_opened, _mcp, [], _instructions, _session}
-    assert_receive {:actor_turn_started, "Start waiting.", _turn_id}
+    replacement = start_supervised!({Actor, opts})
+    assert_receive {:agent_actor_started, ^work, second_session_id}, 2_000
+    refute second_session_id == first_session_id
 
-    test_pid = self()
+    assert eventually(fn -> Actor.status(replacement).phase == :awaiting_user end)
+    assert ConversationJournal.session(first_session_id).status == "interrupted"
+    assert ConversationJournal.session(second_session_id).session_sequence == 2
+    assert ConversationJournal.session(second_session_id).recovery_sequence == 1
 
-    invocation =
-      Task.async(fn -> Actor.invoke(actor, "wait", %{"test_pid" => test_pid}) end)
+    recovery_root =
+      Path.join([workspace, "agent-sessions", second_session_id, "recovery-01"])
 
-    assert_receive {:blocking_role_waiting, domain_task}
-    assert Process.alive?(domain_task)
-    assert %{phase: :running} = Actor.status(actor)
+    assert File.regular?(Path.join(recovery_root, "messages.jsonl"))
+    assert File.regular?(Path.join(recovery_root, "recovery.json"))
+    assert File.read!(Path.join(recovery_root, "messages.jsonl")) =~ "第一轮对话"
 
-    monitor = Process.monitor(actor)
-    assert :ok = Actor.stop(actor)
-    assert Task.await(invocation) == {:error, :actor_stopped}
-    assert_receive {:DOWN, ^monitor, :process, ^actor, :normal}
-    refute Process.alive?(domain_task)
+    prompt_session = ConversationJournal.session(second_session_id)
+    assert prompt_session.provider_session_id != nil
+  end
+
+  test "recovery does not invent the first Alignment User Turn", %{
+    directory: directory,
+    opts: opts,
+    work: work
+  } do
+    actor = start_supervised!({Actor, opts})
+    assert_receive {:agent_actor_started, ^work, _first_session_id}, 2_000
+    assert Actor.status(actor).phase == :awaiting_user_kickoff
+    Process.exit(actor, :kill)
+
+    assert eventually(fn ->
+             Directory.lookup_work(work.role_id, work.kind, work.id, directory) ==
+               {:error, :not_found}
+           end)
+
+    assert {:ok, replacement} = Actor.start_link(opts)
+    assert_receive {:agent_actor_started, ^work, _second_session_id}, 2_000
+    assert Actor.status(replacement).phase == :awaiting_user_kickoff
+    Actor.stop(replacement)
+  end
+
+  defp eventually(check, attempts \\ 100)
+  defp eventually(_check, 0), do: false
+
+  defp eventually(check, attempts) do
+    if check.() do
+      true
+    else
+      Process.sleep(10)
+      eventually(check, attempts - 1)
+    end
+  catch
+    :exit, _reason -> false
+  end
+
+  defp yaml(repo, workspace) do
+    """
+    version: 2
+    repo: #{repo}
+    workspace: #{workspace}
+    agents:
+      baseline_alignment:
+        backend: codex
+        approval_policy: never
+        sandbox: workspace-write
+      baseline_verify:
+        backend: codex
+        approval_policy: never
+        sandbox: workspace-write
+      iteration:
+        agents:
+          - backend: codex
+            approval_policy: never
+            sandbox: workspace-write
+      integration:
+        backend: codex
+        approval_policy: never
+        sandbox: workspace-write
+    """
   end
 end

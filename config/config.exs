@@ -28,13 +28,4 @@ config :pika, PikaWeb.Endpoint,
   secret_key_base: String.duplicate("pika-preview-demo-", 8),
   server: false
 
-config :pika, Pika.PromptCatalog,
-  alignment: {:priv, "prompts/alignment/alignment.md.eex"},
-  setup_merge: {:priv, "prompts/alignment/setup_merge.md.eex"},
-  baseline: {:priv, "prompts/alignment/baseline.md.eex"},
-  plan: {:priv, "prompts/attempt/plan.md.eex"},
-  iteration: {:priv, "prompts/attempt/iteration.md.eex"},
-  integration: {:priv, "prompts/integration/integration.md.eex"},
-  sync: {:priv, "prompts/sync/sync.md.eex"}
-
 import_config "#{config_env()}.exs"

@@ -28,6 +28,7 @@ defmodule Pika.Optimization.ConfigTest do
     assert config.iteration.max_pending_attempts == 0
     assert config.integration.regression_feedback_cases == 3
     assert config.progress_summary.interval_ms == 300_000
+    assert config.progress_summary.time_zone == "Asia/Shanghai"
 
     assert RoleRegistry.enabled(config) |> Enum.map(& &1.id) |> Enum.sort() ==
              RoleRegistry.all() |> Map.keys() |> Enum.sort()
@@ -38,11 +39,11 @@ defmodule Pika.Optimization.ConfigTest do
     assert {:ok, integration} = Config.role_agent(config, :integration)
     assert %Agent{} = integration
 
-    profile = Agent.backend_profile(integration)
-    assert profile["backend"] == :codex_app_server
-    assert profile["sandbox_policy"] == "workspace-write"
-    refute Map.has_key?(profile, "name")
-    refute Map.has_key?(profile, "profile")
+    snapshot = Agent.snapshot(integration)
+    assert snapshot["backend"] == :codex_app_server
+    assert snapshot["sandbox_policy"] == "workspace_write"
+    refute Map.has_key?(snapshot, "name")
+    refute Map.has_key?(snapshot, "profile")
   end
 
   test "allows optional Follow-up and Progress Summary Roles to be absent" do
@@ -81,6 +82,19 @@ defmodule Pika.Optimization.ConfigTest do
 
     assert {:error, {:invalid_v2_config, [message]}} = Config.load(config_file(empty_agents))
     assert message =~ "agents.iteration.agents: must be a non-empty list"
+  end
+
+  test "rejects unknown Backend fields instead of silently ignoring them" do
+    yaml =
+      String.replace(
+        minimal_yaml(),
+        "  baseline_alignment:\n    backend: codex",
+        "  baseline_alignment:\n    backend: codex\n    magic_backend_flag: true"
+      )
+
+    assert {:error, {:invalid_v2_config, [message]}} = Config.load(config_file(yaml))
+    assert message =~ "unsupported Backend fields"
+    assert message =~ "magic_backend_flag"
   end
 
   test "requires version 2 and all mandatory Roles" do
@@ -143,8 +157,8 @@ defmodule Pika.Optimization.ConfigTest do
           - <<: *writer
           - backend: cursor
             model: auto
-            approval_policy: never
-            sandbox: workspace-write
+            approval_policy: force
+            sandbox: disabled
 
       iteration_followup:
         <<: *reader
@@ -159,6 +173,7 @@ defmodule Pika.Optimization.ConfigTest do
 
       progress_summary:
         interval: 5m
+        timezone: Asia/Shanghai
         backend: codex
         model: gpt-test
         reasoning_effort: low

@@ -1,0 +1,86 @@
+defmodule PikaWeb.OptimizationLiveTest do
+  use ExUnit.Case, async: false
+
+  alias Pika.Optimization.Bootstrap
+  alias Pika.{Auth, Git, Repo}
+
+  test "renders the singleton v2 Optimization without removed workflow controls" do
+    root = Path.join(System.tmp_dir!(), "pika-v2-live-#{System.unique_integer([:positive])}")
+    repo = Path.join(root, "repo")
+    workspace = Path.join(root, "workspace")
+    File.mkdir_p!(repo)
+    File.mkdir_p!(workspace)
+    Git.run!(repo, ["init", "--initial-branch=main"])
+    Git.run!(repo, ["config", "user.name", "Pika Test"])
+    Git.run!(repo, ["config", "user.email", "pika-test@example.invalid"])
+    File.write!(Path.join(repo, "kernel.py"), "def run(): return 1\n")
+    Git.run!(repo, ["add", "."])
+    Git.run!(repo, ["commit", "-m", "initial"])
+    config_path = Path.join(workspace, "pika.yaml")
+    File.write!(config_path, yaml(repo, workspace))
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    Application.put_env(:pika, Repo,
+      database: Path.join(workspace, "pika.sqlite3"),
+      pool_size: 1,
+      journal_mode: :wal,
+      synchronous: :full,
+      foreign_keys: :on,
+      busy_timeout: 5_000
+    )
+
+    start_supervised!(Repo)
+    assert {:ok, bootstrap} = Bootstrap.start_link(name: nil, config_path: config_path)
+    %{marker: marker} = Auth.generate()
+
+    assert {:ok, socket} =
+             PikaWeb.OptimizationLive.mount(
+               %{},
+               %{"pika_auth" => marker},
+               %Phoenix.LiveView.Socket{}
+             )
+
+    html =
+      socket.assigns
+      |> PikaWeb.OptimizationLive.render()
+      |> Phoenix.HTML.Safe.to_iodata()
+      |> IO.iodata_to_binary()
+
+    assert html =~ "Pika v2"
+    assert html =~ "Baseline"
+    assert html =~ "Review"
+    assert html =~ "Current Best"
+    assert html =~ "Iteration Guidance"
+    refute html =~ ">Sync<"
+    refute html =~ "Campaign singleton"
+
+    GenServer.stop(bootstrap)
+    Auth.clear()
+  end
+
+  defp yaml(repo, workspace) do
+    """
+    version: 2
+    repo: #{repo}
+    workspace: #{workspace}
+    agents:
+      baseline_alignment:
+        backend: codex
+        approval_policy: never
+        sandbox: workspace-write
+      baseline_verify:
+        backend: codex
+        approval_policy: never
+        sandbox: workspace-write
+      iteration:
+        agents:
+          - backend: codex
+            approval_policy: never
+            sandbox: workspace-write
+      integration:
+        backend: codex
+        approval_policy: never
+        sandbox: workspace-write
+    """
+  end
+end

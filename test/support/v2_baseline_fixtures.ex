@@ -120,6 +120,11 @@ defmodule Pika.Test.V2BaselineFixtures do
       "cases_path" => "cases.json",
       "metrics_path" => "metrics.json",
       "measurement" => %{"warmup" => 2, "pair_count" => 3, "min_valid_pairs" => 2},
+      "stopping" => %{
+        "mode" => "manual",
+        "max_attempts" => nil,
+        "max_duration_seconds" => nil
+      },
       "smoke_verify_path" => "smoke-verify.json",
       "smoke_benchmark_path" => "smoke-benchmark.jsonl"
     })

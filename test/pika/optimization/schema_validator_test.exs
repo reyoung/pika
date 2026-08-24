@@ -149,6 +149,11 @@ defmodule Pika.Optimization.SchemaValidatorTest do
       "cases_path" => "cases.json",
       "metrics_path" => "metrics.json",
       "measurement" => %{"warmup" => 20, "pair_count" => 20, "min_valid_pairs" => 15},
+      "stopping" => %{
+        "mode" => "manual",
+        "max_attempts" => nil,
+        "max_duration_seconds" => nil
+      },
       "smoke_verify_path" => "smoke-verify.json",
       "smoke_benchmark_path" => "smoke-benchmark.jsonl"
     }

@@ -2,7 +2,8 @@ defmodule Pika.Attempt.Scheduler do
   @moduledoc "Allocates integer Attempts, applies Iteration capacity, and owns stale FIFO refresh."
 
   alias Pika.Attempt.Workspace
-  alias Pika.Optimization.{Config, Persistence}
+  alias Pika.Baseline.TargetSnapshot
+  alias Pika.Optimization.{Config, Persistence, StopPolicy}
   alias Pika.Repo
 
   @optimization_id "optimization"
@@ -12,7 +13,9 @@ defmodule Pika.Attempt.Scheduler do
   def spawn_available(%Config{} = config) do
     with :ok <- require_optimizing(),
          {:ok, context} <- base_context(),
-         slots <- available_slots(length(config.iteration.agents)),
+         slots <-
+           available_slots(length(config.iteration.agents))
+           |> limit_by_stop_policy(),
          true <- spawn_allowed?(config.iteration.max_pending_attempts) do
       spawn_slots(slots, config, context, [])
     else
@@ -339,16 +342,19 @@ defmodule Pika.Attempt.Scheduler do
   defp current_target_root do
     case Repo.query!(
            """
-           SELECT br.work_relative_path
+           SELECT ts.id, ts.relative_path
            FROM baseline_revisions br
+           JOIN target_snapshots ts ON ts.id = br.target_snapshot_id
            WHERE br.optimization_id = ? AND br.status = 'accepted'
            ORDER BY br.revision DESC LIMIT 1
            """,
            [@optimization_id]
          ).rows do
-      [[work_relative_path]] ->
-        workspace = Persistence.current().workspace_canonical_path
-        {:ok, Path.join([workspace, work_relative_path, "target"])}
+      [[snapshot_id, relative_path]] ->
+        with :ok <- TargetSnapshot.verify(snapshot_id) do
+          workspace = Persistence.current().workspace_canonical_path
+          {:ok, Path.join(workspace, relative_path)}
+        end
 
       [] ->
         {:error, :target_snapshot_missing}
@@ -368,6 +374,13 @@ defmodule Pika.Attempt.Scheduler do
       |> MapSet.new()
 
     0..(concurrency - 1) |> Enum.reject(&MapSet.member?(used, &1))
+  end
+
+  defp limit_by_stop_policy(slots) do
+    case StopPolicy.remaining_attempt_capacity() do
+      :unlimited -> slots
+      remaining -> Enum.take(slots, remaining)
+    end
   end
 
   defp spawn_allowed?(0), do: true

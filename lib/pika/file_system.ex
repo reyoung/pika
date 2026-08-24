@@ -18,6 +18,15 @@ defmodule Pika.FileSystem do
     end
   end
 
+  def freeze_files(paths) when is_list(paths) do
+    Enum.reduce_while(paths, :ok, fn path, :ok ->
+      case File.chmod(path, 0o444) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:freeze_file_failed, path, reason}}}
+      end
+    end)
+  end
+
   defp write_sync_close(io, contents) do
     result =
       with :ok <- IO.binwrite(io, contents),

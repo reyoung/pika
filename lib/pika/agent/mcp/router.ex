@@ -1,19 +1,19 @@
 defmodule Pika.Agent.MCP.Router do
-  @moduledoc "Single MCP transport adapter for every Actor-bound Agent Role."
+  @moduledoc "JSON-RPC MCP transport for v2 Actor-bound Role tokens."
 
   import Plug.Conn
 
-  alias Pika.Agent.{Actor, Directory}
-  alias Pika.Agent.Role.Tool
+  alias Pika.Agent.Directory
 
   def init(opts), do: opts
 
   def call(conn, opts) do
     directory = Keyword.get(opts, :directory, Directory)
+    invoker = Keyword.get(opts, :invoker, &Pika.Agent.Actor.invoke/3)
 
     with {:ok, conn} <- parse(conn),
-         {:ok, token, binding} <- authenticate(conn, directory) do
-      dispatch(conn, token, binding)
+         {:ok, binding} <- authenticate(conn, directory) do
+      dispatch(conn, binding, invoker)
     else
       {:error, :invalid_json, conn} -> rpc_error(conn, nil, -32_600, "invalid request", %{}, 400)
       {:error, :unauthorized} -> rpc_error(conn, nil, -32_001, "unauthorized", %{}, 401)
@@ -38,123 +38,60 @@ defmodule Pika.Agent.MCP.Router do
   defp authenticate(conn, directory) do
     with ["Bearer " <> token] when token != "" <- get_req_header(conn, "authorization"),
          {:ok, binding} <- Directory.lookup(token, directory) do
-      {:ok, token, binding}
+      {:ok, binding}
     else
-      _ -> {:error, :unauthorized}
+      _other -> {:error, :unauthorized}
     end
   catch
     :exit, _reason -> {:error, :unauthorized}
   end
 
-  defp dispatch(%{method: "POST"} = conn, token, binding) do
-    dispatch_rpc(conn, token, binding, conn.body_params)
-  end
+  defp dispatch(%{method: "POST"} = conn, binding, invoker),
+    do: dispatch_rpc(conn, binding, invoker, conn.body_params)
 
-  defp dispatch(conn, _token, _binding), do: send_resp(conn, 405, "method not allowed")
+  defp dispatch(conn, _binding, _invoker), do: send_resp(conn, 405, "method not allowed")
 
-  defp dispatch_rpc(conn, _token, binding, %{"method" => "initialize", "id" => id}) do
-    capabilities =
-      if binding.role_id in ["plan", "iteration"] do
-        %{
-          "tools" => %{"listChanged" => false},
-          "resources" => %{"listChanged" => false, "subscribe" => false}
-        }
-      else
-        %{"tools" => %{"listChanged" => false}}
-      end
-
+  defp dispatch_rpc(conn, binding, _invoker, %{"method" => "initialize", "id" => id}) do
     rpc_result(conn, id, %{
       "protocolVersion" => "2025-06-18",
-      "capabilities" => capabilities,
-      "serverInfo" => %{"name" => server_name(binding.role_id), "version" => "0.1.0"}
+      "capabilities" => %{"tools" => %{"listChanged" => false}},
+      "serverInfo" => %{"name" => "pika-v2-#{binding.role_id}", "version" => "0.2.0"}
     })
   end
 
-  defp dispatch_rpc(conn, _token, _binding, %{"method" => "notifications/initialized"}),
+  defp dispatch_rpc(conn, _binding, _invoker, %{"method" => "notifications/initialized"}),
     do: send_resp(conn, 202, "")
 
-  defp dispatch_rpc(conn, _token, _binding, %{"method" => "ping", "id" => id}),
+  defp dispatch_rpc(conn, _binding, _invoker, %{"method" => "ping", "id" => id}),
     do: rpc_result(conn, id, %{})
 
-  defp dispatch_rpc(conn, _token, %{catalog: tools}, %{"method" => "tools/list", "id" => id})
-       when is_list(tools),
-       do: rpc_result(conn, id, %{"tools" => Enum.map(tools, &tool/1)})
+  defp dispatch_rpc(conn, binding, _invoker, %{"method" => "tools/list", "id" => id}),
+    do: rpc_result(conn, id, %{"tools" => binding.catalog})
 
-  defp dispatch_rpc(conn, _token, binding, %{"method" => "tools/list", "id" => id}) do
-    case actor_call(fn -> Actor.catalog(binding.actor) end) do
-      {:ok, tools} -> rpc_result(conn, id, %{"tools" => Enum.map(tools, &tool/1)})
+  defp dispatch_rpc(
+         conn,
+         binding,
+         invoker,
+         %{"method" => "tools/call", "id" => id, "params" => %{"name" => name}} = request
+       ) do
+    arguments = get_in(request, ["params", "arguments"]) || %{}
+
+    case invoke(invoker, binding.actor, name, arguments) do
+      {:ok, value} -> tool_result(conn, id, value)
       {:error, reason} -> operation_error(conn, id, reason)
     end
   end
 
-  defp dispatch_rpc(conn, _token, binding, %{
-         "method" => "tools/call",
-         "id" => id,
-         "params" => %{"name" => name} = params
-       }) do
-    case actor_call(fn -> Actor.invoke(binding.actor, name, params["arguments"] || %{}) end) do
-      {:ok, outcome} -> tool_result(conn, id, outcome.value)
-      {:error, reason} -> operation_error(conn, id, reason)
-    end
-  end
-
-  defp dispatch_rpc(conn, _token, binding, %{"method" => "resources/list", "id" => id}) do
-    resources =
-      if binding.role_id in ["plan", "iteration"] do
-        case Pika.AttemptStore.attempt(binding.work.id) do
-          {:ok, %{plan_artifact_id: artifact_id}} when not is_nil(artifact_id) ->
-            [
-              %{
-                "uri" => plan_uri(binding.work.id),
-                "name" => "Attempt optimization plan",
-                "mimeType" => "text/markdown"
-              }
-            ]
-
-          _ ->
-            []
-        end
-      else
-        []
-      end
-
-    rpc_result(conn, id, %{"resources" => resources})
-  end
-
-  defp dispatch_rpc(conn, token, binding, %{
-         "method" => "resources/read",
-         "id" => id,
-         "params" => %{"uri" => uri}
-       }) do
-    with true <- binding.role_id in ["plan", "iteration"],
-         {:ok, plan} <- Pika.AttemptCoordinator.read_plan(token),
-         true <- uri == plan_uri(plan.attempt_id) do
-      rpc_result(conn, id, %{
-        "contents" => [%{"uri" => uri, "mimeType" => "text/markdown", "text" => plan.text}]
-      })
-    else
-      _ -> rpc_error(conn, id, -32_002, "resource not found", %{}, 404)
-    end
-  end
-
-  defp dispatch_rpc(conn, _token, _binding, %{"id" => id}),
+  defp dispatch_rpc(conn, _binding, _invoker, %{"id" => id}),
     do: rpc_error(conn, id, -32_601, "method not found", %{}, 404)
 
-  defp dispatch_rpc(conn, _token, _binding, _request),
+  defp dispatch_rpc(conn, _binding, _invoker, _request),
     do: rpc_error(conn, nil, -32_600, "invalid request", %{}, 400)
 
-  defp actor_call(operation) do
-    operation.()
+  defp invoke(invoker, actor, name, arguments) do
+    invoker.(actor, name, arguments)
   catch
     :exit, reason -> {:error, {:actor_unavailable, reason}}
-  end
-
-  defp tool(%Tool{} = tool) do
-    %{
-      "name" => tool.name,
-      "description" => tool.description,
-      "inputSchema" => tool.input_schema
-    }
   end
 
   defp tool_result(conn, id, value) do
@@ -167,29 +104,8 @@ defmodule Pika.Agent.MCP.Router do
     })
   end
 
-  defp operation_error(conn, id, reason) do
-    details =
-      case reason do
-        %Pika.Agent.Role.Error{} = error -> Map.from_struct(error)
-        _ -> %{reason: reason}
-      end
-
-    rpc_error(conn, id, -32_602, error_message(reason), details, 409)
-  end
-
-  defp error_message(%Pika.Agent.Role.Error{} = error), do: "#{error.code}: #{error.message}"
-  defp error_message(reason), do: inspect(reason)
-
-  defp server_name("integration"), do: "pika-integration"
-  defp server_name("sync"), do: "pika-sync"
-
-  defp server_name(role_id) when role_id in ["alignment", "setup_merge", "baseline"],
-    do: "pika-alignment"
-
-  defp server_name(role_id) when role_id in ["plan", "iteration"], do: "pika-optimization"
-  defp server_name(role_id), do: "pika-agent-#{role_id}"
-
-  defp plan_uri(attempt_id), do: "pika://attempt/#{attempt_id}/plan"
+  defp operation_error(conn, id, reason),
+    do: rpc_error(conn, id, -32_602, inspect(reason), %{reason: reason}, 409)
 
   defp rpc_result(conn, id, result),
     do: json(conn, 200, %{"jsonrpc" => "2.0", "id" => id, "result" => result})

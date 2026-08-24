@@ -1,4 +1,4 @@
-defmodule Pika.AgentBackend.Profile do
+defmodule Pika.AgentBackend.LaunchConfig do
   @moduledoc false
   @enforce_keys [:backend]
   defstruct [

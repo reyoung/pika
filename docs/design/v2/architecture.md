@@ -8,7 +8,7 @@ Pika 只推进 Workspace 内部 Best。最终把 Best 合并到用户分支并 P
 
 ```text
 Optimization Workspace
-├── repo/                              # Pika 管理的 Git repo
+├── repo/                              # 配置绑定的 Git repo；也可以位于 Workspace 外
 ├── baseline/
 │   ├── revisions/<revision>/
 │   └── target/                        # 当前只读 Target Snapshot
@@ -134,17 +134,22 @@ Context Bundle 创建后不可修改。Best、Sampling 或 Guidance 的变化通
 
 stale refresh 在 Attempt branch 上 merge Best。Integration Accept 把 Candidate 有效 Patch squash 到 `pika/best`，因此每个 Accepted Attempt 只产生一个线性 Best commit。
 
-## 4. 建议代码布局
+## 4. 代码布局
 
 ```text
 lib/pika/
-├── optimization.ex
-├── optimization/runtime.ex
+├── optimization/
+│   ├── bootstrap.ex
+│   ├── config.ex
+│   ├── persistence.ex
+│   ├── runtime.ex
+│   └── stop_policy.ex
 ├── baseline/
 │   ├── lifecycle.ex
 │   ├── definition.ex
-│   ├── review.ex
-│   └── verification.ex
+│   ├── questions.ex
+│   ├── target_snapshot.ex
+│   └── workspace.ex
 ├── attempt/
 │   ├── scheduler.ex
 │   ├── lifecycle.ex
@@ -153,27 +158,23 @@ lib/pika/
 ├── integration/
 │   ├── lifecycle.ex
 │   ├── decision.ex
-│   └── git_intent.ex
+│   └── prompt_input.ex
 ├── followup/lifecycle.ex
 ├── progress_summary/lifecycle.ex
-├── measurement/
-│   ├── verify_result.ex
-│   ├── benchmark_result.ex
-│   └── evaluator.ex
 ├── agent/
 │   ├── symphony.ex
 │   ├── actor.ex
-│   ├── role.ex
+│   ├── command_router.ex
 │   ├── context_bundle.ex
 │   ├── conversation_journal.ex
-│   └── roles/
+│   ├── directory.ex
+│   └── work_projector.ex
 ├── agent_backend/
-├── artifact_store.ex
-├── git_workspace.ex
-└── persistence.ex
+├── workspace_lock.ex
+└── repo.ex
 ```
 
-`Baseline.Lifecycle`、`Attempt.Scheduler`、`Integration.Lifecycle` 是领域状态的唯一写入口。Role modules 只是文件/MCP 到 typed command 的 Adapter；Web、Symphony 和 Backend 都不能直接更新领域表。
+`Optimization.Runtime`、`Baseline.Lifecycle`、`Attempt.Scheduler/Lifecycle`、`Integration.Lifecycle`、`Followup.Lifecycle` 与 `ProgressSummary.Lifecycle` 是领域状态写入口。`Agent.CommandRouter` 只把文件/MCP 转成这些入口的命令；Web、Symphony 和 Backend 不复制门禁。
 
 ## 5. 监督树
 
@@ -185,15 +186,14 @@ Pika.Application
 ├── Pika.AgentBackendSessionSupervisor
 ├── Pika.Agent.ActorSupervisor
 ├── Pika.Agent.Directory
+├── Pika.Optimization.Bootstrap
+├── Pika.Baseline.Questions
 ├── Pika.Optimization.Runtime
-├── Pika.Baseline.Lifecycle
-├── Pika.Attempt.Scheduler
-├── Pika.Integration.Lifecycle
-├── Pika.Followup.Lifecycle
-├── Pika.ProgressSummary.Lifecycle          # 配置存在时启动
 ├── Pika.Agent.Symphony
 └── PikaWeb.Endpoint
 ```
+
+Baseline、Attempt、Integration、Follow-up 与 Progress Summary Lifecycle 是以 SQLite 事务为边界的无状态深模块，由 Symphony、Actor、MCP 或 UI 调用；它们不各自维持第二份进程内状态，因此不作为独立 Supervisor child。
 
 ## 6. 数据权威
 

@@ -4,7 +4,7 @@ defmodule Pika.AgentBackend.CursorACP do
   use GenServer
   @behaviour Pika.AgentBackend
 
-  alias Pika.AgentBackend.{Error, Event, Id, JSONLPort, PermissionPolicy, Profile, Session}
+  alias Pika.AgentBackend.{Error, Event, Id, JSONLPort, LaunchConfig, PermissionPolicy, Session}
 
   @protocol "acp-v1"
   @default_command "cursor-agent"
@@ -96,7 +96,7 @@ defmodule Pika.AgentBackend.CursorACP do
 
   @impl true
   def init({profile, event_sink}) do
-    profile = Profile.normalize(profile)
+    profile = LaunchConfig.normalize(profile)
 
     {:ok,
      %{
@@ -544,6 +544,13 @@ defmodule Pika.AgentBackend.CursorACP do
     state
   end
 
+  defp map_session_update(%{"sessionUpdate" => "usage_update"} = update, state) do
+    emit(state, :usage_updated, data: update)
+    state
+  end
+
+  defp map_session_update(_update, state), do: state
+
   defp cursor_raw_output(output) when is_binary(output), do: output
 
   defp cursor_raw_output(output) when is_map(output) do
@@ -552,13 +559,6 @@ defmodule Pika.AgentBackend.CursorACP do
   end
 
   defp cursor_raw_output(_output), do: nil
-
-  defp map_session_update(%{"sessionUpdate" => "usage_update"} = update, state) do
-    emit(state, :usage_updated, data: update)
-    state
-  end
-
-  defp map_session_update(_update, state), do: state
 
   defp close_transport(%{transport: nil} = state, _fallback_reason),
     do: {:reply, :ok, cleanup_instruction_rule(state)}

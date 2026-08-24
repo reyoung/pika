@@ -143,12 +143,10 @@ follow-ups/<target-role>/<work-id>/<sequence>/
   },
   "verify": {
     "script": "verify_cases.sh",
-    "argv": ["./verify_cases.sh", "--case-id", "{case_ids}"],
     "output_schema_version": 1
   },
   "benchmark": {
     "script": "benchmark_cases.sh",
-    "argv": ["./benchmark_cases.sh", "--case-id", "{case_ids}"],
     "output_schema_version": 1
   },
   "cases_path": "cases.json",
@@ -158,12 +156,19 @@ follow-ups/<target-role>/<work-id>/<sequence>/
     "pair_count": 20,
     "min_valid_pairs": 15
   },
+  "stopping": {
+    "mode": "attempt_or_duration",
+    "max_attempts": 100,
+    "max_duration_seconds": 2592000
+  },
   "smoke_verify_path": "smoke-verify.json",
   "smoke_benchmark_path": "smoke-benchmark.jsonl"
 }
 ```
 
 `correctness.mode` 是 `target_equivalence` 或 `independent_oracle`。Target 与 Development 初始代码相同时仍分别冻结 Target Snapshot 和 Development commit。
+
+`stopping.mode` 是 `manual`、`attempt_limit`、`duration` 或 `attempt_or_duration`；对应上限是已审阅 Definition 的一部分。达到自动上限后停止创建新 Attempt，已有 Iteration 和 Integration 进入 Draining 并继续完成。
 
 ## 7. Case 与脚本
 

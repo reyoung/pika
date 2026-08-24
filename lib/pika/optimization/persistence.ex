@@ -2,6 +2,7 @@ defmodule Pika.Optimization.Persistence do
   @moduledoc "Fresh v2 SQLite schema and singleton Optimization initialization/recovery."
 
   alias Pika.Optimization.Config
+  alias Pika.Paths
   alias Pika.Repo
 
   @optimization_id "optimization"
@@ -109,6 +110,8 @@ defmodule Pika.Optimization.Persistence do
   defp initialize(config, initial_sha) do
     now = now_us()
     config_sha256 = config_sha256(config)
+    repo = Paths.canonical!(config.repo)
+    workspace = Paths.canonical!(config.workspace)
 
     result =
       Repo.transaction(fn ->
@@ -121,8 +124,8 @@ defmodule Pika.Optimization.Persistence do
           """,
           [
             @optimization_id,
-            config.repo,
-            config.workspace,
+            repo,
+            workspace,
             initial_sha,
             config_sha256,
             now,
@@ -134,7 +137,7 @@ defmodule Pika.Optimization.Persistence do
           "optimization",
           @optimization_id,
           "optimization_initialized",
-          %{repo: config.repo, workspace: config.workspace, initial_sha: initial_sha},
+          %{repo: repo, workspace: workspace, initial_sha: initial_sha},
           now
         )
 
@@ -154,7 +157,11 @@ defmodule Pika.Optimization.Persistence do
       initial_sha: optimization.initial_sha
     }
 
-    actual = %{repo: config.repo, workspace: config.workspace, initial_sha: initial_sha}
+    actual = %{
+      repo: Paths.canonical!(config.repo),
+      workspace: Paths.canonical!(config.workspace),
+      initial_sha: initial_sha
+    }
 
     if expected == actual do
       now = now_us()

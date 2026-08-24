@@ -1,114 +1,126 @@
 defmodule Pika.WorkspaceLock do
-  @moduledoc false
+  @moduledoc "Cross-process ownership lock for exactly one v2 process per Workspace."
 
   use GenServer
 
-  def start_link({plan, opts}),
-    do: GenServer.start_link(__MODULE__, plan, Keyword.put_new(opts, :name, __MODULE__))
+  def start_link(opts) do
+    case Keyword.get(opts, :name, __MODULE__) do
+      nil -> GenServer.start_link(__MODULE__, opts)
+      name -> GenServer.start_link(__MODULE__, opts, name: name)
+    end
+  end
 
-  def start_link(plan), do: GenServer.start_link(__MODULE__, plan, name: __MODULE__)
-
-  def start({plan, opts}),
-    do: GenServer.start(__MODULE__, plan, Keyword.put_new(opts, :name, __MODULE__))
-
-  def workspace(server \\ __MODULE__), do: GenServer.call(server, :workspace)
+  def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
 
   @impl true
-  def init(plan) do
-    Process.flag(:trap_exit, true)
+  def init(opts) do
+    workspace = opts |> Keyword.fetch!(:workspace) |> Pika.Paths.canonical!()
+    path = Path.join(workspace, ".pika.lock")
+    token = Ecto.UUID.generate()
 
-    with {:ok, port} <- acquire(plan),
-         {:ok, workspace} <- Pika.Workspace.activate(plan) do
-      {:ok, %{port: port, workspace: workspace}}
-    else
+    case acquire(path, token, 0) do
+      {:ok, metadata} -> {:ok, %{path: path, token: token, metadata: metadata}}
       {:error, reason} -> {:stop, reason}
     end
   end
 
   @impl true
-  def handle_call(:workspace, _from, state), do: {:reply, state.workspace, state}
+  def handle_call(:snapshot, _from, state), do: {:reply, state.metadata, state}
 
   @impl true
-  def handle_info({port, {:exit_status, status}}, %{port: port} = state),
-    do: {:stop, {:workspace_lock_process_exited, status}, state}
+  def terminate(_reason, state) do
+    case File.read(state.path) do
+      {:ok, contents} ->
+        case Jason.decode(contents) do
+          {:ok, %{"token" => token}} when token == state.token -> File.rm(state.path)
+          _other -> :ok
+        end
 
-  def handle_info(_message, state), do: {:noreply, state}
+      {:error, _reason} ->
+        :ok
+    end
 
-  @impl true
-  def terminate(_reason, %{port: port}) when is_port(port) do
-    Port.close(port)
     :ok
-  rescue
-    ArgumentError -> :ok
   end
 
-  def terminate(_reason, _state), do: :ok
+  defp acquire(path, token, retries) when retries <= 1 do
+    metadata = metadata(token)
 
-  defp acquire(%{mode: :owned_repo}), do: {:ok, nil}
+    case File.open(path, [:write, :exclusive, :binary]) do
+      {:ok, io} ->
+        result =
+          with :ok <- IO.binwrite(io, Jason.encode!(metadata)),
+               :ok <- :file.sync(io) do
+            :ok
+          end
 
-  defp acquire(%{lock_path: path, config: config}) do
-    with python when is_binary(python) <- System.find_executable("python3") do
-      diagnostics = %{
-        server_uuid: Ecto.UUID.generate(),
-        pid: System.pid(),
-        started_at: DateTime.utc_now() |> DateTime.to_iso8601(),
-        workspace: config.workspace
-      }
+        File.close(io)
 
-      encoded = Jason.encode!(diagnostics) <> "\n"
+        case result do
+          :ok -> {:ok, metadata}
+          {:error, reason} -> {:error, {:workspace_lock_write_failed, reason}}
+        end
 
-      script = """
-      import fcntl, os, sys
-      path, payload = sys.argv[1], sys.argv[2].encode('utf-8')
-      fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-      try:
-          fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-      except BlockingIOError:
-          print('BUSY', flush=True)
-          sys.exit(73)
-      os.ftruncate(fd, 0)
-      os.write(fd, payload)
-      os.fsync(fd)
-      print('LOCKED', flush=True)
-      while os.read(0, 1):
-          pass
-      """
+      {:error, :eexist} ->
+        with {:ok, existing} <- read_lock(path),
+             false <- owner_alive?(existing) do
+          case File.rm(path) do
+            :ok -> acquire(path, token, retries + 1)
+            {:error, reason} -> {:error, {:stale_workspace_lock_remove_failed, reason}}
+          end
+        else
+          true -> {:error, {:workspace_already_locked, existing_identity(path)}}
+          {:error, reason} -> {:error, reason}
+        end
 
-      port =
-        Port.open({:spawn_executable, python}, [
-          :binary,
-          :exit_status,
-          {:line, 1024},
-          args: ["-u", "-c", script, path, encoded]
-        ])
-
-      await_lock(port, path)
-    else
-      nil -> {:error, {:missing_dependency, "python3", :managed_repo_lock}}
+      {:error, reason} ->
+        {:error, {:workspace_lock_create_failed, reason}}
     end
   end
 
-  defp await_lock(port, path) do
-    receive do
-      {^port, {:data, {:eol, "LOCKED"}}} ->
-        {:ok, port}
+  defp acquire(path, _token, _retries), do: {:error, {:workspace_lock_race, path}}
 
-      {^port, {:data, {:eol, "BUSY"}}} ->
-        diagnostic =
-          case File.read(path) do
-            {:ok, value} -> String.trim(value)
-            _ -> "unavailable"
-          end
+  defp metadata(token) do
+    {:ok, hostname} = :inet.gethostname()
 
-        Port.close(port)
-        {:error, {:managed_repo_locked, path, diagnostic}}
+    %{
+      "schema_version" => 1,
+      "token" => token,
+      "hostname" => to_string(hostname),
+      "os_pid" => System.pid(),
+      "started_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+  end
 
-      {^port, {:exit_status, status}} ->
-        {:error, {:managed_repo_lock_failed, path, status}}
-    after
-      5_000 ->
-        Port.close(port)
-        {:error, {:managed_repo_lock_timeout, path}}
+  defp read_lock(path) do
+    with {:ok, contents} <- File.read(path),
+         {:ok, value} when is_map(value) <- Jason.decode(contents) do
+      {:ok, value}
+    else
+      {:error, reason} -> {:error, {:invalid_workspace_lock, reason}}
+      _other -> {:error, :invalid_workspace_lock}
+    end
+  end
+
+  defp owner_alive?(%{"hostname" => hostname, "os_pid" => pid}) do
+    {:ok, current_hostname} = :inet.gethostname()
+
+    if hostname == to_string(current_hostname) and Regex.match?(~r/^\d+$/, to_string(pid)) do
+      case System.cmd("kill", ["-0", to_string(pid)], stderr_to_stdout: true) do
+        {_output, 0} -> true
+        {_output, _status} -> false
+      end
+    else
+      true
+    end
+  end
+
+  defp owner_alive?(_metadata), do: true
+
+  defp existing_identity(path) do
+    case read_lock(path) do
+      {:ok, metadata} -> metadata
+      {:error, reason} -> %{path: path, error: inspect(reason)}
     end
   end
 end

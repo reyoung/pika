@@ -9,7 +9,7 @@
     "optimization_target": {
       "type": "object",
       "properties": {
-        "manifest_path": {"type": "string", "minLength": 1},
+        "manifest_path": {"const": "target/manifest.json"},
         "entrypoint": {"type": "string", "minLength": 1}
       },
       "required": ["manifest_path", "entrypoint"],
@@ -66,6 +66,18 @@
       "required": ["warmup", "pair_count", "min_valid_pairs"],
       "additionalProperties": false
     },
+    "stopping": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "enum": ["manual", "attempt_limit", "duration", "attempt_or_duration"]
+        },
+        "max_attempts": {"type": ["integer", "null"], "minimum": 1},
+        "max_duration_seconds": {"type": ["integer", "null"], "minimum": 1}
+      },
+      "required": ["mode", "max_attempts", "max_duration_seconds"],
+      "additionalProperties": false
+    },
     "smoke_verify_path": {"type": "string", "minLength": 1},
     "smoke_benchmark_path": {"type": "string", "minLength": 1}
   },
@@ -80,6 +92,7 @@
     "cases_path",
     "metrics_path",
     "measurement",
+    "stopping",
     "smoke_verify_path",
     "smoke_benchmark_path"
   ],

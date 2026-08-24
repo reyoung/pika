@@ -3,6 +3,7 @@ Code.require_file(Path.expand("../../support/v2_baseline_fixtures.ex", __DIR__))
 defmodule Pika.Attempt.SchedulerTest do
   use ExUnit.Case, async: false
 
+  alias Pika.Agent.{ContextBundle, PromptBuilder, Work}
   alias Pika.Attempt.{PromptInput, Scheduler, Workspace}
   alias Pika.Baseline.Lifecycle
   alias Pika.Optimization.{Config, Persistence}
@@ -76,8 +77,10 @@ defmodule Pika.Attempt.SchedulerTest do
       assert Git.run!(paths.repo, ["rev-parse", "HEAD"]) == baseline.development_sha
       assert Git.run!(paths.repo, ["branch", "--show-current"]) == paths.branch
 
+      [[target_relative_path]] = Repo.query!("SELECT relative_path FROM target_snapshots").rows
+
       assert File.read_link!(Path.join(paths.repo, "target")) ==
-               Path.join(baseline.root, "target")
+               Path.join(Persistence.current().workspace_canonical_path, target_relative_path)
     end
 
     assert Enum.map(Scheduler.project_work(), & &1.work_id) == ~w(1 2)
@@ -93,6 +96,19 @@ defmodule Pika.Attempt.SchedulerTest do
     limited = %{config | iteration: %{config.iteration | max_pending_attempts: 1}}
     assert Scheduler.pending_count() == 1
     assert {:ok, []} = Scheduler.spawn_available(limited)
+  end
+
+  test "refuses to spawn from a mutated Target Snapshot", %{config: config} do
+    [[relative_path]] = Repo.query!("SELECT relative_path FROM target_snapshots").rows
+    root = Path.join(Persistence.current().workspace_canonical_path, relative_path)
+    target_file = Path.join(root, "target.py")
+    File.chmod!(target_file, 0o644)
+    File.write!(target_file, "tampered\n")
+
+    assert {:error, {:target_snapshot_identity_mismatch, ^target_file, _identity}} =
+             Scheduler.spawn_available(config)
+
+    assert Repo.query!("SELECT COUNT(*) FROM attempts").rows == [[0]]
   end
 
   test "Guidance revisions affect only future Attempts", %{config: config} do
@@ -145,6 +161,24 @@ defmodule Pika.Attempt.SchedulerTest do
 
     assert prompt =~ "## stale refresh"
     assert prompt =~ "Best Commit 已更新为 `#{new_best}`"
+
+    session_id = Ecto.UUID.generate()
+
+    assert {:ok, bundle} =
+             ContextBundle.build(config, session_id, "iteration", :attempt, to_string(first.id))
+
+    work = %Work{
+      role_id: "iteration",
+      kind: :attempt,
+      id: to_string(first.id),
+      payload: %{attempt: refreshed}
+    }
+
+    assert {:ok, rendered} = PromptBuilder.build(config, work, bundle)
+    assert {:start_turn, initial_user_prompt} = rendered.activation
+    assert initial_user_prompt =~ "旧 Base #{baseline.development_sha} 已 stale"
+    assert initial_user_prompt =~ "当前 Best 是 #{new_best}"
+    assert initial_user_prompt =~ "git merge #{new_best}"
   end
 
   test "Iteration Prompt contains the configured recent terminal Attempt history", %{
@@ -222,8 +256,8 @@ defmodule Pika.Attempt.SchedulerTest do
             approval_policy: never
             sandbox: workspace-write
           - backend: cursor
-            approval_policy: never
-            sandbox: workspace-write
+            approval_policy: force
+            sandbox: disabled
       integration:
         backend: codex
         approval_policy: never

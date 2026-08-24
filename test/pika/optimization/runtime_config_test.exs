@@ -40,7 +40,7 @@ defmodule Pika.Optimization.RuntimeConfigTest do
   defp minimal_yaml(iteration_agents) do
     cursor =
       if iteration_agents == 2 do
-        "      - backend: cursor\n        approval_policy: never\n        sandbox: workspace-write\n"
+        "      - backend: cursor\n        approval_policy: force\n        sandbox: disabled\n"
       else
         ""
       end

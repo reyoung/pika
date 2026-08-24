@@ -26,9 +26,7 @@ defmodule Pika.MixProject do
     [
       preferred_envs: [
         check: :test,
-        "test.integration.lifecycle": :test,
-        "test.integration.contract": :test,
-        "test.integration.scenario": :test
+        "test.integration.lifecycle": :test
       ]
     ]
   end
@@ -44,6 +42,7 @@ defmodule Pika.MixProject do
       {:phoenix, "~> 1.8"},
       {:phoenix_html, "~> 4.2"},
       {:phoenix_live_view, "~> 1.1"},
+      {:tz, "~> 0.28.2"},
       {:yaml_elixir, "~> 2.12"}
     ]
   end
@@ -52,10 +51,6 @@ defmodule Pika.MixProject do
     [
       "assets.build": ["esbuild default"],
       "test.integration.lifecycle": ["test test/pika/integration/lifecycle_test.exs"],
-      "test.integration.contract": [
-        "test test/pika/integration/lifecycle_test.exs test/pika/agent/integration_role_test.exs"
-      ],
-      "test.integration.scenario": ["test test/pika/integration_full_regression_test.exs"],
       check: ["format --check-formatted", "compile --warnings-as-errors", "test"]
     ]
   end

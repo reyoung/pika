@@ -1,57 +1,44 @@
+Code.require_file(Path.expand("../../support/v2_baseline_fixtures.ex", __DIR__))
+
+defmodule Pika.Test.ProjectedActor do
+  use GenServer, restart: :temporary
+
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+  def kickoff(pid, message), do: GenServer.call(pid, {:kickoff, message})
+  def stop(pid), do: GenServer.stop(pid, :normal)
+
+  @impl true
+  def init(opts) do
+    if notify = Keyword.get(opts, :test_notify),
+      do: send(notify, {:projected_actor_started, Keyword.fetch!(opts, :work)})
+
+    {:ok, opts}
+  end
+
+  @impl true
+  def handle_call({:kickoff, message}, _from, state), do: {:reply, {:ok, message}, state}
+end
+
 defmodule Pika.Agent.SymphonyTest do
   use ExUnit.Case, async: false
 
-  alias Pika.Agent.{Actor, Directory, Symphony}
-  alias Pika.Agent.Role.Work
-  alias Pika.AgentBackend.Session
-  alias Pika.Test.CampaignFixtures
-  alias Pika.{Config, Persistence, ProgressSummaryStore, Repo, Workspace}
-
-  defmodule Backend do
-    @behaviour Pika.AgentBackend
-
-    def start_link(profile, sink), do: Agent.start_link(fn -> %{profile: profile, sink: sink} end)
-
-    def open_session(server, cwd, model, effort, mcp, _skills, instructions) do
-      state = Agent.get(server, & &1)
-
-      session = %Session{
-        id: Ecto.UUID.generate(),
-        backend: :symphony_fake,
-        backend_protocol: "symphony-fake-v1",
-        backend_session_id: Ecto.UUID.generate(),
-        cwd: cwd,
-        model: model,
-        reasoning_effort: effort,
-        jsonl_path: "/dev/null"
-      }
-
-      send(state.profile.env.test_pid, {:symphony_session_opened, session, mcp, instructions})
-      {:ok, session}
-    end
-
-    def start_turn(_server, prompt) do
-      send(test_pid(), {:symphony_turn_started, prompt})
-      {:ok, Ecto.UUID.generate()}
-    end
-
-    def steer(_server, _input), do: {:error, :unsupported}
-    def interrupt(_server), do: :ok
-    def close_session(_server), do: :ok
-    def capabilities(_server), do: %{}
-
-    defp test_pid, do: :persistent_term.get({__MODULE__, :test_pid})
-  end
+  alias Pika.Agent.{Directory, Symphony}
+  alias Pika.Baseline.Lifecycle, as: BaselineLifecycle
+  alias Pika.Optimization.{Config, Persistence}
+  alias Pika.Test.V2BaselineFixtures
+  alias Pika.Repo
 
   setup do
-    root = CampaignFixtures.workspace()
-    config_path = CampaignFixtures.config_file()
-    {:ok, config} = Config.load(config_path, workspace: root)
-    {:ok, plan} = Workspace.plan(config)
-    {:ok, workspace} = Workspace.activate(plan)
+    root = Path.join(System.tmp_dir!(), "pika-v2-symphony-#{System.unique_integer([:positive])}")
+    workspace = Path.join(root, "workspace")
+    File.mkdir_p!(workspace)
+    baseline = V2BaselineFixtures.create_work_root(workspace, 0)
+    config_path = Path.join(workspace, "pika.yaml")
+    File.write!(config_path, yaml(baseline.repo, workspace))
+    assert {:ok, config} = Config.load(config_path)
 
     Application.put_env(:pika, Repo,
-      database: workspace.database,
+      database: Path.join(workspace, "pika.sqlite3"),
       pool_size: 1,
       journal_mode: :wal,
       synchronous: :full,
@@ -61,156 +48,90 @@ defmodule Pika.Agent.SymphonyTest do
 
     start_supervised!(Repo)
     assert :ok = Persistence.migrate()
-    assert {:ok, campaign, :initialized} = Persistence.initialize_or_recover(workspace)
+
+    assert {:ok, _optimization, :initialized} =
+             Persistence.initialize_or_recover(config, baseline.development_sha)
+
+    assert {:ok, _draft} = BaselineLifecycle.ensure_draft(baseline.root)
+
+    assert {:ok, _submitted} =
+             BaselineLifecycle.submit_definition(0, baseline.root, "baseline-definition.json")
+
+    assert {:ok, approved} =
+             BaselineLifecycle.review(0, :approve, baseline.root, "baseline-definition.json")
+
+    V2BaselineFixtures.write_verification_result(baseline, approved.id, :accepted)
+
+    assert {:ok, _accepted} =
+             BaselineLifecycle.finish_verification(
+               0,
+               baseline.root,
+               "baseline-verification-result.json"
+             )
 
     directory = start_supervised!({Directory, name: nil})
+    actor_supervisor = start_supervised!({DynamicSupervisor, strategy: :one_for_one})
 
-    actor_supervisor =
-      start_supervised!({DynamicSupervisor, strategy: :one_for_one, name: nil})
+    on_exit(fn -> File.rm_rf!(root) end)
 
-    :persistent_term.put({Backend, :test_pid}, self())
-    on_exit(fn -> :persistent_term.erase({Backend, :test_pid}) end)
-
-    %{
-      workspace: workspace,
-      campaign: campaign,
-      directory: directory,
-      actor_supervisor: actor_supervisor
-    }
+    %{actor_supervisor: actor_supervisor, directory: directory, workspace: workspace}
   end
 
-  test "reconcile starts one Actor per Work and recovery creates a fresh Session", context do
-    profile = %{
-      "backend" => :symphony_fake,
-      "model" => "fake-model",
-      "reasoning_effort" => "low",
-      "env" => %{test_pid: self()}
-    }
-
-    assert {:ok, request} =
-             ProgressSummaryStore.request(context.campaign.id, %{phase: "attempts"}, profile)
-
+  test "starts every Iteration slot without a global Actor capacity", %{
+    actor_supervisor: actor_supervisor,
+    directory: directory,
+    workspace: workspace
+  } do
     symphony =
       start_supervised!(
         {Symphony,
          name: nil,
-         workspace: context.workspace,
-         campaign_id: context.campaign.id,
-         directory: context.directory,
-         actor_supervisor: context.actor_supervisor,
-         reconcile_interval_ms: :infinity,
-         actor_opts: [
-           profile: profile,
-           backend_modules: %{symphony_fake: Backend},
-           mcp_url: "http://127.0.0.1:8080/mcp"
-         ]}
+         workspace: workspace,
+         directory: directory,
+         actor_supervisor: actor_supervisor,
+         actor_module: Pika.Test.ProjectedActor,
+         actor_opts: [test_notify: self()],
+         reconcile_interval_ms: :infinity}
       )
 
     assert :ok = Symphony.reconcile(symphony)
-    assert :ok = Symphony.reconcile(symphony)
-    assert_receive {:symphony_session_opened, first_session, _mcp, _instructions}
-    assert_receive {:symphony_turn_started, first_prompt}
-    refute first_prompt =~ "恢复这次中断"
-
-    assert [{work, first_actor}] = Symphony.active(symphony)
-    assert work.id == request.id
-
-    assert [[1]] =
-             Repo.query!("SELECT COUNT(*) FROM agent_sessions WHERE work_id = ?", [request.id]).rows
-
-    assert :ok = DynamicSupervisor.terminate_child(context.actor_supervisor, first_actor)
-
-    wait_until(fn ->
-      match?({:error, :not_found}, Directory.lookup_work(work, context.directory))
-    end)
+    assert_receive {:projected_actor_started, first}, 1_000
+    assert_receive {:projected_actor_started, second}, 1_000
+    assert Enum.sort([first.id, second.id]) == ["1", "2"]
+    assert first.role_id == "iteration"
+    assert second.role_id == "iteration"
+    assert length(Symphony.active(symphony)) == 2
 
     assert :ok = Symphony.reconcile(symphony)
-    assert_receive {:symphony_session_opened, second_session, _mcp, recovery_instructions}
-    assert first_session.id != second_session.id
-    assert recovery_instructions =~ "Progress Summary Actor"
-    assert_receive {:symphony_turn_started, recovery_prompt}
-    assert recovery_prompt =~ "恢复这次中断"
-
-    assert [["interrupted"], ["running"]] =
-             Repo.query!(
-               "SELECT status FROM agent_sessions WHERE work_id = ? ORDER BY started_at",
-               [request.id]
-             ).rows
-
-    assert [["fresh"], ["recovering"]] =
-             Repo.query!(
-               "SELECT session_mode FROM agent_sessions WHERE work_id = ? ORDER BY started_at",
-               [request.id]
-             ).rows
+    refute_receive {:projected_actor_started, _work}, 100
   end
 
-  test "a restarted Symphony adopts an Actor already registered for its Work", context do
-    profile = %{
-      "backend" => :symphony_fake,
-      "model" => "fake-model",
-      "reasoning_effort" => "low",
-      "env" => %{test_pid: self()}
-    }
-
-    assert {:ok, request} =
-             ProgressSummaryStore.request(context.campaign.id, %{phase: "attempts"}, profile)
-
-    work = %Work{
-      role_id: "progress_summary",
-      kind: :progress_summary,
-      id: request.id,
-      campaign_id: context.campaign.id
-    }
-
-    actor_opts = [
-      work: work,
-      workspace: context.workspace,
-      profile: profile,
-      directory: context.directory,
-      backend_modules: %{symphony_fake: Backend},
-      mcp_url: "http://127.0.0.1:8080/mcp"
-    ]
-
-    assert {:ok, actor} =
-             DynamicSupervisor.start_child(context.actor_supervisor, {Actor, actor_opts})
-
-    assert_receive {:symphony_session_opened, _session, _mcp, _instructions}
-    assert_receive {:symphony_turn_started, _prompt}
-
-    symphony =
-      start_supervised!(
-        {Symphony,
-         name: nil,
-         workspace: context.workspace,
-         campaign_id: context.campaign.id,
-         directory: context.directory,
-         actor_supervisor: context.actor_supervisor,
-         reconcile_interval_ms: :infinity,
-         actor_opts: [
-           profile: profile,
-           backend_modules: %{symphony_fake: Backend},
-           mcp_url: "http://127.0.0.1:8080/mcp"
-         ]}
-      )
-
-    assert :ok = Symphony.reconcile(symphony)
-    assert [{^work, ^actor}] = Symphony.active(symphony)
-    refute_receive {:symphony_session_opened, _session, _mcp, _instructions}, 100
-
-    assert Repo.query!("SELECT COUNT(*) FROM agent_sessions WHERE work_id = ?", [request.id]).rows ==
-             [[1]]
+  defp yaml(repo, workspace) do
+    """
+    version: 2
+    repo: #{repo}
+    workspace: #{workspace}
+    agents:
+      baseline_alignment:
+        backend: codex
+        approval_policy: never
+        sandbox: workspace-write
+      baseline_verify:
+        backend: codex
+        approval_policy: never
+        sandbox: workspace-write
+      iteration:
+        agents:
+          - backend: codex
+            approval_policy: never
+            sandbox: workspace-write
+          - backend: cursor
+            approval_policy: force
+            sandbox: disabled
+      integration:
+        backend: codex
+        approval_policy: never
+        sandbox: workspace-write
+    """
   end
-
-  defp wait_until(predicate, attempts \\ 100)
-
-  defp wait_until(predicate, attempts) when attempts > 0 do
-    if predicate.() do
-      :ok
-    else
-      Process.sleep(10)
-      wait_until(predicate, attempts - 1)
-    end
-  end
-
-  defp wait_until(_predicate, 0), do: flunk("condition did not become true")
 end

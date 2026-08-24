@@ -27,8 +27,8 @@ defmodule Pika.Optimization.Config.Agent do
           options: map()
         }
 
-  @spec backend_profile(t()) :: map()
-  def backend_profile(%__MODULE__{} = agent) do
+  @spec snapshot(t()) :: map()
+  def snapshot(%__MODULE__{} = agent) do
     %{
       "backend" => agent.backend,
       "command" => agent.command,
@@ -82,12 +82,13 @@ defmodule Pika.Optimization.Config.ProgressSummary do
 
   alias Pika.Optimization.Config.Agent
 
-  @enforce_keys [:agent, :interval_ms, :max_followups]
+  @enforce_keys [:agent, :interval_ms, :time_zone, :max_followups]
   defstruct @enforce_keys
 
   @type t :: %__MODULE__{
           agent: Agent.t(),
           interval_ms: pos_integer(),
+          time_zone: String.t(),
           max_followups: non_neg_integer()
         }
 end
@@ -100,7 +101,7 @@ defmodule Pika.Optimization.Config do
   @root_fields ~w(version repo workspace agents)
   @reserved_agent_fields ~w(
     backend command model reasoning_effort approval_policy sandbox env protocol_config
-    max_followups generator_max_attempts regression_feedback_cases interval agents
+    max_followups generator_max_attempts regression_feedback_cases interval timezone agents
     history_limit max_pending_attempts
   )
   @forbidden_agent_fields ~w(name profile profile_key)
@@ -309,14 +310,17 @@ defmodule Pika.Optimization.Config do
 
   defp progress_summary(value) do
     with {:ok, value} <- required_map(value, "agents.progress_summary"),
-         {:ok, agent} <- agent(value, "progress_summary", [:interval, :max_followups]),
+         {:ok, agent} <-
+           agent(value, "progress_summary", [:interval, :timezone, :max_followups]),
          {:ok, interval_ms} <- interval(value["interval"] || "5m"),
+         {:ok, time_zone} <- time_zone(value["timezone"] || "Asia/Shanghai"),
          {:ok, max_followups} <-
            integer(value["max_followups"], 3, 0, "agents.progress_summary.max_followups") do
       {:ok,
        %ProgressSummary{
          agent: agent,
          interval_ms: interval_ms,
+         time_zone: time_zone,
          max_followups: max_followups
        }}
     end
@@ -349,8 +353,14 @@ defmodule Pika.Optimization.Config do
          {:ok, reasoning_effort} <-
            optional_string(value["reasoning_effort"], "agents.#{path}.reasoning_effort"),
          {:ok, approval_policy} <-
-           required_string(value["approval_policy"], "agents.#{path}.approval_policy"),
-         {:ok, sandbox} <- required_string(value["sandbox"], "agents.#{path}.sandbox"),
+           permission(
+             backend,
+             :approval_policy,
+             value["approval_policy"],
+             "agents.#{path}.approval_policy"
+           ),
+         {:ok, sandbox} <-
+           permission(backend, :sandbox_policy, value["sandbox"], "agents.#{path}.sandbox"),
          {:ok, env} <- string_map(value["env"] || %{}, "agents.#{path}.env"),
          {:ok, protocol_config} <-
            required_map(value["protocol_config"] || %{}, "agents.#{path}.protocol_config") do
@@ -361,18 +371,24 @@ defmodule Pika.Optimization.Config do
         |> Enum.reject(fn {key, _value} -> MapSet.member?(reserved, key) end)
         |> Map.new()
 
-      {:ok,
-       %Agent{
-         backend: backend,
-         command: command,
-         model: model,
-         reasoning_effort: reasoning_effort,
-         approval_policy: approval_policy,
-         sandbox: sandbox,
-         env: env,
-         protocol_config: protocol_config,
-         options: options
-       }}
+      if map_size(options) == 0 do
+        {:ok,
+         %Agent{
+           backend: backend,
+           command: command,
+           model: model,
+           reasoning_effort: reasoning_effort,
+           approval_policy: approval_policy,
+           sandbox: sandbox,
+           env: env,
+           protocol_config: protocol_config,
+           options: %{}
+         }}
+      else
+        error(
+          "agents.#{path}: unsupported Backend fields #{inspect(Map.keys(options) |> Enum.sort())}"
+        )
+      end
     else
       {:error, _} = error -> error
       [_ | _] -> error("agents.#{path}: Agent Profile fields are not allowed")
@@ -406,6 +422,15 @@ defmodule Pika.Optimization.Config do
 
   defp backend(_value, path), do: error("#{path}: must be codex or cursor")
 
+  defp permission(backend, kind, value, path) do
+    with {:ok, value} <- required_string(value, path) do
+      case Pika.AgentBackend.PermissionPolicy.parse(backend, kind, value) do
+        {:ok, normalized} -> {:ok, normalized}
+        {:error, expected} -> error("#{path}: #{expected}")
+      end
+    end
+  end
+
   defp command(nil, _path), do: {:ok, nil}
   defp command(value, _path) when is_binary(value) and value != "", do: {:ok, value}
 
@@ -433,6 +458,19 @@ defmodule Pika.Optimization.Config do
   end
 
   defp interval(_value), do: error("agents.progress_summary.interval: must be a duration string")
+
+  defp time_zone(value) when is_binary(value) do
+    case DateTime.shift_zone(DateTime.utc_now(), value, Tz.TimeZoneDatabase) do
+      {:ok, _datetime} ->
+        {:ok, value}
+
+      {:error, reason} ->
+        error("agents.progress_summary.timezone: invalid time zone #{inspect(value)} (#{reason})")
+    end
+  end
+
+  defp time_zone(value),
+    do: error("agents.progress_summary.timezone: must be a time zone name, got #{inspect(value)}")
 
   defp integer(nil, default, _minimum, _path), do: {:ok, default}
 

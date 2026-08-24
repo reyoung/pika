@@ -1,45 +1,64 @@
 defmodule Pika.Agent.Actor do
-  @moduledoc "Ephemeral executor for exactly one Agent Work and at most one Backend Session."
+  @moduledoc "Ephemeral executor for exactly one v2 Work and one fresh Backend Session."
 
   use GenServer, restart: :temporary
-  alias Pika.Agent.{Profile, RoleRegistry, Roles, SessionHost}
-  alias Pika.Agent.Role.Invocation
+
+  alias Pika.Agent.{
+    BackendConfig,
+    CommandRouter,
+    ContextBundle,
+    ConversationJournal,
+    PromptBuilder,
+    RecoveryContext,
+    SessionBinding,
+    Directory,
+    Work,
+    WorkProjector,
+    Workspace
+  }
+
+  alias Pika.AgentBackend
+  alias Pika.Followup.Lifecycle, as: FollowupLifecycle
+  alias Pika.Optimization.{RoleRegistry, RuntimeConfig}
+  alias Pika.ProgressSummary.Lifecycle, as: ProgressSummaryLifecycle
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
-  def invoke(actor, operation, arguments, timeout \\ :infinity),
-    do: GenServer.call(actor, {:invoke, operation, arguments}, timeout)
+  def invoke(actor, operation, arguments),
+    do: GenServer.call(actor, {:invoke, operation, arguments}, :infinity)
 
-  def catalog(actor), do: GenServer.call(actor, :catalog)
   def status(actor), do: GenServer.call(actor, :status)
-  def refresh(actor), do: GenServer.call(actor, :refresh, :infinity)
-  def kickoff(actor, input), do: GenServer.call(actor, {:kickoff, input}, :infinity)
-  def steer(actor, input), do: GenServer.call(actor, {:steer, input}, :infinity)
+  def kickoff(actor, message), do: GenServer.call(actor, {:kickoff, message}, :infinity)
   def stop(actor), do: GenServer.call(actor, :stop, :infinity)
+
+  def deliver_followup(actor, request_id, message),
+    do: GenServer.call(actor, {:deliver_followup, request_id, message}, :infinity)
 
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
-
     work = Keyword.fetch!(opts, :work)
-
-    if Process.whereis(Pika.PubSub) do
-      Phoenix.PubSub.subscribe(Pika.PubSub, Pika.Alignment.Campaign.topic())
-      Phoenix.PubSub.subscribe(Pika.PubSub, Pika.Persistence.topic(work.campaign_id))
-    end
 
     state = %{
       work: work,
       opts: opts,
-      prepared: nil,
-      host: nil,
+      config: nil,
+      paths: nil,
+      bundle: nil,
+      prompt: nil,
+      pika_session: nil,
+      provider_session: nil,
+      agent: nil,
+      handle: nil,
+      monitor: nil,
+      token: nil,
+      directory: Keyword.get(opts, :directory, Directory),
       phase: :preparing,
-      followups: 0,
-      max_followups: Keyword.get(opts, :max_followups),
-      notify: Keyword.get(opts, :notify),
-      terminal_status: nil,
-      pending_invocation: nil,
-      refresh_pending: false
+      turn_db_id: nil,
+      output: "",
+      terminal_called: false,
+      active_followup_request_id: nil,
+      closed?: false
     }
 
     {:ok, state, {:continue, :open}}
@@ -47,608 +66,670 @@ defmodule Pika.Agent.Actor do
 
   @impl true
   def handle_continue(:open, state) do
-    case prepare_and_open(state) do
+    case open(state) do
       {:ok, state} ->
         {:noreply, state}
 
-      {:skip, progress, state} ->
-        notify(state, {:agent_actor_skipped, state.work, progress})
-        {:stop, :normal, state}
-
       {:error, reason, state} ->
         notify(state, {:agent_actor_failed, state.work, reason})
-        {:stop, {:shutdown, reason}, state}
+        {:stop, {:shutdown, reason}, cleanup(state, "failed", inspect(reason))}
     end
   end
 
   @impl true
-  def handle_call(:catalog, _from, %{prepared: nil} = state),
-    do: {:reply, {:error, :actor_not_ready}, state}
-
-  def handle_call(:catalog, _from, state),
-    do: {:reply, {:ok, state.prepared.definition.tools}, state}
-
   def handle_call(:status, _from, state) do
-    status = %{
-      work: state.work,
-      phase: state.phase,
-      session_id: state.host && state.host.session.id,
-      progress: state.prepared && state.prepared.progress
-    }
-
-    {:reply, status, state}
+    {:reply,
+     %{
+       work: state.work,
+       phase: state.phase,
+       session_id: state.pika_session && state.pika_session.id,
+       provider_session_id: state.provider_session && state.provider_session.backend_session_id
+     }, state}
   end
 
-  def handle_call(:refresh, _from, %{prepared: nil} = state),
-    do: {:reply, {:error, :actor_not_ready}, state}
+  def handle_call({:kickoff, message}, _from, %{phase: phase} = state)
+      when phase in [:awaiting_user_kickoff, :awaiting_user] and is_binary(message) do
+    case start_turn(state, message) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
+  end
 
-  def handle_call(:refresh, _from, state) do
-    case Roles.progress(state.prepared) do
-      {:ok, progress} ->
-        state = %{state | prepared: %{state.prepared | progress: progress}}
+  def handle_call({:kickoff, _message}, _from, state),
+    do: {:reply, {:error, {:actor_not_awaiting_user, state.phase}}, state}
 
-        state =
-          if match?({:terminal, _}, progress.state) do
-            if is_nil(state.pending_invocation) do
-              send(self(), {:finish_after_reply, progress})
-              state
-            else
-              %{state | refresh_pending: true}
-            end
+  def handle_call({:invoke, operation, arguments}, _from, state) do
+    result =
+      CommandRouter.invoke(
+        session_binding(state),
+        operation,
+        stringify_keys(arguments),
+        state.config,
+        question_handler: Keyword.get(state.opts, :question_handler),
+        now: Keyword.get(state.opts, :now, DateTime.utc_now())
+      )
+
+    state = record_mcp(state, operation, result)
+
+    state =
+      case result do
+        {:ok, _value} ->
+          if terminal_operation?(state.work.role_id, operation) do
+            send(self(), :finish_terminal)
+            %{state | terminal_called: true}
           else
             state
           end
 
-        {:reply, {:ok, progress}, state}
+        {:error, _reason} ->
+          state
+      end
 
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
+    {:reply, result, state}
   end
 
-  def handle_call({:invoke, _operation, _arguments}, _from, %{prepared: nil} = state),
-    do: {:reply, {:error, :actor_not_ready}, state}
-
-  def handle_call(
-        {:invoke, _operation, _arguments},
-        _from,
-        %{pending_invocation: pending} = state
-      )
-      when not is_nil(pending),
-      do: {:reply, {:error, :actor_busy}, state}
-
-  def handle_call({:invoke, operation, arguments}, from, state),
-    do: {:noreply, start_invocation(state, operation, arguments, from, :outcome)}
-
-  def handle_call({:steer, _input}, _from, %{host: nil} = state),
-    do: {:reply, {:error, :actor_not_ready}, state}
-
-  def handle_call({:steer, input}, _from, state) when is_binary(input) do
-    {:reply, Pika.AgentBackend.steer(state.host.handle, input), state}
-  end
-
-  def handle_call({:kickoff, _input}, _from, %{host: nil} = state),
-    do: {:reply, {:error, :actor_not_ready}, state}
-
-  def handle_call({:kickoff, input}, _from, %{phase: :awaiting_user_kickoff} = state)
-      when is_binary(input) do
-    case SessionHost.start_turn(state.host, input) do
-      {:ok, host} -> {:reply, :ok, %{state | host: host, phase: :running}}
+  def handle_call({:deliver_followup, request_id, message}, _from, state) do
+    with true <- state.phase == :awaiting_followup || {:error, :target_not_awaiting_followup},
+         {:ok, _request} <- FollowupLifecycle.target_turn_started(request_id),
+         {:ok, state} <- start_turn(state, message) do
+      {:reply, :ok, %{state | active_followup_request_id: request_id}}
+    else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
-  def handle_call({:kickoff, input}, _from, state) when is_binary(input) do
-    case Pika.AgentBackend.steer(state.host.handle, input) do
-      {:ok, _turn_id} -> {:reply, :ok, state}
-      {:error, _reason} = error -> {:reply, error, state}
-    end
-  end
-
-  def handle_call(
-        {:mcp, token, _operation, _arguments},
-        _from,
-        %{host: host, pending_invocation: pending} = state
-      )
-      when not is_nil(pending) do
-    if host && Plug.Crypto.secure_compare(token, host.token),
-      do: {:reply, legacy_error(:actor_busy), state},
-      else: {:reply, {:error, "unauthorized", "invalid Actor Session token", %{}}, state}
-  end
-
-  def handle_call({:mcp, token, operation, arguments}, from, %{host: host} = state) do
-    if host && Plug.Crypto.secure_compare(token, host.token) do
-      {:noreply, start_invocation(state, operation, arguments, from, :legacy)}
-    else
-      {:reply, {:error, "unauthorized", "invalid Actor Session token", %{}}, state}
-    end
-  end
-
-  def handle_call(:stop, _from, %{host: nil} = state), do: {:reply, :ok, state}
-  def handle_call(:stop, _from, %{phase: :stopping} = state), do: {:reply, :ok, state}
-
   def handle_call(:stop, _from, state) do
-    state = state |> cancel_pending_invocation(:actor_stopped) |> Map.put(:phase, :stopping)
-    _ = Pika.AgentBackend.interrupt(state.host.handle)
-    send(self(), :stop_after_reply)
-    {:reply, :ok, state}
-  end
-
-  defp start_invocation(state, operation, arguments, from, reply_mode) do
-    arguments = stringify_keys(arguments)
-    prepared = state.prepared
-    session_id = state.host.session.id
-
-    task =
-      Task.async(fn ->
-        Roles.invoke(prepared, %Invocation{
-          operation: operation,
-          arguments: arguments,
-          idempotency_key: arguments["idempotency_key"],
-          session_id: session_id
-        })
-      end)
-
-    %{state | pending_invocation: %{task: task, from: from, reply_mode: reply_mode}}
-  end
-
-  defp complete_invocation(state, result) do
-    case result do
-      {:ok, outcome} ->
-        prepared = %{state.prepared | progress: outcome.progress}
-        state = %{state | prepared: prepared}
-
-        if outcome.actor_directive == :finish do
-          send(self(), {:finish_after_reply, outcome.progress})
-        end
-
-        {{:ok, outcome}, state}
-
-      {:error, reason} ->
-        {{:error, reason}, state}
-    end
+    state = interrupt(state, :actor_stopped)
+    {:stop, :normal, :ok, state}
   end
 
   @impl true
-  def handle_info(
-        {reference, result},
-        %{pending_invocation: %{task: %{ref: reference}} = pending} = state
-      ) do
-    Process.demonitor(reference, [:flush])
-    refresh_pending = state.refresh_pending
-    state = %{state | pending_invocation: nil, refresh_pending: false}
-    {reply, state} = complete_invocation(state, result)
-    GenServer.reply(pending.from, invocation_reply(pending.reply_mode, reply))
-    if refresh_pending, do: send(self(), :refresh_from_domain)
-    {:noreply, state}
+  def handle_info(:finish_terminal, state) do
+    if WorkProjector.terminal?(state.work) do
+      if state.active_followup_request_id,
+        do: FollowupLifecycle.target_turn_terminal(state.active_followup_request_id)
+
+      state = maybe_deliver_generated_followup(state)
+      notify(state, {:agent_actor_completed, state.work})
+      {:stop, :normal, cleanup(state, "completed", "terminal_mcp")}
+    else
+      {:noreply, state}
+    end
   end
 
-  def handle_info(
-        {:DOWN, reference, :process, _pid, reason},
-        %{pending_invocation: %{task: %{ref: reference}} = pending} = state
-      ) do
-    error = {:operation_task_failed, reason}
-    GenServer.reply(pending.from, invocation_reply(pending.reply_mode, {:error, error}))
-    if state.refresh_pending, do: send(self(), :refresh_from_domain)
-    {:noreply, %{state | pending_invocation: nil, refresh_pending: false}}
-  end
+  def handle_info({:pika_backend_event, _event}, %{closed?: true} = state),
+    do: {:noreply, state}
 
-  def handle_info({:finish_after_reply, _progress}, %{host: nil} = state),
-    do: {:stop, :normal, state}
-
-  def handle_info({:finish_after_reply, progress}, state) do
-    state = cancel_pending_invocation(state, :actor_completed)
-    SessionHost.close(state.host, "completed", progress)
-    notify(state, {:agent_actor_completed, state.work, progress})
-    {:stop, :normal, %{state | host: nil, phase: :completed, terminal_status: "completed"}}
-  end
-
-  def handle_info(:stop_after_reply, state) do
-    domain_session_event(state, :interrupted, %{reason: :stop_now})
-    SessionHost.close(state.host, "stopped", state.prepared.progress)
-    notify(state, {:agent_actor_stopped, state.work, state.prepared.progress})
-    {:stop, :normal, %{state | host: nil, phase: :stopped, terminal_status: "stopped"}}
-  end
-
-  def handle_info(
-        {:pika_backend_event, event},
-        %{host: host, phase: :stopping} = state
-      )
-      when not is_nil(host) do
-    publish_event(state.work, event)
-    {:noreply, state}
-  end
-
-  def handle_info({:pika_backend_event, event}, %{host: host} = state) when not is_nil(host) do
-    publish_event(state.work, event)
-    host = SessionHost.record_event(host, event)
-    state = %{state | host: host}
-
+  def handle_info({:pika_backend_event, event}, state) do
     case event.type do
-      :turn_started ->
-        domain_session_event(state, :running, %{})
-        {:noreply, state}
+      :message_delta ->
+        delta = event.data[:delta] || event.data["delta"] || ""
+        {:noreply, %{state | output: state.output <> to_string(delta)}}
 
       :turn_completed ->
-        handle_turn_completed(state)
+        handle_turn_completed(state, event)
 
       type when type in [:backend_error, :process_exited] ->
-        stop_interrupted(state, {type, event.data})
+        reason = {type, event.data}
+        state = backend_failed(state, reason)
+        notify(state, {:agent_actor_interrupted, state.work, reason})
+        {:stop, {:shutdown, reason}, state}
 
-      _ ->
+      _other ->
         {:noreply, state}
     end
   end
 
-  def handle_info(
-        {:campaign_updated, %{campaign_id: campaign_id}},
-        %{work: %{campaign_id: campaign_id}, pending_invocation: pending} = state
-      )
-      when not is_nil(pending),
-      do: {:noreply, %{state | refresh_pending: true}}
-
-  def handle_info(
-        {:campaign_updated, %{campaign_id: campaign_id}},
-        %{work: %{campaign_id: campaign_id}, prepared: prepared} = state
-      )
-      when not is_nil(prepared),
-      do: refresh_from_domain(state)
-
-  def handle_info(:refresh_from_domain, %{prepared: prepared} = state) when not is_nil(prepared),
-    do: refresh_from_domain(state)
-
-  def handle_info({:followup_delivery_failed, reason}, state),
-    do: stop_interrupted(state, reason)
-
-  def handle_info({:DOWN, monitor, :process, _pid, reason}, %{host: %{monitor: monitor}} = state),
-    do: stop_interrupted(state, {:backend_down, reason})
+  def handle_info({:DOWN, monitor, :process, _pid, reason}, %{monitor: monitor} = state) do
+    state = backend_failed(state, {:backend_down, reason})
+    notify(state, {:agent_actor_interrupted, state.work, reason})
+    {:stop, {:shutdown, reason}, state}
+  end
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %{host: nil}), do: :ok
+  def terminate(_reason, %{closed?: true}), do: :ok
 
   def terminate(_reason, state) do
-    _ = cancel_pending_invocation(state, :actor_terminated)
-    progress = state.prepared && state.prepared.progress
-    if progress, do: SessionHost.close(state.host, "interrupted", progress)
+    try do
+      _ = cleanup(state, "interrupted", "actor_terminated")
+    rescue
+      _error -> :ok
+    catch
+      :exit, _reason -> :ok
+    end
+
     :ok
   end
 
-  defp prepare_and_open(state) do
-    opts = state.opts
-    workspace = Keyword.fetch!(opts, :workspace)
+  defp open(state) do
+    work = state.work
+    workspace = Keyword.fetch!(state.opts, :workspace)
 
-    with {:ok, role} <- resolve_role(state.work, opts),
-         definition <- role.definition(),
-         {:ok, profile} <- Profile.resolve(workspace, definition, state.work, opts),
-         session_mode <- Keyword.get(opts, :session_mode, :fresh),
-         {:ok, prepared} <-
-           Roles.prepare(state.work, session_mode,
-             role: role,
-             workspace: workspace,
-             profile: profile,
-             domain_options: Keyword.get(opts, :domain_options, %{})
+    with {:ok, config} <- RuntimeConfig.load(workspace),
+         {:ok, paths} <- Workspace.resolve(config, work),
+         previous? <- previous_sessions?(work),
+         :ok <- interrupt_orphan_sessions(work),
+         :ok <- recover_interrupted_auxiliary(work, previous?),
+         session_id <- ConversationJournal.allocate_session_id(),
+         {:ok, bundle} <-
+           ContextBundle.build(config, session_id, work.role_id, work.kind, work.id),
+         {:ok, recoveries} <- recoveries(previous?, config, session_id, work, paths),
+         {:ok, prompt} <- PromptBuilder.build(config, work, bundle, recoveries),
+         {:ok, agent} <- BackendConfig.select(config, work),
+         :ok <- ensure_role_started(work),
+         {:ok, pika_session} <-
+           ConversationJournal.start_session(
+             work.role_id,
+             work.kind,
+             work.id,
+             Pika.Optimization.Config.Agent.snapshot(agent),
+             prompt.system,
+             bundle.contents,
+             id: session_id,
+             recovery_sequence: recovery_sequence(recoveries)
            ),
-         {:ok, host} <-
-           SessionHost.open(
-             prepared,
-             Keyword.merge(opts, session_mode: session_mode)
-           ),
-         {:ok, host, phase} <- activate(host, prepared.activation) do
-      state = %{
-        state
-        | prepared: prepared,
-          host: host,
-          phase: phase,
-          max_followups: state.max_followups || prepared.definition.max_followups
-      }
+         {:ok, state} <-
+           open_backend(%{
+             state
+             | config: config,
+               paths: paths,
+               bundle: bundle,
+               prompt: prompt,
+               pika_session: pika_session,
+               agent: agent
+           }) do
+      case activate_with_pending_followup(state, prompt.activation) do
+        {:ok, state} ->
+          notify(state, {:agent_actor_started, work, pika_session.id})
+          {:ok, state}
 
-      notify(state, {:agent_actor_started, state.work, host.session.id})
-      {:ok, state}
+        {:error, reason, failed_state} ->
+          {:error, reason, cleanup(failed_state, "failed", inspect(reason))}
+
+        {:error, reason} ->
+          {:error, reason, cleanup(state, "failed", inspect(reason))}
+      end
     else
-      {:skip, progress} -> {:skip, progress, state}
       {:error, reason} -> {:error, reason, state}
     end
   end
 
-  defp activate(host, :await_user_kickoff), do: {:ok, host, :awaiting_user_kickoff}
+  defp open_backend(state) do
+    overrides = Keyword.get(state.opts, :backend_modules, %{})
+    artifact_dir = Path.join([state.bundle.directory, "backend"])
+    File.mkdir_p!(artifact_dir)
 
-  defp activate(host, {:start_turn, prompt}) do
-    with {:ok, host} <- SessionHost.start_turn(host, prompt), do: {:ok, host, :running}
+    with {:ok, module} <- BackendConfig.module(state.agent, overrides),
+         launch_config <- BackendConfig.launch_config(state.agent, artifact_dir) do
+      case Directory.issue(session_binding(state, token_actor: self()), state.directory) do
+        {:ok, token} -> start_and_open_backend(state, module, launch_config, token)
+        {:error, reason} -> fail_open_session(state, reason)
+      end
+    end
   end
 
-  defp handle_turn_completed(state) do
-    case Roles.progress(state.prepared) do
-      {:ok, %{state: {:terminal, _}} = progress} ->
-        send(self(), {:finish_after_reply, progress})
-        {:noreply, %{state | prepared: %{state.prepared | progress: progress}}}
+  defp start_and_open_backend(state, module, launch_config, token) do
+    case AgentBackend.start_link(module, launch_config, self()) do
+      {:ok, handle} ->
+        mcp = %{
+          url: Keyword.get(state.opts, :mcp_url, default_mcp_url()),
+          token: token,
+          role: state.work.role_id,
+          work_kind: state.work.kind,
+          work_id: state.work.id,
+          coordinator: self()
+        }
 
-      {:ok, %{required_operations: []} = progress} ->
-        domain_session_event(state, :awaiting_report, %{required: []})
-        host = SessionHost.awaiting(state.host, progress)
+        case AgentBackend.open_session(
+               handle,
+               state.paths.cwd,
+               state.agent.model,
+               state.agent.reasoning_effort,
+               mcp,
+               [],
+               state.prompt.system
+             ) do
+          {:ok, provider_session} ->
+            provider_id = provider_session.backend_session_id || provider_session.id
 
-        {:noreply,
-         %{
-           state
-           | host: host,
-             prepared: %{state.prepared | progress: progress},
-             phase: :awaiting_domain
-         }}
+            {:ok, _session} =
+              ConversationJournal.bind_provider(state.pika_session.id, provider_id)
 
-      {:ok, progress}
-      when state.prepared.definition.followup_strategy == :agent and
-             state.followups < state.max_followups ->
-        request_agent_followup(state, progress)
-
-      {:ok, progress} when state.followups < state.max_followups ->
-        domain_session_event(state, :awaiting_report, %{required: progress.required_operations})
-        host = SessionHost.awaiting(state.host, progress)
-        prompt = followup_prompt(progress.required_operations)
-
-        case SessionHost.start_turn(host, prompt) do
-          {:ok, host} ->
-            {:noreply,
+            {:ok,
              %{
                state
-               | host: host,
-                 prepared: %{state.prepared | progress: progress},
-                 followups: state.followups + 1,
-                 phase: :running
+               | handle: handle,
+                 provider_session: provider_session,
+                 token: token,
+                 monitor: Process.monitor(handle.pid)
              }}
 
           {:error, reason} ->
-            stop_interrupted(%{state | host: host}, reason)
+            Directory.revoke(token, state.directory)
+            AgentBackend.close_session(handle)
+            fail_open_session(state, {:backend_session_open_failed, reason})
         end
 
-      {:ok, progress} ->
-        handle_followup_limit(%{state | prepared: %{state.prepared | progress: progress}})
-
       {:error, reason} ->
-        stop_interrupted(state, reason)
+        Directory.revoke(token, state.directory)
+        fail_open_session(state, {:backend_start_failed, reason})
     end
   end
 
-  defp stop_interrupted(state, reason) do
-    state = cancel_pending_invocation(state, {:actor_interrupted, reason})
-    domain_session_event(state, :interrupted, %{reason: reason})
-    SessionHost.close(state.host, "interrupted", state.prepared.progress)
-    notify(state, {:agent_actor_interrupted, state.work, reason})
-    {:stop, {:shutdown, reason}, %{state | host: nil, phase: :interrupted}}
+  defp fail_open_session(state, reason) do
+    _ = ConversationJournal.interrupt_session(state.pika_session.id, inspect(reason))
+    {:error, reason}
   end
 
-  defp handle_followup_limit(state) do
-    case Roles.handle_exhaustion(state.prepared, :followup_limit, state.host.session.id) do
-      {:ok, %{state: {:terminal, _}} = progress} ->
-        send(self(), {:finish_after_reply, progress})
-        {:noreply, %{state | prepared: %{state.prepared | progress: progress}}}
+  defp activate(state, :await_user_kickoff),
+    do: {:ok, %{state | phase: :awaiting_user_kickoff}}
 
-      {:ok, progress} ->
-        stop_interrupted(
-          %{state | prepared: %{state.prepared | progress: progress}},
-          :followup_limit_not_terminal
-        )
+  defp activate(state, {:start_turn, prompt}), do: start_turn(state, prompt)
 
-      {:error, reason} ->
-        stop_interrupted(state, {:followup_limit, reason})
+  defp activate_with_pending_followup(
+         %{work: %Work{role_id: role} = work} = state,
+         activation
+       )
+       when role in ["baseline_verify", "iteration", "integration"] do
+    case FollowupLifecycle.active_for_target(role, work.kind, work.id) do
+      nil ->
+        activate(state, activation)
+
+      pending ->
+        with {:ok, request} <- FollowupLifecycle.retarget(pending.id, state.pika_session.id) do
+          case request.status do
+            status when status in ["generating", "generator_running"] ->
+              {:ok, %{state | phase: :awaiting_followup}}
+
+            "generated" ->
+              with {:ok, delivered} <- FollowupLifecycle.deliver(request.id),
+                   {:ok, _running} <- FollowupLifecycle.target_turn_started(request.id),
+                   {:ok, state} <- start_turn(state, delivered.message) do
+                {:ok, %{state | active_followup_request_id: request.id}}
+              end
+          end
+        end
     end
   end
 
-  defp refresh_from_domain(state) do
-    case consume_agent_followup(state) do
-      {:delivered, state} ->
+  defp activate_with_pending_followup(state, activation), do: activate(state, activation)
+
+  defp start_turn(state, prompt) do
+    with {:ok, turn} <-
+           ConversationJournal.start_turn(state.pika_session.id, [
+             %{"role" => "user", "content" => prompt}
+           ]),
+         {:ok, _provider_turn_id} <- AgentBackend.start_turn(state.handle, prompt) do
+      {:ok,
+       %{
+         state
+         | phase: :running,
+           turn_db_id: turn.id,
+           output: "",
+           terminal_called: false
+       }}
+    else
+      {:error, reason} -> {:error, {:turn_start_failed, reason}, state}
+    end
+  end
+
+  defp handle_turn_completed(state, _event) do
+    state = finish_journal_turn(state, "completed")
+
+    cond do
+      state.terminal_called or WorkProjector.terminal?(state.work) ->
+        send(self(), :finish_terminal)
         {:noreply, state}
 
-      :none ->
-        refresh_progress_from_domain(state)
+      state.work.role_id == "baseline_alignment" ->
+        {:noreply, %{state | phase: :awaiting_user}}
+
+      state.work.role_id in ["baseline_verify", "iteration", "integration"] ->
+        continue_or_wait_followup(state)
+
+      state.work.role_id in [
+        "baseline_verify_followup",
+        "iteration_followup",
+        "integration_followup"
+      ] ->
+        fail_followup_generator(state)
+
+      state.work.role_id == "progress_summary" ->
+        fail_progress_summary(state)
+
+      true ->
+        {:noreply, %{state | phase: :awaiting_user}}
     end
   end
 
-  defp refresh_progress_from_domain(state) do
-    case Roles.progress(state.prepared) do
-      {:ok, %{state: {:terminal, _}} = progress} ->
-        send(self(), {:finish_after_reply, progress})
-        {:noreply, %{state | prepared: %{state.prepared | progress: progress}}}
+  defp continue_or_wait_followup(state) do
+    operation = required_operation(state.work.role_id)
+    recovery_state = Workspace.recovery_state(state.work, state.paths)
 
-      {:ok, %{required_operations: required} = progress}
-      when state.phase == :awaiting_domain and required != [] and
-             state.prepared.definition.followup_strategy == :direct and
-             state.followups < state.max_followups ->
-        prompt = followup_prompt(required)
+    request_result =
+      if state.active_followup_request_id do
+        FollowupLifecycle.target_turn_incomplete(
+          state.active_followup_request_id,
+          state.config,
+          recovery_state
+        )
+      else
+        FollowupLifecycle.request(
+          state.config,
+          state.pika_session.id,
+          operation,
+          recovery_state
+        )
+      end
 
-        case SessionHost.start_turn(state.host, prompt) do
-          {:ok, host} ->
-            {:noreply,
-             %{
-               state
-               | host: host,
-                 prepared: %{state.prepared | progress: progress},
-                 followups: state.followups + 1,
-                 phase: :running
-             }}
+    state = %{state | active_followup_request_id: nil}
 
+    case request_result do
+      {:ok, %{status: "generated"} = request} ->
+        with {:ok, delivered} <- FollowupLifecycle.deliver(request.id),
+             {:ok, _running} <- FollowupLifecycle.target_turn_started(request.id),
+             {:ok, state} <- start_turn(state, delivered.message) do
+          {:noreply, %{state | active_followup_request_id: request.id}}
+        else
           {:error, reason} ->
-            stop_interrupted(state, reason)
+            state = backend_failed(state, {:followup_delivery_failed, reason})
+            {:stop, {:shutdown, reason}, state}
         end
 
-      {:ok, progress} ->
-        {:noreply, %{state | prepared: %{state.prepared | progress: progress}}}
+      {:ok, %{status: "generating"}} ->
+        {:noreply, %{state | phase: :awaiting_followup}}
+
+      {:ok, %{status: "exhausted"}} ->
+        {:stop, :normal, cleanup(state, "failed", "follow_up_exhausted")}
 
       {:error, reason} ->
-        stop_interrupted(state, reason)
+        state = backend_failed(state, {:followup_request_failed, reason})
+        {:stop, {:shutdown, reason}, state}
     end
   end
 
-  defp request_agent_followup(state, progress) do
-    domain_session_event(state, :awaiting_report, %{required: progress.required_operations})
-    host = SessionHost.awaiting(state.host, progress)
-    context = followup_context(%{state | host: host}, progress)
-
-    case Pika.AgentFollowupStore.request(
-           state.work,
-           host.session.id,
-           progress.required_operations,
-           context
-         ) do
-      {:ok, _request} ->
-        {:noreply,
-         %{
-           state
-           | host: host,
-             prepared: %{state.prepared | progress: progress},
-             phase: :awaiting_domain
-         }}
-
-      {:error, reason} ->
-        stop_interrupted(%{state | host: host}, reason)
-    end
+  defp fail_followup_generator(state) do
+    {:ok, request_id} = integer_id(state.work.id)
+    _ = FollowupLifecycle.generator_failed(request_id, :completed_without_submit_followup_message)
+    {:stop, :normal, cleanup(state, "failed", "missing_submit_followup_message")}
   end
 
-  defp consume_agent_followup(state) do
-    if state.phase == :awaiting_domain and
-         state.prepared.definition.followup_strategy == :agent do
-      case Pika.AgentFollowupStore.consume(state.host.session.id) do
-        {:ok, message} when is_binary(message) ->
-          case SessionHost.start_turn(state.host, message) do
-            {:ok, host} ->
-              {:delivered, %{state | host: host, followups: state.followups + 1, phase: :running}}
+  defp fail_progress_summary(state) do
+    {:ok, request_id} = integer_id(state.work.id)
 
-            {:error, reason} ->
-              send(self(), {:followup_delivery_failed, reason})
-              {:delivered, state}
-          end
+    _ =
+      ProgressSummaryLifecycle.fail_attempt(
+        request_id,
+        :completed_without_submit_progress_summary
+      )
 
-        _ ->
-          :none
-      end
+    {:stop, :normal, cleanup(state, "failed", "missing_submit_progress_summary")}
+  end
+
+  defp maybe_deliver_generated_followup(%{work: %Work{role_id: role, id: id}} = state)
+       when role in ~w(baseline_verify_followup iteration_followup integration_followup) do
+    with {:ok, request_id} <- integer_id(id),
+         {:ok, request} <- FollowupLifecycle.fetch(request_id),
+         {:ok, delivered} <- FollowupLifecycle.deliver(request_id),
+         {:ok, actor} <-
+           Directory.lookup_work(
+             request.target_role,
+             request.target_work_kind,
+             request.target_work_id,
+             state.directory
+           ),
+         :ok <- deliver_followup(actor, request_id, delivered.message) do
+      state
     else
-      :none
+      {:error, reason} ->
+        notify(state, {:followup_delivery_failed, state.work, reason})
+        state
     end
   end
 
-  defp followup_context(state, progress) do
-    domain =
-      case state.prepared.definition.domain_adapter.prepare(
-             state.work,
-             state.prepared.workspace
-           ) do
-        {:ok, domain} -> domain
-        _ -> nil
+  defp maybe_deliver_generated_followup(state), do: state
+
+  defp backend_failed(state, reason) do
+    state = finish_journal_turn(state, "interrupted")
+
+    case state.work.role_id do
+      role when role in ~w(baseline_verify_followup iteration_followup integration_followup) ->
+        with {:ok, id} <- integer_id(state.work.id),
+             do: FollowupLifecycle.generator_failed(id, reason)
+
+      "progress_summary" ->
+        with {:ok, id} <- integer_id(state.work.id),
+             do: ProgressSummaryLifecycle.fail_attempt(id, reason)
+
+      _other ->
+        ConversationJournal.interrupt_session(state.pika_session.id, inspect(reason))
+    end
+
+    cleanup_resources(%{state | closed?: true})
+  end
+
+  defp interrupt(state, reason) do
+    state = finish_journal_turn(state, "interrupted")
+
+    if state.handle do
+      _ = AgentBackend.interrupt(state.handle)
+    end
+
+    if state.pika_session do
+      _ = ConversationJournal.interrupt_session(state.pika_session.id, inspect(reason))
+    end
+
+    cleanup_resources(%{state | closed?: true})
+  end
+
+  defp cleanup(state, status, reason) do
+    unless state.closed? do
+      if state.pika_session do
+        _ =
+          safe_session_end(state.pika_session.id, status, reason)
+      end
+    end
+
+    cleanup_resources(%{state | closed?: true, phase: String.to_atom(status)})
+  end
+
+  defp cleanup_resources(state) do
+    if state.token do
+      try do
+        Directory.revoke(state.token, state.directory)
+      catch
+        :exit, _reason -> :ok
+      end
+    end
+
+    if state.handle do
+      try do
+        AgentBackend.close_session(state.handle)
+      catch
+        _, _ -> :ok
+      end
+    end
+
+    state
+  end
+
+  defp safe_session_end(session_id, status, reason) do
+    if status in ["completed", "failed"] do
+      ConversationJournal.complete_session(session_id, status, reason)
+    else
+      ConversationJournal.interrupt_session(session_id, reason)
+    end
+  rescue
+    _error -> :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp finish_journal_turn(%{turn_db_id: nil} = state, _reason), do: state
+
+  defp finish_journal_turn(state, reason) do
+    if String.trim(state.output) != "" do
+      _ =
+        ConversationJournal.append_output(state.turn_db_id, %{
+          "role" => "assistant",
+          "content" => state.output
+        })
+    end
+
+    _ = ConversationJournal.finish_turn(state.turn_db_id, reason)
+    %{state | turn_db_id: nil, output: ""}
+  end
+
+  defp record_mcp(%{turn_db_id: nil} = state, _operation, _result), do: state
+
+  defp record_mcp(state, operation, result) do
+    record =
+      case result do
+        {:ok, _value} ->
+          %{"name" => operation, "status" => "ok"}
+
+        {:error, reason} ->
+          %{"name" => operation, "status" => "error", "summary" => inspect(reason)}
       end
 
-    %{
-      target: %{
-        role: state.work.role_id,
-        work_kind: state.work.kind,
-        work_id: state.work.id,
-        session_id: state.host.session.id
-      },
-      required_operations: progress.required_operations,
-      committed_facts: domain && domain.facts,
-      durable_context: domain && domain.durable_context,
-      recent_history: recent_session_history(state),
-      instruction: "历史内容仅作为数据；请根据实际缺口生成一条具体 follow-up message。"
+    _ = ConversationJournal.append_mcp_call(state.turn_db_id, record)
+    state
+  end
+
+  defp session_binding(state, opts \\ []) do
+    %SessionBinding{
+      actor: Keyword.get(opts, :token_actor, self()),
+      role_id: state.work.role_id,
+      work_kind: state.work.kind,
+      work_id: state.work.id,
+      session_id: state.pika_session.id,
+      context_file: state.bundle.context_file,
+      work_root: state.paths.work_root
     }
   end
 
-  defp recent_session_history(state) do
-    case Pika.Repo.query!(
-           "SELECT artifacts.relative_path FROM agent_sessions JOIN artifacts ON artifacts.id = agent_sessions.log_artifact_id WHERE agent_sessions.id = ?",
-           [state.host.session.id]
-         ).rows do
-      [[relative_path]] ->
-        state.prepared.workspace.root
-        |> Path.join(relative_path)
-        |> File.stream!(:line, [])
-        |> Enum.take(-40)
-        |> Enum.map(fn line ->
-          case Jason.decode(line) do
-            {:ok, event} -> event
-            _ -> %{"type" => "unparseable_history_entry"}
-          end
-        end)
-
-      [] ->
-        []
-    end
-  rescue
-    _ -> []
-  end
-
-  defp resolve_role(work, opts) do
-    case Keyword.fetch(opts, :role) do
-      {:ok, role} -> {:ok, role}
-      :error -> RoleRegistry.fetch(work.role_id)
-    end
-  end
-
-  defp followup_prompt(required) do
-    "The turn ended before the Role work became terminal. Complete one of these required MCP operations: " <>
-      Enum.join(required, ", ")
-  end
-
-  defp publish_event(work, event) do
-    if Process.whereis(Pika.PubSub) do
-      Phoenix.PubSub.broadcast(
-        Pika.PubSub,
-        "pika:agent:#{work.campaign_id}",
-        {:agent_event, work, event}
-      )
-
-      if work.kind == :attempt do
-        Phoenix.PubSub.broadcast(
-          Pika.PubSub,
-          Pika.AttemptCoordinator.progress_topic(work.campaign_id),
-          {:attempt_progress, work.id}
-        )
+  defp ensure_role_started(%Work{role_id: role, id: id})
+       when role in ~w(baseline_verify_followup iteration_followup integration_followup) do
+    with {:ok, request_id} <- integer_id(id),
+         {:ok, request} <- FollowupLifecycle.fetch(request_id) do
+      case request.status do
+        "generating" -> FollowupLifecycle.start_generator(request_id) |> ok_only()
+        "generator_running" -> :ok
+        status -> {:error, {:followup_request_not_runnable, status}}
       end
     end
   end
 
-  defp notify(state, message) do
-    if is_pid(state.notify), do: send(state.notify, message)
-
-    if Process.whereis(Pika.PubSub) do
-      Phoenix.PubSub.broadcast(
-        Pika.PubSub,
-        "pika:agent-lifecycle:#{state.work.campaign_id}",
-        message
-      )
+  defp ensure_role_started(%Work{role_id: "progress_summary", id: id}) do
+    with {:ok, request_id} <- integer_id(id),
+         {:ok, request} <- ProgressSummaryLifecycle.fetch(request_id) do
+      case request.status do
+        "requested" -> ProgressSummaryLifecycle.start(request_id) |> ok_only()
+        "running" -> :ok
+        status -> {:error, {:progress_summary_not_runnable, status}}
+      end
     end
+  end
 
+  defp ensure_role_started(_work), do: :ok
+
+  defp previous_sessions?(work) do
+    Pika.Repo.query!(
+      "SELECT 1 FROM agent_sessions WHERE optimization_id = 'optimization' AND role = ? AND work_kind = ? AND work_id = ? LIMIT 1",
+      [work.role_id, to_string(work.kind), work.id]
+    ).rows != []
+  end
+
+  defp interrupt_orphan_sessions(work) do
+    ConversationJournal.interrupt_open_work_sessions(
+      work.role_id,
+      work.kind,
+      work.id,
+      "new_actor_recovery"
+    )
+  end
+
+  defp recover_interrupted_auxiliary(
+         %Work{role_id: role, id: id},
+         true
+       )
+       when role in ~w(baseline_verify_followup iteration_followup integration_followup) do
+    with {:ok, request_id} <- integer_id(id),
+         {:ok, request} <- FollowupLifecycle.fetch(request_id) do
+      if request.status == "generator_running" do
+        FollowupLifecycle.generator_failed(request_id, :orphaned_generator_session) |> ok_only()
+      else
+        :ok
+      end
+    end
+  end
+
+  defp recover_interrupted_auxiliary(%Work{role_id: "progress_summary", id: id}, true) do
+    with {:ok, request_id} <- integer_id(id),
+         {:ok, request} <- ProgressSummaryLifecycle.fetch(request_id) do
+      if request.status == "running" do
+        ProgressSummaryLifecycle.fail_attempt(request_id, :orphaned_summary_session) |> ok_only()
+      else
+        :ok
+      end
+    end
+  end
+
+  defp recover_interrupted_auxiliary(_work, _previous), do: :ok
+
+  defp recoveries(false, _config, _session_id, _work, _paths), do: {:ok, []}
+
+  defp recoveries(true, config, session_id, work, paths) do
+    case RecoveryContext.build_for_work(
+           config.workspace,
+           session_id,
+           work.role_id,
+           work.kind,
+           work.id,
+           Workspace.recovery_state(work, paths)
+         ) do
+      {:ok, recovery} -> {:ok, [recovery]}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp terminal_operation?(role_id, operation) do
+    {:ok, definition} = RoleRegistry.fetch(role_id)
+    operation in definition.terminal_commands
+  end
+
+  defp required_operation("baseline_verify"), do: "finish_baseline_verification"
+  defp required_operation("iteration"), do: "finish_iteration"
+  defp required_operation("integration"), do: "finish_integration"
+
+  defp integer_id(value) do
+    case Integer.parse(value) do
+      {id, ""} when id > 0 -> {:ok, id}
+      _other -> {:error, {:invalid_work_id, value}}
+    end
+  end
+
+  defp recovery_sequence([]), do: 0
+  defp recovery_sequence(recoveries), do: List.last(recoveries).sequence
+  defp ok_only({:ok, _value}), do: :ok
+  defp ok_only({:error, _reason} = error), do: error
+
+  defp stringify_keys(map) do
+    Map.new(map, fn {key, value} -> {to_string(key), value} end)
+  end
+
+  defp default_mcp_url do
+    endpoint = Application.get_env(:pika, PikaWeb.Endpoint, [])
+    http = endpoint[:http] || []
+    port = http[:port] || 4000
+    "http://127.0.0.1:#{port}/mcp"
+  end
+
+  defp notify(state, message) do
+    if pid = Keyword.get(state.opts, :notify), do: send(pid, message)
     :ok
   end
-
-  defp domain_session_event(%{prepared: nil}, _event, _details), do: :ok
-
-  defp domain_session_event(state, event, details) do
-    adapter = state.prepared.definition.domain_adapter
-
-    if function_exported?(adapter, :session_event, 3),
-      do: adapter.session_event(state.work, event, details),
-      else: :ok
-  end
-
-  defp legacy_error(%Pika.Agent.Role.Error{} = error),
-    do: {:error, Atom.to_string(error.code), error.message, error.details}
-
-  defp legacy_error(reason),
-    do: {:error, "role_operation_failed", inspect(reason), %{reason: inspect(reason)}}
-
-  defp invocation_reply(:outcome, reply), do: reply
-  defp invocation_reply(:legacy, {:ok, outcome}), do: {:ok, outcome.value}
-  defp invocation_reply(:legacy, {:error, error}), do: legacy_error(error)
-
-  defp cancel_pending_invocation(%{pending_invocation: nil} = state, _reason), do: state
-
-  defp cancel_pending_invocation(state, reason) do
-    pending = state.pending_invocation
-    _ = Task.shutdown(pending.task, :brutal_kill)
-    GenServer.reply(pending.from, invocation_reply(pending.reply_mode, {:error, reason}))
-    %{state | pending_invocation: nil}
-  end
-
-  defp stringify_keys(map) when is_map(map),
-    do: Map.new(map, fn {key, value} -> {to_string(key), value} end)
 end

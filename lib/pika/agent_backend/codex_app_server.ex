@@ -9,8 +9,8 @@ defmodule Pika.AgentBackend.CodexAppServer do
     Error,
     Event,
     JSONLPort,
+    LaunchConfig,
     PermissionPolicy,
-    Profile,
     Session
   }
 
@@ -120,7 +120,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
 
   @impl true
   def init({profile, event_sink}) do
-    profile = Profile.normalize(profile)
+    profile = LaunchConfig.normalize(profile)
     session_id = Ecto.UUID.generate()
 
     {:ok,

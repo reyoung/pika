@@ -1,10 +1,10 @@
-# Pika v2 设计审阅稿
+# Pika v2 设计与实现
 
 ## 状态
 
-本目录描述 Pika 下一版本的目标架构。产品与领域决策已经过逐轮确认；代码尚未按本设计完成重构，因此本文档不能作为 v2 已交付的证明。
+本目录是当前 Pika 架构的权威设计。实现已切换到全新的 v2 配置、SQLite schema、Role Prompt、Actor/Symphony、MCP、CLI 和 UI；验收仍以代码、Schema、测试和运行时 Git/SQLite 事实为准，而不是仅凭本文档声明。
 
-v2 是破坏性版本：不兼容 v1 Workspace、SQLite schema、配置、MCP 或 CLI。实现切换后使用最终领域名，不保留 `Pika.V2.*` namespace，也不并行维护两套运行时。
+v2 是破坏性版本：不兼容旧 Workspace、SQLite schema、配置、MCP 或 CLI。代码使用最终领域名，不保留 `Pika.V2.*` namespace，也不并行维护两套运行时。
 
 ## 核心变化
 

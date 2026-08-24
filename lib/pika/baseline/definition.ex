@@ -64,6 +64,8 @@ defmodule Pika.Baseline.Definition do
          :ok <- validate_cases(cases_file["cases"]),
          :ok <- validate_metrics(metrics_file["metrics"]),
          :ok <- validate_measurement(manifest["measurement"]),
+         :ok <- validate_stopping(manifest["stopping"]),
+         :ok <- validate_target_coverage(work_root, manifest, target_manifest),
          :ok <- validate_target_files(work_root, manifest, target_manifest),
          :ok <-
            validate_smoke(
@@ -133,6 +135,25 @@ defmodule Pika.Baseline.Definition do
     if minimum <= pair_count, do: :ok, else: {:error, :min_valid_pairs_exceeds_pair_count}
   end
 
+  defp validate_stopping(%{
+         "mode" => mode,
+         "max_attempts" => max_attempts,
+         "max_duration_seconds" => max_duration
+       }) do
+    valid? =
+      case mode do
+        "manual" -> is_nil(max_attempts) and is_nil(max_duration)
+        "attempt_limit" -> is_integer(max_attempts) and is_nil(max_duration)
+        "duration" -> is_nil(max_attempts) and is_integer(max_duration)
+        "attempt_or_duration" -> is_integer(max_attempts) and is_integer(max_duration)
+        _other -> false
+      end
+
+    if valid?, do: :ok, else: {:error, :invalid_stopping_policy}
+  end
+
+  defp validate_stopping(_stopping), do: {:error, :invalid_stopping_policy}
+
   defp validate_target_files(work_root, manifest, target_manifest) do
     target_manifest_path = get_in(manifest, ["optimization_target", "manifest_path"])
     target_root = Path.dirname(target_manifest_path)
@@ -155,6 +176,27 @@ defmodule Pika.Baseline.Definition do
           {:halt, {:error, {:invalid_target_file, relative_path, reason}}}
       end
     end)
+  end
+
+  defp validate_target_coverage(work_root, manifest, target_manifest) do
+    target_manifest_path = get_in(manifest, ["optimization_target", "manifest_path"])
+    target_root = Path.join(work_root, Path.dirname(target_manifest_path))
+    manifest_name = Path.basename(target_manifest_path)
+
+    actual =
+      target_root
+      |> Path.join("**/*")
+      |> Path.wildcard(match_dot: true)
+      |> Enum.filter(&File.regular?/1)
+      |> Enum.map(&Path.relative_to(&1, target_root))
+      |> Enum.reject(&(&1 == manifest_name))
+      |> Enum.sort()
+
+    expected = target_manifest["files"] |> Enum.map(& &1["path"]) |> Enum.sort()
+
+    if actual == expected,
+      do: :ok,
+      else: {:error, {:target_manifest_coverage_mismatch, %{expected: expected, actual: actual}}}
   end
 
   defp validate_smoke(verify, benchmark, cases, metrics) do

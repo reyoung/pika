@@ -1,7 +1,7 @@
 defmodule Pika.Baseline.Lifecycle do
   @moduledoc "The sole write interface for the v2 Baseline Definition and Review lifecycle."
 
-  alias Pika.Baseline.Definition
+  alias Pika.Baseline.{Definition, TargetSnapshot}
   alias Pika.Agent.RolePromptRegistry
   alias Pika.Optimization.{FileContract, Measurement, Persistence}
   alias Pika.{Git, Repo}
@@ -266,25 +266,36 @@ defmodule Pika.Baseline.Lifecycle do
   defp persist_review(persisted, definition, :approve, _feedback) do
     now = now_us()
     target_manifest_path = get_in(definition.manifest, ["optimization_target", "manifest_path"])
+    target_snapshot_id = Ecto.UUID.generate()
 
-    with {:ok, target_artifact_id} <- artifact_id_for_kind(persisted, "target_manifest") do
+    with {:ok, target_artifact_id} <- artifact_id_for_kind(persisted, "target_manifest"),
+         {:ok, target_relative_path} <-
+           TargetSnapshot.create(
+             Path.join(
+               Persistence.current().workspace_canonical_path,
+               persisted.work_relative_path
+             ),
+             target_snapshot_id,
+             definition.target_manifest,
+             definition.dependency_receipts[target_manifest_path].sha256
+           ) do
       result =
         Repo.transaction(fn ->
-          target_snapshot_id = Ecto.UUID.generate()
           insert_review(persisted, definition, "approved", nil, now)
 
           Repo.query!(
             """
             INSERT INTO target_snapshots(
-              id, optimization_id, baseline_revision_id, provenance_json, root_artifact_id,
+              id, optimization_id, baseline_revision_id, provenance_json, relative_path, root_artifact_id,
               digest, entrypoint, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
               target_snapshot_id,
               @optimization_id,
               persisted.id,
               Jason.encode!(definition.target_manifest),
+              target_relative_path,
               target_artifact_id,
               definition.dependency_receipts[target_manifest_path].sha256,
               get_in(definition.manifest, ["optimization_target", "entrypoint"]),
@@ -762,7 +773,7 @@ defmodule Pika.Baseline.Lifecycle do
 
     case Repo.query!(
            """
-           SELECT id, owner_type, owner_id FROM artifacts
+           SELECT id, owner_type, owner_id, kind, sha256, byte_size FROM artifacts
            WHERE optimization_id = ? AND relative_path = ?
            """,
            [@optimization_id, relative_path]
@@ -793,17 +804,19 @@ defmodule Pika.Baseline.Lifecycle do
 
         {:ok, id}
 
-      [[id, ^owner_type, ^owner_id]] ->
-        Repo.query!(
-          """
-          UPDATE artifacts SET kind = ?, sha256 = ?, byte_size = ?, mime_type = ? WHERE id = ?
-          """,
-          [kind, receipt.sha256, receipt.byte_size, MIME.from_path(receipt.absolute_path), id]
-        )
-
+      [[id, ^owner_type, ^owner_id, ^kind, sha256, byte_size]]
+      when sha256 == receipt.sha256 and byte_size == receipt.byte_size ->
         {:ok, id}
 
-      [[_id, existing_type, existing_id]] ->
+      [[_id, ^owner_type, ^owner_id, existing_kind, existing_sha, existing_size]] ->
+        {:error,
+         {:artifact_immutable_conflict, relative_path,
+          %{
+            expected: %{kind: existing_kind, sha256: existing_sha, byte_size: existing_size},
+            actual: %{kind: kind, sha256: receipt.sha256, byte_size: receipt.byte_size}
+          }}}
+
+      [[_id, existing_type, existing_id, _kind, _sha, _size]] ->
         {:error, {:artifact_owner_conflict, relative_path, existing_type, existing_id}}
     end
   end
@@ -831,7 +844,7 @@ defmodule Pika.Baseline.Lifecycle do
           case_["description"],
           Jason.encode!(case_["inputs"]),
           case_["weight"],
-          case_["critical"]
+          if(case_["critical"], do: 1, else: 0)
         ]
       )
     end)
@@ -1000,8 +1013,8 @@ defmodule Pika.Baseline.Lifecycle do
   end
 
   defp workspace_relative(workspace, absolute) do
-    workspace = Path.expand(workspace)
-    absolute = Path.expand(absolute)
+    workspace = Pika.Paths.canonical!(workspace)
+    absolute = Pika.Paths.canonical!(absolute)
     relative = Path.relative_to(absolute, workspace)
 
     if relative == "." or not String.starts_with?(relative, "..") do

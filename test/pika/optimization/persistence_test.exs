@@ -43,7 +43,7 @@ defmodule Pika.Optimization.PersistenceTest do
     for table <-
           ~w(
             optimizations artifacts baseline_revisions target_snapshots baseline_reviews
-            baseline_verifications benchmark_cases metric_definitions sampling_revisions
+            baseline_question_batches baseline_verifications benchmark_cases metric_definitions sampling_revisions
             sampling_revision_cases best_revisions best_metrics guidance_revisions attempts
             iteration_rounds attempt_metrics integration_runs operation_intents agent_sessions
             conversation_turns followup_requests progress_summary_requests progress_summaries

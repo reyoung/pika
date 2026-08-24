@@ -31,12 +31,9 @@ defmodule PikaWeb.Router do
     get "/attempts/:id", ControlController, :attempt
     get "/metrics", ControlController, :metrics
     get "/audit/events", ControlController, :events
-    get "/sync/preview", ControlController, :sync_preview
     post "/control/pause", ControlController, :pause
     post "/control/stop", ControlController, :stop
     post "/control/resume", ControlController, :resume
-    post "/sync", ControlController, :request_sync
-    post "/sync/:id/spec-confirmation", ControlController, :confirm_sync_spec
     post "/attempts/:id/btw", ControlController, :create_btw
   end
 

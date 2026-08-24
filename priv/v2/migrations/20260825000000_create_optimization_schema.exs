@@ -15,6 +15,8 @@ defmodule Pika.Repo.V2Migrations.CreateOptimizationSchema do
       add(:stop_reason, :text)
       add(:config_sha256, :string, null: false)
       add(:next_attempt_id, :integer, null: false, default: 1)
+      add(:progress_summary_due, :boolean, null: false, default: false)
+      add(:progress_summary_next_due_at, :integer)
       add(:inserted_at, :integer, null: false)
       add(:updated_at, :integer, null: false)
     end
@@ -78,6 +80,7 @@ defmodule Pika.Repo.V2Migrations.CreateOptimizationSchema do
       )
 
       add(:provenance_json, :text, null: false)
+      add(:relative_path, :string, null: false)
 
       add(:root_artifact_id, references(:artifacts, type: :string, on_delete: :restrict),
         null: false
@@ -89,7 +92,7 @@ defmodule Pika.Repo.V2Migrations.CreateOptimizationSchema do
     end
 
     create(unique_index(:target_snapshots, [:baseline_revision_id]))
-    create(unique_index(:target_snapshots, [:optimization_id, :digest]))
+    create(index(:target_snapshots, [:optimization_id, :digest]))
 
     create table(:baseline_reviews, primary_key: false) do
       add(:id, :integer, primary_key: true, autogenerate: true)
@@ -111,6 +114,34 @@ defmodule Pika.Repo.V2Migrations.CreateOptimizationSchema do
     end
 
     create(index(:baseline_reviews, [:baseline_revision_id, :created_at]))
+
+    create table(:baseline_question_batches, primary_key: false) do
+      add(:id, :string, primary_key: true)
+
+      add(:optimization_id, references(:optimizations, type: :string, on_delete: :delete_all),
+        null: false
+      )
+
+      add(:baseline_revision_id, references(:baseline_revisions, on_delete: :delete_all),
+        null: false
+      )
+
+      add(:session_id, :string)
+      add(:status, :string, null: false)
+      add(:questions_json, :text, null: false)
+      add(:answers_json, :text)
+      add(:created_at, :integer, null: false)
+      add(:answered_at, :integer)
+    end
+
+    create(index(:baseline_question_batches, [:optimization_id, :status, :created_at]))
+
+    create(
+      unique_index(:baseline_question_batches, [:baseline_revision_id],
+        name: :baseline_question_batches_one_pending,
+        where: "status = 'pending'"
+      )
+    )
 
     create table(:baseline_verifications, primary_key: false) do
       add(:id, :integer, primary_key: true, autogenerate: true)
@@ -434,15 +465,31 @@ defmodule Pika.Repo.V2Migrations.CreateOptimizationSchema do
 
       add(:target_followup_sequence, :integer, null: false)
       add(:generator_attempt_sequence, :integer, null: false, default: 0)
+      add(:target_max_followups, :integer, null: false)
+      add(:generator_max_attempts, :integer, null: false)
+      add(:generator_role, :string)
       add(:required_operation, :string, null: false)
       add(:status, :string, null: false)
       add(:message, :text)
+      add(:relative_directory, :string, null: false)
+      add(:failure_reason, :text)
       add(:created_at, :integer, null: false)
       add(:updated_at, :integer, null: false)
       add(:delivered_at, :integer)
+      add(:completed_at, :integer)
     end
 
     create(index(:followup_requests, [:optimization_id, :target_role, :target_work_id, :status]))
+
+    create(
+      unique_index(
+        :followup_requests,
+        [:optimization_id, :target_role, :target_work_kind, :target_work_id],
+        name: :followup_requests_one_active,
+        where:
+          "status IN ('requested', 'generating', 'generator_running', 'generated', 'delivered', 'target_turn_running')"
+      )
+    )
 
     create table(:progress_summary_requests, primary_key: false) do
       add(:id, :integer, primary_key: true, autogenerate: true)
@@ -453,15 +500,26 @@ defmodule Pika.Repo.V2Migrations.CreateOptimizationSchema do
 
       add(:sequence, :integer, null: false)
       add(:status, :string, null: false)
+      add(:attempt_sequence, :integer, null: false, default: 0)
+      add(:max_attempts, :integer, null: false)
       add(:snapshot_cursor, :integer, null: false)
       add(:previous_summary_id, :integer)
       add(:relative_directory, :string, null: false)
+      add(:failure_reason, :text)
       add(:created_at, :integer, null: false)
       add(:updated_at, :integer, null: false)
+      add(:completed_at, :integer)
     end
 
     create(unique_index(:progress_summary_requests, [:optimization_id, :sequence]))
     create(index(:progress_summary_requests, [:optimization_id, :status]))
+
+    create(
+      unique_index(:progress_summary_requests, [:optimization_id],
+        name: :progress_summary_requests_one_active,
+        where: "status IN ('preparing', 'requested', 'running')"
+      )
+    )
 
     create table(:progress_summaries, primary_key: false) do
       add(:id, :integer, primary_key: true, autogenerate: true)

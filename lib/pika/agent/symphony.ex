@@ -1,20 +1,11 @@
 defmodule Pika.Agent.Symphony do
-  @moduledoc "Reconciles domain-approved Agent Work into one ephemeral Actor per Work."
+  @moduledoc "Reconciles v2 domain Work into one Actor per Work with only per-Role concurrency."
 
   use GenServer
-  alias Pika.Agent.{Actor, Directory, RoleOwnership}
-  alias Pika.Agent.Role.Work
-  alias Pika.Repo
 
-  @default_sources [
-    Pika.Agent.WorkSources.AgentFollowup,
-    Pika.Agent.WorkSources.ProgressSummary,
-    Pika.Agent.WorkSources.Sync,
-    Pika.Agent.WorkSources.Integration,
-    Pika.Agent.WorkSources.Plan,
-    Pika.Agent.WorkSources.Iteration,
-    Pika.Agent.WorkSources.Alignment
-  ]
+  alias Pika.Agent.{Actor, Directory, Work, WorkProjector}
+  alias Pika.Optimization.{RoleRegistry, RuntimeConfig}
+  alias Pika.Optimization.Persistence
 
   def start_link(opts \\ []) do
     case Keyword.get(opts, :name, __MODULE__) do
@@ -26,25 +17,18 @@ defmodule Pika.Agent.Symphony do
   def reconcile(server \\ __MODULE__), do: GenServer.call(server, :reconcile, :infinity)
   def active(server \\ __MODULE__), do: GenServer.call(server, :active)
 
+  def kickoff(role_id, work_id, message, server \\ __MODULE__) do
+    GenServer.call(server, {:kickoff, role_id, work_id, message}, :infinity)
+  end
+
   @impl true
   def init(opts) do
-    workspace = Keyword.get_lazy(opts, :workspace, &Pika.WorkspaceLock.workspace/0)
-
-    campaign_id =
-      Keyword.get_lazy(opts, :campaign_id, fn -> Pika.Persistence.current_campaign().id end)
-
-    subscribe(campaign_id)
-
     state = %{
-      workspace: workspace,
-      campaign_id: campaign_id,
+      workspace: Keyword.fetch!(opts, :workspace),
       directory: Keyword.get(opts, :directory, Directory),
       actor_supervisor: Keyword.get(opts, :actor_supervisor, Pika.Agent.ActorSupervisor),
       actor_module: Keyword.get(opts, :actor_module, Actor),
       actor_opts: Keyword.get(opts, :actor_opts, []),
-      sources: Keyword.get(opts, :sources, @default_sources),
-      role_owners: Keyword.get(opts, :role_owners, RoleOwnership.all()),
-      capacity: Keyword.get(opts, :capacity, 32),
       interval: Keyword.get(opts, :reconcile_interval_ms, 1_000),
       timer: nil,
       actors: %{},
@@ -56,7 +40,8 @@ defmodule Pika.Agent.Symphony do
 
   @impl true
   def handle_call(:reconcile, _from, state) do
-    {:reply, :ok, do_reconcile(%{state | timer: nil}) |> schedule()}
+    state = state |> Map.put(:timer, nil) |> do_reconcile() |> schedule()
+    {:reply, :ok, state}
   end
 
   def handle_call(:active, _from, state) do
@@ -65,185 +50,165 @@ defmodule Pika.Agent.Symphony do
       |> Map.values()
       |> Enum.filter(&Process.alive?(&1.pid))
       |> Enum.map(&{&1.work, &1.pid})
-      |> Enum.sort_by(fn {work, _pid} -> {work.role_id, work.id} end)
+      |> Enum.sort_by(fn {work, _pid} -> Work.key(work) end)
 
     {:reply, active, state}
   end
 
+  def handle_call({:kickoff, role_id, work_id, message}, _from, state) do
+    actor =
+      state.actors
+      |> Map.values()
+      |> Enum.find_value(fn entry ->
+        if entry.work.role_id == role_id and entry.work.id == work_id and
+             Process.alive?(entry.pid),
+           do: entry.pid
+      end)
+
+    reply =
+      if actor, do: state.actor_module.kickoff(actor, message), else: {:error, :work_not_active}
+
+    {:reply, reply, state}
+  end
+
   @impl true
   def handle_info(:reconcile, state),
-    do: {:noreply, do_reconcile(%{state | timer: nil}) |> schedule()}
-
-  def handle_info({:domain_event, _event}, state), do: {:noreply, trigger(state)}
-  def handle_info({:optimization_event, _event}, state), do: {:noreply, trigger(state)}
-  def handle_info({:campaign_updated, _snapshot}, state), do: {:noreply, trigger(state)}
+    do: {:noreply, state |> Map.put(:timer, nil) |> do_reconcile() |> schedule()}
 
   def handle_info({:DOWN, monitor, :process, _pid, reason}, state) do
     {removed, actors} = pop_monitor(state.actors, monitor)
 
-    state =
-      if removed do
-        %{state | actors: actors, errors: record_exit(state.errors, removed.work, reason)}
-      else
-        state
-      end
+    errors =
+      if removed && reason not in [:normal, :shutdown],
+        do: [{removed.work, reason} | Enum.take(state.errors, 19)],
+        else: state.errors
 
-    {:noreply, trigger(state)}
+    {:noreply, trigger(%{state | actors: actors, errors: errors})}
   end
 
   def handle_info({event, _work, _details}, state)
       when event in [
+             :agent_actor_started,
              :agent_actor_completed,
-             :agent_actor_skipped,
              :agent_actor_failed,
-             :agent_actor_interrupted
+             :agent_actor_interrupted,
+             :followup_delivery_failed
            ],
       do: {:noreply, trigger(state)}
+
+  def handle_info({event, _work}, state) when event == :agent_actor_completed,
+    do: {:noreply, trigger(state)}
 
   def handle_info(_message, state), do: {:noreply, state}
 
   defp do_reconcile(state) do
     state = prune_dead(state)
-    state = adopt_directory_actors(state)
-    works = runnable_work(state)
-    state = retire_ineligible(state, works)
-    available = max(state.capacity - map_size(state.actors), 0)
 
-    works
-    |> Enum.reject(&active?(&1, state))
-    |> Enum.take(available)
-    |> Enum.reduce(state, &start_actor(&1, &2))
+    with {:ok, config} <- RuntimeConfig.load(state.workspace),
+         {:ok, works} <- WorkProjector.reconcile(config) do
+      state
+      |> retire_ineligible(works)
+      |> start_eligible(works, config)
+      |> maybe_complete_draining()
+    else
+      {:error, reason} -> %{state | errors: [reason | Enum.take(state.errors, 19)]}
+    end
   rescue
     error -> %{state | errors: [Exception.message(error) | Enum.take(state.errors, 19)]}
   end
 
-  defp adopt_directory_actors(state) do
-    state.directory
-    |> Directory.active()
-    |> Enum.reduce(state, fn {work, pid}, acc ->
-      key = work_key(work)
-
-      if work.campaign_id == state.campaign_id and actor_owned?(work, state.role_owners) and
-           Process.alive?(pid) and not Map.has_key?(acc.actors, key) do
-        put_actor(acc, work, pid)
-      else
-        acc
+  defp start_eligible(state, works, config) do
+    Enum.reduce(works, state, fn work, state ->
+      cond do
+        active?(work, state) -> state
+        role_active_count(work.role_id, state) >= role_concurrency(work.role_id, config) -> state
+        true -> start_actor(work, state)
       end
     end)
-  catch
-    :exit, _reason -> state
   end
 
-  defp runnable_work(state) do
-    state.sources
-    |> Enum.flat_map(& &1.runnable_work(state.campaign_id, state.workspace))
-    |> Enum.filter(&actor_owned?(&1, state.role_owners))
-    |> Enum.uniq_by(&work_key/1)
-    |> Enum.sort_by(&{&1.role_id, &1.id})
-  end
-
-  defp active?(work, state) do
-    case Map.get(state.actors, work_key(work)) do
-      %{pid: pid} -> Process.alive?(pid)
-      nil -> match?({:ok, _pid}, Directory.lookup_work(work, state.directory))
-    end
-  end
-
-  defp start_actor(%Work{} = work, state) do
-    session_mode = session_mode(work)
-
+  defp start_actor(work, state) do
     opts =
       Keyword.merge(state.actor_opts,
         work: work,
         workspace: state.workspace,
-        session_mode: session_mode,
         directory: state.directory,
         notify: self()
       )
 
-    case DynamicSupervisor.start_child(state.actor_supervisor, {state.actor_module, opts}) do
-      {:ok, pid} ->
-        put_actor(state, work, pid)
+    result =
+      if is_nil(state.actor_supervisor) do
+        state.actor_module.start_link(opts)
+      else
+        DynamicSupervisor.start_child(state.actor_supervisor, {state.actor_module, opts})
+      end
 
-      {:error, {:already_started, pid}} ->
-        put_actor(state, work, pid)
-
-      {:error, reason} ->
-        %{state | errors: [{work, reason} | Enum.take(state.errors, 19)]}
+    case result do
+      {:ok, pid} -> put_actor(state, work, pid)
+      {:error, {:already_started, pid}} -> put_actor(state, work, pid)
+      {:error, reason} -> %{state | errors: [{work, reason} | Enum.take(state.errors, 19)]}
     end
-  end
-
-  defp put_actor(state, work, pid) do
-    monitor = Process.monitor(pid)
-    entry = %{work: work, pid: pid, monitor: monitor}
-    %{state | actors: Map.put(state.actors, work_key(work), entry)}
-  end
-
-  defp session_mode(work) do
-    case Repo.query!(
-           "SELECT 1 FROM agent_sessions WHERE campaign_id = ? AND role = ? AND work_kind = ? AND work_id = ? LIMIT 1",
-           [work.campaign_id, work.role_id, Atom.to_string(work.kind), work.id]
-         ).rows do
-      [] -> if(legacy_alignment_session?(work), do: :recovering, else: :fresh)
-      _ -> :recovering
-    end
-  end
-
-  defp legacy_alignment_session?(%Work{role_id: role_id, campaign_id: campaign_id})
-       when role_id in ~w(alignment setup_merge baseline) do
-    Repo.query!(
-      "SELECT 1 FROM agent_sessions WHERE campaign_id = ? AND role = 'boundary' LIMIT 1",
-      [campaign_id]
-    ).rows != []
-  end
-
-  defp legacy_alignment_session?(_work), do: false
-
-  defp prune_dead(state) do
-    actors = Map.reject(state.actors, fn {_key, entry} -> not Process.alive?(entry.pid) end)
-    %{state | actors: actors}
   end
 
   defp retire_ineligible(state, works) do
-    unless campaign_paused?(state.campaign_id) do
-      desired = MapSet.new(Enum.map(works, &work_key/1))
+    if Persistence.current().status == "paused" do
+      state
+    else
+      desired = MapSet.new(Enum.map(works, &Work.key/1))
 
       Enum.each(state.actors, fn {key, entry} ->
         if Process.alive?(entry.pid) and not MapSet.member?(desired, key) do
-          case refresh_actor(entry.pid, state.actor_module) do
-            {:ok, %{state: {:terminal, _outcome}}} -> :ok
-            _other -> stop_actor(entry.pid, state.actor_module)
-          end
+          stop_actor(state.actor_module, entry.pid)
         end
       end)
+
+      state
+    end
+  end
+
+  defp active?(work, state) do
+    case state.actors[Work.key(work)] do
+      %{pid: pid} ->
+        Process.alive?(pid)
+
+      nil ->
+        match?(
+          {:ok, _pid},
+          Directory.lookup_work(work.role_id, work.kind, work.id, state.directory)
+        )
+    end
+  end
+
+  defp role_active_count(role_id, state) do
+    Enum.count(state.actors, fn {_key, entry} ->
+      entry.work.role_id == role_id and Process.alive?(entry.pid)
+    end)
+  end
+
+  defp role_concurrency(role_id, config) do
+    with {:ok, definition} <- RoleRegistry.fetch(role_id),
+         do: RoleRegistry.concurrency(definition, config)
+  end
+
+  defp maybe_complete_draining(state) do
+    if Persistence.current().status == "draining" and Process.whereis(Pika.Optimization.Runtime) do
+      _ = Pika.Optimization.Runtime.complete_if_drained()
     end
 
     state
   end
 
-  # Pause is a dispatch gate, not a cancellation signal. Existing Actors retain their
-  # Backend Sessions and in-flight turns until the campaign is resumed or explicitly stopped.
-  defp campaign_paused?(campaign_id) do
-    case Repo.query!("SELECT status FROM campaigns WHERE id = ?", [campaign_id]).rows do
-      [["paused"]] -> true
-      _ -> false
-    end
+  defp put_actor(state, work, pid) do
+    monitor = Process.monitor(pid)
+    entry = %{work: work, pid: pid, monitor: monitor}
+    %{state | actors: Map.put(state.actors, Work.key(work), entry)}
   end
 
-  defp refresh_actor(pid, module) do
-    if function_exported?(module, :refresh, 1),
-      do: module.refresh(pid),
-      else: {:error, :unsupported}
-  catch
-    :exit, _reason -> {:error, :actor_unavailable}
-  end
-
-  defp stop_actor(pid, module) do
-    if function_exported?(module, :stop, 1),
-      do: module.stop(pid),
-      else: Process.exit(pid, :shutdown)
-  catch
-    :exit, _reason -> :ok
+  defp prune_dead(state) do
+    %{
+      state
+      | actors: Map.reject(state.actors, fn {_key, entry} -> not Process.alive?(entry.pid) end)
+    }
   end
 
   defp pop_monitor(actors, monitor) do
@@ -253,42 +218,30 @@ defmodule Pika.Agent.Symphony do
     end
   end
 
-  defp actor_owned?(work, owners) do
-    owner =
-      Map.get(owners, work.role_id) ||
-        Enum.find_value(owners, :legacy, fn {key, value} ->
-          if is_atom(key) and Atom.to_string(key) == work.role_id, do: value
-        end)
-
-    owner in [:actor, "actor"]
+  defp stop_actor(module, pid) do
+    if function_exported?(module, :stop, 1),
+      do: module.stop(pid),
+      else: Process.exit(pid, :shutdown)
+  catch
+    :exit, _reason -> :ok
   end
 
   defp trigger(state) do
     if state.timer, do: Process.cancel_timer(state.timer)
-    %{state | timer: Process.send_after(self(), :reconcile, 50)}
+    %{state | timer: Process.send_after(self(), :reconcile, 25)}
   end
 
-  defp schedule(state, delay \\ nil)
-  defp schedule(%{interval: :infinity} = state, _delay), do: state
+  defp schedule(state) do
+    cond do
+      state.interval == :infinity -> state
+      state.timer -> state
+      true -> %{state | timer: Process.send_after(self(), :reconcile, state.interval)}
+    end
+  end
 
   defp schedule(state, delay) do
-    if state.timer do
-      state
-    else
-      timeout = if is_integer(delay), do: delay, else: state.interval
-      %{state | timer: Process.send_after(self(), :reconcile, timeout)}
-    end
+    if state.interval == :infinity,
+      do: state,
+      else: %{state | timer: Process.send_after(self(), :reconcile, delay)}
   end
-
-  defp subscribe(campaign_id) do
-    if Process.whereis(Pika.PubSub) do
-      Phoenix.PubSub.subscribe(Pika.PubSub, Pika.Persistence.topic(campaign_id))
-      Phoenix.PubSub.subscribe(Pika.PubSub, "pika:optimization:#{campaign_id}")
-      Phoenix.PubSub.subscribe(Pika.PubSub, Pika.Alignment.Campaign.topic())
-    end
-  end
-
-  defp record_exit(errors, _work, :normal), do: errors
-  defp record_exit(errors, work, reason), do: [{work, reason} | Enum.take(errors, 19)]
-  defp work_key(work), do: {work.role_id, work.kind, work.id, work.campaign_id}
 end

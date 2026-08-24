@@ -28,7 +28,7 @@ defmodule Pika.Optimization.ArtifactStore do
 
     case Repo.query!(
            """
-           SELECT id, owner_type, owner_id FROM artifacts
+           SELECT id, owner_type, owner_id, kind, sha256, byte_size FROM artifacts
            WHERE optimization_id = ? AND relative_path = ?
            """,
            [@optimization_id, relative_path]
@@ -59,21 +59,27 @@ defmodule Pika.Optimization.ArtifactStore do
 
         {:ok, id}
 
-      [[id, ^owner_type, ^owner_id]] ->
-        Repo.query!(
-          "UPDATE artifacts SET kind = ?, sha256 = ?, byte_size = ?, mime_type = ? WHERE id = ?",
-          [kind, receipt.sha256, receipt.byte_size, MIME.from_path(receipt.absolute_path), id]
-        )
-
+      [[id, ^owner_type, ^owner_id, ^kind, sha256, byte_size]]
+      when sha256 == receipt.sha256 and byte_size == receipt.byte_size ->
         {:ok, id}
 
-      [[_id, existing_type, existing_id]] ->
+      [[_id, ^owner_type, ^owner_id, existing_kind, existing_sha, existing_size]] ->
+        {:error,
+         {:artifact_immutable_conflict, relative_path,
+          %{
+            expected: %{kind: existing_kind, sha256: existing_sha, byte_size: existing_size},
+            actual: %{kind: kind, sha256: receipt.sha256, byte_size: receipt.byte_size}
+          }}}
+
+      [[_id, existing_type, existing_id, _kind, _sha, _size]] ->
         {:error, {:artifact_owner_conflict, relative_path, existing_type, existing_id}}
     end
   end
 
   defp workspace_relative(workspace, absolute) do
-    relative = Path.relative_to(Path.expand(absolute), Path.expand(workspace))
+    workspace = Pika.Paths.canonical!(workspace)
+    absolute = Pika.Paths.canonical!(absolute)
+    relative = Path.relative_to(absolute, workspace)
 
     if relative == "." or not String.starts_with?(relative, "..") do
       {:ok, relative}

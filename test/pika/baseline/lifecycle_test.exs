@@ -3,6 +3,7 @@ Code.require_file(Path.expand("../../support/v2_baseline_fixtures.ex", __DIR__))
 defmodule Pika.Baseline.LifecycleTest do
   use ExUnit.Case, async: false
 
+  alias Pika.Agent.{ContextBundle, PromptBuilder, Work}
   alias Pika.Baseline.Lifecycle
   alias Pika.Optimization.{Config, Persistence}
   alias Pika.{Git, Repo}
@@ -158,7 +159,11 @@ defmodule Pika.Baseline.LifecycleTest do
     assert Lifecycle.project_work() == []
   end
 
-  test "rejected Verification preserves its Result for the next Alignment", %{work: work} do
+  test "rejected Verification preserves its Result for the next Alignment", %{
+    config: config,
+    work: work,
+    workspace: workspace
+  } do
     assert {:ok, _draft} = Lifecycle.ensure_draft(work.root)
 
     assert {:ok, _submitted} =
@@ -182,6 +187,39 @@ defmodule Pika.Baseline.LifecycleTest do
              Repo.query!(
                "SELECT COUNT(*) FROM artifacts WHERE kind = 'baseline_verification_result'"
              ).rows
+
+    next_root = Path.join([workspace, "baseline", "revisions", "000001"])
+    File.mkdir_p!(next_root)
+    assert {:ok, next} = Lifecycle.ensure_draft(next_root)
+    session_id = Ecto.UUID.generate()
+
+    assert {:ok, bundle} =
+             ContextBundle.build(
+               config,
+               session_id,
+               "baseline_alignment",
+               :baseline_revision,
+               to_string(next.id)
+             )
+
+    next_work = %Work{
+      role_id: "baseline_alignment",
+      kind: :baseline_revision,
+      id: to_string(next.id)
+    }
+
+    [[failure_relative_path]] =
+      Repo.query!(
+        "SELECT relative_path FROM artifacts WHERE kind = 'baseline_verification_result'"
+      ).rows
+
+    assert File.regular?(Path.join(workspace, failure_relative_path))
+    assert File.regular?(bundle.context_file)
+
+    assert {:ok, prompt} = PromptBuilder.build(config, next_work, bundle)
+    assert prompt.system =~ "开始工作前必须读取以下信息"
+    assert prompt.system =~ "## previous verification 0"
+    assert prompt.system =~ "baseline-verification-result.json"
   end
 
   test "accepted Verification rejects Agent metrics that do not match raw Pairs", %{work: work} do

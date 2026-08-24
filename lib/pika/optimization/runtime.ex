@@ -31,7 +31,10 @@ defmodule Pika.Optimization.Runtime do
   end
 
   @impl true
-  def handle_call(:snapshot, _from, state), do: {:reply, state.optimization, state}
+  def handle_call(:snapshot, _from, state) do
+    optimization = Persistence.current()
+    {:reply, optimization, %{state | optimization: optimization}}
+  end
 
   def handle_call(:pause, _from, state) do
     transition(state, fn optimization ->
@@ -131,6 +134,40 @@ defmodule Pika.Optimization.Runtime do
              """,
              [status, resume_status, stop_reason, now, @optimization_id]
            )
+
+           if status == "stopped" do
+             Repo.query!(
+               """
+               UPDATE attempts
+               SET status = 'cancelled', outcome = 'rejected', failure_reason = ?, updated_at = ?
+               WHERE optimization_id = ? AND status NOT IN ('accepted', 'rejected', 'cancelled')
+               """,
+               [stop_reason || "stop_now", now, @optimization_id]
+             )
+
+             Repo.query!(
+               """
+               UPDATE integration_runs
+               SET status = 'failed', outcome = 'rejected', updated_at = ?
+               WHERE optimization_id = ? AND status NOT IN ('accepted', 'rejected', 'failed')
+               """,
+               [now, @optimization_id]
+             )
+
+             Repo.query!(
+               "UPDATE operation_intents SET state = 'aborted', updated_at = ? WHERE optimization_id = ? AND state = 'pending'",
+               [now, @optimization_id]
+             )
+
+             Repo.query!(
+               """
+               UPDATE agent_sessions
+               SET status = 'interrupted', ended_reason = 'stop_now', ended_at = ?
+               WHERE optimization_id = ? AND status IN ('running', 'awaiting_report', 'awaiting_followup')
+               """,
+               [now, @optimization_id]
+             )
+           end
 
            Repo.query!(
              """

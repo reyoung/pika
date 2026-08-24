@@ -1,50 +1,36 @@
-server:
-  host: 127.0.0.1
-  port: 8080
+version: 2
+repo: /path/to/clean/git/repo
+workspace: /path/to/pika-workspace
 
-backend:
-  type: codex_app_server
-  command:
-    - codex
-    - app-server
-    - --listen
-    - stdio://
-  approval_policy: never
-  sandbox_policy: danger_full_access
-  protocol_config: {}
-
-campaign:
-  plan: false
-  max_attempts: null
-  # New Iteration dispatch pauses once this many completed candidates await Integration.
-  # 0 means wait for every completed candidate to finish Integration before dispatching again.
-  max_unverified_attempts: 0
-  history_n: 10
-  iteration_agents:
-    - name: codex-1
-      backend: codex_app_server
-      reasoning_effort: high
-      approval_policy: never
-      sandbox_policy: danger_full_access
-  integration_agent:
-    name: integration
-    backend: codex_app_server
+agents:
+  baseline_alignment: &writer
+    backend: codex
+    model: gpt-5.6
     reasoning_effort: high
     approval_policy: never
-    sandbox_policy: danger_full_access
-  # Optional read-only AI progress report. Disabled by default.
-  progress_summary:
-    enabled: false
-    interval_minutes: 10
-    name: progress-summary
-    backend: codex_app_server
-    reasoning_effort: medium
-    approval_policy: never
-    sandbox_policy: read_only
-  reference_catalog: []
-  stop_conditions:
-    mode: all_goals
+    sandbox: workspace-write
 
-sync:
-  remote: origin
-  branch: main
+  baseline_verify:
+    <<: *writer
+    max_followups: 8
+
+  iteration:
+    history_limit: 20
+    max_followups: 5
+    max_pending_attempts: 0
+    agents:
+      - <<: *writer
+
+  integration:
+    <<: *writer
+    max_followups: 8
+    regression_feedback_cases: 3
+
+  progress_summary:
+    interval: 5m
+    timezone: Asia/Shanghai
+    backend: codex
+    reasoning_effort: low
+    approval_policy: never
+    sandbox: read-only
+    max_followups: 3

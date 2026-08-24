@@ -52,6 +52,16 @@ defmodule Pika.Baseline.DefinitionTest do
              Definition.validate(root, "baseline-definition.json")
   end
 
+  test "requires the Target manifest to cover every Target file", %{root: root} do
+    File.write!(Path.join(root, "target/unlisted.py"), "hidden dependency\n")
+
+    assert {:error, {:target_manifest_coverage_mismatch, coverage}} =
+             Definition.validate(root, "baseline-definition.json")
+
+    assert coverage.actual == ["target.py", "unlisted.py"]
+    assert coverage.expected == ["target.py"]
+  end
+
   defp write_valid_bundle(root) do
     write_executable(root, "verify_cases.sh")
     write_executable(root, "benchmark_cases.sh")
@@ -147,6 +157,11 @@ defmodule Pika.Baseline.DefinitionTest do
       "cases_path" => "cases.json",
       "metrics_path" => "metrics.json",
       "measurement" => %{"warmup" => 2, "pair_count" => 3, "min_valid_pairs" => 2},
+      "stopping" => %{
+        "mode" => "manual",
+        "max_attempts" => nil,
+        "max_duration_seconds" => nil
+      },
       "smoke_verify_path" => "smoke-verify.json",
       "smoke_benchmark_path" => "smoke-benchmark.jsonl"
     })

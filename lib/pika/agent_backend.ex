@@ -30,7 +30,7 @@ defmodule Pika.AgentBackend do
   @type event_sink :: pid() | (Pika.AgentBackend.Event.t() -> any())
   @type backend :: pid() | GenServer.server()
 
-  @callback start_link(Pika.AgentBackend.Profile.t() | map(), event_sink()) ::
+  @callback start_link(Pika.AgentBackend.LaunchConfig.t() | map(), event_sink()) ::
               GenServer.on_start()
   @callback open_session(
               backend(),
@@ -48,7 +48,7 @@ defmodule Pika.AgentBackend do
   @callback close_session(backend()) :: :ok | {:error, Error.t()}
   @callback capabilities(backend()) :: map()
 
-  @spec start_link(module(), map() | Pika.AgentBackend.Profile.t(), event_sink()) ::
+  @spec start_link(module(), map() | Pika.AgentBackend.LaunchConfig.t(), event_sink()) ::
           {:ok, Handle.t()} | {:error, term()}
   def start_link(module, profile, event_sink) do
     start_result =
