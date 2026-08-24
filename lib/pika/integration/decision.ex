@@ -71,7 +71,10 @@ defmodule Pika.Integration.Decision do
   defp require_judgements(evaluated) do
     missing =
       evaluated
-      |> Enum.filter(&(&1.significant_regression and not &1.critical and is_nil(&1.judgement)))
+      |> Enum.filter(
+        &(&1.role != "guard" and &1.significant_regression and not &1.critical and
+            is_nil(&1.judgement))
+      )
       |> Enum.map(&{&1.case_id, &1.metric_id})
 
     if missing == [], do: :ok, else: {:error, {:regression_judgements_missing, missing}}
@@ -95,6 +98,9 @@ defmodule Pika.Integration.Decision do
   end
 
   defp decide(evaluated, aggregates) do
+    guard_regression =
+      Enum.find(evaluated, &(&1.role == "guard" and &1.significant_regression))
+
     critical_regression = Enum.find(evaluated, &(&1.critical and &1.significant_regression))
 
     agent_regression =
@@ -108,6 +114,10 @@ defmodule Pika.Integration.Decision do
 
     {outcome, reason} =
       cond do
+        guard_regression ->
+          {:rejected,
+           "guard Metric #{guard_regression.metric_id} regressed on Case #{guard_regression.case_id}"}
+
         critical_regression ->
           {:rejected,
            "critical Case #{critical_regression.case_id}/#{critical_regression.metric_id} regressed"}

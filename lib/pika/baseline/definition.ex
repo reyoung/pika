@@ -128,7 +128,12 @@ defmodule Pika.Baseline.Definition do
 
   defp validate_metrics(metrics) do
     ids = Enum.map(metrics, & &1["id"])
-    if Enum.uniq(ids) == ids, do: :ok, else: {:error, :duplicate_metric_ids}
+
+    cond do
+      Enum.uniq(ids) != ids -> {:error, :duplicate_metric_ids}
+      not Enum.any?(metrics, &(&1["role"] == "primary")) -> {:error, :primary_metric_missing}
+      true -> :ok
+    end
   end
 
   defp validate_measurement(%{"pair_count" => pair_count, "min_valid_pairs" => minimum}) do

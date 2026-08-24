@@ -35,6 +35,8 @@ defmodule Pika.Agent.BaselineAlignmentRolePromptTest do
     assert prompt =~ "submit_baseline_definition(manifest_path, idempotency_key)"
     assert prompt =~ "./verify_cases.sh --case-id 0,1,2,3"
     assert prompt =~ "./benchmark_cases.sh --case-id 0,1,2,3"
+    assert prompt =~ "`guard`"
+    assert prompt =~ "任一 Case 超过 Noise Tolerance 的回退都会硬拒绝"
 
     schemas
     |> Map.from_struct()

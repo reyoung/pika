@@ -60,18 +60,72 @@ defmodule Pika.Integration.DecisionTest do
     assert decision.reason =~ ">= 1%"
   end
 
+  test "rejects any guard Metric regression beyond noise without an Agent judgement" do
+    metrics =
+      @metrics ++ [%{"id" => "accuracy", "direction" => "maximize", "role" => "guard"}]
+
+    candidate = [
+      stat(0, 0.90),
+      stat(1, 0.99),
+      stat(0, 1.00, "accuracy"),
+      stat(1, 0.98, "accuracy")
+    ]
+
+    best = best() ++ [best_stat(0, "accuracy"), best_stat(1, "accuracy")]
+
+    assert {:ok, decision} = Decision.evaluate(candidate, best, @cases, metrics, [])
+    assert decision.outcome == :rejected
+    assert decision.reason == "guard Metric accuracy regressed on Case 1"
+    assert Enum.map(decision.weighted_aggregates, & &1.metric_id) == ["latency_us"]
+  end
+
+  test "accepts a guard Metric change within noise when a primary Metric improves" do
+    metrics =
+      @metrics ++ [%{"id" => "accuracy", "direction" => "maximize", "role" => "guard"}]
+
+    candidate = [
+      stat(0, 0.90),
+      stat(1, 0.99),
+      stat(0, 0.997, "accuracy"),
+      stat(1, 1.00, "accuracy")
+    ]
+
+    best = best() ++ [best_stat(0, "accuracy"), best_stat(1, "accuracy")]
+
+    assert {:ok, decision} = Decision.evaluate(candidate, best, @cases, metrics, [])
+    assert decision.outcome == :accepted
+  end
+
+  test "does not count a guard Metric improvement as the required primary improvement" do
+    metrics =
+      @metrics ++ [%{"id" => "accuracy", "direction" => "maximize", "role" => "guard"}]
+
+    candidate = [
+      stat(0, 1.00),
+      stat(1, 1.00),
+      stat(0, 1.02, "accuracy"),
+      stat(1, 1.02, "accuracy")
+    ]
+
+    best = best() ++ [best_stat(0, "accuracy"), best_stat(1, "accuracy")]
+
+    assert {:ok, decision} = Decision.evaluate(candidate, best, @cases, metrics, [])
+    assert decision.outcome == :rejected
+    assert decision.reason == "no primary Case improved beyond noise"
+  end
+
   defp best do
     [best_stat(0), best_stat(1)]
   end
 
-  defp best_stat(case_id) do
-    %{case_id: case_id, metric_id: "latency_us", normalized_ratio: 1.0, noise_tolerance: 0.005}
+  defp best_stat(case_id, metric_id \\ "latency_us") do
+    %{case_id: case_id, metric_id: metric_id, normalized_ratio: 1.0, noise_tolerance: 0.005}
   end
 
-  defp stat(case_id, ratio) do
+  defp stat(case_id, ratio, metric_id \\ "latency_us") do
     %{
       case_id: case_id,
-      metric_id: "latency_us",
+      metric_id: metric_id,
       normalized_ratio: ratio,
       noise_tolerance: 0.005
     }

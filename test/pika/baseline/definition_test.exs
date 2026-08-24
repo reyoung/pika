@@ -52,6 +52,29 @@ defmodule Pika.Baseline.DefinitionTest do
              Definition.validate(root, "baseline-definition.json")
   end
 
+  test "accepts guard Metrics alongside a primary Metric", %{root: root} do
+    metrics = read_json(root, "metrics.json")
+    metrics = put_in(metrics, ["metrics", Access.at(1), "role"], "guard")
+    write_json(root, "metrics.json", metrics)
+
+    assert {:ok, definition} = Definition.validate(root, "baseline-definition.json")
+    assert Enum.map(definition.metrics, & &1["role"]) == ["primary", "guard"]
+  end
+
+  test "requires at least one primary Metric", %{root: root} do
+    metrics = read_json(root, "metrics.json")
+
+    metrics =
+      update_in(metrics, ["metrics"], fn definitions ->
+        Enum.map(definitions, &Map.put(&1, "role", "guard"))
+      end)
+
+    write_json(root, "metrics.json", metrics)
+
+    assert {:error, :primary_metric_missing} =
+             Definition.validate(root, "baseline-definition.json")
+  end
+
   test "requires the Target manifest to cover every Target file", %{root: root} do
     File.write!(Path.join(root, "target/unlisted.py"), "hidden dependency\n")
 

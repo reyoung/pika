@@ -134,6 +134,22 @@ defmodule Pika.Optimization.SchemaValidatorTest do
     assert :ok = SchemaValidator.validate(record, schema(schemas.benchmark_record))
   end
 
+  test "accepts guard as a Metric role", %{schemas: schemas} do
+    metric = %{
+      "schema_version" => 1,
+      "metrics" => [
+        %{
+          "id" => "accuracy",
+          "unit" => "ratio",
+          "direction" => "maximize",
+          "role" => "guard"
+        }
+      ]
+    }
+
+    assert :ok = SchemaValidator.validate(metric, schema(schemas.metrics))
+  end
+
   defp baseline_definition do
     %{
       "schema_version" => 1,

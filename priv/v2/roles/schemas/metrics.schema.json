@@ -14,7 +14,7 @@
           "id": {"type": "string", "minLength": 1},
           "unit": {"type": "string", "minLength": 1},
           "direction": {"enum": ["minimize", "maximize"]},
-          "role": {"enum": ["primary", "informational"]}
+          "role": {"enum": ["primary", "guard", "informational"]}
         },
         "required": ["id", "unit", "direction", "role"],
         "additionalProperties": false

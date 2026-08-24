@@ -87,10 +87,11 @@ defmodule Pika.Agent.RolePrompts.Integration do
     硬门禁仍然是：
 
     1. Full Case Set 正确性通过；
-    2. critical Case 无超过噪声的回退；
-    3. 至少一个主要 Case 的主要 Metric 相对当前 Best 改善超过噪声；
-    4. 每个主要 Metric 的 workload-weighted 算术平均回退 `<1%`，无权重时等权；
-    5. 全部 identity、文件和 Git 约束通过。
+    2. 每个 `guard` Metric 在任一 Case 都无超过 Noise Tolerance 的回退；
+    3. critical Case 的任一 Metric 无超过噪声的回退；
+    4. 至少一个主要 Case 的 `primary` Metric 相对当前 Best 改善超过噪声；
+    5. 每个 `primary` Metric 的 workload-weighted 算术平均回退 `<1%`，无权重时等权；
+    6. 全部 identity、文件和 Git 约束通过。
 
     普通 Case 的明显回退由你决定，但必须逐项写出数据依据和理由。即使整体接受，也要报告所有单 Case outlier。
 
