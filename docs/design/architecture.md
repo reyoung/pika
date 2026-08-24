@@ -132,11 +132,23 @@ Codex 每个 Session 通过进程级 config override 注入 Pika MCP URL、Beare
 ### IntegrationCoordinator
 
 - FIFO 串行处理准备归并的 Attempt。
+- `Pika.Integration.Lifecycle.project/1` 从 SQLite 已提交事实投影唯一的下一步；`execute/3` 以 facts revision 和 idempotency key 校验并提交 typed command。
+- `Pika.Agent.Roles.Integration.Domain` 只适配 MCP 字符串工具、Workspace 路径与 Agent Session identity，不拥有 Integration 状态决策。
 - 原子签发绑定 Backend Session 与进程的 Integration Lease。
 - 检查陈旧 Base，要求 Agent刷新并重新进行正式配对测量。
 - 在 Git mutation 前校验全量正确性、5 Pair Screening、异常组合的 Campaign Spec 正式 Pair 测量和 Full Regression Receipt。
 - 回退候选拒绝并推进 Sampling Revision；通过候选才允许创建 Intent 和调用 `complete_merge`。
 - 在 `complete_merge` 后联合核验 Receipt、SQLite Intent、Git 与全量 Metrics。
+
+Integration 采用三层测试反馈环：
+
+| 层级 | 命令 | 覆盖范围 | 预期用途 |
+|---|---|---|---|
+| Lifecycle | `mix test.integration.lifecycle` | Lease、Refresh、Receipt、Intent、Merge、terminal、stale revision、幂等重放 | 修复状态机/恢复 Bug 时每次修改都跑 |
+| Role contract | `mix test.integration.contract` | Lifecycle 加 MCP Role 投影与协议适配 | 修改工具参数、Completion 或 Role adapter 时跑 |
+| Actor scenario | `mix test.integration.scenario` | Fake Agent、Git、Artifact、Measurement、Coordinator 恢复 | 合并前或修改跨边界流程时跑 |
+
+前两层不启动真实 Code Agent；Lifecycle 测试使用真实 SQLite、脚本化已提交事实，并把 Git/Artifact/Measurement 留给 scenario 层。真实 Backend 只属于显式 conformance/smoke，不作为日常 Integration Bug 的首轮反馈。
 
 ### SyncCoordinator
 

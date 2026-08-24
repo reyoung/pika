@@ -59,17 +59,15 @@ defmodule Pika.Agent.WorkSources.Integration do
   @behaviour Pika.Agent.WorkSource
 
   alias Pika.Agent.Role.Work
-  alias Pika.Agent.Roles.Integration.Domain
+  alias Pika.Integration.Lifecycle
   alias Pika.{IntegrationStore, Repo}
 
   @impl true
   def runnable_work(campaign_id, workspace) do
-    _ = IntegrationStore.repair_legacy_target_gate_rejections(campaign_id)
-
     with status when status not in ~w(paused stopped blocked completed) <-
            campaign_status(campaign_id),
          {:ok, attempt} <- IntegrationStore.queue_head(campaign_id) do
-      case Domain.ensure_recoverable_best(workspace, attempt) do
+      case Lifecycle.ensure_recoverable_best(workspace, attempt) do
         :ok ->
           [
             %Work{
@@ -81,11 +79,32 @@ defmodule Pika.Agent.WorkSources.Integration do
           ]
 
         {:error, reason} ->
-          _ = IntegrationStore.block(campaign_id, attempt.id, reason)
+          _ = block_unrecoverable(campaign_id, attempt, workspace, reason)
           []
       end
     else
       _ -> []
+    end
+  end
+
+  defp block_unrecoverable(campaign_id, attempt, workspace, reason) do
+    identity = %Lifecycle.Identity{
+      campaign_id: campaign_id,
+      attempt_id: attempt.id,
+      session_id: "integration-work-source"
+    }
+
+    with {:ok, projection} <- Lifecycle.project(identity) do
+      Lifecycle.execute(
+        identity,
+        %Lifecycle.Command{
+          operation: :block_integration,
+          facts_revision: projection.revision,
+          idempotency_key: "block-integration-#{attempt.id}-#{projection.revision}",
+          params: %{reason: reason}
+        },
+        workspace
+      )
     end
   end
 

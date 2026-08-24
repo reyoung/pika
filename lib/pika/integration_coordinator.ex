@@ -4,7 +4,7 @@ defmodule Pika.IntegrationCoordinator do
   use GenServer
 
   alias Pika.Agent.{Actor, Directory, Symphony}
-  alias Pika.Agent.Roles.Integration.Domain
+  alias Pika.Integration.Lifecycle
   alias Pika.{AttemptStore, IntegrationStore, IntegrationWorkspace, Repo}
 
   def start_link(opts \\ []) do
@@ -153,13 +153,12 @@ defmodule Pika.IntegrationCoordinator do
     else
       case IntegrationStore.queue_head(state.campaign_id) do
         {:ok, attempt} ->
-          case Domain.ensure_recoverable_best(state.workspace, attempt) do
+          case Lifecycle.ensure_recoverable_best(state.workspace, attempt) do
             :ok ->
               reconcile_actor(%{state | last_error: nil})
 
             {:error, reason} ->
-              _ = IntegrationStore.block(state.campaign_id, attempt.id, reason)
-              %{state | recovery_enabled: false, last_error: inspect(reason)}
+              block_unrecoverable(state, attempt, reason)
           end
 
         {:error, :integration_queue_empty} ->
@@ -169,6 +168,31 @@ defmodule Pika.IntegrationCoordinator do
           %{state | last_error: inspect(reason)}
       end
     end
+  end
+
+  defp block_unrecoverable(state, attempt, reason) do
+    identity = %Lifecycle.Identity{
+      campaign_id: state.campaign_id,
+      attempt_id: attempt.id,
+      session_id: "integration-coordinator"
+    }
+
+    result =
+      with {:ok, projection} <- Lifecycle.project(identity) do
+        Lifecycle.execute(
+          identity,
+          %Lifecycle.Command{
+            operation: :block_integration,
+            facts_revision: projection.revision,
+            idempotency_key: "block-integration-#{attempt.id}-#{projection.revision}",
+            params: %{reason: reason}
+          },
+          state.workspace
+        )
+      end
+
+    last_error = if match?({:ok, _}, result), do: inspect(reason), else: inspect(result)
+    %{state | recovery_enabled: false, last_error: last_error}
   end
 
   defp reconcile_actor(state) do

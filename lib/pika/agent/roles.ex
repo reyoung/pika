@@ -307,6 +307,7 @@ defmodule Pika.Agent.Roles do
     %{
       role_id: prepared.definition.id,
       contract_revision: prepared.definition.contract_revision,
+      facts_revision: prepared.progress.facts_revision,
       session_id: invocation.session_id,
       idempotency_key: invocation.idempotency_key,
       request_sha256: request_sha256,
@@ -319,6 +320,7 @@ defmodule Pika.Agent.Roles do
     %{
       role_id: prepared.definition.id,
       contract_revision: prepared.definition.contract_revision,
+      facts_revision: prepared.progress.facts_revision,
       session_id: session_id,
       workspace: prepared.workspace,
       domain_options: prepared.domain_options

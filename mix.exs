@@ -22,7 +22,14 @@ defmodule Pika.MixProject do
   end
 
   def cli do
-    [preferred_envs: [check: :test]]
+    [
+      preferred_envs: [
+        check: :test,
+        "test.integration.lifecycle": :test,
+        "test.integration.contract": :test,
+        "test.integration.scenario": :test
+      ]
+    ]
   end
 
   defp deps do
@@ -43,6 +50,11 @@ defmodule Pika.MixProject do
   defp aliases do
     [
       "assets.build": ["esbuild default"],
+      "test.integration.lifecycle": ["test test/pika/integration/lifecycle_test.exs"],
+      "test.integration.contract": [
+        "test test/pika/integration/lifecycle_test.exs test/pika/agent/integration_role_test.exs"
+      ],
+      "test.integration.scenario": ["test test/pika/integration_full_regression_test.exs"],
       check: ["format --check-formatted", "compile --warnings-as-errors", "test"]
     ]
   end

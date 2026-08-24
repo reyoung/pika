@@ -61,12 +61,17 @@ npm run dev
 ```bash
 mix deps.get
 mix test
+mix test.integration.lifecycle
+mix test.integration.contract
+mix test.integration.scenario
 mix run scripts/backend_smoke.exs -- \
   --backend all \
   --workspace /tmp/pika-backend-smoke
 ```
 
 Smoke 会验证 Codex App Server、Cursor ACP、真实 HTTP MCP、Skill 可见性、steer、interrupt、子进程隔离与 provider resume 的安全降级，并把脱敏证据写入 `artifacts/backend-conformance/`。
+
+修复 Integration Bug 时优先从 `test.integration.lifecycle` 开始：它用真实 SQLite 覆盖确定性状态投影、stale facts 与幂等重试，但不启动 Code Agent。只有跨 Git、Artifact、Measurement 或 Coordinator 的修改才升级到 `test.integration.scenario`；真实 Backend smoke 留到协议或发布验证。
 
 ## Alignment → Baseline Preview
 

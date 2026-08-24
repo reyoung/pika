@@ -185,7 +185,7 @@ _Avoid_: 固定超时锁、Git lock 文件、Agent 自报状态
 _Avoid_: Iteration Benchmark、合入后复验、自由 Benchmark
 
 **阻塞（Blocked）**：
-系统无法安全恢复 Campaign Best Branch 时的调优任务状态；已有候选可以保存工作，但任何新归并都被禁止。
+系统无法证明 Campaign Best Branch 仍可安全恢复时的调优任务状态；已有候选可以保存工作，但任何新归并都被禁止。能够证明 Campaign Best Branch 未改变的未分类 Integration 错误默认只拒绝对应候选尝试，不得升级为 Blocked。
 _Avoid_: Paused、Stopped、Failed
 
 **中断（Interrupted）**：
