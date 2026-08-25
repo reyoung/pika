@@ -794,12 +794,31 @@ code { color: #8ee8ff; }
 .ops-chat-message header strong { color: #b8c2c8; font-size: 9px; }
 .ops-chat-message header small { color: #58656f; font: 7px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
 .ops-chat-message pre { margin: 0; padding: 7px 10px 10px; overflow: visible; color: #aab6bd; background: transparent; font: 10px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.ops-chat-tool { display: grid; max-width: calc(100% - 39px); grid-template-columns: 20px minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-left: 39px; padding: 8px 9px; border: 1px solid #2c363f; border-radius: 8px; background: #0c1117; }
-.ops-chat-tool > span { display: grid; width: 19px; height: 19px; place-items: center; border-radius: 5px; color: #8da668; background: #c3f53c0b; font-size: 10px; }
-.ops-chat-tool strong, .ops-chat-tool small { display: block; }
-.ops-chat-tool strong { color: #9ca8ae; font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; }
-.ops-chat-tool small { margin-top: 3px; color: #6d7880; font-size: 8px; line-height: 1.4; }
-.ops-chat-tool .pill { padding: 3px 6px; font-size: 6px; }
+.ops-chat-tools { max-width: calc(100% - 39px); margin-left: 39px; overflow: hidden; border: 1px solid #2c363f; border-radius: 9px; background: #0c1117; }
+.ops-chat-tools > summary { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto 16px; gap: 9px; align-items: center; padding: 9px 10px; cursor: pointer; list-style: none; }
+.ops-chat-tools > summary::-webkit-details-marker { display: none; }
+.ops-chat-tools > summary:hover { background: #ffffff04; }
+.ops-chat-tools > summary:focus-visible { outline: 2px solid #6c8247; outline-offset: -2px; }
+.ops-chat-tools-icon, .ops-chat-tool-icon { display: grid; place-items: center; border-radius: 6px; color: #9fb874; background: #c3f53c0b; font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ops-chat-tools-icon { width: 23px; height: 23px; font-size: 13px; }
+.ops-chat-tools summary strong, .ops-chat-tools summary small { display: block; }
+.ops-chat-tools summary strong { color: #aeb8be; font-size: 9px; }
+.ops-chat-tools summary small { margin-top: 3px; color: #65717a; font-size: 8px; }
+.ops-chat-tools summary .pill, .ops-chat-tool-row .pill { padding: 3px 6px; font-size: 6px; }
+.ops-chat-tools[open] > summary { border-bottom: 1px solid #252e37; background: #ffffff03; }
+.ops-chat-tools[open] > summary .ops-chevron { transform: rotate(90deg); }
+.ops-chat-tools-list { display: grid; padding: 4px 10px 7px; }
+.ops-chat-tool-row { display: grid; grid-template-columns: 23px minmax(0, 1fr) auto auto; gap: 9px; align-items: center; min-width: 0; padding: 7px 0; border-bottom: 1px solid #202831; }
+.ops-chat-tool-row:last-child { border-bottom: 0; }
+.ops-chat-tool-icon { width: 22px; height: 22px; }
+.ops-chat-tool-icon.kind-command { color: #9cc6d7; background: #65d9ff0c; }
+.ops-chat-tool-icon.kind-file_change { color: #d4b879; background: #e7b85a0c; }
+.ops-chat-tool-row > div { min-width: 0; }
+.ops-chat-tool-row strong, .ops-chat-tool-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ops-chat-tool-row strong { color: #9ca8ae; font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ops-chat-tool-row small { margin-top: 3px; color: #69747c; font-size: 8px; }
+.ops-chat-tool-output { padding: 4px 7px; border: 1px solid #334852; border-radius: 6px; color: #8fb8c8; background: #102027; font-size: 7px; white-space: nowrap; }
+.ops-chat-tool-output:hover { border-color: #57717b; color: #b3d9e6; background: #162b34; }
 .ops-chat-thinking { display: grid; width: min(72%, 520px); grid-template-columns: 30px minmax(0, 1fr); gap: 9px; align-items: start; }
 .ops-chat-thinking > div { display: flex; min-height: 42px; gap: 12px; align-items: center; padding: 8px 11px; border: 1px solid #29343e; border-radius: 4px 11px 11px; background: #0d131a; }
 .ops-chat-thinking strong { color: #9eaaaf; font-size: 9px; }
@@ -946,7 +965,12 @@ code { color: #8ee8ff; }
   .ops-agent-restart { align-items: stretch; flex-direction: column; }
   .ops-agent-restart .ops-button { width: 100%; }
   .ops-chat-message { width: 96%; }
-  .ops-chat-tool { max-width: calc(100% - 16px); margin-left: 16px; }
+  .ops-chat-tools { max-width: calc(100% - 16px); margin-left: 16px; }
+  .ops-chat-tools > summary { grid-template-columns: 24px minmax(0, 1fr) 16px; }
+  .ops-chat-tools > summary .pill { display: none; }
+  .ops-chat-tool-row { grid-template-columns: 23px minmax(0, 1fr) auto; }
+  .ops-chat-tool-row .pill { display: none; }
+  .ops-chat-tool-output { grid-column: 2 / -1; justify-self: start; }
   .ops-turn-row > summary { grid-template-columns: 38px minmax(0, 1fr) 18px; gap: 8px; }
   .ops-turn-row > summary .pill { display: none; }
   .ops-turn-row > pre { margin-left: 8px; }

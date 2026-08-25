@@ -182,6 +182,37 @@ defmodule Pika.Agent.ActorTest do
                "content" => "Complete final answer."
              }
            ]
+
+    assert [tool] = turn.mcp_calls
+    assert tool["id"] == "command-1"
+    assert tool["kind"] == "command"
+    assert tool["name"] == "Read files"
+    assert tool["status"] == "completed"
+    assert tool["command_ref"] =~ ~r/^[0-9a-f]{64}$/
+  end
+
+  test "steers an active turn and keeps replacement-turn completion isolated", %{
+    opts: opts,
+    work: work
+  } do
+    actor = start_supervised!({Actor, opts})
+    assert_receive {:agent_actor_started, ^work, session_id}, 2_000
+
+    assert :ok = Actor.kickoff(actor, "hold turn open")
+    assert Actor.status(actor).phase == :running
+
+    assert :ok = Actor.kickoff(actor, "replace active turn")
+    Process.sleep(25)
+    assert Actor.status(actor).phase == :running
+
+    [turn] = ConversationJournal.work_turns(work.role_id, work.kind, work.id)
+    assert turn.session_id == session_id
+    assert turn.partial
+
+    assert turn.input_messages == [
+             %{"role" => "user", "content" => "hold turn open"},
+             %{"role" => "user", "content" => "replace active turn"}
+           ]
   end
 
   defp eventually(check, attempts \\ 100)

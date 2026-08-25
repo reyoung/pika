@@ -91,6 +91,18 @@ defmodule PikaWeb.OptimizationLiveTest do
                "status" => "completed"
              })
 
+    command_ref = String.duplicate("a", 64)
+
+    assert {:ok, _turn} =
+             ConversationJournal.upsert_tool_call(turn.id, %{
+               "id" => "command-1",
+               "kind" => "command",
+               "name" => "Read files",
+               "summary" => "sed -n '1,80p' lib/pika.ex",
+               "status" => "completed",
+               "command_ref" => command_ref
+             })
+
     assert {:ok, _turn} = ConversationJournal.finish_turn(turn.id, "completed")
     assert {:ok, _session} = ConversationJournal.interrupt_session(session.id, "test restart")
 
@@ -187,6 +199,13 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert html =~ "Confirm the measurement protocol"
     assert html =~ "I am streaming the current Baseline analysis."
     assert html =~ "get_context"
+    assert html =~ "2 tool calls"
+    assert html =~ ~s(class="ops-chat-tools")
+    assert html =~ ~s(phx-hook="PersistDetails")
+    assert html =~ "Read files"
+    assert html =~ "View output"
+    assert html =~ ~s(phx-click="open_command_console")
+    assert html =~ ~s(phx-value-ref="#{command_ref}")
     assert html =~ ~s(class="ops-chat-message ops-chat-message-user")
     assert html =~ ~s(class="ops-chat-message ops-chat-message-assistant ops-chat-message-)
     assert html =~ ~s(phx-hook="ConversationScroll")
@@ -199,6 +218,7 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert html =~ ~s(phx-disable-with="Restarting…")
     assert html =~ ~s(data-submit-on-enter="true")
     assert html =~ ~s(id="baseline-message-form")
+    assert html =~ ~s(phx-disable-with="Sending…")
     assert html =~ "Enter to send · ⌘/Ctrl/Shift+Enter for a new line"
     assert html =~ ~s(name="answers[target][choice]")
     assert html =~ ~s(name="answers[target][custom]")
@@ -230,6 +250,26 @@ defmodule PikaWeb.OptimizationLiveTest do
              )
 
     assert collapsed_socket.assigns.open_session_id == nil
+
+    assert {:noreply, console_socket} =
+             PikaWeb.OptimizationLive.handle_event(
+               "open_command_console",
+               %{"ref" => command_ref},
+               socket
+             )
+
+    assert console_socket.assigns.command_console_ref == command_ref
+    assert console_socket.assigns.command_console.ref == command_ref
+
+    assert {:noreply, closed_console_socket} =
+             PikaWeb.OptimizationLive.handle_event(
+               "close_command_console",
+               %{},
+               console_socket
+             )
+
+    assert closed_console_socket.assigns.command_console_ref == nil
+    assert closed_console_socket.assigns.command_console == nil
 
     assert {:noreply, answered_socket} =
              PikaWeb.OptimizationLive.handle_event(

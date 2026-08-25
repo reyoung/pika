@@ -130,6 +130,10 @@ defmodule Pika.Agent.ConversationJournal do
   def append_output(turn_id, message) when is_integer(turn_id) and is_map(message),
     do: append(turn_id, "output_messages_json", message)
 
+  @spec append_input(pos_integer(), map()) :: {:ok, map()} | {:error, term()}
+  def append_input(turn_id, message) when is_integer(turn_id) and is_map(message),
+    do: append(turn_id, "input_messages_json", message)
+
   @spec stream_output(pos_integer(), map()) :: {:ok, map()} | {:error, term()}
   def stream_output(turn_id, message) when is_integer(turn_id) and is_map(message) do
     stream_outputs(turn_id, [message])
@@ -153,6 +157,37 @@ defmodule Pika.Agent.ConversationJournal do
   @spec append_mcp_call(pos_integer(), map()) :: {:ok, map()} | {:error, term()}
   def append_mcp_call(turn_id, call) when is_integer(turn_id) and is_map(call),
     do: append(turn_id, "mcp_calls_json", call)
+
+  @spec upsert_tool_call(pos_integer(), map()) :: {:ok, map()} | {:error, term()}
+  def upsert_tool_call(turn_id, %{"id" => call_id} = call)
+      when is_integer(turn_id) and is_binary(call_id) do
+    case turn(turn_id) do
+      nil ->
+        {:error, :turn_not_found}
+
+      %{partial: false} ->
+        {:error, :turn_not_open}
+
+      turn ->
+        {calls, found?} =
+          Enum.map_reduce(turn.mcp_calls, false, fn existing, found? ->
+            if existing["id"] == call_id do
+              {Map.merge(existing, call), true}
+            else
+              {existing, found?}
+            end
+          end)
+
+        calls = if found?, do: calls, else: calls ++ [call]
+
+        Repo.query!("UPDATE conversation_turns SET mcp_calls_json = ? WHERE id = ?", [
+          Jason.encode!(calls),
+          turn_id
+        ])
+
+        {:ok, turn(turn_id)}
+    end
+  end
 
   @spec finish_turn(pos_integer(), String.t()) :: {:ok, map()} | {:error, term()}
   def finish_turn(turn_id, ended_reason) when is_integer(turn_id) and is_binary(ended_reason) do
@@ -442,6 +477,7 @@ defmodule Pika.Agent.ConversationJournal do
     }
   end
 
+  defp column_key("input_messages_json"), do: :input_messages
   defp column_key("output_messages_json"), do: :output_messages
   defp column_key("mcp_calls_json"), do: :mcp_calls
 

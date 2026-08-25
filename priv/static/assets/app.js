@@ -54513,6 +54513,17 @@ removing illegal node: "${("outerHTML" in childNode && childNode.outerHTML || ch
       });
     }
   };
+  Hooks2.PersistDetails = {
+    mounted() {
+      this.wasOpen = this.el.open;
+    },
+    beforeUpdate() {
+      this.wasOpen = this.el.open;
+    },
+    updated() {
+      this.el.open = this.wasOpen;
+    }
+  };
   Hooks2.CommandConsole = {
     mounted() {
       this.output = this.el.querySelector("[data-console-output]");

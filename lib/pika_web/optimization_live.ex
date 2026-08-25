@@ -5,6 +5,7 @@ defmodule PikaWeb.OptimizationLive do
   alias Pika.Attempt.Scheduler
   alias Pika.Baseline.Lifecycle, as: BaselineLifecycle
   alias Pika.Baseline.Questions
+  alias Pika.CommandConsole
   alias Pika.Optimization.{Persistence, Runtime}
   alias Pika.ProgressSummary.Lifecycle, as: ProgressLifecycle
   alias Pika.ProgressSummary.Snapshot
@@ -23,6 +24,8 @@ defmodule PikaWeb.OptimizationLive do
        |> assign(:review_form, to_form(%{"feedback" => ""}, as: :review))
        |> assign(:guidance_form, to_form(%{"body" => ""}, as: :guidance))
        |> assign(:open_session_id, nil)
+       |> assign(:command_console, nil)
+       |> assign(:command_console_ref, nil)
        |> refresh()}
     else
       {:ok, redirect(socket, to: "/")}
@@ -34,6 +37,16 @@ defmodule PikaWeb.OptimizationLive do
     Process.send_after(self(), :refresh, @refresh_ms)
     {:noreply, refresh(socket)}
   end
+
+  def handle_info(
+        {:command_console_event, ref, record},
+        %{assigns: %{command_console_ref: ref, command_console: console}} = socket
+      )
+      when is_map(console) do
+    {:noreply, assign(socket, :command_console, CommandConsole.apply_record(console, record))}
+  end
+
+  def handle_info({:command_console_event, _ref, _record}, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("send_message", %{"message" => %{"body" => body}}, socket) do
@@ -77,6 +90,30 @@ defmodule PikaWeb.OptimizationLive do
         else: session_id
 
     {:noreply, assign(socket, :open_session_id, open_session_id)}
+  end
+
+  def handle_event("open_command_console", %{"ref" => ref}, socket) do
+    case CommandConsole.load(ref) do
+      {:ok, console} ->
+        socket = switch_console_subscription(socket, ref)
+
+        {:noreply,
+         socket
+         |> assign(:command_console_ref, ref)
+         |> assign(:command_console, console)}
+
+      {:error, reason} ->
+        {:noreply, put_result(socket, {:error, reason}, "")}
+    end
+  end
+
+  def handle_event("close_command_console", _params, socket) do
+    socket = switch_console_subscription(socket, nil)
+
+    {:noreply,
+     socket
+     |> assign(:command_console_ref, nil)
+     |> assign(:command_console, nil)}
   end
 
   def handle_event("answer_questions", params, socket) do
@@ -383,16 +420,47 @@ defmodule PikaWeb.OptimizationLive do
                         </div>
                       </article>
 
-                      <div :for={call <- turn.mcp_calls} class="ops-chat-tool">
-                        <span>↳</span>
-                        <div>
-                          <strong>{call["name"] || "MCP tool"}</strong>
-                          <small :if={call["summary"]}>{call["summary"]}</small>
+                      <details
+                        :if={turn.mcp_calls != []}
+                        id={"tool-activity-#{turn.id}"}
+                        class="ops-chat-tools"
+                        phx-hook="PersistDetails"
+                      >
+                        <summary>
+                          <span class="ops-chat-tools-icon">⌕</span>
+                          <div>
+                            <strong>{tool_activity_title(turn.mcp_calls)}</strong>
+                            <small>{tool_activity_meta(turn.mcp_calls)}</small>
+                          </div>
+                          <.pill kind={status_kind(tool_activity_status(turn.mcp_calls))}>
+                            {humanize_status(tool_activity_status(turn.mcp_calls))}
+                          </.pill>
+                          <span class="ops-chevron">›</span>
+                        </summary>
+                        <div class="ops-chat-tools-list">
+                          <article :for={call <- turn.mcp_calls} class="ops-chat-tool-row">
+                            <span class={"ops-chat-tool-icon kind-#{tool_kind(call)}"}>
+                              {tool_icon(call)}
+                            </span>
+                            <div>
+                              <strong>{tool_name(call)}</strong>
+                              <small :if={tool_detail(call)}>{tool_detail(call)}</small>
+                            </div>
+                            <.pill kind={status_kind(tool_call_status(call))}>
+                              {humanize_status(tool_call_status(call))}
+                            </.pill>
+                            <button
+                              :if={call["command_ref"]}
+                              type="button"
+                              class="ops-chat-tool-output"
+                              phx-click="open_command_console"
+                              phx-value-ref={call["command_ref"]}
+                            >
+                              View output
+                            </button>
+                          </article>
                         </div>
-                        <.pill kind={status_kind(call["status"] || "completed")}>
-                          {humanize_status(call["status"] || "completed")}
-                        </.pill>
-                      </div>
+                      </details>
 
                       <article
                         :for={{message, message_index} <- Enum.with_index(turn.output_messages, 1)}
@@ -459,7 +527,13 @@ defmodule PikaWeb.OptimizationLive do
               />
               <div class="ops-form-actions">
                 <span>Enter to send · ⌘/Ctrl/Shift+Enter for a new line</span>
-                <button type="submit" class="ops-button ops-button-primary">Send message</button>
+                <button
+                  type="submit"
+                  class="ops-button ops-button-primary"
+                  phx-disable-with="Sending…"
+                >
+                  Send message
+                </button>
               </div>
             </.form>
 
@@ -610,6 +684,7 @@ defmodule PikaWeb.OptimizationLive do
 
       </div>
     </main>
+    <.command_console console={@command_console} />
     """
   end
 
@@ -781,6 +856,18 @@ defmodule PikaWeb.OptimizationLive do
     end
   end
 
+  defp switch_console_subscription(socket, ref) do
+    previous_ref = socket.assigns[:command_console_ref]
+
+    if connected?(socket) and is_binary(previous_ref) and previous_ref != ref,
+      do: Phoenix.PubSub.unsubscribe(Pika.PubSub, CommandConsole.topic(previous_ref))
+
+    if connected?(socket) and is_binary(ref) and previous_ref != ref,
+      do: Phoenix.PubSub.subscribe(Pika.PubSub, CommandConsole.topic(ref))
+
+    socket
+  end
+
   defp control(socket, callback, success) do
     result = callback.()
     {:noreply, socket |> put_result(result, success) |> refresh()}
@@ -834,6 +921,69 @@ defmodule PikaWeb.OptimizationLive do
   defp streaming_message?(turn, message, index) do
     turn.partial && index == length(turn.output_messages) && message["complete"] != true
   end
+
+  defp tool_activity_title(calls) do
+    names = calls |> Enum.map(&tool_name/1) |> Enum.uniq()
+
+    case names do
+      [name] when length(calls) == 1 -> name
+      [name] -> "#{name} · #{length(calls)}"
+      _names -> "#{length(calls)} tool calls"
+    end
+  end
+
+  defp tool_activity_meta(calls) do
+    counts = Enum.frequencies_by(calls, &tool_call_status/1)
+
+    [
+      count_label(counts["running"], "running"),
+      count_label(counts["completed"], "completed"),
+      count_label(counts["failed"], "failed"),
+      count_label(counts["cancelled"], "cancelled")
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
+  end
+
+  defp count_label(nil, _label), do: nil
+  defp count_label(0, _label), do: nil
+  defp count_label(count, label), do: "#{count} #{label}"
+
+  defp tool_activity_status(calls) do
+    statuses = Enum.map(calls, &tool_call_status/1)
+
+    cond do
+      "running" in statuses -> "running"
+      Enum.any?(statuses, &(&1 in ["failed", "cancelled"])) -> "failed"
+      true -> "completed"
+    end
+  end
+
+  defp tool_call_status(call) do
+    case call["status"] |> to_string() |> Macro.underscore() do
+      status when status in ["running", "in_progress", "started", "pending"] -> "running"
+      status when status in ["failed", "error"] -> "failed"
+      "cancelled" -> "cancelled"
+      _status -> "completed"
+    end
+  end
+
+  defp tool_name(call), do: call["name"] || "Used a tool"
+
+  defp tool_detail(call) do
+    case call["summary"] do
+      summary when is_binary(summary) -> String.slice(summary, 0, 180)
+      _summary -> nil
+    end
+  end
+
+  defp tool_kind(call), do: call["kind"] || "mcp"
+  defp tool_icon(%{"kind" => "command"}), do: ">_"
+  defp tool_icon(%{"kind" => "file_change"}), do: "±"
+  defp tool_icon(%{"kind" => "web_search"}), do: "⌕"
+  defp tool_icon(%{"kind" => "image_view"}), do: "◫"
+  defp tool_icon(%{"kind" => "mcp"}), do: "↳"
+  defp tool_icon(_call), do: "·"
 
   defp session_turns(turns, session_id),
     do: Enum.filter(turns, &(&1.session_id == session_id))

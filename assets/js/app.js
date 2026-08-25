@@ -75,6 +75,18 @@ Hooks.ConversationScroll = {
   }
 }
 
+Hooks.PersistDetails = {
+  mounted() {
+    this.wasOpen = this.el.open
+  },
+  beforeUpdate() {
+    this.wasOpen = this.el.open
+  },
+  updated() {
+    this.el.open = this.wasOpen
+  }
+}
+
 Hooks.CommandConsole = {
   mounted() {
     this.output = this.el.querySelector("[data-console-output]")

@@ -28,35 +28,70 @@ defmodule Pika.Test.FakeAgentBackend do
     Agent.update(server, &%{&1 | turn: turn_id})
     emit(server, :turn_started)
 
-    if input == "emit distinct message items" do
-      emit(server, :message_delta, %{item_id: "message-1", delta: "incomplete first"})
-
-      emit(server, :message_completed, %{
-        item: %{
-          "id" => "message-1",
-          "type" => "agentMessage",
-          "phase" => "commentary",
-          "text" => "Complete first update."
+    case input do
+      "emit distinct message items" ->
+        command = %{
+          "id" => "command-1",
+          "type" => "commandExecution",
+          "command" => "sed -n '1,20p' lib/pika.ex",
+          "status" => "inProgress"
         }
-      })
 
-      emit(server, :message_delta, %{item_id: "message-2", delta: "incomplete final"})
+        emit(server, :tool_started, %{item: command, stage: :started})
 
-      emit(server, :message_completed, %{
-        item: %{
-          "id" => "message-2",
-          "type" => "agentMessage",
-          "phase" => "final_answer",
-          "text" => "Complete final answer."
-        }
-      })
-    else
-      emit(server, :message_delta, %{input: input})
+        emit(server, :message_delta, %{item_id: "message-1", delta: "incomplete first"})
+
+        emit(server, :message_completed, %{
+          item: %{
+            "id" => "message-1",
+            "type" => "agentMessage",
+            "phase" => "commentary",
+            "text" => "Complete first update."
+          }
+        })
+
+        emit(server, :message_delta, %{item_id: "message-2", delta: "incomplete final"})
+
+        emit(server, :message_completed, %{
+          item: %{
+            "id" => "message-2",
+            "type" => "agentMessage",
+            "phase" => "final_answer",
+            "text" => "Complete final answer."
+          }
+        })
+
+        emit(server, :tool_completed, %{
+          item: %{command | "status" => "completed"},
+          stage: :completed
+        })
+
+      "hold turn open" ->
+        :ok
+
+      _input ->
+        emit(server, :message_delta, %{input: input})
     end
 
-    emit(server, :turn_completed, %{status: :completed})
-    Agent.update(server, &%{&1 | turn: nil})
+    if input != "hold turn open" do
+      emit(server, :turn_completed, %{status: :completed})
+      Agent.update(server, &%{&1 | turn: nil})
+    end
+
     {:ok, turn_id}
+  end
+
+  def steer(server, "replace active turn") do
+    case Agent.get(server, & &1.turn) do
+      nil ->
+        {:error, %Error{code: :steer_failed, message: "no active turn"}}
+
+      _old_turn_id ->
+        emit(server, :turn_completed, %{status: :cancelled})
+        new_turn_id = Id.new("turn")
+        Agent.update(server, &%{&1 | turn: new_turn_id})
+        {:ok, new_turn_id}
+    end
   end
 
   def steer(server, _input) do

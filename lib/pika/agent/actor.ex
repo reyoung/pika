@@ -11,6 +11,7 @@ defmodule Pika.Agent.Actor do
     PromptBuilder,
     RecoveryContext,
     SessionBinding,
+    ToolActivity,
     Directory,
     Work,
     WorkProjector,
@@ -57,6 +58,7 @@ defmodule Pika.Agent.Actor do
       directory: Keyword.get(opts, :directory, Directory),
       phase: :preparing,
       turn_db_id: nil,
+      active_provider_turn_id: nil,
       output_messages: [],
       output_flushed_at_ms: nil,
       terminal_called: false,
@@ -93,6 +95,14 @@ defmodule Pika.Agent.Actor do
   def handle_call({:kickoff, message}, _from, %{phase: phase} = state)
       when phase in [:awaiting_user_kickoff, :awaiting_user] and is_binary(message) do
     case start_turn(state, message) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:kickoff, message}, _from, %{phase: :running} = state)
+      when is_binary(message) do
+    case steer_turn(state, message) do
       {:ok, state} -> {:reply, :ok, state}
       {:error, reason, state} -> {:reply, {:error, reason}, state}
     end
@@ -182,6 +192,9 @@ defmodule Pika.Agent.Actor do
           |> maybe_flush_stream_output(true)
 
         {:noreply, state}
+
+      type when type in [:tool_started, :tool_updated, :tool_completed, :file_changed] ->
+        {:noreply, record_tool_activity(state, event)}
 
       :turn_completed ->
         handle_turn_completed(state, event)
@@ -379,11 +392,12 @@ defmodule Pika.Agent.Actor do
            ConversationJournal.start_turn(state.pika_session.id, [
              %{"role" => "user", "content" => prompt}
            ]),
-         {:ok, _provider_turn_id} <- AgentBackend.start_turn(state.handle, prompt) do
+         {:ok, provider_turn_id} <- AgentBackend.start_turn(state.handle, prompt) do
       new_state =
         Map.merge(state, %{
           phase: :running,
           turn_db_id: turn.id,
+          active_provider_turn_id: provider_turn_id,
           output_messages: [],
           terminal_called: false
         })
@@ -394,8 +408,31 @@ defmodule Pika.Agent.Actor do
     end
   end
 
+  defp steer_turn(state, message) do
+    with {:ok, provider_turn_id} <- AgentBackend.steer(state.handle, message),
+         {:ok, _turn} <-
+           ConversationJournal.append_input(state.turn_db_id, %{
+             "role" => "user",
+             "content" => message
+           }) do
+      {:ok, %{state | active_provider_turn_id: provider_turn_id}}
+    else
+      {:error, reason} -> {:error, {:turn_steer_failed, reason}, state}
+    end
+  end
+
+  defp handle_turn_completed(
+         %{active_provider_turn_id: active_turn_id} = state,
+         %{turn_id: completed_turn_id}
+       )
+       when is_binary(active_turn_id) and is_binary(completed_turn_id) and
+              active_turn_id != completed_turn_id do
+    {:noreply, state}
+  end
+
   defp handle_turn_completed(state, _event) do
     state = finish_journal_turn(state, "completed")
+    state = %{state | active_provider_turn_id: nil}
 
     cond do
       state.terminal_called or WorkProjector.terminal?(state.work) ->
@@ -712,6 +749,19 @@ defmodule Pika.Agent.Actor do
 
     _ = ConversationJournal.append_mcp_call(state.turn_db_id, record)
     state
+  end
+
+  defp record_tool_activity(%{turn_db_id: nil} = state, _event), do: state
+
+  defp record_tool_activity(state, event) do
+    case ToolActivity.from_event(event) do
+      {:ok, activity} ->
+        _ = ConversationJournal.upsert_tool_call(state.turn_db_id, activity)
+        state
+
+      :ignore ->
+        state
+    end
   end
 
   defp session_binding(state, opts \\ []) do

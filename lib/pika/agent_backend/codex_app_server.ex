@@ -450,7 +450,11 @@ defmodule Pika.AgentBackend.CodexAppServer do
         {:completed, _} -> :tool_completed
       end
 
-    emit(state, event_type, turn_id: params["turnId"], data: %{item: item})
+    emit(state, event_type,
+      turn_id: params["turnId"],
+      data: %{item: item, stage: stage}
+    )
+
     state
   end
 
