@@ -26,6 +26,7 @@ defmodule PikaWeb.OptimizationLive do
        |> assign(:question_answers, %{})
        |> assign(:question_batch_id, nil)
        |> assign(:open_session_id, nil)
+       |> assign(:session_accordion_initialized?, false)
        |> assign(:baseline_revision_selection, nil)
        |> assign(:command_console, nil)
        |> assign(:command_console_ref, nil)
@@ -80,6 +81,7 @@ defmodule PikaWeb.OptimizationLive do
      socket
      |> put_result(result, "Agent Session 已中断并从 recovery context 重启。")
      |> assign(:open_session_id, nil)
+     |> assign(:session_accordion_initialized?, true)
      |> refresh()}
   end
 
@@ -92,7 +94,10 @@ defmodule PikaWeb.OptimizationLive do
         do: nil,
         else: session_id
 
-    {:noreply, assign(socket, :open_session_id, open_session_id)}
+    {:noreply,
+     socket
+     |> assign(:open_session_id, open_session_id)
+     |> assign(:session_accordion_initialized?, true)}
   end
 
   def handle_event("select_baseline_revision", %{"revision" => revision}, socket) do
@@ -106,6 +111,7 @@ defmodule PikaWeb.OptimizationLive do
      socket
      |> assign(:baseline_revision_selection, selection)
      |> assign(:open_session_id, nil)
+     |> assign(:session_accordion_initialized?, false)
      |> refresh()}
   end
 
@@ -812,10 +818,20 @@ defmodule PikaWeb.OptimizationLive do
   defp assign_open_session(socket, sessions) do
     open_session_id = socket.assigns[:open_session_id]
 
-    if Enum.any?(sessions, &(&1.id == open_session_id)) do
-      socket
-    else
-      assign(socket, :open_session_id, default_open_session_id(sessions))
+    cond do
+      socket.assigns[:session_accordion_initialized?] != true ->
+        socket
+        |> assign(:open_session_id, default_open_session_id(sessions))
+        |> assign(:session_accordion_initialized?, true)
+
+      is_nil(open_session_id) ->
+        socket
+
+      Enum.any?(sessions, &(&1.id == open_session_id)) ->
+        socket
+
+      true ->
+        assign(socket, :open_session_id, default_open_session_id(sessions))
     end
   end
 

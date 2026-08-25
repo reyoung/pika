@@ -284,6 +284,20 @@ defmodule PikaWeb.OptimizationLiveTest do
 
     assert opened_first_socket.assigns.open_session_id == session.id
 
+    opened_first_html =
+      opened_first_socket.assigns
+      |> PikaWeb.OptimizationLive.render()
+      |> Phoenix.HTML.Safe.to_iodata()
+      |> IO.iodata_to_binary()
+
+    assert length(:binary.matches(opened_first_html, ~s(aria-expanded="true"))) == 1
+
+    assert opened_first_html =~
+             ~s(phx-value-session="#{session.id}" aria-expanded="true")
+
+    assert opened_first_html =~
+             ~s(phx-value-session="#{active_session.id}" aria-expanded="false")
+
     assert {:noreply, collapsed_socket} =
              PikaWeb.OptimizationLive.handle_event(
                "toggle_agent_session",
@@ -292,6 +306,19 @@ defmodule PikaWeb.OptimizationLiveTest do
              )
 
     assert collapsed_socket.assigns.open_session_id == nil
+
+    assert {:noreply, refreshed_collapsed_socket} =
+             PikaWeb.OptimizationLive.handle_info(:refresh, collapsed_socket)
+
+    assert refreshed_collapsed_socket.assigns.open_session_id == nil
+
+    refreshed_collapsed_html =
+      refreshed_collapsed_socket.assigns
+      |> PikaWeb.OptimizationLive.render()
+      |> Phoenix.HTML.Safe.to_iodata()
+      |> IO.iodata_to_binary()
+
+    assert length(:binary.matches(refreshed_collapsed_html, ~s(aria-expanded="true"))) == 0
 
     assert {:noreply, console_socket} =
              PikaWeb.OptimizationLive.handle_event(
