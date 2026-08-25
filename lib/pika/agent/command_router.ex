@@ -4,6 +4,7 @@ defmodule Pika.Agent.CommandRouter do
   alias Pika.Agent.{ToolCatalog, SessionBinding}
   alias Pika.Attempt.Lifecycle, as: AttemptLifecycle
   alias Pika.Baseline.Lifecycle, as: BaselineLifecycle
+  alias Pika.Baseline.Questions, as: BaselineQuestions
   alias Pika.Followup.Lifecycle, as: FollowupLifecycle
   alias Pika.Integration.Lifecycle, as: IntegrationLifecycle
   alias Pika.Optimization.{Config, FileContract, OperationReceipts, SchemaValidator}
@@ -135,7 +136,9 @@ defmodule Pika.Agent.CommandRouter do
          _config,
          _opts
        ) do
-    with {:ok, revision} <- baseline_revision(binding.work_id),
+    with {:ok, revision_id} <- integer_id(binding.work_id),
+         {:ok, revision} <- baseline_revision(binding.work_id),
+         :ok <- require_answered_baseline_questions(revision_id),
          do: BaselineLifecycle.submit_definition(revision, binding.work_root, path)
   end
 
@@ -245,6 +248,12 @@ defmodule Pika.Agent.CommandRouter do
         [] -> {:error, {:baseline_revision_not_found, id}}
       end
     end
+  end
+
+  defp require_answered_baseline_questions(revision_id) do
+    if BaselineQuestions.answered_for_revision?(revision_id),
+      do: :ok,
+      else: {:error, :baseline_questions_required}
   end
 
   defp integer_id(value) do

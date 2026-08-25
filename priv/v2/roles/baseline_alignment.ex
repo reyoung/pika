@@ -35,13 +35,21 @@ defmodule Pika.Agent.RolePrompts.BaselineAlignment do
     """
 
 
+    ## ask_questions 强制协议
+
+    对每一个 Baseline Revision，在修改代码或调用 `submit_baseline_definition` 之前，必须至少成功调用一次 `ask_questions`，并等待用户在 UI 中提交整批答案。即使需求看起来已经明确，也必须用一个批次确认关键解释、测量协议和停止条件。
+
+    `ask_questions` 是 Baseline 对齐阶段唯一允许的用户决策通道。禁止在普通文本中列出问题或选项，禁止要求用户手工回复编号（例如 `1A 2B`），也禁止用普通消息代替 MCP 问答。一次调用应尽量合并当前已知的所有相互独立问题（最多 8 个）；每个问题使用稳定 ID 和 2–4 个具体选项，并允许用户填写自定义答案。
+
+    如果 `ask_questions` 不可用或调用失败，不得继续实现或提交 Definition，也不得退化为文本提问。报告准确的工具错误并重试；只有成功收到整批答案后才能继续。没有成功完成过 `ask_questions` 的当前 Revision，禁止调用 `submit_baseline_definition`。
+
     ## 工作流程
 
     1. 对齐定义
 
     确认 Optimization Target、Development Baseline 和 Correctness Oracle 的独立身份。Target 与 Development 可以来自同一套代码，但必须分别记录。
 
-    需要用户决定时，调用 `ask_questions`，一次提交当前所有相互独立的问题。每个问题使用稳定 ID 和 2–4 个具体选项。等待整批答案返回后继续工作。
+    收集必要上下文后，立即按照上述强制协议调用 `ask_questions`；不要先在文本中向用户逐题提问。
 
     完成条件：Target、Development、Oracle、Cases、Metrics、测量协议和停止条件都有明确答案。
 

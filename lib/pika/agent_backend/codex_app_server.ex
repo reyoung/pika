@@ -557,7 +557,9 @@ defmodule Pika.AgentBackend.CodexAppServer do
       "-c",
       "mcp_servers.pika.bearer_token_env_var=\"PIKA_MCP_TOKEN\"",
       "-c",
-      "mcp_servers.pika.required=true"
+      "mcp_servers.pika.required=true",
+      "-c",
+      "mcp_servers.pika.default_tools_approval_mode=\"auto\""
     ]
   end
 

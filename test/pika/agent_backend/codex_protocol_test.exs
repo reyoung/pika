@@ -37,6 +37,10 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
     assert Path.basename(Path.dirname(session.jsonl_path)) == "transport"
     assert_receive {:pika_backend_event, %{type: :session_started}}
 
+    os_pid = Pika.AgentBackend.CodexAppServer.process_os_pid(backend.pid)
+    assert {:ok, cmdline} = File.read("/proc/#{os_pid}/cmdline")
+    assert cmdline =~ "mcp_servers.pika.default_tools_approval_mode=\"auto\""
+
     refute Enum.any?(
              JSONLWriter.replay(session.jsonl_path),
              &(get_in(&1, ["payload", "method"]) == "turn/start")

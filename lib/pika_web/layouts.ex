@@ -16,6 +16,13 @@ defmodule PikaWeb.Layouts do
         <link phx-track-static rel="stylesheet" href="/assets/app.css" />
         <script defer phx-track-static type="text/javascript" src="/assets/app.js"></script>
         <script
+          defer
+          phx-track-static
+          type="text/javascript"
+          src="/assets/keyboard_shortcuts.js"
+        >
+        </script>
+        <script
           :if={Application.get_env(:pika, :dev_reload, false)}
           defer
           type="text/javascript"

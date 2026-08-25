@@ -53,10 +53,19 @@ defmodule Pika.Agent.ActorTest do
     ]
 
     on_exit(fn -> File.rm_rf!(root) end)
-    %{baseline: baseline, directory: directory, opts: opts, work: work, workspace: workspace}
+
+    %{
+      baseline: baseline,
+      directory: directory,
+      draft_id: draft.id,
+      opts: opts,
+      work: work,
+      workspace: workspace
+    }
   end
 
   test "opens a frozen Session, waits for user kickoff, and completes only after terminal MCP", %{
+    draft_id: draft_id,
     opts: opts,
     work: work
   } do
@@ -69,6 +78,8 @@ defmodule Pika.Agent.ActorTest do
 
     assert {:ok, context} = Actor.invoke(actor, "get_context", %{})
     assert context.context_file =~ "/agent-sessions/#{session_id}/context/context.json"
+
+    insert_answered_question_batch(draft_id, session_id)
 
     monitor = Process.monitor(actor)
 
@@ -154,6 +165,37 @@ defmodule Pika.Agent.ActorTest do
     end
   catch
     :exit, _reason -> false
+  end
+
+  defp insert_answered_question_batch(revision_id, session_id) do
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      """
+      INSERT INTO baseline_question_batches(
+        id, optimization_id, baseline_revision_id, session_id, status,
+        questions_json, answers_json, created_at, answered_at
+      ) VALUES (?, 'optimization', ?, ?, 'answered', ?, ?, ?, ?)
+      """,
+      [
+        Ecto.UUID.generate(),
+        revision_id,
+        session_id,
+        Jason.encode!([
+          %{
+            "id" => "measurement",
+            "question" => "确认测量协议？",
+            "options" => [
+              %{"label" => "确认", "description" => "使用当前协议"},
+              %{"label" => "修改", "description" => "提供自定义协议"}
+            ]
+          }
+        ]),
+        Jason.encode!([%{"id" => "measurement", "answer" => "确认"}]),
+        now,
+        now
+      ]
+    )
   end
 
   defp yaml(repo, workspace) do

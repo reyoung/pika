@@ -31,7 +31,10 @@ defmodule Pika.Agent.ToolCatalogTest do
     assert {:ok, tools} = ToolCatalog.for_role("baseline_alignment")
     questions = Enum.find(tools, &(&1["name"] == "ask_questions"))
     items = questions["inputSchema"]["properties"]["questions"]
+    assert questions["description"] =~ "唯一用户决策通道"
+    assert questions["description"] =~ "每个 Revision 提交前必须至少成功调用一次"
     assert items["minItems"] == 1
+    assert items["maxItems"] == 8
     assert items["items"]["properties"]["options"]["minItems"] == 2
     assert items["items"]["properties"]["options"]["maxItems"] == 4
   end

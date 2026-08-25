@@ -7,6 +7,8 @@ defmodule Pika.DevReload do
     "priv/v2/**/*.ex",
     "assets/js/**/*.js",
     "assets/css/**/*.css",
+    "priv/static/assets/dev_reload.js",
+    "priv/static/assets/keyboard_shortcuts.js",
     "priv/static/**/*.svg"
   ]
 

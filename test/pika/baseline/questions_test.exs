@@ -96,7 +96,7 @@ defmodule Pika.Baseline.QuestionsTest do
 
     answers = [
       %{"id" => "target", "answer" => "A"},
-      %{"id" => "metric", "answer" => "延迟"}
+      %{"id" => "metric", "answer" => "P95 延迟，同时记录吞吐", "custom" => true}
     ]
 
     assert {:ok, completed} = Questions.answer(batch.id, answers, server)
@@ -104,6 +104,34 @@ defmodule Pika.Baseline.QuestionsTest do
     assert completed.answers == answers
     assert Task.await(task) == {:ok, answers}
     assert Questions.pending(server) == nil
+  end
+
+  test "cancels a pending batch so an interrupted Session is not left blocked", %{
+    binding: binding,
+    questions: server
+  } do
+    questions = [
+      %{
+        "id" => "target",
+        "question" => "Target 是什么？",
+        "options" => [
+          %{"label" => "A", "description" => "方案 A"},
+          %{"label" => "B", "description" => "方案 B"}
+        ]
+      }
+    ]
+
+    task = Task.async(fn -> Questions.ask(binding, questions, server) end)
+    assert eventually(fn -> Questions.pending(server) != nil end)
+
+    assert :ok = Questions.cancel_session(binding.session_id, server)
+    assert Task.await(task) == {:error, :baseline_questions_cancelled}
+    assert Questions.pending(server) == nil
+
+    assert [["cancelled"]] =
+             Repo.query!(
+               "SELECT status FROM baseline_question_batches ORDER BY created_at DESC LIMIT 1"
+             ).rows
   end
 
   defp eventually(check, attempts \\ 100)

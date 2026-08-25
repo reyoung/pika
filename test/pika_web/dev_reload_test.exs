@@ -37,6 +37,7 @@ defmodule PikaWeb.DevReloadTest do
     conn =
       conn
       |> recycle()
+      |> put_req_header("accept", "application/json")
       |> get("/__pika_reload")
 
     assert %{"fingerprint" => fingerprint} = json_response(conn, 200)

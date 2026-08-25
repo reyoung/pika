@@ -72,10 +72,18 @@ defmodule Pika.Agent.ToolCatalog do
 
     definition(
       "ask_questions",
-      "向用户一次提交一批互相独立的 Baseline 对齐问题，并等待整批答案。",
-      object(%{"questions" => %{"type" => "array", "minItems" => 1, "items" => question}}, [
-        "questions"
-      ])
+      "Baseline Alignment 的唯一用户决策通道。每个 Revision 提交前必须至少成功调用一次；不得用普通文本提问或要求用户手工回复。一次提交当前已知的一批问题（尽量合并，最多 8 个），并等待用户整批选择选项或填写自定义答案。",
+      object(
+        %{
+          "questions" => %{
+            "type" => "array",
+            "minItems" => 1,
+            "maxItems" => 8,
+            "items" => question
+          }
+        },
+        ["questions"]
+      )
     )
   end
 

@@ -5,18 +5,49 @@ defmodule Pika.Test.ProjectedActor do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
   def kickoff(pid, message), do: GenServer.call(pid, {:kickoff, message})
-  def stop(pid), do: GenServer.stop(pid, :normal)
+  def status(pid), do: GenServer.call(pid, :status)
+  def stop(pid), do: GenServer.call(pid, :stop)
 
   @impl true
   def init(opts) do
-    if notify = Keyword.get(opts, :test_notify),
-      do: send(notify, {:projected_actor_started, Keyword.fetch!(opts, :work)})
+    work = Keyword.fetch!(opts, :work)
 
-    {:ok, opts}
+    if notify = Keyword.get(opts, :test_notify),
+      do: send(notify, {:projected_actor_started, work, self()})
+
+    {:ok, session} =
+      Pika.Agent.ConversationJournal.start_session(
+        work.role_id,
+        work.kind,
+        work.id,
+        %{"backend" => "projected_test"},
+        "system",
+        "context"
+      )
+
+    {:ok, %{opts: opts, session_id: session.id, work: work}}
   end
 
   @impl true
-  def handle_call({:kickoff, message}, _from, state), do: {:reply, {:ok, message}, state}
+  def handle_call(:status, _from, state),
+    do: {:reply, %{session_id: state.session_id, work: state.work}, state}
+
+  def handle_call({:kickoff, message}, _from, state) do
+    if notify = Keyword.get(state.opts, :test_notify),
+      do: send(notify, {:projected_actor_kicked_off, state.work, message})
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:stop, _from, state) do
+    {:ok, _session} =
+      Pika.Agent.ConversationJournal.interrupt_session(
+        state.session_id,
+        "projected_actor_stopped"
+      )
+
+    {:stop, :normal, :ok, state}
+  end
 end
 
 defmodule Pika.Agent.SymphonyTest do
@@ -95,15 +126,51 @@ defmodule Pika.Agent.SymphonyTest do
       )
 
     assert :ok = Symphony.reconcile(symphony)
-    assert_receive {:projected_actor_started, first}, 1_000
-    assert_receive {:projected_actor_started, second}, 1_000
+    assert_receive {:projected_actor_started, first, _first_pid}, 1_000
+    assert_receive {:projected_actor_started, second, _second_pid}, 1_000
     assert Enum.sort([first.id, second.id]) == ["1", "2"]
     assert first.role_id == "iteration"
     assert second.role_id == "iteration"
     assert length(Symphony.active(symphony)) == 2
 
     assert :ok = Symphony.reconcile(symphony)
-    refute_receive {:projected_actor_started, _work}, 100
+    refute_receive {:projected_actor_started, _work, _pid}, 100
+  end
+
+  test "interrupts an active Session, starts a replacement, and resumes from recovery", %{
+    actor_supervisor: actor_supervisor,
+    directory: directory,
+    workspace: workspace
+  } do
+    symphony =
+      start_supervised!(
+        {Symphony,
+         name: nil,
+         workspace: workspace,
+         directory: directory,
+         actor_supervisor: actor_supervisor,
+         actor_module: Pika.Test.ProjectedActor,
+         actor_opts: [test_notify: self()],
+         reconcile_interval_ms: :infinity}
+      )
+
+    assert :ok = Symphony.reconcile(symphony)
+    assert_receive {:projected_actor_started, first, first_pid}, 1_000
+    assert_receive {:projected_actor_started, _second, _second_pid}, 1_000
+
+    %{session_id: session_id} = Pika.Test.ProjectedActor.status(first_pid)
+    assert :ok = Symphony.restart_session(session_id, symphony)
+
+    assert_receive {:projected_actor_started, restarted, restarted_pid}, 1_000
+    assert restarted.id == first.id
+    refute restarted_pid == first_pid
+    refute Process.alive?(first_pid)
+
+    assert_receive {:projected_actor_kicked_off, ^restarted, message}, 1_000
+    assert message =~ "recovery context"
+    assert message =~ "ask_questions"
+
+    assert {:error, :session_not_active} = Symphony.restart_session(session_id, symphony)
   end
 
   defp yaml(repo, workspace) do

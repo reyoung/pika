@@ -130,6 +130,21 @@ defmodule Pika.Agent.ConversationJournal do
   def append_output(turn_id, message) when is_integer(turn_id) and is_map(message),
     do: append(turn_id, "output_messages_json", message)
 
+  @spec stream_output(pos_integer(), map()) :: {:ok, map()} | {:error, term()}
+  def stream_output(turn_id, message) when is_integer(turn_id) and is_map(message) do
+    case Repo.query!(
+           """
+           UPDATE conversation_turns
+           SET output_messages_json = ?
+           WHERE id = ? AND partial = 1
+           """,
+           [Jason.encode!([message]), turn_id]
+         ).num_rows do
+      1 -> {:ok, turn(turn_id)}
+      0 -> {:error, :turn_not_open}
+    end
+  end
+
   @spec append_mcp_call(pos_integer(), map()) :: {:ok, map()} | {:error, term()}
   def append_mcp_call(turn_id, call) when is_integer(turn_id) and is_map(call),
     do: append(turn_id, "mcp_calls_json", call)
@@ -266,6 +281,22 @@ defmodule Pika.Agent.ConversationJournal do
       [@optimization_id, role, to_string(work_kind), work_id]
     ).rows
     |> Enum.map(&turn/1)
+  end
+
+  @spec work_sessions(String.t(), atom() | String.t(), String.t()) :: [map()]
+  def work_sessions(role, work_kind, work_id) do
+    Repo.query!(
+      """
+      SELECT id, role, work_kind, work_id, session_sequence, backend_config_json,
+             system_prompt_sha256, context_sha256, provider_session_id, status,
+             recovery_sequence, ended_reason, started_at, ended_at
+      FROM agent_sessions
+      WHERE optimization_id = ? AND role = ? AND work_kind = ? AND work_id = ?
+      ORDER BY session_sequence
+      """,
+      [@optimization_id, role, to_string(work_kind), work_id]
+    ).rows
+    |> Enum.map(&session_row/1)
   end
 
   @spec session(String.t()) :: map() | nil

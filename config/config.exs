@@ -20,7 +20,7 @@ config :esbuild,
 
 config :pika, PikaWeb.Endpoint,
   adapter: Bandit.PhoenixAdapter,
-  check_origin: ["//21.6.66.127:8081"],
+  check_origin: :conn,
   http: [ip: {127, 0, 0, 1}, port: 0],
   live_view: [signing_salt: "pika-preview-live"],
   pubsub_server: Pika.PubSub,

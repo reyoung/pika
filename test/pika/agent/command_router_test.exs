@@ -49,8 +49,28 @@ defmodule Pika.Agent.CommandRouterTest do
       work_root: baseline.root
     }
 
+    insert_answered_question_batch(draft.id, binding.session_id)
+
     on_exit(fn -> File.rm_rf!(root) end)
     %{baseline: baseline, binding: binding, config: config}
+  end
+
+  test "requires an answered ask_questions batch before definition submission", %{
+    binding: binding,
+    config: config
+  } do
+    Repo.query!(
+      "DELETE FROM baseline_question_batches WHERE baseline_revision_id = ?",
+      [String.to_integer(binding.work_id)]
+    )
+
+    args = %{
+      "definition_path" => "baseline-definition.json",
+      "idempotency_key" => "submit-without-questions"
+    }
+
+    assert {:error, :baseline_questions_required} =
+             CommandRouter.invoke(binding, "submit_baseline_definition", args, config)
   end
 
   test "authorizes get_context and ask_questions from the frozen binding", %{
@@ -163,5 +183,36 @@ defmodule Pika.Agent.CommandRouterTest do
         approval_policy: never
         sandbox: workspace-write
     """
+  end
+
+  defp insert_answered_question_batch(revision_id, session_id) do
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      """
+      INSERT INTO baseline_question_batches(
+        id, optimization_id, baseline_revision_id, session_id, status,
+        questions_json, answers_json, created_at, answered_at
+      ) VALUES (?, 'optimization', ?, ?, 'answered', ?, ?, ?, ?)
+      """,
+      [
+        Ecto.UUID.generate(),
+        revision_id,
+        session_id,
+        Jason.encode!([
+          %{
+            "id" => "measurement",
+            "question" => "确认测量协议？",
+            "options" => [
+              %{"label" => "确认", "description" => "使用当前协议"},
+              %{"label" => "修改", "description" => "提供自定义协议"}
+            ]
+          }
+        ]),
+        Jason.encode!([%{"id" => "measurement", "answer" => "确认"}]),
+        now,
+        now
+      ]
+    )
   end
 end

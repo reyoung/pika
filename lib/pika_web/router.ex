@@ -16,12 +16,22 @@ defmodule PikaWeb.Router do
     plug(PikaWeb.APIAuth)
   end
 
+  pipeline :session_json do
+    plug(:accepts, ["json"])
+    plug(:fetch_session)
+    plug(PikaWeb.EntryAuth)
+  end
+
   scope "/" do
     pipe_through(:browser)
     get("/", PikaWeb.RootController, :index)
-    get("/__pika_reload", PikaWeb.DevReloadController, :show)
     get("/alignment", PikaWeb.RootController, :alignment)
     get("/control", PikaWeb.RootController, :control)
+  end
+
+  scope "/" do
+    pipe_through(:session_json)
+    get("/__pika_reload", PikaWeb.DevReloadController, :show)
   end
 
   scope "/api", PikaWeb do

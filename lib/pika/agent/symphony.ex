@@ -3,9 +3,14 @@ defmodule Pika.Agent.Symphony do
 
   use GenServer
 
-  alias Pika.Agent.{Actor, Directory, Work, WorkProjector}
+  alias Pika.Agent.{Actor, ConversationJournal, Directory, Work, WorkProjector}
+  alias Pika.Baseline.Questions
   alias Pika.Optimization.{RoleRegistry, RuntimeConfig}
   alias Pika.Optimization.Persistence
+
+  @manual_restart_message """
+  这是用户触发的手动重启。请读取 recovery context，继续当前工作，不要重复已经完成的步骤。需要用户决定时，使用 ask_questions 一次批量提交当前所有相互独立的问题。
+  """
 
   def start_link(opts \\ []) do
     case Keyword.get(opts, :name, __MODULE__) do
@@ -19,6 +24,10 @@ defmodule Pika.Agent.Symphony do
 
   def kickoff(role_id, work_id, message, server \\ __MODULE__) do
     GenServer.call(server, {:kickoff, role_id, work_id, message}, :infinity)
+  end
+
+  def restart_session(session_id, server \\ __MODULE__) when is_binary(session_id) do
+    GenServer.call(server, {:restart_session, session_id}, :infinity)
   end
 
   @impl true
@@ -69,6 +78,31 @@ defmodule Pika.Agent.Symphony do
       if actor, do: state.actor_module.kickoff(actor, message), else: {:error, :work_not_active}
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:restart_session, session_id}, _from, state) do
+    case find_session_actor(state, session_id) do
+      {key, entry} ->
+        Process.demonitor(entry.monitor, [:flush])
+        :ok = cancel_pending_questions(session_id)
+        :ok = stop_actor(state.actor_module, entry.pid)
+
+        state =
+          state
+          |> Map.update!(:actors, &Map.delete(&1, key))
+          |> do_reconcile()
+
+        reply =
+          case state.actors[key] do
+            %{pid: pid} -> state.actor_module.kickoff(pid, String.trim(@manual_restart_message))
+            nil -> {:error, :session_restart_not_runnable}
+          end
+
+        {:reply, reply, state}
+
+      nil ->
+        {:reply, {:error, :session_not_active}, state}
+    end
   end
 
   @impl true
@@ -216,6 +250,26 @@ defmodule Pika.Agent.Symphony do
       {key, entry} -> {entry, Map.delete(actors, key)}
       nil -> {nil, actors}
     end
+  end
+
+  defp find_session_actor(state, session_id) do
+    case ConversationJournal.session(session_id) do
+      %{status: status, role: role, work_kind: work_kind, work_id: work_id}
+      when status in ["running", "awaiting_report", "awaiting_followup"] ->
+        Enum.find(state.actors, fn {_key, entry} ->
+          entry.work.role_id == role and to_string(entry.work.kind) == work_kind and
+            entry.work.id == work_id
+        end)
+
+      _other ->
+        nil
+    end
+  end
+
+  defp cancel_pending_questions(session_id) do
+    if Process.whereis(Questions), do: Questions.cancel_session(session_id), else: :ok
+  catch
+    :exit, _reason -> :ok
   end
 
   defp stop_actor(module, pid) do

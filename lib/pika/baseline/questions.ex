@@ -24,6 +24,25 @@ defmodule Pika.Baseline.Questions do
   def answer(batch_id, answers, server \\ __MODULE__),
     do: GenServer.call(server, {:answer, batch_id, answers})
 
+  def cancel_session(session_id, server \\ __MODULE__) when is_binary(session_id),
+    do: GenServer.call(server, {:cancel_session, session_id})
+
+  @spec answered_for_revision?(pos_integer()) :: boolean()
+  def answered_for_revision?(baseline_revision_id)
+      when is_integer(baseline_revision_id) and baseline_revision_id > 0 do
+    case Repo.query!(
+           """
+           SELECT 1 FROM baseline_question_batches
+           WHERE optimization_id = ? AND baseline_revision_id = ? AND status = 'answered'
+           LIMIT 1
+           """,
+           [@optimization_id, baseline_revision_id]
+         ).rows do
+      [[1]] -> true
+      [] -> false
+    end
+  end
+
   @impl true
   def init(_state) do
     cancel_orphaned_pending()
@@ -57,6 +76,27 @@ defmodule Pika.Baseline.Questions do
       end
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:cancel_session, session_id}, _from, state) do
+    case latest_pending() do
+      %{session_id: ^session_id} = batch ->
+        with {:ok, _cancelled} <- cancel_batch(batch, "session_restarted") do
+          case Map.pop(state.waiters, batch.id) do
+            {nil, waiters} ->
+              {:reply, :ok, %{state | waiters: waiters}}
+
+            {from, waiters} ->
+              GenServer.reply(from, {:error, :baseline_questions_cancelled})
+              {:reply, :ok, %{state | waiters: waiters}}
+          end
+        else
+          {:error, reason} -> {:reply, {:error, reason}, state}
+        end
+
+      _other ->
+        {:reply, :ok, state}
     end
   end
 
@@ -132,6 +172,27 @@ defmodule Pika.Baseline.Questions do
          end) do
       {:ok, completed} -> {:ok, completed}
       {:error, reason} -> {:error, {:baseline_answers_failed, reason}}
+    end
+  end
+
+  defp cancel_batch(batch, reason) do
+    now = now_us()
+
+    case Repo.transaction(fn ->
+           Repo.query!(
+             """
+             UPDATE baseline_question_batches
+             SET status = 'cancelled'
+             WHERE id = ? AND status = 'pending'
+             """,
+             [batch.id]
+           )
+
+           append_event(batch.id, "baseline_questions_cancelled", %{reason: reason}, now)
+           fetch!(batch.id)
+         end) do
+      {:ok, cancelled} -> {:ok, cancelled}
+      {:error, error} -> {:error, {:baseline_questions_cancel_failed, error}}
     end
   end
 

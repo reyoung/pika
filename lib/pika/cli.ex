@@ -323,7 +323,7 @@ defmodule Pika.CLI do
 
       watchers =
         if reload? do
-          [esbuild: {Esbuild, :install_and_run, [:default, ~w(--sourcemap=inline --watch)]}]
+          [esbuild: {Esbuild, :install_and_run, [:default, ~w(--watch)]}]
         else
           []
         end
@@ -333,7 +333,6 @@ defmodule Pika.CLI do
         PikaWeb.Endpoint,
         Keyword.merge(current,
           server: true,
-          code_reloader: reload?,
           watchers: watchers,
           http: [ip: ip, port: port],
           url: [host: host, port: port]

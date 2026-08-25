@@ -22,6 +22,8 @@ defmodule Pika.Agent.Actor do
   alias Pika.Optimization.{RoleRegistry, RuntimeConfig}
   alias Pika.ProgressSummary.Lifecycle, as: ProgressSummaryLifecycle
 
+  @stream_flush_ms 100
+
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
   def invoke(actor, operation, arguments),
@@ -56,6 +58,7 @@ defmodule Pika.Agent.Actor do
       phase: :preparing,
       turn_db_id: nil,
       output: "",
+      output_flushed_at_ms: nil,
       terminal_called: false,
       active_followup_request_id: nil,
       closed?: false
@@ -164,7 +167,13 @@ defmodule Pika.Agent.Actor do
     case event.type do
       :message_delta ->
         delta = event.data[:delta] || event.data["delta"] || ""
-        {:noreply, %{state | output: state.output <> to_string(delta)}}
+
+        state =
+          state
+          |> Map.update!(:output, &(&1 <> to_string(delta)))
+          |> maybe_flush_stream_output()
+
+        {:noreply, state}
 
       :turn_completed ->
         handle_turn_completed(state, event)
@@ -363,14 +372,15 @@ defmodule Pika.Agent.Actor do
              %{"role" => "user", "content" => prompt}
            ]),
          {:ok, _provider_turn_id} <- AgentBackend.start_turn(state.handle, prompt) do
-      {:ok,
-       %{
-         state
-         | phase: :running,
-           turn_db_id: turn.id,
-           output: "",
-           terminal_called: false
-       }}
+      new_state = %{
+        state
+        | phase: :running,
+          turn_db_id: turn.id,
+          output: "",
+          terminal_called: false
+      }
+
+      {:ok, Map.put(new_state, :output_flushed_at_ms, nil)}
     else
       {:error, reason} -> {:error, {:turn_start_failed, reason}, state}
     end
@@ -571,16 +581,40 @@ defmodule Pika.Agent.Actor do
   defp finish_journal_turn(%{turn_db_id: nil} = state, _reason), do: state
 
   defp finish_journal_turn(state, reason) do
-    if String.trim(state.output) != "" do
+    state = maybe_flush_stream_output(state, true)
+
+    _ = ConversationJournal.finish_turn(state.turn_db_id, reason)
+
+    state
+    |> Map.merge(%{turn_db_id: nil, output: ""})
+    |> Map.put(:output_flushed_at_ms, nil)
+  end
+
+  defp maybe_flush_stream_output(state, force? \\ false)
+
+  defp maybe_flush_stream_output(%{turn_db_id: nil} = state, _force?), do: state
+
+  defp maybe_flush_stream_output(%{output: output} = state, _force?)
+       when output == "",
+       do: state
+
+  defp maybe_flush_stream_output(state, force?) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    output_flushed_at_ms = Map.get(state, :output_flushed_at_ms)
+
+    if force? or is_nil(output_flushed_at_ms) or
+         now_ms - output_flushed_at_ms >= @stream_flush_ms do
       _ =
-        ConversationJournal.append_output(state.turn_db_id, %{
+        ConversationJournal.stream_output(state.turn_db_id, %{
           "role" => "assistant",
           "content" => state.output
         })
-    end
 
-    _ = ConversationJournal.finish_turn(state.turn_db_id, reason)
-    %{state | turn_db_id: nil, output: ""}
+      Map.put(state, :output_flushed_at_ms, now_ms)
+    else
+      state
+    end
   end
 
   defp record_mcp(%{turn_db_id: nil} = state, _operation, _result), do: state
