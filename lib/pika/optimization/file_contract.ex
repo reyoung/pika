@@ -64,8 +64,9 @@ defmodule Pika.Optimization.FileContract do
   end
 
   @spec resolve(Path.t(), Path.t()) :: {:ok, Path.t(), Path.t()} | {:error, term()}
-  def resolve(root, relative_path) when is_binary(root) and is_binary(relative_path) do
+  def resolve(root, path) when is_binary(root) and is_binary(path) do
     with {:ok, canonical_root} <- Paths.canonical(root),
+         {:ok, relative_path} <- relative_path(canonical_root, path),
          :ok <- validate_relative(relative_path),
          :ok <- reject_symlink_components(canonical_root, Path.split(relative_path)) do
       {:ok, Path.join(canonical_root, relative_path), canonical_root}
@@ -131,6 +132,17 @@ defmodule Pika.Optimization.FileContract do
 
       true ->
         :ok
+    end
+  end
+
+  defp relative_path(root, path) do
+    if Path.type(path) == :absolute do
+      path
+      |> Path.expand()
+      |> Path.relative_to(root)
+      |> then(&{:ok, &1})
+    else
+      {:ok, path}
     end
   end
 

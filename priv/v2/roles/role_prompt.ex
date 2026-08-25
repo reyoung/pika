@@ -13,9 +13,14 @@ defmodule Pika.Agent.RolePrompt.Section do
   alias Pika.Agent.RolePrompt.FileRef
 
   @enforce_keys [:title, :files]
-  defstruct @enforce_keys ++ [required?: false]
+  defstruct @enforce_keys ++ [required?: false, content: nil]
 
-  @type t :: %__MODULE__{title: String.t(), files: [FileRef.t()], required?: boolean()}
+  @type t :: %__MODULE__{
+          title: String.t(),
+          files: [FileRef.t()],
+          required?: boolean(),
+          content: String.t() | nil
+        }
 end
 
 defmodule Pika.Agent.RolePrompt.Sections do
@@ -46,20 +51,30 @@ defmodule Pika.Agent.RolePrompt.Sections do
 
   defp render_group(sections, lead) do
     rendered =
-      Enum.map_join(sections, "\n\n", fn %Section{title: title, files: files} ->
+      Enum.map_join(sections, "\n\n", fn %Section{
+                                           title: title,
+                                           files: files,
+                                           content: content
+                                         } ->
         items =
           Enum.map_join(files, "\n", fn %FileRef{label: label, path: path} ->
             "- #{label}：[#{Path.basename(path)}](<#{path}>)"
           end)
 
-        "## #{title}\n\n#{items}"
+        ["## #{title}\n\n", items, render_content(content)]
       end)
 
     "\n\n" <> lead <> "\n\n" <> rendered
   end
 
-  defp valid_section?(%Section{title: title, files: files, required?: required?}) do
+  defp valid_section?(%Section{
+         title: title,
+         files: files,
+         required?: required?,
+         content: content
+       }) do
     is_binary(title) and String.trim(title) != "" and files != [] and is_boolean(required?) and
+      (is_nil(content) or (is_binary(content) and String.trim(content) != "")) and
       Enum.all?(files, fn
         %FileRef{label: label, path: path, kind: kind} ->
           is_binary(label) and String.trim(label) != "" and valid_path?(path, kind)
@@ -74,6 +89,9 @@ defmodule Pika.Agent.RolePrompt.Sections do
   defp valid_path?(path, :file), do: File.regular?(path)
   defp valid_path?(path, :directory), do: File.dir?(path)
   defp valid_path?(_path, _kind), do: false
+
+  defp render_content(nil), do: ""
+  defp render_content(content), do: "\n\n" <> content
 end
 
 defmodule Pika.Agent.RolePrompt.Schemas do

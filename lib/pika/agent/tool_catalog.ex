@@ -162,5 +162,11 @@ defmodule Pika.Agent.ToolCatalog do
     }
   end
 
-  defp path, do: %{"type" => "string", "minLength" => 1}
+  defp path do
+    %{
+      "type" => "string",
+      "minLength" => 1,
+      "description" => "文件路径。可使用相对于当前 Work Root 的路径，或位于该 Work Root 内的绝对路径；禁止访问 Work Root 外的文件。"
+    }
+  end
 end

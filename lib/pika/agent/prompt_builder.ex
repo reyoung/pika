@@ -83,8 +83,13 @@ defmodule Pika.Agent.PromptBuilder do
   defp system_prompt(_config, work, _context, _sections),
     do: {:error, {:unsupported_prompt_work, work.role_id, work.kind}}
 
-  defp activation(_config, %Work{role_id: "baseline_alignment"}, _context, []),
-    do: {:ok, :await_user_kickoff}
+  defp activation(_config, %Work{role_id: "baseline_alignment"}, context, []) do
+    if verification_rejected?() do
+      {:ok, {:start_turn, verification_rejection_prompt(context)}}
+    else
+      {:ok, :await_user_kickoff}
+    end
+  end
 
   defp activation(
          _config,
@@ -92,9 +97,16 @@ defmodule Pika.Agent.PromptBuilder do
          context,
          recoveries
        ) do
-    if alignment_started?(work_id),
-      do: {:ok, {:start_turn, recovery_prompt(context, recoveries)}},
-      else: {:ok, :await_user_kickoff}
+    cond do
+      alignment_started?(work_id) ->
+        {:ok, {:start_turn, recovery_prompt(context, recoveries)}}
+
+      verification_rejected?() ->
+        {:ok, {:start_turn, verification_rejection_prompt(context)}}
+
+      true ->
+        {:ok, :await_user_kickoff}
+    end
   end
 
   defp activation(_config, %Work{role_id: "iteration", id: id}, context, []) do
@@ -148,17 +160,45 @@ defmodule Pika.Agent.PromptBuilder do
     """).rows
     |> Enum.with_index()
     |> Enum.map(fn {[relative_path], index} ->
+      absolute_path = Path.join(workspace, relative_path)
+
       %Section{
         title: "previous verification #{index}",
         required?: true,
         files: [
           %FileRef{
             label: "失败的 Baseline Verification Result",
-            path: Path.join(workspace, relative_path)
+            path: absolute_path
           }
-        ]
+        ],
+        content: verification_failure_content(absolute_path)
       }
     end)
+  end
+
+  defp verification_rejected? do
+    Repo.query!("""
+    SELECT 1
+    FROM baseline_verifications
+    WHERE optimization_id = 'optimization' AND outcome = 'definition_rejected'
+    LIMIT 1
+    """).rows != []
+  end
+
+  defp verification_failure_content(path) do
+    with {:ok, contents} <- File.read(path),
+         {:ok, result} <- Jason.decode(contents) do
+      feedback = %{
+        "summary" => result["summary"],
+        "failure_kind" => get_in(result, ["details", "failure_kind"]),
+        "reason" => get_in(result, ["details", "reason"]),
+        "requested_changes" => get_in(result, ["details", "requested_changes"])
+      }
+
+      "上一轮 Baseline Verify 的拒绝反馈如下。新 Revision 必须逐项处理，不能原样重交：\n\n```json\n#{Jason.encode!(feedback, pretty: true)}\n```"
+    else
+      _error -> "必须读取并处理上一轮 Baseline Verify 的完整拒绝结果，不能原样重交。"
+    end
   end
 
   defp initial_prompt(role, context) do
@@ -169,6 +209,10 @@ defmodule Pika.Agent.PromptBuilder do
     latest = List.last(recoveries)
 
     "这是新的 Backend Session，不使用 provider resume。先读取 Context Bundle #{context}，再读取最新恢复历史 #{latest.messages_file} 和状态 #{latest.state_file}；保留并检查当前 Git 现场，然后继续缺少的终态操作。"
+  end
+
+  defp verification_rejection_prompt(context) do
+    "上一轮 Baseline Verify 已拒绝 Definition。拒绝原因和 requested_changes 已注入 System Prompt；先读取 Context Bundle #{context} 和失败结果，逐项修订，并按协议调用 ask_questions。"
   end
 
   defp stale_refresh_prompt(attempt_id, context) do

@@ -102,21 +102,24 @@ defmodule Pika.Baseline.Lifecycle do
 
   @spec latest_revision() :: map() | nil
   def latest_revision do
-    case Repo.query!(
-           """
-           SELECT id, revision, status, work_relative_path, definition_artifact_id,
-                  definition_sha256, dependencies_sha256, development_sha,
-                  target_snapshot_id, review_feedback, terminal_reason,
-                  inserted_at, updated_at
-           FROM baseline_revisions
-           WHERE optimization_id = ?
-           ORDER BY revision DESC LIMIT 1
-           """,
-           [@optimization_id]
-         ).rows do
-      [row] -> baseline_revision(row)
-      [] -> nil
-    end
+    revisions() |> List.last()
+  end
+
+  @spec revisions() :: [map()]
+  def revisions do
+    Repo.query!(
+      """
+      SELECT id, revision, status, work_relative_path, definition_artifact_id,
+             definition_sha256, dependencies_sha256, development_sha,
+             target_snapshot_id, review_feedback, terminal_reason,
+             inserted_at, updated_at
+      FROM baseline_revisions
+      WHERE optimization_id = ?
+      ORDER BY revision
+      """,
+      [@optimization_id]
+    ).rows
+    |> Enum.map(&baseline_revision/1)
   end
 
   @spec project_work() :: [map()]
@@ -606,7 +609,8 @@ defmodule Pika.Baseline.Lifecycle do
 
   defp validate_result_file(work_root, result, key, schema_path, :json) do
     with {:ok, file} <- result_file(result, key),
-         {:ok, value, receipt} <- FileContract.validate_json(work_root, file["path"], schema_path),
+         {:ok, value, receipt} <-
+           FileContract.validate_json(work_root, file["path"], schema_path),
          :ok <- expected_digest(file, receipt) do
       {:ok, value, receipt}
     end

@@ -28,10 +28,24 @@ defmodule Pika.Optimization.FileContractTest do
     assert receipt.sha256 == sha256(contents)
   end
 
-  test "rejects absolute, escaping, noncanonical, symlink, and oversized paths", %{root: root} do
+  test "accepts an absolute path inside the work root and records it as relative", %{root: root} do
+    relative = "artifacts/value.json"
+    absolute = Path.join(root, relative)
+    File.write!(absolute, "{}")
+
+    assert {:ok, "{}", receipt} = FileContract.read(root, absolute)
+    assert receipt.relative_path == relative
+    assert receipt.absolute_path == absolute
+  end
+
+  test "rejects outside-root, escaping, noncanonical, symlink, and oversized paths", %{root: root} do
     File.write!(Path.join(root, "artifacts/value.json"), "{}")
 
     assert {:error, :absolute_file_path} = FileContract.read(root, "/tmp/value.json")
+
+    assert {:error, :absolute_file_path} =
+             FileContract.read(root, Path.join(root <> "-outside", "value.json"))
+
     assert {:error, :file_path_escape} = FileContract.read(root, "../value.json")
     assert {:error, :noncanonical_file_path} = FileContract.read(root, "artifacts//value.json")
 
@@ -39,6 +53,9 @@ defmodule Pika.Optimization.FileContractTest do
 
     assert {:error, {:symlink_component, _path}} =
              FileContract.read(root, "artifacts/link.json")
+
+    assert {:error, {:symlink_component, _path}} =
+             FileContract.read(root, Path.join(root, "artifacts/link.json"))
 
     assert {:error, {:file_too_large, 2, 1}} =
              FileContract.read(root, "artifacts/value.json", max_bytes: 1)

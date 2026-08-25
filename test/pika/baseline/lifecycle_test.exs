@@ -220,6 +220,32 @@ defmodule Pika.Baseline.LifecycleTest do
     assert prompt.system =~ "开始工作前必须读取以下信息"
     assert prompt.system =~ "## previous verification 0"
     assert prompt.system =~ "baseline-verification-result.json"
+    assert prompt.system =~ "上一轮 Baseline Verify 的拒绝反馈如下"
+    assert prompt.system =~ "unstable measurements"
+    assert prompt.system =~ "fix benchmark synchronization"
+
+    assert {:start_turn, activation} = prompt.activation
+    assert activation =~ "上一轮 Baseline Verify 已拒绝 Definition"
+    assert activation =~ "requested_changes 已注入 System Prompt"
+
+    recovery_directory = Path.join(workspace, "empty-alignment-recovery")
+    File.mkdir_p!(recovery_directory)
+    messages_file = Path.join(recovery_directory, "messages.jsonl")
+    state_file = Path.join(recovery_directory, "recovery.json")
+    File.write!(messages_file, "")
+    File.write!(state_file, "{}")
+
+    recoveries = [
+      %{
+        directory: recovery_directory,
+        messages_file: messages_file,
+        state_file: state_file
+      }
+    ]
+
+    assert {:ok, recovered_prompt} = PromptBuilder.build(config, next_work, bundle, recoveries)
+    assert {:start_turn, recovered_activation} = recovered_prompt.activation
+    assert recovered_activation =~ "上一轮 Baseline Verify 已拒绝 Definition"
   end
 
   test "accepted Verification rejects Agent metrics that do not match raw Pairs", %{work: work} do

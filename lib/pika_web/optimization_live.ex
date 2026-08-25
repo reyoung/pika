@@ -24,6 +24,7 @@ defmodule PikaWeb.OptimizationLive do
        |> assign(:review_form, to_form(%{"feedback" => ""}, as: :review))
        |> assign(:guidance_form, to_form(%{"body" => ""}, as: :guidance))
        |> assign(:open_session_id, nil)
+       |> assign(:baseline_revision_selection, nil)
        |> assign(:command_console, nil)
        |> assign(:command_console_ref, nil)
        |> refresh()}
@@ -90,6 +91,20 @@ defmodule PikaWeb.OptimizationLive do
         else: session_id
 
     {:noreply, assign(socket, :open_session_id, open_session_id)}
+  end
+
+  def handle_event("select_baseline_revision", %{"revision" => revision}, socket) do
+    selection =
+      case Integer.parse(revision) do
+        {value, ""} when value >= 0 -> value
+        _other -> socket.assigns.baseline_revision_selection
+      end
+
+    {:noreply,
+     socket
+     |> assign(:baseline_revision_selection, selection)
+     |> assign(:open_session_id, nil)
+     |> refresh()}
   end
 
   def handle_event("open_command_console", %{"ref" => ref}, socket) do
@@ -263,8 +278,8 @@ defmodule PikaWeb.OptimizationLive do
         <section class="ops-stat-grid" aria-label="Optimization overview">
           <article class="ops-stat-card">
             <span>Baseline</span>
-            <strong>{if @baseline, do: humanize_status(@baseline.status), else: "Not created"}</strong>
-            <small>{if @baseline, do: "Revision #{@baseline.revision}", else: "Waiting for bootstrap"}</small>
+            <strong>{if @latest_baseline, do: humanize_status(@latest_baseline.status), else: "Not created"}</strong>
+            <small>{if @latest_baseline, do: "Revision #{@latest_baseline.revision}", else: "Waiting for bootstrap"}</small>
           </article>
           <article class="ops-stat-card">
             <span>Attempts</span>
@@ -296,10 +311,35 @@ defmodule PikaWeb.OptimizationLive do
               </.pill>
             </header>
 
+            <nav
+              :if={length(@baseline_revisions) > 1}
+              class="ops-baseline-tabs"
+              role="tablist"
+              aria-label="Baseline revisions"
+            >
+              <button
+                :for={revision <- @baseline_revisions}
+                type="button"
+                role="tab"
+                class={if revision.id == @baseline.id, do: "is-active", else: nil}
+                aria-selected={to_string(revision.id == @baseline.id)}
+                phx-click="select_baseline_revision"
+                phx-value-revision={revision.revision}
+              >
+                <strong>v{revision.revision}</strong>
+                <span>{humanize_status(revision.status)}</span>
+              </button>
+            </nav>
+
             <div :if={@baseline} class="ops-baseline-facts">
               <div><span>Revision</span><strong>v{@baseline.revision}</strong></div>
               <div><span>Development SHA</span><code>{short_sha(@baseline.development_sha)}</code></div>
               <div><span>Updated</span><strong>{format_timestamp(@baseline.updated_at)}</strong></div>
+            </div>
+
+            <div :if={baseline_feedback(@baseline)} class="ops-baseline-feedback">
+              <span>{baseline_feedback_label(@baseline)}</span>
+              <p>{baseline_feedback(@baseline)}</p>
             </div>
 
             <section :if={@baseline} id="baseline-agent-details" class="ops-agent-inspector">
@@ -364,7 +404,7 @@ defmodule PikaWeb.OptimizationLive do
                     </span>
                   </div>
 
-                  <div :if={active_session?(session)} class="ops-agent-restart">
+                  <div :if={@current_baseline? && active_session?(session)} class="ops-agent-restart">
                     <span>
                       <strong>Restart this agent</strong>
                       <small>
@@ -507,7 +547,7 @@ defmodule PikaWeb.OptimizationLive do
             </div>
 
             <.form
-              :if={@baseline && @baseline.status == "drafting"}
+              :if={@current_baseline? && @baseline && @baseline.status == "drafting"}
               id="baseline-message-form"
               for={@message_form}
               phx-submit="send_message"
@@ -537,7 +577,7 @@ defmodule PikaWeb.OptimizationLive do
               </div>
             </.form>
 
-            <div :if={@questions} class="ops-question-batch">
+            <div :if={@current_baseline? && @questions} class="ops-question-batch">
               <header>
                 <span>Action required</span>
                 <div>
@@ -575,12 +615,12 @@ defmodule PikaWeb.OptimizationLive do
             </div>
 
             <div
-              :if={@baseline && @baseline.status == "awaiting_review"}
+              :if={@baseline && baseline_artifacts?(@baseline)}
               class="ops-review-workspace"
             >
               <div class="ops-review-callout">
-                <span>Review required</span>
-                <p>The definition is frozen. Approval advances the run to full Baseline Verify.</p>
+                <span>{baseline_artifacts_title(@baseline)}</span>
+                <p>{baseline_artifacts_description(@baseline)}</p>
               </div>
               <details open>
                 <summary><span>01</span>Baseline Definition <b>JSON</b></summary>
@@ -594,7 +634,14 @@ defmodule PikaWeb.OptimizationLive do
                 <summary><span>03</span>Smoke Benchmark <b>LOG</b></summary>
                 <pre>{@review_bundle.smoke_benchmark}</pre>
               </details>
-              <div class="ops-review-actions">
+              <details :if={@review_bundle.verification_result != "unavailable"}>
+                <summary><span>04</span>Baseline Verification Result <b>JSON</b></summary>
+                <pre>{@review_bundle.verification_result}</pre>
+              </details>
+              <div
+                :if={@current_baseline? && @baseline.status == "awaiting_review"}
+                class="ops-review-actions"
+              >
                 <button phx-click="approve_baseline" class="ops-button ops-button-primary">
                   Approve baseline
                 </button>
@@ -693,13 +740,29 @@ defmodule PikaWeb.OptimizationLive do
       Repo.query!("SELECT COALESCE(MAX(id), 0) FROM conversation_turns").rows |> hd() |> hd()
 
     snapshot = Snapshot.build(cursor, DateTime.utc_now())
-    baseline = BaselineLifecycle.latest_revision()
-    questions = if Process.whereis(Questions), do: Questions.pending(), else: nil
+    baseline_revisions = BaselineLifecycle.revisions()
+    latest_baseline = List.last(baseline_revisions)
+
+    baseline =
+      selected_baseline(
+        baseline_revisions,
+        socket.assigns[:baseline_revision_selection]
+      )
+
+    current_baseline? =
+      is_map(baseline) and is_map(latest_baseline) and baseline.id == latest_baseline.id
+
+    questions =
+      if current_baseline? and Process.whereis(Questions), do: Questions.pending(), else: nil
+
     {baseline_sessions, turns} = baseline_activity(baseline)
 
     socket
     |> assign(:snapshot, snapshot)
     |> assign(:baseline, baseline)
+    |> assign(:latest_baseline, latest_baseline)
+    |> assign(:baseline_revisions, baseline_revisions)
+    |> assign(:current_baseline?, current_baseline?)
     |> assign(:baseline_sessions, baseline_sessions)
     |> assign_open_session(baseline_sessions)
     |> assign(:questions, questions)
@@ -708,6 +771,13 @@ defmodule PikaWeb.OptimizationLive do
     |> assign(:summary, latest_summary())
     |> assign(:workspace, Persistence.current().workspace_canonical_path)
     |> assign_new(:flash_message, fn -> nil end)
+  end
+
+  defp selected_baseline([], _selection), do: nil
+  defp selected_baseline(revisions, nil), do: List.last(revisions)
+
+  defp selected_baseline(revisions, selection) do
+    Enum.find(revisions, &(&1.revision == selection)) || List.last(revisions)
   end
 
   defp baseline_activity(nil), do: {[], []}
@@ -783,7 +853,8 @@ defmodule PikaWeb.OptimizationLive do
   defp update_message_form(socket, _result, body),
     do: assign(socket, :message_form, to_form(%{"body" => body}, as: :message))
 
-  defp review_bundle(%{status: "awaiting_review"} = baseline) do
+  defp review_bundle(%{definition_artifact_id: artifact_id} = baseline)
+       when not is_nil(artifact_id) do
     root =
       Path.join(Persistence.current().workspace_canonical_path, baseline.work_relative_path)
 
@@ -793,16 +864,28 @@ defmodule PikaWeb.OptimizationLive do
       %{
         definition: definition,
         smoke_verify: read_json_pretty(Path.join(root, definition_value["smoke_verify_path"])),
-        smoke_benchmark: read_text(Path.join(root, definition_value["smoke_benchmark_path"]))
+        smoke_benchmark: read_text(Path.join(root, definition_value["smoke_benchmark_path"])),
+        verification_result:
+          read_json_pretty(Path.join(root, "baseline-verification-result.json"))
       }
     else
       _error ->
-        %{definition: definition, smoke_verify: "unavailable", smoke_benchmark: "unavailable"}
+        %{
+          definition: definition,
+          smoke_verify: "unavailable",
+          smoke_benchmark: "unavailable",
+          verification_result: "unavailable"
+        }
     end
   end
 
   defp review_bundle(_baseline),
-    do: %{definition: "", smoke_verify: "", smoke_benchmark: ""}
+    do: %{
+      definition: "",
+      smoke_verify: "",
+      smoke_benchmark: "",
+      verification_result: "unavailable"
+    }
 
   defp read_json_pretty(path) do
     with {:ok, contents} <- File.read(path),
@@ -995,6 +1078,35 @@ defmodule PikaWeb.OptimizationLive do
   defp active_session?(session),
     do: session.status in ["running", "awaiting_report", "awaiting_followup"]
 
+  defp baseline_feedback(nil), do: nil
+
+  defp baseline_feedback(baseline),
+    do: baseline.terminal_reason || baseline.review_feedback
+
+  defp baseline_feedback_label(%{terminal_reason: reason}) when is_binary(reason),
+    do: "Verification rejection"
+
+  defp baseline_feedback_label(%{review_feedback: feedback}) when is_binary(feedback),
+    do: "Review feedback"
+
+  defp baseline_feedback_label(_baseline), do: "Revision feedback"
+
+  defp baseline_artifacts?(%{definition_artifact_id: artifact_id}),
+    do: not is_nil(artifact_id)
+
+  defp baseline_artifacts_title(%{status: "awaiting_review"}), do: "Review required"
+  defp baseline_artifacts_title(_baseline), do: "Revision artifacts"
+
+  defp baseline_artifacts_description(%{status: "awaiting_review"}),
+    do: "The definition is frozen. Approval advances the run to full Baseline Verify."
+
+  defp baseline_artifacts_description(%{status: "superseded"}),
+    do:
+      "This revision is read-only. Its frozen definition and verification result are preserved below."
+
+  defp baseline_artifacts_description(_baseline),
+    do: "The frozen definition and recorded evidence for this revision are preserved below."
+
   defp role_name("baseline_alignment"), do: "Baseline Alignment"
   defp role_name("baseline_verify"), do: "Baseline Verify"
   defp role_name(role), do: humanize_status(role)
@@ -1036,7 +1148,7 @@ defmodule PikaWeb.OptimizationLive do
   defp status_kind(status) when status in ["completed", "accepted", "passed"], do: "success"
 
   defp status_kind(status)
-       when status in ["paused", "draining", "awaiting_review", "awaiting_followup"],
+       when status in ["paused", "draining", "awaiting_review", "awaiting_followup", "superseded"],
        do: "warning"
 
   defp status_kind(status)

@@ -319,8 +319,75 @@ defmodule PikaWeb.OptimizationLiveTest do
              ["clear-form", %{id: "baseline-message-form"}]
            ]
 
+    assert {:ok, _session} =
+             ConversationJournal.interrupt_session(active_session.id, "revision superseded")
+
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      "UPDATE baseline_revisions SET status = 'superseded', terminal_reason = 'test verification rejection', updated_at = ? WHERE id = ?",
+      [now, baseline.id]
+    )
+
+    Repo.query!(
+      "UPDATE optimizations SET status = 'aligning_baseline', updated_at = ? WHERE id = 'optimization'",
+      [now]
+    )
+
+    next_root = Path.join([workspace, "baseline", "revisions", "000001"])
+    File.mkdir_p!(next_root)
+    assert {:ok, next_baseline} = Lifecycle.ensure_draft(next_root)
+
+    assert {:ok, next_session} =
+             ConversationJournal.start_session(
+               "baseline_alignment",
+               :baseline_revision,
+               to_string(next_baseline.id),
+               %{"backend" => "codex_app_server", "model" => "gpt-next"},
+               "next system prompt",
+               "next context"
+             )
+
+    assert {:ok, revisions_socket} =
+             PikaWeb.OptimizationLive.mount(
+               %{},
+               %{"pika_auth" => marker},
+               %Phoenix.LiveView.Socket{}
+             )
+
+    revisions_html = render_socket(revisions_socket)
+    assert revisions_socket.assigns.baseline.revision == 1
+    assert revisions_html =~ ~s(class="ops-baseline-tabs")
+    assert revisions_html =~ ~s(role="tablist")
+    assert revisions_html =~ ~s(phx-value-revision="0")
+    assert revisions_html =~ ~s(phx-value-revision="1")
+    assert revisions_html =~ next_session.id
+
+    assert {:noreply, revision_zero_socket} =
+             PikaWeb.OptimizationLive.handle_event(
+               "select_baseline_revision",
+               %{"revision" => "0"},
+               revisions_socket
+             )
+
+    revision_zero_html = render_socket(revision_zero_socket)
+    assert revision_zero_socket.assigns.baseline.revision == 0
+    refute revision_zero_socket.assigns.current_baseline?
+    assert revision_zero_html =~ "test verification rejection"
+    assert revision_zero_html =~ "I am checking the cases and metrics."
+    assert revision_zero_html =~ session.id
+    refute revision_zero_html =~ next_session.id
+    refute revision_zero_html =~ ~s(id="baseline-message-form")
+
     GenServer.stop(bootstrap)
     Auth.clear()
+  end
+
+  defp render_socket(socket) do
+    socket.assigns
+    |> PikaWeb.OptimizationLive.render()
+    |> Phoenix.HTML.Safe.to_iodata()
+    |> IO.iodata_to_binary()
   end
 
   defp eventually(check, attempts \\ 100)

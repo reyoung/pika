@@ -62,6 +62,27 @@ defmodule Pika.Baseline.WorkspaceTest do
     assert repeated.revision.id == first.revision.id
   end
 
+  test "rebuilds a stale Pika revision branch at the required base", %{
+    config: config,
+    initial_sha: initial_sha
+  } do
+    File.write!(Path.join(config.repo, "kernel.py"), "def run(): return 2\n")
+    Git.run!(config.repo, ["add", "kernel.py"])
+    Git.run!(config.repo, ["commit", "-m", "later source commit"])
+    stale_sha = Git.run!(config.repo, ["rev-parse", "HEAD"])
+    stale_paths = Workspace.paths(config.workspace, 0)
+
+    Git.run!(config.repo, ["branch", stale_paths.branch, stale_sha])
+    File.mkdir_p!(stale_paths.root)
+    Git.run!(config.repo, ["worktree", "add", stale_paths.repo, stale_paths.branch])
+    File.rm_rf!(stale_paths.repo)
+
+    assert {:ok, current} = Workspace.ensure_current(config)
+    assert current.revision.revision == 0
+    assert Git.run!(current.paths.repo, ["rev-parse", "HEAD"]) == initial_sha
+    assert Git.run!(config.repo, ["rev-parse", stale_paths.branch]) == initial_sha
+  end
+
   defp yaml(repo, workspace) do
     """
     version: 2

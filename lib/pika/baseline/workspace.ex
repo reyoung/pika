@@ -47,14 +47,21 @@ defmodule Pika.Baseline.Workspace do
 
   defp prepare_worktree(source_repo, paths, sha) do
     cond do
-      git_worktree?(paths.repo) -> verify_worktree(paths, sha)
-      branch_exists?(source_repo, paths.branch) -> add_existing_worktree(source_repo, paths, sha)
-      true -> create_worktree(source_repo, paths, sha)
+      git_worktree?(paths.repo) ->
+        verify_worktree(paths, sha)
+
+      branch_exists?(source_repo, paths.branch) ->
+        recreate_pika_worktree(source_repo, paths, sha)
+
+      true ->
+        create_worktree(source_repo, paths, sha)
     end
   end
 
-  defp add_existing_worktree(source_repo, paths, sha) do
-    with {:ok, _output} <- Git.run(source_repo, ["worktree", "add", paths.repo, paths.branch]),
+  defp recreate_pika_worktree(source_repo, paths, sha) do
+    with {:ok, _output} <- Git.run(source_repo, ["worktree", "prune", "--expire", "now"]),
+         {:ok, _output} <-
+           Git.run(source_repo, ["worktree", "add", "-B", paths.branch, paths.repo, sha]),
          do: verify_worktree(paths, sha)
   end
 
