@@ -189,6 +189,13 @@ defmodule Pika.Agent.ActorTest do
     assert tool["name"] == "Read files"
     assert tool["status"] == "completed"
     assert tool["command_ref"] =~ ~r/^[0-9a-f]{64}$/
+
+    assert turn.timeline_items == [
+             %{sequence: 1, kind: "input", item_index: 0},
+             %{sequence: 2, kind: "tool", item_index: 0},
+             %{sequence: 3, kind: "output", item_index: 0},
+             %{sequence: 4, kind: "output", item_index: 1}
+           ]
   end
 
   test "steers an active turn and keeps replacement-turn completion isolated", %{

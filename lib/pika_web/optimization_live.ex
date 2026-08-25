@@ -23,6 +23,8 @@ defmodule PikaWeb.OptimizationLive do
        |> assign(:message_form, to_form(%{"body" => ""}, as: :message))
        |> assign(:review_form, to_form(%{"feedback" => ""}, as: :review))
        |> assign(:guidance_form, to_form(%{"body" => ""}, as: :guidance))
+       |> assign(:question_answers, %{})
+       |> assign(:question_batch_id, nil)
        |> assign(:open_session_id, nil)
        |> assign(:baseline_revision_selection, nil)
        |> assign(:command_console, nil)
@@ -134,7 +136,11 @@ defmodule PikaWeb.OptimizationLive do
   def handle_event("answer_questions", params, socket) do
     result =
       with batch when is_map(batch) <- Questions.pending(),
-           values <- normalize_question_answers(batch.questions, Map.get(params, "answers", %{})),
+           answers <-
+             params
+             |> Map.get("answers", %{})
+             |> normalize_question_form_answers(),
+           values <- normalize_question_answers(batch.questions, answers),
            {:ok, _batch} <- Questions.answer(batch.id, values) do
         :ok
       else
@@ -143,6 +149,15 @@ defmodule PikaWeb.OptimizationLive do
       end
 
     {:noreply, socket |> put_result(result, "问题答案已返回 Agent。") |> refresh()}
+  end
+
+  def handle_event("change_question_answers", params, socket) do
+    answers =
+      params
+      |> Map.get("answers", %{})
+      |> normalize_question_form_answers()
+
+    {:noreply, assign(socket, :question_answers, answers)}
   end
 
   def handle_event("approve_baseline", _params, socket) do
@@ -446,83 +461,71 @@ defmodule PikaWeb.OptimizationLive do
                         </.pill>
                       </div>
 
-                      <article
-                        :for={message <- turn.input_messages}
-                        class={"ops-chat-message ops-chat-message-#{message_role(message, "user")}"}
-                      >
-                        <span class="ops-chat-avatar">{message_avatar(message, "user")}</span>
-                        <div>
-                          <header>
-                            <strong>{message_author(message, "user")}</strong>
-                            <small>Turn {turn.turn}</small>
-                          </header>
-                          <pre>{message_text(message)}</pre>
-                        </div>
-                      </article>
-
-                      <details
-                        :if={turn.mcp_calls != []}
-                        id={"tool-activity-#{turn.id}"}
-                        class="ops-chat-tools"
-                        phx-hook="PersistDetails"
-                      >
-                        <summary>
-                          <span class="ops-chat-tools-icon">⌕</span>
+                      <%= for item <- conversation_items(turn) do %>
+                        <article
+                          :if={item.kind == :message}
+                          class={timeline_message_class(item)}
+                        >
+                          <span class="ops-chat-avatar">
+                            {message_avatar(item.message, item.fallback_role)}
+                          </span>
                           <div>
-                            <strong>{tool_activity_title(turn.mcp_calls)}</strong>
-                            <small>{tool_activity_meta(turn.mcp_calls)}</small>
-                          </div>
-                          <.pill kind={status_kind(tool_activity_status(turn.mcp_calls))}>
-                            {humanize_status(tool_activity_status(turn.mcp_calls))}
-                          </.pill>
-                          <span class="ops-chevron">›</span>
-                        </summary>
-                        <div class="ops-chat-tools-list">
-                          <article :for={call <- turn.mcp_calls} class="ops-chat-tool-row">
-                            <span class={"ops-chat-tool-icon kind-#{tool_kind(call)}"}>
-                              {tool_icon(call)}
-                            </span>
-                            <div>
-                              <strong>{tool_name(call)}</strong>
-                              <small :if={tool_detail(call)}>{tool_detail(call)}</small>
-                            </div>
-                            <.pill kind={status_kind(tool_call_status(call))}>
-                              {humanize_status(tool_call_status(call))}
-                            </.pill>
-                            <button
-                              :if={call["command_ref"]}
-                              type="button"
-                              class="ops-chat-tool-output"
-                              phx-click="open_command_console"
-                              phx-value-ref={call["command_ref"]}
+                            <header>
+                              <strong>{message_author(item.message, item.fallback_role)}</strong>
+                              <small>{timeline_message_caption(turn, item)}</small>
+                            </header>
+                            <pre>{message_text(item.message)}</pre>
+                            <i
+                              :if={timeline_streaming_message?(turn, item)}
+                              class="ops-stream-cursor"
+                              aria-label="Generating"
                             >
-                              View output
-                            </button>
-                          </article>
-                        </div>
-                      </details>
+                            </i>
+                          </div>
+                        </article>
 
-                      <article
-                        :for={{message, message_index} <- Enum.with_index(turn.output_messages, 1)}
-                        class={
-                          "ops-chat-message ops-chat-message-#{message_role(message, "assistant")} ops-chat-message-#{message_phase(message)}"
-                        }
-                      >
-                        <span class="ops-chat-avatar">{message_avatar(message, "assistant")}</span>
-                        <div>
-                          <header>
-                            <strong>{message_author(message, "assistant")}</strong>
-                            <small>{message_caption(turn, message, message_index)}</small>
-                          </header>
-                          <pre>{message_text(message)}</pre>
-                          <i
-                            :if={streaming_message?(turn, message, message_index)}
-                            class="ops-stream-cursor"
-                            aria-label="Generating"
-                          >
-                          </i>
-                        </div>
-                      </article>
+                        <details
+                          :if={item.kind == :tools}
+                          id={item.id}
+                          class="ops-chat-tools"
+                          phx-hook="PersistDetails"
+                        >
+                          <summary>
+                            <span class="ops-chat-tools-icon">⌕</span>
+                            <div>
+                              <strong>{tool_activity_title(item.calls)}</strong>
+                              <small>{tool_activity_meta(item.calls)}</small>
+                            </div>
+                            <.pill kind={status_kind(tool_activity_status(item.calls))}>
+                              {humanize_status(tool_activity_status(item.calls))}
+                            </.pill>
+                            <span class="ops-chevron">›</span>
+                          </summary>
+                          <div class="ops-chat-tools-list">
+                            <article :for={call <- item.calls} class="ops-chat-tool-row">
+                              <span class={"ops-chat-tool-icon kind-#{tool_kind(call)}"}>
+                                {tool_icon(call)}
+                              </span>
+                              <div>
+                                <strong>{tool_name(call)}</strong>
+                                <small :if={tool_detail(call)}>{tool_detail(call)}</small>
+                              </div>
+                              <.pill kind={status_kind(tool_call_status(call))}>
+                                {humanize_status(tool_call_status(call))}
+                              </.pill>
+                              <button
+                                :if={call["command_ref"]}
+                                type="button"
+                                class="ops-chat-tool-output"
+                                phx-click="open_command_console"
+                                phx-value-ref={call["command_ref"]}
+                              >
+                                View output
+                              </button>
+                            </article>
+                          </div>
+                        </details>
+                      <% end %>
 
                       <div
                         :if={turn.partial && turn.output_messages == []}
@@ -585,7 +588,7 @@ defmodule PikaWeb.OptimizationLive do
                   <p>Answer every question before the alignment can continue.</p>
                 </div>
               </header>
-              <form phx-submit="answer_questions">
+              <form phx-change="change_question_answers" phx-submit="answer_questions">
                 <fieldset :for={{question, index} <- Enum.with_index(@questions.questions, 1)}>
                   <legend><span>{index}</span>{question["question"]}</legend>
                   <label :for={option <- question["options"]}>
@@ -593,6 +596,13 @@ defmodule PikaWeb.OptimizationLive do
                       type="radio"
                       name={"answers[#{question["id"]}][choice]"}
                       value={option["label"]}
+                      checked={
+                        question_answer_value(
+                          @question_answers,
+                          question["id"],
+                          "choice"
+                        ) == option["label"]
+                      }
                     />
                     <span><strong>{option["label"]}</strong><small>{option["description"]}</small></span>
                   </label>
@@ -604,7 +614,7 @@ defmodule PikaWeb.OptimizationLive do
                     <textarea
                       name={"answers[#{question["id"]}][custom]"}
                       placeholder="Type a specific answer, constraint, path, or measurement rule…"
-                    ></textarea>
+                    >{question_answer_value(@question_answers, question["id"], "custom")}</textarea>
                   </label>
                 </fieldset>
                 <div class="ops-form-actions">
@@ -765,7 +775,7 @@ defmodule PikaWeb.OptimizationLive do
     |> assign(:current_baseline?, current_baseline?)
     |> assign(:baseline_sessions, baseline_sessions)
     |> assign_open_session(baseline_sessions)
-    |> assign(:questions, questions)
+    |> assign_questions(questions)
     |> assign(:turns, turns)
     |> assign(:review_bundle, review_bundle(baseline))
     |> assign(:summary, latest_summary())
@@ -840,6 +850,51 @@ defmodule PikaWeb.OptimizationLive do
 
   defp normalize_question_answers(questions, _answers),
     do: Enum.map(questions, &%{"id" => &1["id"], "answer" => ""})
+
+  defp normalize_question_form_answers(answers) when is_map(answers) do
+    Map.new(answers, fn
+      {question_id, values} when is_map(values) ->
+        custom = Map.get(values, "custom", "")
+
+        values =
+          if is_binary(custom) and String.trim(custom) != "" do
+            Map.put(values, "choice", "")
+          else
+            values
+          end
+
+        {question_id, values}
+
+      {question_id, _values} ->
+        {question_id, %{}}
+    end)
+  end
+
+  defp normalize_question_form_answers(_answers), do: %{}
+
+  defp assign_questions(socket, nil) do
+    socket
+    |> assign(:questions, nil)
+    |> assign(:question_answers, %{})
+    |> assign(:question_batch_id, nil)
+  end
+
+  defp assign_questions(%{assigns: %{question_batch_id: id}} = socket, %{id: id} = questions),
+    do: assign(socket, :questions, questions)
+
+  defp assign_questions(socket, questions) do
+    socket
+    |> assign(:questions, questions)
+    |> assign(:question_answers, %{})
+    |> assign(:question_batch_id, questions.id)
+  end
+
+  defp question_answer_value(answers, question_id, field) do
+    case get_in(answers, [question_id, field]) do
+      value when is_binary(value) -> value
+      _other -> ""
+    end
+  end
 
   defp trim_param(value) when is_binary(value), do: String.trim(value)
   defp trim_param(_value), do: ""
@@ -1004,6 +1059,111 @@ defmodule PikaWeb.OptimizationLive do
   defp streaming_message?(turn, message, index) do
     turn.partial && index == length(turn.output_messages) && message["complete"] != true
   end
+
+  defp conversation_items(turn) do
+    references =
+      Map.new(turn.timeline_items, fn item ->
+        {{item.kind, item.item_index}, item.sequence}
+      end)
+
+    {items, _next_fallback_sequence} =
+      Enum.map_reduce(legacy_conversation_items(turn), 1, fn item, fallback_sequence ->
+        case Map.fetch(references, item.reference) do
+          {:ok, sequence} ->
+            {Map.put(item, :sequence, sequence), fallback_sequence}
+
+          :error ->
+            {Map.put(item, :sequence, fallback_sequence), fallback_sequence + 1}
+        end
+      end)
+
+    items
+    |> Enum.sort_by(&{&1.sequence, &1.legacy_sequence})
+    |> group_consecutive_tools(turn.id)
+  end
+
+  defp legacy_conversation_items(turn) do
+    inputs =
+      turn.input_messages
+      |> Enum.with_index()
+      |> Enum.map(fn {message, index} ->
+        %{
+          kind: :message,
+          message: message,
+          fallback_role: "user",
+          message_index: index + 1,
+          output?: false,
+          reference: {"input", index},
+          legacy_sequence: index
+        }
+      end)
+
+    outputs =
+      turn.output_messages
+      |> Enum.with_index()
+      |> Enum.map(fn {message, index} ->
+        %{
+          kind: :message,
+          message: message,
+          fallback_role: "assistant",
+          message_index: index + 1,
+          output?: true,
+          reference: {"output", index},
+          legacy_sequence: length(inputs) + index
+        }
+      end)
+
+    tools =
+      turn.mcp_calls
+      |> Enum.with_index()
+      |> Enum.map(fn {call, index} ->
+        %{
+          kind: :tool,
+          call: call,
+          reference: {"tool", index},
+          legacy_sequence: length(inputs) + length(outputs) + index
+        }
+      end)
+
+    case inputs do
+      [] -> outputs ++ tools
+      [initial | continuations] -> [initial] ++ outputs ++ tools ++ continuations
+    end
+  end
+
+  defp group_consecutive_tools(items, turn_id) do
+    items
+    |> Enum.reduce([], fn
+      %{kind: :tool} = item, [%{kind: :tools} = group | rest] ->
+        [%{group | calls: group.calls ++ [item.call]} | rest]
+
+      %{kind: :tool} = item, groups ->
+        id = "tool-activity-#{turn_id}-#{item.sequence}"
+        [%{kind: :tools, calls: [item.call], id: id} | groups]
+
+      item, groups ->
+        [item | groups]
+    end)
+    |> Enum.reverse()
+  end
+
+  defp timeline_message_class(%{fallback_role: "assistant", message: message}) do
+    "ops-chat-message ops-chat-message-#{message_role(message, "assistant")} ops-chat-message-#{message_phase(message)}"
+  end
+
+  defp timeline_message_class(%{message: message, fallback_role: fallback}) do
+    "ops-chat-message ops-chat-message-#{message_role(message, fallback)}"
+  end
+
+  defp timeline_message_caption(turn, %{output?: true} = item),
+    do: message_caption(turn, item.message, item.message_index)
+
+  defp timeline_message_caption(turn, _item), do: "Turn #{turn.turn}"
+
+  defp timeline_streaming_message?(turn, %{output?: true} = item),
+    do: streaming_message?(turn, item.message, item.message_index)
+
+  defp timeline_streaming_message?(_turn, _item), do: false
 
   defp tool_activity_title(calls) do
     names = calls |> Enum.map(&tool_name/1) |> Enum.uniq()

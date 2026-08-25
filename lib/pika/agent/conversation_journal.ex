@@ -108,6 +108,13 @@ defmodule Pika.Agent.ConversationJournal do
         )
 
         [[id]] = Repo.query!("SELECT last_insert_rowid()").rows
+
+        input_messages
+        |> Enum.with_index()
+        |> Enum.each(fn {_message, index} ->
+          insert_timeline_item(id, index + 1, "input", index, now)
+        end)
+
         turn(id)
       end)
 
@@ -141,16 +148,29 @@ defmodule Pika.Agent.ConversationJournal do
 
   @spec stream_outputs(pos_integer(), [map()]) :: {:ok, map()} | {:error, term()}
   def stream_outputs(turn_id, messages) when is_integer(turn_id) and is_list(messages) do
-    case Repo.query!(
-           """
-           UPDATE conversation_turns
-           SET output_messages_json = ?
-           WHERE id = ? AND partial = 1
-           """,
-           [Jason.encode!(messages), turn_id]
-         ).num_rows do
-      1 -> {:ok, turn(turn_id)}
-      0 -> {:error, :turn_not_open}
+    case turn(turn_id) do
+      nil ->
+        {:error, :turn_not_found}
+
+      %{partial: false} ->
+        {:error, :turn_not_open}
+
+      turn ->
+        previous_count = length(turn.output_messages)
+
+        Repo.query!(
+          "UPDATE conversation_turns SET output_messages_json = ? WHERE id = ?",
+          [Jason.encode!(messages), turn_id]
+        )
+
+        messages
+        |> Enum.with_index()
+        |> Enum.drop(previous_count)
+        |> Enum.each(fn {_message, index} ->
+          append_timeline_item(turn, "output", index)
+        end)
+
+        {:ok, turn(turn_id)}
     end
   end
 
@@ -184,6 +204,8 @@ defmodule Pika.Agent.ConversationJournal do
           Jason.encode!(calls),
           turn_id
         ])
+
+        if not found?, do: append_timeline_item(turn, "tool", length(turn.mcp_calls))
 
         {:ok, turn(turn_id)}
     end
@@ -391,11 +413,14 @@ defmodule Pika.Agent.ConversationJournal do
 
       turn ->
         values = Map.fetch!(turn, column_key(column)) ++ [value]
+        item_index = length(values) - 1
 
         Repo.query!("UPDATE conversation_turns SET #{column} = ? WHERE id = ?", [
           Jason.encode!(values),
           turn_id
         ])
+
+        append_timeline_item(turn, timeline_kind(column), item_index)
 
         {:ok, turn(turn_id)}
     end
@@ -436,6 +461,7 @@ defmodule Pika.Agent.ConversationJournal do
       input_messages: Jason.decode!(input),
       output_messages: Jason.decode!(output),
       mcp_calls: Jason.decode!(mcp_calls),
+      timeline_items: timeline_items(id),
       ended_reason: ended_reason,
       partial: partial in [1, true, "1", "true"],
       started_at: started_at,
@@ -480,6 +506,50 @@ defmodule Pika.Agent.ConversationJournal do
   defp column_key("input_messages_json"), do: :input_messages
   defp column_key("output_messages_json"), do: :output_messages
   defp column_key("mcp_calls_json"), do: :mcp_calls
+
+  defp timeline_kind("input_messages_json"), do: "input"
+  defp timeline_kind("output_messages_json"), do: "output"
+  defp timeline_kind("mcp_calls_json"), do: "tool"
+
+  defp append_timeline_item(turn, kind, item_index) do
+    [[max_sequence]] =
+      Repo.query!(
+        "SELECT COALESCE(MAX(sequence), 0) FROM conversation_timeline_items WHERE turn_id = ?",
+        [turn.id]
+      ).rows
+
+    legacy_item_count =
+      length(turn.input_messages) + length(turn.output_messages) + length(turn.mcp_calls)
+
+    sequence = max(max_sequence, legacy_item_count) + 1
+    insert_timeline_item(turn.id, sequence, kind, item_index, now_us())
+  end
+
+  defp insert_timeline_item(turn_id, sequence, kind, item_index, created_at) do
+    Repo.query!(
+      """
+      INSERT OR IGNORE INTO conversation_timeline_items(
+        turn_id, sequence, kind, item_index, created_at
+      ) VALUES (?, ?, ?, ?, ?)
+      """,
+      [turn_id, sequence, kind, item_index, created_at]
+    )
+  end
+
+  defp timeline_items(turn_id) do
+    Repo.query!(
+      """
+      SELECT sequence, kind, item_index
+      FROM conversation_timeline_items
+      WHERE turn_id = ?
+      ORDER BY sequence
+      """,
+      [turn_id]
+    ).rows
+    |> Enum.map(fn [sequence, kind, item_index] ->
+      %{sequence: sequence, kind: kind, item_index: item_index}
+    end)
+  end
 
   defp finish({:ok, value}, _tag), do: {:ok, value}
   defp finish({:error, reason}, tag), do: {:error, {tag, reason}}

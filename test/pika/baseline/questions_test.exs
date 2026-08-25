@@ -94,12 +94,22 @@ defmodule Pika.Baseline.QuestionsTest do
     batch = Questions.pending(server)
     assert batch.questions == questions
 
+    submitted_answers = [
+      %{"id" => "target", "answer" => "A"},
+      %{
+        "id" => "metric",
+        "answer" => "P95 延迟，同时记录吞吐",
+        "custom" => true,
+        "choice" => "吞吐"
+      }
+    ]
+
     answers = [
       %{"id" => "target", "answer" => "A"},
       %{"id" => "metric", "answer" => "P95 延迟，同时记录吞吐", "custom" => true}
     ]
 
-    assert {:ok, completed} = Questions.answer(batch.id, answers, server)
+    assert {:ok, completed} = Questions.answer(batch.id, submitted_answers, server)
     assert completed.status == "answered"
     assert completed.answers == answers
     assert Task.await(task) == {:ok, answers}

@@ -75,6 +75,8 @@ defmodule Pika.Baseline.Questions do
   def handle_call(:pending, _from, state), do: {:reply, latest_pending(), state}
 
   def handle_call({:answer, batch_id, answers}, _from, state) do
+    answers = normalize_answers(answers)
+
     with {:ok, batch} <- fetch_pending(batch_id),
          :ok <- validate_answers(batch.questions, answers),
          {:ok, completed} <- persist_answers(batch, answers) do
@@ -187,6 +189,15 @@ defmodule Pika.Baseline.Questions do
   end
 
   defp validate_answers(_questions, _answers), do: {:error, :invalid_baseline_question_answers}
+
+  defp normalize_answers(answers) when is_list(answers) do
+    Enum.map(answers, fn
+      %{"custom" => true} = answer -> Map.delete(answer, "choice")
+      answer -> answer
+    end)
+  end
+
+  defp normalize_answers(answers), do: answers
 
   defp persist_answers(batch, answers) do
     now = now_us()

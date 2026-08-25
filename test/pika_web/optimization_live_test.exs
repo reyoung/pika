@@ -78,17 +78,17 @@ defmodule PikaWeb.OptimizationLiveTest do
              })
 
     assert {:ok, _turn} =
+             ConversationJournal.append_mcp_call(turn.id, %{
+               "name" => "get_context",
+               "status" => "completed"
+             })
+
+    assert {:ok, _turn} =
              ConversationJournal.append_output(turn.id, %{
                "role" => "assistant",
                "content" => "The measurement plan is ready for review.",
                "phase" => "final_answer",
                "complete" => true
-             })
-
-    assert {:ok, _turn} =
-             ConversationJournal.append_mcp_call(turn.id, %{
-               "name" => "get_context",
-               "status" => "completed"
              })
 
     command_ref = String.duplicate("a", 64)
@@ -101,6 +101,26 @@ defmodule PikaWeb.OptimizationLiveTest do
                "summary" => "sed -n '1,80p' lib/pika.ex",
                "status" => "completed",
                "command_ref" => command_ref
+             })
+
+    assert {:ok, _turn} =
+             ConversationJournal.append_mcp_call(turn.id, %{
+               "name" => "save_context",
+               "status" => "completed"
+             })
+
+    assert {:ok, _turn} =
+             ConversationJournal.append_input(turn.id, %{
+               "role" => "user",
+               "content" => "Run every case in one process."
+             })
+
+    assert {:ok, _turn} =
+             ConversationJournal.append_output(turn.id, %{
+               "role" => "assistant",
+               "content" => "I will reuse one torchrun process.",
+               "phase" => "commentary",
+               "complete" => true
              })
 
     assert {:ok, _turn} = ConversationJournal.finish_turn(turn.id, "completed")
@@ -201,6 +221,7 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert html =~ "get_context"
     assert html =~ "2 tool calls"
     assert html =~ ~s(class="ops-chat-tools")
+    assert length(:binary.matches(html, ~s(class="ops-chat-tools"))) == 2
     assert html =~ ~s(phx-hook="PersistDetails")
     assert html =~ "Read files"
     assert html =~ "View output"
@@ -222,6 +243,7 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert html =~ "Enter to send · ⌘/Ctrl/Shift+Enter for a new line"
     assert html =~ ~s(name="answers[target][choice]")
     assert html =~ ~s(name="answers[target][custom]")
+    assert html =~ ~s(phx-change="change_question_answers")
     assert html =~ "Write your own answer"
     assert html =~ "No attempts yet"
     assert html =~ "No progress summary yet"
@@ -232,6 +254,26 @@ defmodule PikaWeb.OptimizationLiveTest do
     {session_one_position, _length} = :binary.match(html, "Session 1")
     {session_two_position, _length} = :binary.match(html, "Session 2")
     assert session_one_position < session_two_position
+
+    {initial_user_position, _length} = :binary.match(html, "Inspect the benchmark contract")
+    {first_agent_position, _length} = :binary.match(html, "I am checking the cases and metrics.")
+    {first_tool_position, _length} = :binary.match(html, "get_context")
+
+    {second_agent_position, _length} =
+      :binary.match(html, "The measurement plan is ready for review.")
+
+    {second_tool_position, _length} = :binary.match(html, "Read files")
+    {third_tool_position, _length} = :binary.match(html, "save_context")
+    {user_reply_position, _length} = :binary.match(html, "Run every case in one process.")
+    {final_agent_position, _length} = :binary.match(html, "I will reuse one torchrun process.")
+
+    assert initial_user_position < first_agent_position
+    assert first_agent_position < first_tool_position
+    assert first_tool_position < second_agent_position
+    assert second_agent_position < second_tool_position
+    assert second_tool_position < third_tool_position
+    assert third_tool_position < user_reply_position
+    assert user_reply_position < final_agent_position
 
     assert {:noreply, opened_first_socket} =
              PikaWeb.OptimizationLive.handle_event(
@@ -271,20 +313,48 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert closed_console_socket.assigns.command_console_ref == nil
     assert closed_console_socket.assigns.command_console == nil
 
+    edited_answers = %{
+      "target" => %{"choice" => "A", "custom" => ""},
+      "metric" => %{
+        "choice" => "Latency",
+        "custom" => "Use P95 latency and report throughput"
+      }
+    }
+
+    assert {:noreply, edited_socket} =
+             PikaWeb.OptimizationLive.handle_event(
+               "change_question_answers",
+               %{"answers" => edited_answers},
+               socket
+             )
+
+    assert edited_socket.assigns.question_answers["metric"] == %{
+             "choice" => "",
+             "custom" => "Use P95 latency and report throughput"
+           }
+
+    assert {:noreply, refreshed_socket} =
+             PikaWeb.OptimizationLive.handle_info(:refresh, edited_socket)
+
+    refreshed_html =
+      refreshed_socket.assigns
+      |> PikaWeb.OptimizationLive.render()
+      |> Phoenix.HTML.Safe.to_iodata()
+      |> IO.iodata_to_binary()
+
+    assert refreshed_html =~ "Use P95 latency and report throughput"
+    assert refreshed_html =~ ~s(value="A" checked)
+    refute refreshed_html =~ ~s(value="Latency" checked)
+
     assert {:noreply, answered_socket} =
              PikaWeb.OptimizationLive.handle_event(
                "answer_questions",
-               %{
-                 "answers" => %{
-                   "target" => %{"choice" => "A", "custom" => ""},
-                   "metric" => %{
-                     "choice" => "Latency",
-                     "custom" => "Use P95 latency and report throughput"
-                   }
-                 }
-               },
-               socket
+               %{"answers" => edited_answers},
+               refreshed_socket
              )
+
+    assert answered_socket.assigns.question_answers == %{}
+    assert answered_socket.assigns.question_batch_id == nil
 
     assert Task.await(question_task) ==
              {:ok,
