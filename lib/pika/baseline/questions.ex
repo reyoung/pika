@@ -7,11 +7,12 @@ defmodule Pika.Baseline.Questions do
   alias Pika.Repo
 
   @optimization_id "optimization"
+  @default_answer_timeout_ms :timer.minutes(10)
 
   def start_link(opts \\ []) do
     case Keyword.get(opts, :name, __MODULE__) do
-      nil -> GenServer.start_link(__MODULE__, %{})
-      name -> GenServer.start_link(__MODULE__, %{}, name: name)
+      nil -> GenServer.start_link(__MODULE__, opts)
+      name -> GenServer.start_link(__MODULE__, opts, name: name)
     end
   end
 
@@ -44,9 +45,17 @@ defmodule Pika.Baseline.Questions do
   end
 
   @impl true
-  def init(_state) do
+  def init(opts) do
     cancel_orphaned_pending()
-    {:ok, %{waiters: %{}}}
+
+    {:ok,
+     %{
+       waiters: %{},
+       answer_timeout_ms:
+         normalize_answer_timeout(
+           Keyword.get(opts, :answer_timeout_ms, @default_answer_timeout_ms)
+         )
+     }}
   end
 
   @impl true
@@ -54,7 +63,10 @@ defmodule Pika.Baseline.Questions do
     with :ok <- require_alignment(binding),
          {:ok, baseline_revision_id} <- integer_id(binding.work_id),
          {:ok, batch} <- insert_batch(baseline_revision_id, binding.session_id, questions) do
-      {:noreply, %{state | waiters: Map.put(state.waiters, batch.id, from)}}
+      timer = Process.send_after(self(), {:answer_timeout, batch.id}, state.answer_timeout_ms)
+
+      waiter = %{from: from, actor: binding.actor, timer: timer}
+      {:noreply, %{state | waiters: Map.put(state.waiters, batch.id, waiter)}}
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -70,8 +82,10 @@ defmodule Pika.Baseline.Questions do
         {nil, waiters} ->
           {:reply, {:ok, completed}, %{state | waiters: waiters}}
 
-        {from, waiters} ->
-          GenServer.reply(from, {:ok, answers})
+        {waiter, waiters} ->
+          cancel_timer(waiter.timer)
+          GenServer.reply(waiter.from, {:ok, answers})
+          notify_answered(waiter.actor, completed)
           {:reply, {:ok, completed}, %{state | waiters: waiters}}
       end
     else
@@ -87,8 +101,9 @@ defmodule Pika.Baseline.Questions do
             {nil, waiters} ->
               {:reply, :ok, %{state | waiters: waiters}}
 
-            {from, waiters} ->
-              GenServer.reply(from, {:error, :baseline_questions_cancelled})
+            {waiter, waiters} ->
+              cancel_timer(waiter.timer)
+              GenServer.reply(waiter.from, {:error, :baseline_questions_cancelled})
               {:reply, :ok, %{state | waiters: waiters}}
           end
         else
@@ -99,6 +114,25 @@ defmodule Pika.Baseline.Questions do
         {:reply, :ok, state}
     end
   end
+
+  @impl true
+  def handle_info({:answer_timeout, batch_id}, state) do
+    case Map.pop(state.waiters, batch_id) do
+      {nil, waiters} ->
+        {:noreply, %{state | waiters: waiters}}
+
+      {waiter, waiters} ->
+        case fetch_pending(batch_id) do
+          {:ok, batch} -> _ = cancel_batch(batch, "answer_timeout")
+          _other -> :ok
+        end
+
+        GenServer.reply(waiter.from, {:error, :baseline_questions_timeout})
+        {:noreply, %{state | waiters: waiters}}
+    end
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
 
   defp insert_batch(baseline_revision_id, session_id, questions) do
     now = now_us()
@@ -195,6 +229,23 @@ defmodule Pika.Baseline.Questions do
       {:error, error} -> {:error, {:baseline_questions_cancel_failed, error}}
     end
   end
+
+  defp notify_answered(actor, completed) when is_pid(actor) do
+    send(
+      actor,
+      {:pika_baseline_questions_answered, completed.id, completed.session_id, completed.answers}
+    )
+  end
+
+  defp notify_answered(_actor, _completed), do: :ok
+
+  defp cancel_timer(timer) do
+    _ = Process.cancel_timer(timer, async: true, info: false)
+    :ok
+  end
+
+  defp normalize_answer_timeout(timeout) when is_integer(timeout) and timeout > 0, do: timeout
+  defp normalize_answer_timeout(_timeout), do: @default_answer_timeout_ms
 
   defp latest_pending do
     case Repo.query!(

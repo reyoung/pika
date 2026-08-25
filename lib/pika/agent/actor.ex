@@ -62,6 +62,7 @@ defmodule Pika.Agent.Actor do
       output_messages: [],
       output_flushed_at_ms: nil,
       terminal_called: false,
+      pending_question_continuation: nil,
       active_followup_request_id: nil,
       closed?: false
     }
@@ -165,6 +166,34 @@ defmodule Pika.Agent.Actor do
       state = maybe_deliver_generated_followup(state)
       notify(state, {:agent_actor_completed, state.work})
       {:stop, :normal, cleanup(state, "completed", "terminal_mcp")}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info(
+        {:pika_baseline_questions_answered, _batch_id, _session_id, _answers},
+        %{closed?: true} = state
+      ),
+      do: {:noreply, state}
+
+  def handle_info(
+        {:pika_baseline_questions_answered, batch_id, session_id, answers},
+        state
+      ) do
+    if state.work.role_id == "baseline_alignment" and state.pika_session.id == session_id do
+      message = question_continuation_message(batch_id, answers)
+
+      case state.phase do
+        :running ->
+          {:noreply, %{state | pending_question_continuation: message}}
+
+        phase when phase in [:awaiting_user_kickoff, :awaiting_user] ->
+          start_question_continuation(state, message)
+
+        _other ->
+          {:noreply, %{state | pending_question_continuation: message}}
+      end
     else
       {:noreply, state}
     end
@@ -399,7 +428,8 @@ defmodule Pika.Agent.Actor do
           turn_db_id: turn.id,
           active_provider_turn_id: provider_turn_id,
           output_messages: [],
-          terminal_called: false
+          terminal_called: false,
+          pending_question_continuation: nil
         })
 
       {:ok, Map.put(new_state, :output_flushed_at_ms, nil)}
@@ -421,6 +451,35 @@ defmodule Pika.Agent.Actor do
     end
   end
 
+  defp start_question_continuation(state, message) do
+    state = %{state | pending_question_continuation: nil}
+
+    case start_turn(state, message) do
+      {:ok, state} ->
+        {:noreply, state}
+
+      {:error, reason, state} ->
+        state = backend_failed(state, {:question_continuation_failed, reason})
+        notify(state, {:agent_actor_interrupted, state.work, reason})
+        {:stop, {:shutdown, reason}, state}
+    end
+  end
+
+  defp question_continuation_message(batch_id, answers) do
+    encoded_answers = Jason.encode!(answers, pretty: true)
+
+    """
+    用户已经在 Pika UI 中完成 `ask_questions` 批次 #{batch_id}。以下是整批最终答案：
+
+    ```json
+    #{encoded_answers}
+    ```
+
+    立即使用这些答案继续当前 Baseline Alignment 工作。不要再次声称仍在等待这批答案，也不要要求用户重复提交；继续准备、验证并通过 MCP 提交 Baseline Definition。
+    """
+    |> String.trim()
+  end
+
   defp handle_turn_completed(
          %{active_provider_turn_id: active_turn_id} = state,
          %{turn_id: completed_turn_id}
@@ -438,6 +497,9 @@ defmodule Pika.Agent.Actor do
       state.terminal_called or WorkProjector.terminal?(state.work) ->
         send(self(), :finish_terminal)
         {:noreply, state}
+
+      is_binary(state.pending_question_continuation) ->
+        start_question_continuation(state, state.pending_question_continuation)
 
       state.work.role_id == "baseline_alignment" ->
         {:noreply, %{state | phase: :awaiting_user}}

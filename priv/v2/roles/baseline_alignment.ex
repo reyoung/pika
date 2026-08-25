@@ -43,6 +43,8 @@ defmodule Pika.Agent.RolePrompts.BaselineAlignment do
 
     如果 `ask_questions` 不可用或调用失败，不得继续实现或提交 Definition，也不得退化为文本提问。报告准确的工具错误并重试；只有成功收到整批答案后才能继续。没有成功完成过 `ask_questions` 的当前 Revision，禁止调用 `submit_baseline_definition`。
 
+    `ask_questions` 是一个阻塞调用：它成功返回时，返回值已经包含用户提交的整批答案。收到成功结果后必须在当前工作中立即应用这些答案并继续准备 Definition；禁止继续声称“正在等待答案”、禁止要求用户重复提交，也禁止仅因问卷刚完成而结束当前 Turn。Pika 可能追加一条包含同一批答案的 continuation 消息；这是恢复信号，不是新的问卷请求。
+
     ## 工作流程
 
     1. 对齐定义

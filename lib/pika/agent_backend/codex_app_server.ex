@@ -16,6 +16,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
 
   @protocol "codex-app-server-v2"
   @rpc_timeout 60_000
+  @mcp_tool_timeout_sec 610
 
   @impl true
   def start_link(profile, event_sink), do: GenServer.start_link(__MODULE__, {profile, event_sink})
@@ -564,6 +565,8 @@ defmodule Pika.AgentBackend.CodexAppServer do
       "mcp_servers.pika.bearer_token_env_var=\"PIKA_MCP_TOKEN\"",
       "-c",
       "mcp_servers.pika.required=true",
+      "-c",
+      "mcp_servers.pika.tool_timeout_sec=#{@mcp_tool_timeout_sec}",
       "-c",
       "mcp_servers.pika.default_tools_approval_mode=\"approve\""
     ]

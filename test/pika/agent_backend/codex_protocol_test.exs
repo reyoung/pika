@@ -40,6 +40,7 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
     os_pid = Pika.AgentBackend.CodexAppServer.process_os_pid(backend.pid)
     assert {:ok, cmdline} = File.read("/proc/#{os_pid}/cmdline")
     assert cmdline =~ "mcp_servers.pika.default_tools_approval_mode=\"approve\""
+    assert cmdline =~ "mcp_servers.pika.tool_timeout_sec=610"
     refute cmdline =~ "mcp_servers.pika.default_tools_approval_mode=\"auto\""
 
     refute Enum.any?(

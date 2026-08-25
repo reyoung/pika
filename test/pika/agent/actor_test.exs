@@ -5,7 +5,7 @@ defmodule Pika.Agent.ActorTest do
   use ExUnit.Case, async: false
 
   alias Pika.Agent.{ConversationJournal, Actor, Directory, Work}
-  alias Pika.Baseline.Lifecycle
+  alias Pika.Baseline.{Lifecycle, Questions}
   alias Pika.Optimization.{Config, Persistence}
   alias Pika.Test.{FakeAgentBackend, V2BaselineFixtures}
   alias Pika.Repo
@@ -213,6 +213,55 @@ defmodule Pika.Agent.ActorTest do
              %{"role" => "user", "content" => "hold turn open"},
              %{"role" => "user", "content" => "replace active turn"}
            ]
+  end
+
+  test "continues Baseline Alignment automatically after question answers arrive", %{
+    opts: opts,
+    work: work
+  } do
+    questions = start_supervised!({Questions, name: nil})
+
+    question_handler = fn binding, batch -> Questions.ask(binding, batch, questions) end
+    actor = start_supervised!({Actor, Keyword.put(opts, :question_handler, question_handler)})
+    assert_receive {:agent_actor_started, ^work, _session_id}, 2_000
+
+    assert :ok = Actor.kickoff(actor, "collect requirements")
+    assert eventually(fn -> Actor.status(actor).phase == :awaiting_user end)
+
+    batch = [
+      %{
+        "id" => "metric",
+        "question" => "主指标是什么？",
+        "options" => [
+          %{"label" => "Latency", "description" => "最小化延迟"},
+          %{"label" => "Throughput", "description" => "最大化吞吐"}
+        ]
+      }
+    ]
+
+    invocation =
+      Task.async(fn -> Actor.invoke(actor, "ask_questions", %{"questions" => batch}) end)
+
+    assert eventually(fn -> Questions.pending(questions) != nil end)
+    pending = Questions.pending(questions)
+    answers = [%{"id" => "metric", "answer" => "Latency"}]
+
+    assert {:ok, _completed} = Questions.answer(pending.id, answers, questions)
+    assert Task.await(invocation) == {:ok, %{answers: answers}}
+
+    assert eventually(fn ->
+             turns = ConversationJournal.work_turns(work.role_id, work.kind, work.id)
+
+             length(turns) == 2 and
+               turns
+               |> List.last()
+               |> Map.fetch!(:input_messages)
+               |> List.first()
+               |> Map.fetch!("content")
+               |> String.contains?("立即使用这些答案继续")
+           end)
+
+    assert Actor.status(actor).phase == :awaiting_user
   end
 
   defp eventually(check, attempts \\ 100)

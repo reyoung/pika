@@ -103,7 +103,42 @@ defmodule Pika.Baseline.QuestionsTest do
     assert completed.status == "answered"
     assert completed.answers == answers
     assert Task.await(task) == {:ok, answers}
+    batch_id = batch.id
+    session_id = binding.session_id
+    assert_receive {:pika_baseline_questions_answered, ^batch_id, ^session_id, ^answers}
     assert Questions.pending(server) == nil
+  end
+
+  test "times out an unanswered batch after the configured user window", %{
+    binding: binding
+  } do
+    server =
+      start_supervised!(
+        {Questions, name: nil, answer_timeout_ms: 25},
+        id: :questions_with_short_timeout
+      )
+
+    questions = [
+      %{
+        "id" => "target",
+        "question" => "Target 是什么？",
+        "options" => [
+          %{"label" => "A", "description" => "方案 A"},
+          %{"label" => "B", "description" => "方案 B"}
+        ]
+      }
+    ]
+
+    task = Task.async(fn -> Questions.ask(binding, questions, server) end)
+    assert eventually(fn -> Questions.pending(server) != nil end)
+
+    assert Task.await(task, 1_000) == {:error, :baseline_questions_timeout}
+    assert Questions.pending(server) == nil
+
+    assert [["cancelled"]] =
+             Repo.query!(
+               "SELECT status FROM baseline_question_batches ORDER BY created_at DESC LIMIT 1"
+             ).rows
   end
 
   test "cancels a pending batch so an interrupted Session is not left blocked", %{

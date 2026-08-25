@@ -37,6 +37,8 @@ defmodule Pika.Agent.BaselineAlignmentRolePromptTest do
     assert prompt =~ "禁止要求用户手工回复编号"
     assert prompt =~ "不得退化为文本提问"
     assert prompt =~ "没有成功完成过 `ask_questions` 的当前 Revision"
+    assert prompt =~ "成功返回时，返回值已经包含用户提交的整批答案"
+    assert prompt =~ "禁止继续声称“正在等待答案”"
     assert prompt =~ "尽量合并当前已知的所有相互独立问题（最多 8 个）"
     assert prompt =~ "填写自定义答案"
     assert prompt =~ "submit_baseline_definition(manifest_path, idempotency_key)"
