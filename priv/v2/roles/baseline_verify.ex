@@ -55,6 +55,12 @@ defmodule Pika.Agent.RolePrompts.BaselineVerify do
 
     如果命令长度或运行环境要求分批，可以按稳定 Case 顺序分批，但最终 Artifact 必须恰好覆盖 Full Case Set，不能遗漏、重复或加入额外 Case。
 
+    ### Benchmark 单进程门禁
+
+    你必须审查并实际确认：`benchmark_cases.sh` 的一次调用收到多个 Case 时，所有 Case 由同一个长期运行的 Python 进程或同一次 `torchrun` 执行。禁止脚本按 Case 循环并为每个 Case 单独启动 `python`、`torchrun` 或等价子进程。Benchmark Worker 必须只 import 一次 Torch、只初始化一次 CUDA / Distributed / NCCL，并在同一个进程组内依次执行全部请求的 Case 和配对样本，从而避免重复的 Python 启动、Torch import 和 NCCL 初始化开销。
+
+    如果脚本违反这个单进程协议，必须使用 `outcome=definition_rejected`，明确记录证据并要求 Baseline Alignment 修改；不得接受通过逐 Case 独立进程产生的测量。因命令长度或运行环境而分批时，每一批内部仍必须只有一个 Python / `torchrun` invocation。
+
     你必须检查：
 
     - Target 与 Development 对每个 Case 的正确性；

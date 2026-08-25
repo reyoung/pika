@@ -215,6 +215,27 @@ defmodule Pika.Agent.ActorTest do
            ]
   end
 
+  test "records a user message before an active-turn steer can fail", %{
+    opts: opts,
+    work: work
+  } do
+    actor = start_supervised!({Actor, opts})
+    assert_receive {:agent_actor_started, ^work, _session_id}, 2_000
+
+    assert :ok = Actor.kickoff(actor, "hold turn open")
+    assert Actor.status(actor).phase == :running
+
+    assert {:error, {:turn_steer_failed, %Pika.AgentBackend.Error{code: :steer_failed}}} =
+             Actor.kickoff(actor, "fail active turn")
+
+    [turn] = ConversationJournal.work_turns(work.role_id, work.kind, work.id)
+
+    assert turn.input_messages == [
+             %{"role" => "user", "content" => "hold turn open"},
+             %{"role" => "user", "content" => "fail active turn"}
+           ]
+  end
+
   test "continues Baseline Alignment automatically after question answers arrive", %{
     opts: opts,
     work: work

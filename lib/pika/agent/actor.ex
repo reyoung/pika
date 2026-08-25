@@ -439,12 +439,12 @@ defmodule Pika.Agent.Actor do
   end
 
   defp steer_turn(state, message) do
-    with {:ok, provider_turn_id} <- AgentBackend.steer(state.handle, message),
-         {:ok, _turn} <-
+    with {:ok, _turn} <-
            ConversationJournal.append_input(state.turn_db_id, %{
              "role" => "user",
              "content" => message
-           }) do
+           }),
+         {:ok, provider_turn_id} <- AgentBackend.steer(state.handle, message) do
       {:ok, %{state | active_provider_turn_id: provider_turn_id}}
     else
       {:error, reason} -> {:error, {:turn_steer_failed, reason}, state}

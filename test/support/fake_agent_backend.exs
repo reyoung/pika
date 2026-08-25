@@ -94,6 +94,10 @@ defmodule Pika.Test.FakeAgentBackend do
     end
   end
 
+  def steer(_server, "fail active turn") do
+    {:error, %Error{code: :steer_failed, message: "injected steer failure"}}
+  end
+
   def steer(server, _input) do
     case Agent.get(server, & &1.turn) do
       nil -> {:error, %Error{code: :steer_failed, message: "no active turn"}}

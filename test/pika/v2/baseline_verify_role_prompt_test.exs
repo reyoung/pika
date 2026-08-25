@@ -30,6 +30,11 @@ defmodule Pika.Agent.BaselineVerifyRolePromptTest do
 
     assert prompt =~ "./verify_cases.sh --list-cases"
     assert prompt =~ "./benchmark_cases.sh --list-cases"
+    assert prompt =~ "Benchmark 单进程门禁"
+    assert prompt =~ "同一个长期运行的 Python 进程或同一次 `torchrun`"
+    assert prompt =~ "禁止脚本按 Case 循环"
+    assert prompt =~ "只初始化一次 CUDA / Distributed / NCCL"
+    assert prompt =~ "不得接受通过逐 Case 独立进程产生的测量"
     assert prompt =~ "每一个 `case_id × metric_id`"
     assert prompt =~ "outcome=accepted"
     assert prompt =~ "outcome=definition_rejected"

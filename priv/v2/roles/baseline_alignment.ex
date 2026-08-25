@@ -85,6 +85,14 @@ defmodule Pika.Agent.RolePrompts.BaselineAlignment do
 
     两个脚本把日志写入 stderr，并支持 `--help` 和 `--list-cases`。
 
+    ### Benchmark 单进程强制协议
+
+    `benchmark_cases.sh` 的一次调用收到多个 Case 时，必须使用同一个长期运行的 Python 进程或同一次 `torchrun` 执行全部 Case。禁止在 Shell 或其他调度层按 Case 循环，并为每个 Case 单独启动 `python`、`torchrun` 或等价子进程。
+
+    Benchmark Worker 必须只 import 一次 Torch、只初始化一次 CUDA / Distributed / NCCL，并在同一个进程组内依次执行所有请求的 Case 和配对样本。Target、Development 及其共享运行时也应在这次调用内复用；不得把 Torch import、Python 启动或 NCCL 初始化开销重复计入每个 Case。stdout 仍须按协议为每个 `case_id × metric_id × pair_index` 独立输出记录。
+
+    如果实现需要分批，分批只能发生在用户或 Pika 发起的多次标准脚本调用之间；单次 `--case-id` 参数所列的所有 Case 仍必须由一个 Python / `torchrun` invocation 完成。
+
     完成条件：两个标准命令能在任意非空 Case 子集上产生符合 Schema 的结果。
 
     5. Smoke
