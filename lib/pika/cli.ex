@@ -186,6 +186,8 @@ defmodule Pika.CLI do
           config: :string,
           host: :string,
           port: :integer,
+          reload: :boolean,
+          autoreload: :boolean,
           help: :boolean
         ],
         aliases: [h: :help]
@@ -219,7 +221,8 @@ defmodule Pika.CLI do
          workspace: workspace,
          config: config_path,
          host: opts[:host] || "127.0.0.1",
-         port: opts[:port] || 8080
+         port: opts[:port] || 8080,
+         reload: opts[:reload] == true or opts[:autoreload] == true
        }}
     else
       {:error, Enum.join(errors, "\n")}
@@ -264,8 +267,9 @@ defmodule Pika.CLI do
            Path.expand(config.source_path) ==
              Path.expand(Path.join(config.workspace, "pika.yaml")) ||
              {:error, {:config_must_be_workspace_pika_yaml, config.workspace}},
-         :ok <- configure_endpoint(opts.host, opts.port),
-         :ok <- configure_runtime(config),
+         :ok <- validate_reload(opts.reload),
+         :ok <- configure_endpoint(opts.host, opts.port, opts.reload),
+         :ok <- configure_runtime(config, opts.reload),
          %{token: token} <- Pika.Auth.configure(config.token),
          {:ok, _apps} <- Application.ensure_all_started(:pika),
          snapshot <- Bootstrap.snapshot() do
@@ -273,6 +277,10 @@ defmodule Pika.CLI do
       IO.puts("Pika Workspace: #{config.workspace}")
       IO.puts("Pika Repo: #{config.repo}")
       IO.puts("Pika Optimization: #{snapshot.optimization.id} (#{snapshot.recovery})")
+
+      if opts.reload do
+        IO.puts("Pika Auto-reload: enabled for Elixir, JS, and CSS source changes")
+      end
 
       IO.puts(
         "Pika URL: http://#{browser_host}:#{opts.port}/?token=#{URI.encode_www_form(token)}"
@@ -285,9 +293,16 @@ defmodule Pika.CLI do
     end
   end
 
-  defp configure_runtime(config) do
+  defp configure_runtime(config, reload?) do
     Application.put_env(:pika, :runtime_mode, :v2)
     Application.put_env(:pika, :v2_config_path, config.source_path)
+    Application.put_env(:pika, :dev_reload, reload?)
+
+    if reload? do
+      Application.put_env(:pika, :dev_reload_root, File.cwd!())
+    else
+      Application.delete_env(:pika, :dev_reload_root)
+    end
 
     Application.put_env(:pika, Pika.Repo,
       database: Path.join(config.workspace, "pika.sqlite3"),
@@ -302,15 +317,24 @@ defmodule Pika.CLI do
     :ok
   end
 
-  defp configure_endpoint(host, port) do
+  defp configure_endpoint(host, port, reload?) do
     with {:ok, ip} <- :inet.parse_address(String.to_charlist(host)) do
       current = Application.get_env(:pika, PikaWeb.Endpoint, [])
+
+      watchers =
+        if reload? do
+          [esbuild: {Esbuild, :install_and_run, [:default, ~w(--sourcemap=inline --watch)]}]
+        else
+          []
+        end
 
       Application.put_env(
         :pika,
         PikaWeb.Endpoint,
         Keyword.merge(current,
           server: true,
+          code_reloader: reload?,
+          watchers: watchers,
           http: [ip: ip, port: port],
           url: [host: host, port: port]
         )
@@ -319,6 +343,19 @@ defmodule Pika.CLI do
       :ok
     else
       _other -> {:error, {:invalid_host, host}}
+    end
+  end
+
+  defp validate_reload(false), do: :ok
+
+  defp validate_reload(true) do
+    mix_running? =
+      Code.ensure_loaded?(Mix.Project) and not is_nil(Process.whereis(Mix.ProjectStack))
+
+    if mix_running? and Code.ensure_loaded?(Esbuild) do
+      :ok
+    else
+      {:error, :autoreload_requires_source_checkout}
     end
   end
 
@@ -385,6 +422,8 @@ defmodule Pika.CLI do
       --config PATH      Must resolve to WORKSPACE/pika.yaml
       --host IP          Listen host (default 127.0.0.1)
       --port PORT        Listen port (default 8080)
+      --reload           Hot-compile Elixir, watch assets, and refresh the browser (source only)
+      --autoreload       Alias for --reload
       -h, --help
     """
   end

@@ -38,6 +38,19 @@ mix release
 
 初始化会生成完整展开的 v2 `pika.yaml`。也可以从 [config/pika.example.yaml](config/pika.example.yaml) 开始；YAML anchor 只负责书写复用，运行时不存在 Agent Profile registry。
 
+## 开发时自动重载
+
+从源码 checkout 启动时，可以开启开发重载：
+
+```bash
+./bin/pika serve --workspace /absolute/path/to/workspace --reload
+```
+
+`--autoreload` 是同义选项。该模式会在请求时热编译 `lib/` 和 `priv/v2/` 下的 Elixir
+代码、持续构建 `assets/js` 与 `assets/css`，并在这些源码变化后自动刷新浏览器。它只适用于
+源码 checkout，release 中不会启用；`mix.exs`、依赖、运行时配置或 supervision tree 的结构
+变化仍需手工重启。
+
 ## 核心契约
 
 - Baseline 同时定义 Optimization Target 与 Development Baseline；两者可以相同，但必须分别记录。

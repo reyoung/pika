@@ -8,6 +8,7 @@ defmodule Pika.MixProject do
       elixir: "~> 1.18",
       elixirc_paths: ["lib", "priv/v2/roles"],
       start_permanent: Mix.env() == :prod,
+      listeners: [Phoenix.CodeReloader],
       deps: deps(),
       aliases: aliases(),
       releases: [pika: [steps: [:assemble, &Pika.Release.add_cli/1]]],

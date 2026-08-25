@@ -11,26 +11,31 @@ defmodule PikaWeb.Endpoint do
     http_only: true
   ]
 
-  socket "/live", Phoenix.LiveView.Socket,
+  socket("/live", Phoenix.LiveView.Socket,
     websocket: [connect_info: [session: @session_options]],
     longpoll: false
+  )
 
-  plug Plug.Static,
+  plug(Plug.Static,
     at: "/",
     from: :pika,
     gzip: false,
     only: PikaWeb.static_paths()
+  )
 
-  plug Plug.RequestId
-  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
+  plug(PikaWeb.CodeReloader)
 
-  plug Plug.Parsers,
+  plug(Plug.RequestId)
+  plug(Plug.Telemetry, event_prefix: [:phoenix, :endpoint])
+
+  plug(Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
     json_decoder: Phoenix.json_library()
+  )
 
-  plug Plug.MethodOverride
-  plug Plug.Head
-  plug Plug.Session, @session_options
-  plug PikaWeb.Router
+  plug(Plug.MethodOverride)
+  plug(Plug.Head)
+  plug(Plug.Session, @session_options)
+  plug(PikaWeb.Router)
 end

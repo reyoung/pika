@@ -41,6 +41,10 @@ defmodule Pika.CLITest do
     assert serve.workspace == Path.expand(workspace)
     assert serve.config == Path.join(Path.expand(workspace), "pika.yaml")
     assert serve.port == 8080
+    refute serve.reload
+
+    assert {:ok, %{reload: true}} = Pika.CLI.parse_serve(["--reload"])
+    assert {:ok, %{reload: true}} = Pika.CLI.parse_serve(["--autoreload"])
   end
 
   test "help parsing does not require paths" do

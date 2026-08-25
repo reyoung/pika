@@ -1,7 +1,7 @@
 defmodule PikaWeb.Layouts do
   use PikaWeb, :html
 
-  attr :inner_content, :any, required: true
+  attr(:inner_content, :any, required: true)
 
   def root(assigns) do
     ~H"""
@@ -15,6 +15,13 @@ defmodule PikaWeb.Layouts do
         <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
         <link phx-track-static rel="stylesheet" href="/assets/app.css" />
         <script defer phx-track-static type="text/javascript" src="/assets/app.js"></script>
+        <script
+          :if={Application.get_env(:pika, :dev_reload, false)}
+          defer
+          type="text/javascript"
+          src="/assets/dev_reload.js"
+        >
+        </script>
       </head>
       <body>
         {@inner_content}
@@ -23,7 +30,7 @@ defmodule PikaWeb.Layouts do
     """
   end
 
-  attr :inner_content, :any, required: true
+  attr(:inner_content, :any, required: true)
 
   def app(assigns) do
     ~H"""
