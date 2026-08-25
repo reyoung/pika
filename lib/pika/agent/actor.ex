@@ -57,7 +57,7 @@ defmodule Pika.Agent.Actor do
       directory: Keyword.get(opts, :directory, Directory),
       phase: :preparing,
       turn_db_id: nil,
-      output: "",
+      output_messages: [],
       output_flushed_at_ms: nil,
       terminal_called: false,
       active_followup_request_id: nil,
@@ -170,8 +170,16 @@ defmodule Pika.Agent.Actor do
 
         state =
           state
-          |> Map.update!(:output, &(&1 <> to_string(delta)))
+          |> append_message_delta(event, to_string(delta))
           |> maybe_flush_stream_output()
+
+        {:noreply, state}
+
+      :message_completed ->
+        state =
+          state
+          |> complete_message(event)
+          |> maybe_flush_stream_output(true)
 
         {:noreply, state}
 
@@ -372,13 +380,13 @@ defmodule Pika.Agent.Actor do
              %{"role" => "user", "content" => prompt}
            ]),
          {:ok, _provider_turn_id} <- AgentBackend.start_turn(state.handle, prompt) do
-      new_state = %{
-        state
-        | phase: :running,
+      new_state =
+        Map.merge(state, %{
+          phase: :running,
           turn_db_id: turn.id,
-          output: "",
+          output_messages: [],
           terminal_called: false
-      }
+        })
 
       {:ok, Map.put(new_state, :output_flushed_at_ms, nil)}
     else
@@ -586,7 +594,7 @@ defmodule Pika.Agent.Actor do
     _ = ConversationJournal.finish_turn(state.turn_db_id, reason)
 
     state
-    |> Map.merge(%{turn_db_id: nil, output: ""})
+    |> Map.merge(%{turn_db_id: nil, output_messages: []})
     |> Map.put(:output_flushed_at_ms, nil)
   end
 
@@ -594,28 +602,101 @@ defmodule Pika.Agent.Actor do
 
   defp maybe_flush_stream_output(%{turn_db_id: nil} = state, _force?), do: state
 
-  defp maybe_flush_stream_output(%{output: output} = state, _force?)
-       when output == "",
-       do: state
-
   defp maybe_flush_stream_output(state, force?) do
+    messages = state_output_messages(state)
     now_ms = System.monotonic_time(:millisecond)
 
     output_flushed_at_ms = Map.get(state, :output_flushed_at_ms)
 
-    if force? or is_nil(output_flushed_at_ms) or
-         now_ms - output_flushed_at_ms >= @stream_flush_ms do
-      _ =
-        ConversationJournal.stream_output(state.turn_db_id, %{
-          "role" => "assistant",
-          "content" => state.output
-        })
+    cond do
+      messages == [] ->
+        state
 
-      Map.put(state, :output_flushed_at_ms, now_ms)
+      force? or is_nil(output_flushed_at_ms) or
+          now_ms - output_flushed_at_ms >= @stream_flush_ms ->
+        _ = ConversationJournal.stream_outputs(state.turn_db_id, messages)
+        Map.put(state, :output_flushed_at_ms, now_ms)
+
+      true ->
+        state
+    end
+  end
+
+  defp append_message_delta(state, _event, ""), do: state
+
+  defp append_message_delta(state, event, delta) do
+    item_id = message_item_id(event)
+
+    update_output_message(state, item_id, fn message ->
+      message
+      |> Map.put("role", "assistant")
+      |> Map.put("content", (message["content"] || "") <> delta)
+      |> Map.put("complete", false)
+    end)
+  end
+
+  defp complete_message(state, event) do
+    item = event.data[:item] || event.data["item"] || %{}
+    text = item["text"] || item["content"]
+
+    if is_binary(text) do
+      update_output_message(state, item["id"] || message_item_id(event), fn message ->
+        message
+        |> Map.put("role", "assistant")
+        |> Map.put("content", text)
+        |> Map.put("complete", true)
+        |> put_message_metadata("phase", item["phase"])
+        |> put_message_metadata("delivery", item["delivery"])
+      end)
     else
       state
     end
   end
+
+  defp update_output_message(state, item_id, update) do
+    {messages, found?} =
+      Enum.map_reduce(state_output_messages(state), false, fn message, found? ->
+        if message["id"] == item_id do
+          {update.(message), true}
+        else
+          {message, found?}
+        end
+      end)
+
+    messages = if found?, do: messages, else: messages ++ [update.(%{"id" => item_id})]
+    Map.put(state, :output_messages, messages)
+  end
+
+  defp state_output_messages(state) do
+    case Map.fetch(state, :output_messages) do
+      {:ok, messages} ->
+        messages
+
+      :error ->
+        case Map.get(state, :output, "") do
+          "" ->
+            []
+
+          legacy_output ->
+            [
+              %{
+                "id" => "turn:legacy",
+                "role" => "assistant",
+                "content" => legacy_output,
+                "complete" => false
+              }
+            ]
+        end
+    end
+  end
+
+  defp message_item_id(event) do
+    event.data[:item_id] || event.data["item_id"] || event.data["itemId"] ||
+      "turn:#{event.turn_id || "unknown"}"
+  end
+
+  defp put_message_metadata(message, _key, nil), do: message
+  defp put_message_metadata(message, key, value), do: Map.put(message, key, value)
 
   defp record_mcp(%{turn_db_id: nil} = state, _operation, _result), do: state
 

@@ -104,6 +104,6 @@ defmodule Pika.Optimization.ReconfigurationTest do
     assert config.progress_summary.agent.backend == :cursor_acp
     assert config.progress_summary.agent.model == "summary-model"
     assert config.progress_summary.agent.reasoning_effort == "max"
-    assert config.progress_summary.agent.sandbox == "enabled"
+    assert config.progress_summary.agent.sandbox == "disabled"
   end
 end

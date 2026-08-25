@@ -150,11 +150,30 @@ defmodule Pika.Test.FakeJSONLProvider do
   defp handle_cursor(_message, state), do: state
 
   defp complete_codex_turn(thread_id, turn_id, text) do
+    item_id = "fake-item"
+
+    notify("item/started", %{
+      "threadId" => thread_id,
+      "turnId" => turn_id,
+      "item" => %{"id" => item_id, "type" => "agentMessage", "text" => ""}
+    })
+
     notify("item/agentMessage/delta", %{
       "threadId" => thread_id,
       "turnId" => turn_id,
-      "itemId" => "fake-item",
-      "delta" => text
+      "itemId" => item_id,
+      "delta" => text <> " (streamed)"
+    })
+
+    notify("item/completed", %{
+      "threadId" => thread_id,
+      "turnId" => turn_id,
+      "item" => %{
+        "id" => item_id,
+        "type" => "agentMessage",
+        "phase" => "final_answer",
+        "text" => text
+      }
     })
 
     notify("turn/completed", %{

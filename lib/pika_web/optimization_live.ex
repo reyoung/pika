@@ -395,17 +395,24 @@ defmodule PikaWeb.OptimizationLive do
                       </div>
 
                       <article
-                        :for={message <- turn.output_messages}
-                        class={"ops-chat-message ops-chat-message-#{message_role(message, "assistant")}"}
+                        :for={{message, message_index} <- Enum.with_index(turn.output_messages, 1)}
+                        class={
+                          "ops-chat-message ops-chat-message-#{message_role(message, "assistant")} ops-chat-message-#{message_phase(message)}"
+                        }
                       >
                         <span class="ops-chat-avatar">{message_avatar(message, "assistant")}</span>
                         <div>
                           <header>
                             <strong>{message_author(message, "assistant")}</strong>
-                            <small>{if turn.partial, do: "Streaming", else: "Turn #{turn.turn}"}</small>
+                            <small>{message_caption(turn, message, message_index)}</small>
                           </header>
                           <pre>{message_text(message)}</pre>
-                          <i :if={turn.partial} class="ops-stream-cursor" aria-label="Generating"></i>
+                          <i
+                            :if={streaming_message?(turn, message, message_index)}
+                            class="ops-stream-cursor"
+                            aria-label="Generating"
+                          >
+                          </i>
                         </div>
                       </article>
 
@@ -809,6 +816,23 @@ defmodule PikaWeb.OptimizationLive do
       "system" -> "System"
       _assistant -> "Baseline Agent"
     end
+  end
+
+  defp message_phase(%{"phase" => "final_answer"}), do: "final"
+  defp message_phase(%{"phase" => "commentary"}), do: "update"
+  defp message_phase(_message), do: "default"
+
+  defp message_caption(turn, message, index) do
+    cond do
+      streaming_message?(turn, message, index) -> "Streaming"
+      message["phase"] == "final_answer" -> "Final answer"
+      message["phase"] == "commentary" -> "Update #{index}"
+      true -> "Turn #{turn.turn} · Message #{index}"
+    end
+  end
+
+  defp streaming_message?(turn, message, index) do
+    turn.partial && index == length(turn.output_messages) && message["complete"] != true
   end
 
   defp session_turns(turns, session_id),

@@ -8,6 +8,7 @@
 - 其他已配置 Role 的并发度固定为 1；不同 Role 可以并行。
 - Follow-up 与 Progress Summary Role 可省略。
 - Session 创建时冻结当前完整配置；更新只影响以后创建的 Session。
+- Codex 默认使用 `danger-full-access`，Cursor 默认关闭 sandbox；只有用户显式配置时才启用受限 sandbox。
 - 根级 `token` 是 Web/API 访问 token。新 Workspace 默认生成随机 256-bit token；也可在初始化时固定。`serve` 在启动时读取它，手工修改后需要重启。旧配置省略该字段时，每次 `serve` 启动仍临时生成随机 token。
 
 ## 2. 交互式配置
@@ -37,7 +38,7 @@ agents:
     model: gpt-5.6
     reasoning_effort: high
     approval_policy: never
-    sandbox: workspace-write
+    sandbox: danger-full-access
 
   baseline_verify:
     <<: *codex_writer
@@ -49,7 +50,7 @@ agents:
     model: gpt-5.6
     reasoning_effort: medium
     approval_policy: never
-    sandbox: read-only
+    sandbox: danger-full-access
     generator_max_attempts: 3
 
   iteration:
@@ -86,7 +87,7 @@ agents:
     model: gpt-5.6
     reasoning_effort: low
     approval_policy: never
-    sandbox: read-only
+    sandbox: danger-full-access
     max_followups: 3
 ```
 

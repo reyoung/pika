@@ -35,6 +35,12 @@ defmodule Pika.AgentBackend.PermissionPolicyTest do
     assert PermissionPolicy.codex_approvals_reviewer("never") == nil
     assert PermissionPolicy.codex_approval_decision("never") == "acceptForSession"
     assert PermissionPolicy.codex_legacy_approval_decision("never") == "approved_for_session"
+    assert PermissionPolicy.codex_sandbox_mode("danger_full_access") == "danger-full-access"
+
+    assert PermissionPolicy.codex_sandbox_policy("danger_full_access") == %{
+             "type" => "dangerFullAccess"
+           }
+
     assert PermissionPolicy.codex_sandbox_mode("workspace_write") == "workspace-write"
 
     assert PermissionPolicy.codex_sandbox_policy("workspace_write") == %{

@@ -22,8 +22,8 @@ defmodule Pika.AgentBackend.PermissionPolicy do
   @codex_sandbox_options [
     %{
       value: "danger_full_access",
-      label: "Danger full access",
-      description: "no filesystem or network sandbox; Codex hard safety rules still apply"
+      label: "No sandbox (full access)",
+      description: "default; unrestricted filesystem and network access for unattended work"
     },
     %{
       value: "workspace_write",

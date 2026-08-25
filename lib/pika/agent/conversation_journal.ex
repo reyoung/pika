@@ -132,13 +132,18 @@ defmodule Pika.Agent.ConversationJournal do
 
   @spec stream_output(pos_integer(), map()) :: {:ok, map()} | {:error, term()}
   def stream_output(turn_id, message) when is_integer(turn_id) and is_map(message) do
+    stream_outputs(turn_id, [message])
+  end
+
+  @spec stream_outputs(pos_integer(), [map()]) :: {:ok, map()} | {:error, term()}
+  def stream_outputs(turn_id, messages) when is_integer(turn_id) and is_list(messages) do
     case Repo.query!(
            """
            UPDATE conversation_turns
            SET output_messages_json = ?
            WHERE id = ? AND partial = 1
            """,
-           [Jason.encode!([message]), turn_id]
+           [Jason.encode!(messages), turn_id]
          ).num_rows do
       1 -> {:ok, turn(turn_id)}
       0 -> {:error, :turn_not_open}

@@ -4,7 +4,9 @@ defmodule Pika.AgentBackend.Event do
   @types [
     :session_started,
     :turn_started,
+    :message_started,
     :message_delta,
+    :message_completed,
     :plan_updated,
     :tool_started,
     :tool_updated,

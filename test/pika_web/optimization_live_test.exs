@@ -72,7 +72,17 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert {:ok, _turn} =
              ConversationJournal.append_output(turn.id, %{
                "role" => "assistant",
-               "content" => "I am checking the cases and metrics."
+               "content" => "I am checking the cases and metrics.",
+               "phase" => "commentary",
+               "complete" => true
+             })
+
+    assert {:ok, _turn} =
+             ConversationJournal.append_output(turn.id, %{
+               "role" => "assistant",
+               "content" => "The measurement plan is ready for review.",
+               "phase" => "final_answer",
+               "complete" => true
              })
 
     assert {:ok, _turn} =
@@ -170,11 +180,15 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert html =~ "Codex app server"
     assert html =~ "gpt-test"
     assert html =~ "I am checking the cases and metrics."
+    assert html =~ "The measurement plan is ready for review."
+    assert html =~ "Update 1"
+    assert html =~ "Final answer"
+    assert html =~ "ops-chat-message-final"
     assert html =~ "Confirm the measurement protocol"
     assert html =~ "I am streaming the current Baseline analysis."
     assert html =~ "get_context"
     assert html =~ ~s(class="ops-chat-message ops-chat-message-user")
-    assert html =~ ~s(class="ops-chat-message ops-chat-message-assistant")
+    assert html =~ ~s(class="ops-chat-message ops-chat-message-assistant ops-chat-message-)
     assert html =~ ~s(phx-hook="ConversationScroll")
     assert html =~ ~s(phx-click="toggle_agent_session")
     assert length(:binary.matches(html, ~s(aria-expanded="true"))) == 1

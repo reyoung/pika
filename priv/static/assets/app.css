@@ -3784,6 +3784,18 @@ code {
 .ops-chat-message-system > div {
   border-style: dashed;
 }
+.ops-chat-message-update > div {
+  border-color: #303b43;
+  background: #0c1218;
+}
+.ops-chat-message-final > div {
+  border-color: #526232;
+  background: #10170f;
+  box-shadow: inset 3px 0 0 #9bc52f;
+}
+.ops-chat-message-final header strong {
+  color: #d5e8a2;
+}
 .ops-chat-message header {
   display: flex;
   gap: 10px;

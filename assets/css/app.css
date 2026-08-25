@@ -787,6 +787,9 @@ code { color: #8ee8ff; }
 .ops-chat-message > div { min-width: 0; overflow: hidden; border: 1px solid #29343e; border-radius: 4px 11px 11px; background: #0d131a; }
 .ops-chat-message-user > div { border-color: #334d5e; border-radius: 11px 4px 11px 11px; background: #10202a; }
 .ops-chat-message-system > div { border-style: dashed; }
+.ops-chat-message-update > div { border-color: #303b43; background: #0c1218; }
+.ops-chat-message-final > div { border-color: #526232; background: #10170f; box-shadow: inset 3px 0 0 #9bc52f; }
+.ops-chat-message-final header strong { color: #d5e8a2; }
 .ops-chat-message header { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 8px 10px 0; }
 .ops-chat-message header strong { color: #b8c2c8; font-size: 9px; }
 .ops-chat-message header small { color: #58656f; font: 7px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }

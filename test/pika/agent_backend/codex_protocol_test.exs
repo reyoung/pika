@@ -39,7 +39,8 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
 
     os_pid = Pika.AgentBackend.CodexAppServer.process_os_pid(backend.pid)
     assert {:ok, cmdline} = File.read("/proc/#{os_pid}/cmdline")
-    assert cmdline =~ "mcp_servers.pika.default_tools_approval_mode=\"auto\""
+    assert cmdline =~ "mcp_servers.pika.default_tools_approval_mode=\"approve\""
+    refute cmdline =~ "mcp_servers.pika.default_tools_approval_mode=\"auto\""
 
     refute Enum.any?(
              JSONLWriter.replay(session.jsonl_path),
@@ -49,13 +50,20 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
     assert {:ok, first_turn} = AgentBackend.start_turn(backend, "complete")
     assert is_binary(first_turn)
     assert_event(:turn_started)
+    assert_event(:message_started)
     assert_event(:message_delta)
+
+    assert %{data: %{item: %{"text" => "fake complete"}}} =
+             assert_event(:message_completed)
+
     assert_event(:turn_completed)
 
     assert {:ok, held_turn} = AgentBackend.start_turn(backend, "hold")
     assert_event(:turn_started)
     assert {:ok, ^held_turn} = AgentBackend.steer(backend, "complete after steer")
+    assert_event(:message_started)
     assert_event(:message_delta)
+    assert_event(:message_completed)
     assert_event(:turn_completed)
 
     assert {:ok, interrupted_turn} = AgentBackend.start_turn(backend, "hold for interrupt")

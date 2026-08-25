@@ -57,7 +57,7 @@ defmodule Pika.Optimization.ConfigFile do
       model: model,
       reasoning_effort: reasoning_effort,
       approval_policy: permissions.approval_policy,
-      sandbox: writer_sandbox(backend),
+      sandbox: permissions.sandbox_policy,
       env: %{},
       protocol_config: %{},
       options: %{}
@@ -109,8 +109,7 @@ defmodule Pika.Optimization.ConfigFile do
         if Keyword.get(opts, :progress_summary, false) do
           summary_agent = %{
             default_agent
-            | reasoning_effort: "low",
-              sandbox: reader_sandbox(default_agent.backend)
+            | reasoning_effort: "low"
           }
 
           summary(summary_agent)
@@ -217,9 +216,4 @@ defmodule Pika.Optimization.ConfigFile do
 
   defp short_backend(:cursor_acp), do: "cursor"
   defp short_backend(_backend), do: "codex"
-
-  defp writer_sandbox(:cursor_acp), do: "disabled"
-  defp writer_sandbox(:codex_app_server), do: "workspace_write"
-  defp reader_sandbox(:cursor_acp), do: "enabled"
-  defp reader_sandbox(:codex_app_server), do: "read_only"
 end

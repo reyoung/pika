@@ -73,19 +73,23 @@ defmodule Pika.Optimization.InteractiveConfigTest do
     assert settings.agents.baseline_alignment.backend == :codex_app_server
     assert settings.agents.baseline_alignment.model == "codex-1"
     assert settings.agents.baseline_alignment.reasoning_effort == "low"
+    assert settings.agents.baseline_alignment.sandbox == "danger_full_access"
 
     assert settings.agents.baseline_verify.backend == :cursor_acp
     assert settings.agents.baseline_verify.model == "cursor-2"
     assert settings.agents.baseline_verify.reasoning_effort == "medium"
+    assert settings.agents.baseline_verify.sandbox == "disabled"
 
     assert [iteration] = settings.agents.iteration
     assert iteration.backend == :codex_app_server
     assert iteration.model == "codex-16"
     assert iteration.reasoning_effort == "high"
+    assert iteration.sandbox == "danger_full_access"
 
     assert settings.agents.integration.backend == :cursor_acp
     assert settings.agents.integration.model == "cursor-1"
     assert settings.agents.integration.reasoning_effort == "ultra"
+    assert settings.agents.integration.sandbox == "disabled"
 
     assert output =~ "codex-16"
     assert output =~ "cursor-16"
@@ -121,6 +125,7 @@ defmodule Pika.Optimization.InteractiveConfigTest do
 
     assert Enum.all?(configured, &(&1.backend == :cursor_acp))
     assert Enum.all?(configured, &(&1.model == "cursor-model"))
+    assert Enum.all?(configured, &(&1.sandbox == "disabled"))
     assert length(settings.agents.iteration) == 2
     assert is_binary(settings.token)
     assert byte_size(settings.token) >= 43

@@ -27,7 +27,33 @@ defmodule Pika.Test.FakeAgentBackend do
     turn_id = Id.new("turn")
     Agent.update(server, &%{&1 | turn: turn_id})
     emit(server, :turn_started)
-    emit(server, :message_delta, %{input: input})
+
+    if input == "emit distinct message items" do
+      emit(server, :message_delta, %{item_id: "message-1", delta: "incomplete first"})
+
+      emit(server, :message_completed, %{
+        item: %{
+          "id" => "message-1",
+          "type" => "agentMessage",
+          "phase" => "commentary",
+          "text" => "Complete first update."
+        }
+      })
+
+      emit(server, :message_delta, %{item_id: "message-2", delta: "incomplete final"})
+
+      emit(server, :message_completed, %{
+        item: %{
+          "id" => "message-2",
+          "type" => "agentMessage",
+          "phase" => "final_answer",
+          "text" => "Complete final answer."
+        }
+      })
+    else
+      emit(server, :message_delta, %{input: input})
+    end
+
     emit(server, :turn_completed, %{status: :completed})
     Agent.update(server, &%{&1 | turn: nil})
     {:ok, turn_id}

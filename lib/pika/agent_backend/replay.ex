@@ -90,6 +90,8 @@ defmodule Pika.AgentBackend.Replay do
 
   defp item_event(payload, stage) do
     case get_in(payload, ["params", "item", "type"]) do
+      "agentMessage" when stage == :started -> :message_started
+      "agentMessage" -> :message_completed
       "fileChange" -> :file_changed
       _ when stage == :started -> :tool_started
       _ -> :tool_completed

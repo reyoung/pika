@@ -11,6 +11,10 @@ defmodule Pika.Optimization.ConfigFileTest do
     on_exit(fn -> File.rm_rf!(root) end)
 
     config = ConfigFile.new(path, Path.join(root, "repo"), root)
+    assert config.baseline_alignment.agent.sandbox == "danger_full_access"
+    assert config.baseline_verify.agent.sandbox == "danger_full_access"
+    assert Enum.all?(config.iteration.agents, &(&1.sandbox == "danger_full_access"))
+    assert config.integration.agent.sandbox == "danger_full_access"
 
     rich_agent = %{
       config.baseline_alignment.agent
@@ -52,5 +56,17 @@ defmodule Pika.Optimization.ConfigFileTest do
     assert loaded.progress_summary.interval_ms == 90_000
     assert loaded.progress_summary.time_zone == "UTC"
     assert loaded.progress_summary.max_followups == 4
+  end
+
+  test "optional progress summary also defaults to no sandbox" do
+    root =
+      Path.join(System.tmp_dir!(), "pika-config-summary-#{System.unique_integer([:positive])}")
+
+    config =
+      ConfigFile.new(Path.join(root, "pika.yaml"), Path.join(root, "repo"), root,
+        progress_summary: true
+      )
+
+    assert config.progress_summary.agent.sandbox == "danger_full_access"
   end
 end

@@ -538,7 +538,7 @@ defmodule Pika.Optimization.InteractiveConfig do
           model: model,
           reasoning_effort: effort,
           approval_policy: permissions.approval_policy,
-          sandbox: switched_sandbox(current.sandbox, backend)
+          sandbox: permissions.sandbox_policy
       }
     end
   end
@@ -568,21 +568,13 @@ defmodule Pika.Optimization.InteractiveConfig do
   defp followup_default(agent), do: %{agent | reasoning_effort: "medium"}
 
   defp reader_agent(%Agent{} = agent) do
-    sandbox = if agent.backend == :cursor_acp, do: "enabled", else: "read_only"
-    %{agent | reasoning_effort: "low", sandbox: sandbox}
+    %{agent | reasoning_effort: "low"}
   end
 
   defp resize_agents(agents, count) do
     fallback = List.last(agents)
     Enum.map(0..(count - 1), &(Enum.at(agents, &1) || fallback))
   end
-
-  defp switched_sandbox(current, :cursor_acp) when current in ["read_only", "read-only"],
-    do: "enabled"
-
-  defp switched_sandbox(_current, :cursor_acp), do: "disabled"
-  defp switched_sandbox(current, :codex_app_server) when current == "enabled", do: "read_only"
-  defp switched_sandbox(_current, :codex_app_server), do: "workspace_write"
 
   defp model_default(_models, nil, _custom_index), do: 1
 

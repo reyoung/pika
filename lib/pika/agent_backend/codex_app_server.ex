@@ -442,6 +442,8 @@ defmodule Pika.AgentBackend.CodexAppServer do
 
     event_type =
       case {stage, type} do
+        {:started, "agentMessage"} -> :message_started
+        {:completed, "agentMessage"} -> :message_completed
         {:started, "fileChange"} -> :file_changed
         {:completed, "fileChange"} -> :file_changed
         {:started, _} -> :tool_started
@@ -559,7 +561,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
       "-c",
       "mcp_servers.pika.required=true",
       "-c",
-      "mcp_servers.pika.default_tools_approval_mode=\"auto\""
+      "mcp_servers.pika.default_tools_approval_mode=\"approve\""
     ]
   end
 

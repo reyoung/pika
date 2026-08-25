@@ -153,6 +153,37 @@ defmodule Pika.Agent.ActorTest do
     Actor.stop(replacement)
   end
 
+  test "persists distinct message items and trusts completed text", %{
+    opts: opts,
+    work: work
+  } do
+    actor = start_supervised!({Actor, opts})
+    assert_receive {:agent_actor_started, ^work, session_id}, 2_000
+
+    assert :ok = Actor.kickoff(actor, "emit distinct message items")
+    assert eventually(fn -> Actor.status(actor).phase == :awaiting_user end)
+
+    [turn] = ConversationJournal.work_turns(work.role_id, work.kind, work.id)
+    assert turn.session_id == session_id
+
+    assert turn.output_messages == [
+             %{
+               "id" => "message-1",
+               "role" => "assistant",
+               "phase" => "commentary",
+               "complete" => true,
+               "content" => "Complete first update."
+             },
+             %{
+               "id" => "message-2",
+               "role" => "assistant",
+               "phase" => "final_answer",
+               "complete" => true,
+               "content" => "Complete final answer."
+             }
+           ]
+  end
+
   defp eventually(check, attempts \\ 100)
   defp eventually(_check, 0), do: false
 
