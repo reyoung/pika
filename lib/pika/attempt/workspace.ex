@@ -2,6 +2,7 @@ defmodule Pika.Attempt.Workspace do
   @moduledoc "Creates and verifies integer-ID Attempt Git worktrees."
 
   alias Pika.Git
+  alias Pika.Optimization.Config.ReferenceProject
 
   @spec paths(Path.t(), pos_integer()) :: map()
   def paths(workspace_root, attempt_id) do
@@ -16,16 +17,30 @@ defmodule Pika.Attempt.Workspace do
     }
   end
 
-  @spec prepare(Path.t(), Path.t(), pos_integer(), String.t(), Path.t()) ::
+  @spec prepare(Path.t(), Path.t(), pos_integer(), String.t(), Path.t(), [ReferenceProject.t()]) ::
           {:ok, map()} | {:error, term()}
-  def prepare(best_repo, workspace_root, attempt_id, best_sha, target_root) do
+  def prepare(
+        best_repo,
+        workspace_root,
+        attempt_id,
+        best_sha,
+        target_root,
+        reference_projects \\ []
+      ) do
     paths = paths(workspace_root, attempt_id)
 
     with :ok <- File.mkdir_p(paths.root),
          :ok <- ensure_journals(paths.root),
          :ok <- prepare_worktree(best_repo, paths, best_sha),
          :ok <- verify_worktree(paths, best_sha),
-         :ok <- expose_target(paths.repo, target_root) do
+         :ok <- expose_target(paths.repo, target_root),
+         {:ok, _snapshots} <-
+           Pika.ReferenceProject.prepare(
+             workspace_root,
+             paths.root,
+             paths.repo,
+             reference_projects
+           ) do
       {:ok, paths}
     end
   end

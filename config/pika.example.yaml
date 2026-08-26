@@ -3,6 +3,14 @@ repo: /path/to/clean/git/repo
 workspace: /path/to/pika-workspace
 token: replace-with-a-long-random-token
 
+# Optional read-only Git repositories exposed to newly created Iteration Attempts.
+reference_projects:
+  - id: cutlass
+    url: https://github.com/NVIDIA/cutlass.git
+    description: NVIDIA CUTLASS implementation examples
+    # Optional branch, tag, or full commit SHA. Omit to freeze the first observed HEAD.
+    revision: main
+
 agents:
   baseline_alignment: &writer
     backend: codex

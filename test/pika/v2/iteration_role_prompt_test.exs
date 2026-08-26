@@ -3,7 +3,7 @@ defmodule Pika.Agent.IterationRolePromptTest do
 
   alias Pika.Agent.RolePrompt.{FileRef, Schemas, Section}
   alias Pika.Agent.RolePrompts.Iteration
-  alias Pika.Agent.RolePrompts.Iteration.{AttemptHistory, Input, StaleRefresh}
+  alias Pika.Agent.RolePrompts.Iteration.{AttemptHistory, Input, ReferenceProject, StaleRefresh}
 
   @project_root Path.expand("../../..", __DIR__)
   @schema_dir Path.join(@project_root, "priv/v2/roles/schemas")
@@ -31,6 +31,7 @@ defmodule Pika.Agent.IterationRolePromptTest do
     refute prompt =~ "# Iteration System Prompt"
     refute prompt =~ "<sampling-case-ids>"
     refute prompt =~ "## stale refresh"
+    refute prompt =~ "## Reference Projects"
 
     assert prompt =~ "./verify_cases.sh --case-id 0,3,7"
     assert prompt =~ "./benchmark_cases.sh --case-id 0,3,7"
@@ -80,6 +81,28 @@ defmodule Pika.Agent.IterationRolePromptTest do
     assert prompt =~ "merge 这个 Best Commit"
     assert prompt =~ "重新估算当前 Iteration 的结果"
     refute prompt =~ "检查 `git status`、HEAD、index"
+  end
+
+  test "renders frozen Reference Projects as read-only ref paths", %{schemas: schemas} do
+    sha = String.duplicate("b", 40)
+    path = Path.join(@fixture_dir, "best")
+
+    project = %ReferenceProject{
+      id: "kernel-examples",
+      description: "Kernel implementation examples",
+      path: path,
+      sha: sha
+    }
+
+    assert {:ok, prompt} =
+             Iteration.system_prompt(input(schemas, reference_projects: [project]))
+
+    assert prompt =~ "## Reference Projects"
+    assert prompt =~ "[ref/kernel-examples](<#{path}>)"
+    assert prompt =~ "Kernel implementation examples"
+    assert prompt =~ "固定 commit `#{sha}`"
+    assert prompt =~ "不属于 Candidate Patch"
+    assert prompt =~ "不是 Correctness Oracle"
   end
 
   test "result schema declares ready and rejected outcomes", %{schemas: schemas} do

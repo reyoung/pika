@@ -2,7 +2,7 @@ defmodule Pika.Optimization.ConfigFileTest do
   use ExUnit.Case, async: true
 
   alias Pika.Optimization.{Config, ConfigFile}
-  alias Pika.Optimization.Config.{ProgressSummary, Role}
+  alias Pika.Optimization.Config.{ProgressSummary, ReferenceProject, Role}
 
   test "canonical rendering preserves expanded Backend fields and Role controls" do
     root = Path.join(System.tmp_dir!(), "pika-config-file-#{System.unique_integer([:positive])}")
@@ -40,7 +40,15 @@ defmodule Pika.Optimization.ConfigFileTest do
 
     configured = %{
       config
-      | baseline_alignment: %{config.baseline_alignment | agent: rich_agent},
+      | reference_projects: [
+          %ReferenceProject{
+            id: "local-kernels",
+            url: "/srv/reference/kernels.git",
+            description: "Local kernel examples",
+            revision: "main"
+          }
+        ],
+        baseline_alignment: %{config.baseline_alignment | agent: rich_agent},
         baseline_verify_followup: followup,
         iteration_followup: followup,
         integration_followup: followup,
@@ -50,6 +58,7 @@ defmodule Pika.Optimization.ConfigFileTest do
     File.write!(path, ConfigFile.render(configured))
     assert {:ok, loaded} = Config.load(path)
     assert loaded.token == configured.token
+    assert loaded.reference_projects == configured.reference_projects
 
     assert Config.Agent.snapshot(loaded.baseline_alignment.agent) ==
              Config.Agent.snapshot(rich_agent)

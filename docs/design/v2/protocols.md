@@ -56,7 +56,7 @@ agent-sessions/<session-id>/context/
 }
 ```
 
-Bundle 创建后不得改写。Iteration Prompt renderer 直接注入最近 `history_limit` 个终态 Attempt 表，不区分结果；每行包含 Attempt 名称、摘要、状态和目录链接。Agent需要启动后新增的事实时调用只读 MCP。
+Bundle 创建后不得改写。Iteration Prompt renderer 直接注入最近 `history_limit` 个终态 Attempt 表，不区分结果；每行包含 Attempt 名称、摘要、状态和目录链接。它还从当前 Attempt 冻结的 `reference-projects.json` 注入只读 `ref/<id>` 路径、说明与完整 commit SHA，不从当前 YAML 动态替换已有 Attempt 的 Reference。Agent需要启动后新增的事实时调用只读 MCP。
 
 每个 Attempt 无论 Accepted 或 Rejected 都保留独立目录：
 
@@ -64,6 +64,8 @@ Bundle 创建后不得改写。Iteration Prompt renderer 直接注入最近 `his
 attempts/<integer-id>/
 ├── message.jsonl
 ├── summary.jsonl
+├── reference-projects.json
+├── repo/ref/<id> -> <workspace>/refs/<id>
 └── ...
 ```
 

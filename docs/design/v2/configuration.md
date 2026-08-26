@@ -12,6 +12,7 @@
 - `cursor_headless` 使用本机已登录的 `cursor-agent -p`，不要求 API key。Headless 每个 turn 启动独立进程，在同一 Pika Session 内用 Cursor chat id 延续上下文；断流不会自动重发 prompt。
 - Cursor ACP 已软退役。`pika init`、reconfiguration 和 fallback 向导只允许 Codex 与 Cursor Headless，并拒绝 `--backend cursor|cursor_acp`。旧 YAML 的 `cursor|cursor_acp` 仍按 ACP 加载、运行并记录 warning；重新输出时规范化为显式 `cursor_acp`，访问该槽位进行 reconfiguration 时必须迁移。
 - 根级 `token` 是 Web/API 访问 token。新 Workspace 默认生成随机 256-bit token；也可在初始化时固定。`serve` 在启动时读取它，手工修改后需要重启。旧配置省略该字段时，每次 `serve` 启动仍临时生成随机 token。
+- 根级 `reference_projects` 是可选的有序 Git 仓库列表。配置变化只影响之后创建的 Attempt；每个 Attempt 都冻结自己的 Reference manifest，Session 恢复不会重新解析远端。
 
 ## 2. 交互式配置
 
@@ -33,6 +34,15 @@ version: 2
 repo: /path/to/repo
 workspace: /path/to/workspace
 token: replace-with-a-long-random-token
+
+reference_projects:
+  - id: cutlass
+    url: https://github.com/NVIDIA/cutlass.git
+    description: NVIDIA CUTLASS implementation examples
+    revision: main
+  - id: local-kernels
+    url: /absolute/path/to/local-kernels
+    description: Team-local kernel examples
 
 agents:
   baseline_alignment: &codex_writer
@@ -110,6 +120,14 @@ agents:
 缺少 `baseline_alignment`、`baseline_verify`、非空 `iteration.agents` 或 `integration` 时拒绝启动。可选 Role一旦出现就必须包含完整合法 Backend 配置。
 
 `history_limit` 是非负整数；Iteration Context 取最近这些终态 Attempt，不区分 Accepted/Rejected。`max_pending_attempts=0` 表示无限制。`regression_feedback_cases` 是 Integration 每次最多加入 Iteration Sample 的回退 Case 数。`progress_summary.timezone` 是 IANA 时区名，默认 `Asia/Shanghai`。
+
+### Reference Projects
+
+每个条目必须包含能安全映射到 `ref/<id>` 的唯一 `id` 与 Git `url`；`url` 可以是 HTTP/SSH/Git URL、scp 风格地址或本地绝对路径。`description` 可省略，`revision` 可指定 branch、tag 或完整 commit SHA；省略 `revision` 时，首次使用该 ID 创建 Attempt 所观察到的默认 `HEAD` 会被固定。
+
+Pika 把首次解析的独立 checkout 放在 Workspace `refs/<id>`，把 URL、revision 与完整 SHA 写入 Pika-owned metadata。随后新建的 Attempt 在自身根目录保存 `reference-projects.json`，并在 Candidate repo 中创建 Git 忽略的 `ref/<id>` 软链接。Iteration System Prompt 只注入这个 Attempt manifest 中的项目说明、路径与固定 SHA；已有 Attempt 和恢复 Session 不读取新的列表。
+
+同一 Workspace 内已物化 ID 的 URL/revision 不允许原地改变，因为仍在运行或保留的 Attempt 可能引用它。需要升级或替换仓库时使用新的 ID。checkout dirty、origin/metadata 不匹配、clone 或 revision 解析失败都会使新 Attempt 的准备失败，不会静默跳过 Reference。`ref/**` 是 protected path，即使 Agent 使用 `git add -f` 也不能进入 Candidate Patch；Reference 也不能作为 Correctness Oracle 或交付时的运行时依赖。
 
 Backend-specific 扩展必须放入 `protocol_config`，由对应 Adapter 解释；顶层未知字段直接拒绝，不能静默忽略。Role 和领域代码不得假设 Codex/Cursor 共有模型名、reasoning effort 或 sandbox 枚举。
 

@@ -3,7 +3,7 @@ defmodule Pika.Optimization.ConfigFile do
 
   alias Pika.AgentBackend.PermissionPolicy
   alias Pika.Optimization.Config
-  alias Pika.Optimization.Config.{Agent, Iteration, ProgressSummary, Role}
+  alias Pika.Optimization.Config.{Agent, Iteration, ProgressSummary, ReferenceProject, Role}
 
   @spec new(Path.t(), Path.t(), keyword()) :: Config.t()
   def new(source_path, repo, workspace, opts \\ []) do
@@ -22,6 +22,7 @@ defmodule Pika.Optimization.ConfigFile do
       repo: Path.expand(repo),
       workspace: Path.expand(workspace),
       token: Keyword.get(opts, :token) || Pika.Auth.random_token(),
+      reference_projects: Keyword.get(opts, :reference_projects, []),
       baseline_alignment: %Role{
         agent: Map.get(configured, :baseline_alignment, default_agent)
       },
@@ -73,6 +74,7 @@ defmodule Pika.Optimization.ConfigFile do
       "workspace: #{scalar(config.workspace)}\n\n",
       optional("token", config.token, ""),
       if(config.token, do: "\n", else: ""),
+      reference_projects_yaml(config.reference_projects),
       "agents:\n",
       role("baseline_alignment", config.baseline_alignment),
       role("baseline_verify", config.baseline_verify,
@@ -203,6 +205,23 @@ defmodule Pika.Optimization.ConfigFile do
           agent_yaml_tail(%{fallback | fallbacks: []}, indent <> "    ")
         ]
       end)
+    ]
+  end
+
+  defp reference_projects_yaml([]), do: "reference_projects: []\n\n"
+
+  defp reference_projects_yaml(projects) do
+    [
+      "reference_projects:\n",
+      Enum.map(projects, fn %ReferenceProject{} = project ->
+        [
+          "  - id: #{scalar(project.id)}\n",
+          "    url: #{scalar(project.url)}\n",
+          "    description: #{scalar(project.description)}\n",
+          optional("revision", project.revision, "    ")
+        ]
+      end),
+      "\n"
     ]
   end
 

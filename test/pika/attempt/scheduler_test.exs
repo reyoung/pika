@@ -7,6 +7,7 @@ defmodule Pika.Attempt.SchedulerTest do
   alias Pika.Attempt.{PromptInput, Scheduler, Workspace}
   alias Pika.Baseline.Lifecycle
   alias Pika.Optimization.{Config, Persistence}
+  alias Pika.Optimization.Config.ReferenceProject
   alias Pika.Test.V2BaselineFixtures
   alias Pika.{Git, Repo}
 
@@ -123,6 +124,54 @@ defmodule Pika.Attempt.SchedulerTest do
     assert {:ok, [third]} = Scheduler.spawn_available(config)
     assert attempt_guidance(second.id) == first_guidance.id
     assert attempt_guidance(third.id) == second_guidance.id
+  end
+
+  test "configured Reference Projects flow through Attempt manifests into Iteration prompts", %{
+    config: config,
+    root: root,
+    workspace: workspace
+  } do
+    reference_repo = Path.join(root, "prompt-reference")
+    File.mkdir_p!(reference_repo)
+    Git.run!(reference_repo, ["init", "--initial-branch=main"])
+    Git.run!(reference_repo, ["config", "user.name", "Pika Test"])
+    Git.run!(reference_repo, ["config", "user.email", "pika-test@example.invalid"])
+    File.write!(Path.join(reference_repo, "kernel.cu"), "reference implementation\n")
+    Git.run!(reference_repo, ["add", "."])
+    Git.run!(reference_repo, ["commit", "-m", "reference"])
+    reference_sha = Git.run!(reference_repo, ["rev-parse", "HEAD"])
+
+    configured = %{
+      config
+      | reference_projects: [
+          %ReferenceProject{
+            id: "prompt-reference",
+            url: reference_repo,
+            description: "Prompt-visible kernel examples",
+            revision: nil
+          }
+        ]
+    }
+
+    assert {:ok, attempts} = Scheduler.spawn_available(configured)
+
+    for attempt <- attempts do
+      paths = Workspace.paths(workspace, attempt.id)
+      assert File.dir?(Path.join(paths.repo, "ref/prompt-reference"))
+
+      assert {:ok, prompt} =
+               PromptInput.render(
+                 attempt.id,
+                 configured.workspace,
+                 configured.repo,
+                 configured.iteration.history_limit
+               )
+
+      assert prompt =~ "## Reference Projects"
+      assert prompt =~ "ref/prompt-reference"
+      assert prompt =~ "Prompt-visible kernel examples"
+      assert prompt =~ reference_sha
+    end
   end
 
   test "stale FIFO head returns to Iteration and remains at the queue head", %{

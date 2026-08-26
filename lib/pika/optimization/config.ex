@@ -62,6 +62,20 @@ defmodule Pika.Optimization.Config.Agent do
   end
 end
 
+defmodule Pika.Optimization.Config.ReferenceProject do
+  @moduledoc "A Git repository exposed read-only to newly created Iteration Attempts."
+
+  @enforce_keys [:id, :url, :description]
+  defstruct @enforce_keys ++ [revision: nil]
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          url: String.t(),
+          description: String.t(),
+          revision: String.t() | nil
+        }
+end
+
 defmodule Pika.Optimization.Config.Role do
   @moduledoc false
 
@@ -113,11 +127,15 @@ end
 defmodule Pika.Optimization.Config do
   @moduledoc "Parses and validates the incompatible v2 Optimization configuration."
 
-  alias Pika.Optimization.Config.{Agent, Iteration, ProgressSummary, Role}
+  alias Pika.Optimization.Config.{Agent, Iteration, ProgressSummary, ReferenceProject, Role}
 
   require Logger
 
-  @root_fields ~w(version repo workspace token agents)
+  @root_fields ~w(version repo workspace token reference_projects agents)
+  @reference_project_fields ~w(id url description revision)
+  @reference_id_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
+  @reference_sha_pattern ~r/\A[0-9a-f]{40}([0-9a-f]{24})?\z/i
+  @reference_url_schemes ~w(http https ssh git file)
   @reserved_agent_fields ~w(
     backend command model reasoning_effort approval_policy sandbox env protocol_config fallbacks
     max_followups generator_max_attempts regression_feedback_cases interval timezone agents
@@ -140,7 +158,8 @@ defmodule Pika.Optimization.Config do
                 :baseline_verify_followup,
                 :iteration_followup,
                 :integration_followup,
-                :progress_summary
+                :progress_summary,
+                reference_projects: []
               ]
 
   @type t :: %__MODULE__{
@@ -148,6 +167,7 @@ defmodule Pika.Optimization.Config do
           repo: Path.t(),
           workspace: Path.t(),
           token: String.t() | nil,
+          reference_projects: [ReferenceProject.t()],
           baseline_alignment: Role.t(),
           baseline_verify: Role.t(),
           baseline_verify_followup: Role.t() | nil,
@@ -222,6 +242,7 @@ defmodule Pika.Optimization.Config do
          {:ok, repo} <- path_value(yaml["repo"], source_path, "repo"),
          {:ok, workspace} <- path_value(yaml["workspace"], source_path, "workspace"),
          {:ok, token} <- access_token(yaml["token"]),
+         {:ok, reference_projects} <- reference_projects(yaml["reference_projects"]),
          {:ok, agents} <- required_map(yaml["agents"], "agents"),
          {:ok, baseline_alignment} <- required_role(agents, "baseline_alignment", []),
          {:ok, baseline_verify} <-
@@ -238,6 +259,7 @@ defmodule Pika.Optimization.Config do
          repo: repo,
          workspace: workspace,
          token: token,
+         reference_projects: reference_projects,
          baseline_alignment: baseline_alignment,
          baseline_verify: baseline_verify,
          baseline_verify_followup: baseline_verify_followup,
@@ -603,6 +625,98 @@ defmodule Pika.Optimization.Config do
   end
 
   defp access_token(_value), do: error("token: must be a non-empty string")
+
+  defp reference_projects(nil), do: {:ok, []}
+
+  defp reference_projects(values) when is_list(values) do
+    values
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {value, index}, {:ok, parsed} ->
+      path = "reference_projects[#{index}]"
+
+      with {:ok, value} <- required_map(value, path),
+           :ok <- reject_unknown(value, @reference_project_fields, path),
+           {:ok, id} <- required_string(value["id"], "#{path}.id"),
+           :ok <- reference_id(id, "#{path}.id"),
+           {:ok, url} <- required_string(value["url"], "#{path}.url"),
+           :ok <- reference_url(url, "#{path}.url"),
+           {:ok, description} <- reference_description(value["description"], id, path),
+           {:ok, revision} <- reference_revision(value["revision"], path),
+           :ok <- unique_reference_id(parsed, id, path) do
+        project = %ReferenceProject{
+          id: id,
+          url: url,
+          description: description,
+          revision: revision
+        }
+
+        {:cont, {:ok, [project | parsed]}}
+      else
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, parsed} -> {:ok, Enum.reverse(parsed)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp reference_projects(_value), do: error("reference_projects: must be a list")
+
+  defp reference_id(id, path)
+       when byte_size(id) <= 64 and id not in [".", ".."] do
+    if Regex.match?(@reference_id_pattern, id),
+      do: :ok,
+      else: error("#{path}: must safely map to ref/<id>")
+  end
+
+  defp reference_id(_id, path),
+    do: error("#{path}: must be at most 64 bytes and safely map to ref/<id>")
+
+  defp reference_url(url, path) do
+    uri = URI.parse(url)
+
+    valid? =
+      byte_size(url) <= 2_048 and not String.starts_with?(url, "-") and
+        not Regex.match?(~r/[\x00-\x20\x7f]/, url) and
+        (Path.type(url) == :absolute or reference_scp_url?(url) or
+           (uri.scheme in @reference_url_schemes and is_binary(uri.path) and
+              uri.path not in ["", "/"] and (uri.scheme == "file" or is_binary(uri.host))))
+
+    if valid?, do: :ok, else: error("#{path}: must be a Git URL or absolute local path")
+  end
+
+  defp reference_scp_url?(url),
+    do: Regex.match?(~r/\A(?:[^@:\/\s]+@)?[^:\/\s]+:[^\/\s][^\s]*\z/, url)
+
+  defp reference_description(nil, id, _path), do: {:ok, "Reference Project #{id}"}
+
+  defp reference_description(value, _id, _path)
+       when is_binary(value) and value != "" and byte_size(value) <= 240,
+       do: {:ok, value}
+
+  defp reference_description(_value, _id, path),
+    do: error("#{path}.description: must be a non-empty string of at most 240 bytes")
+
+  defp reference_revision(nil, _path), do: {:ok, nil}
+
+  defp reference_revision(value, path) when is_binary(value) and value != "" do
+    valid? =
+      byte_size(value) <= 256 and not String.starts_with?(value, "-") and
+        not Regex.match?(~r/[\x00-\x20\x7f~^:?*\[]/, value) and
+        (Regex.match?(@reference_sha_pattern, value) or not String.contains?(value, ".."))
+
+    if valid?, do: {:ok, value}, else: error("#{path}.revision: must be a safe Git revision")
+  end
+
+  defp reference_revision(_value, path),
+    do: error("#{path}.revision: must be a non-empty Git revision")
+
+  defp unique_reference_id(parsed, id, path) do
+    if Enum.any?(parsed, &(String.downcase(&1.id) == String.downcase(id))),
+      do: error("#{path}.id: duplicate Reference Project id #{inspect(id)}"),
+      else: :ok
+  end
 
   defp string_map(value, path) when is_map(value) do
     if Enum.all?(value, fn {key, item} -> is_binary(key) and is_binary(item) end),

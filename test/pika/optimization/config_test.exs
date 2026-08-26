@@ -58,12 +58,52 @@ defmodule Pika.Optimization.ConfigTest do
     assert is_nil(config.integration_followup)
     assert is_nil(config.progress_summary)
     assert is_nil(config.token)
+    assert config.reference_projects == []
 
     assert RoleRegistry.enabled(config) |> Enum.map(& &1.id) |> Enum.sort() ==
              ~w(baseline_alignment baseline_verify integration iteration)
 
     assert {:error, {:agent_role_disabled, "progress_summary"}} =
              Config.role_agent(config, :progress_summary)
+  end
+
+  test "loads ordered Reference Projects and validates their safe worktree identities" do
+    yaml =
+      minimal_yaml()
+      |> String.replace(
+        "workspace: workspace",
+        """
+        workspace: workspace
+        reference_projects:
+          - id: cutlass
+            url: https://github.com/NVIDIA/cutlass.git
+            description: CUDA templates
+            revision: v4.0.0
+          - id: local-kernels
+            url: /srv/reference/kernels.git
+        """
+      )
+
+    assert {:ok, config} = Config.load(config_file(yaml))
+
+    assert Enum.map(config.reference_projects, &{&1.id, &1.revision, &1.description}) == [
+             {"cutlass", "v4.0.0", "CUDA templates"},
+             {"local-kernels", nil, "Reference Project local-kernels"}
+           ]
+
+    duplicate =
+      String.replace(
+        yaml,
+        "  - id: local-kernels",
+        "  - id: CUTLASS"
+      )
+
+    assert {:error, {:invalid_v2_config, [message]}} = Config.load(config_file(duplicate))
+    assert message =~ "duplicate Reference Project id"
+
+    unsafe = String.replace(yaml, "id: cutlass", "id: ../cutlass")
+    assert {:error, {:invalid_v2_config, [message]}} = Config.load(config_file(unsafe))
+    assert message =~ "safely map to ref/<id>"
   end
 
   test "accepts Cursor Headless without changing the legacy cursor alias" do

@@ -13,6 +13,8 @@ Optimization Workspace
 │   ├── revisions/<revision>/
 │   └── target/                        # 当前只读 Target Snapshot
 ├── attempts/<integer-id>/
+│   └── reference-projects.json        # 该 Attempt 冻结的 Reference manifest
+├── refs/<id>/                         # Pika-owned 固定 Git checkout
 ├── agent-sessions/<session-id>/
 ├── follow-ups/<role>/<work-id>/
 ├── progress-summaries/<date>/
@@ -80,7 +82,7 @@ project_work()
 
 ### Attempt Scheduler
 
-分配整数 Attempt ID、冻结创建时 Best/Sampling/Guidance、按 `iteration.agents` slots 启动并发工作、维护最近历史投影并施加 pending gate。`max_pending_attempts=0` 表示不限制。
+分配整数 Attempt ID、冻结创建时 Best/Sampling/Guidance/Reference Projects、按 `iteration.agents` slots 启动并发工作、维护最近历史投影并施加 pending gate。`max_pending_attempts=0` 表示不限制。
 
 当 FIFO 队首 Attempt 的 Base 落后于当前 Best 时，Scheduler 不启动 Integration，而是给同一 Attempt 新建 Iteration Round。该 Attempt 保持队首，Initial User Prompt 要求 `git merge <current-best-sha>`；队列在 refresh 完成前不越过它。
 
@@ -133,6 +135,8 @@ Context Bundle 创建后不可修改。Best、Sampling 或 Guidance 的变化通
 ### Git Workspace
 
 维护 baseline branch、Attempt branch/worktree 和 `pika/best`。它核验实际 Git facts，但崩溃恢复时不 reset、clean、checkout、rebase 或自动解决冲突；新 Agent接管原现场。
+
+Reference Project 使用 Workspace `refs/<id>` 中的独立固定 checkout，并通过 Attempt worktree 内 Git 忽略的 `ref/<id>` 软链接暴露。Attempt-owned `reference-projects.json` 冻结 ID、URL、说明、revision 和完整 SHA；Iteration Prompt 从该 manifest 构造，而不是从恢复时的实时配置构造。`ref/**` 始终是 protected path，不能进入 Candidate 或 Best。
 
 stale refresh 在 Attempt branch 上 merge Best。Integration Accept 把 Candidate 有效 Patch squash 到 `pika/best`，因此每个 Accepted Attempt 只产生一个线性 Best commit。
 

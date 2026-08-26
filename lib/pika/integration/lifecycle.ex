@@ -827,7 +827,9 @@ defmodule Pika.Integration.Lifecycle do
       changed
       |> String.split("\n", trim: true)
       |> Enum.any?(
-        &(&1 in ["verify_cases.sh", "benchmark_cases.sh"] or String.starts_with?(&1, "target/"))
+        &(&1 in ["verify_cases.sh", "benchmark_cases.sh"] or
+            String.starts_with?(&1, "target/") or &1 == "ref" or
+            String.starts_with?(&1, "ref/"))
       )
 
     if protected?, do: {:error, :protected_path_changed}, else: :ok

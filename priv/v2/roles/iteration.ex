@@ -21,20 +21,35 @@ defmodule Pika.Agent.RolePrompts.Iteration.StaleRefresh do
   @type t :: %__MODULE__{best_commit: String.t(), best_repo_dir: Path.t()}
 end
 
+defmodule Pika.Agent.RolePrompts.Iteration.ReferenceProject do
+  @moduledoc false
+
+  @enforce_keys [:id, :description, :path, :sha]
+  defstruct @enforce_keys
+
+  @type t :: %__MODULE__{
+          id: String.t(),
+          description: String.t(),
+          path: Path.t(),
+          sha: String.t()
+        }
+end
+
 defmodule Pika.Agent.RolePrompts.Iteration.Input do
   @moduledoc false
 
   alias Pika.Agent.RolePrompt.Section
-  alias Pika.Agent.RolePrompts.Iteration.{AttemptHistory, StaleRefresh}
+  alias Pika.Agent.RolePrompts.Iteration.{AttemptHistory, ReferenceProject, StaleRefresh}
 
   @enforce_keys [:sampling_case_ids, :recent_attempts, :all_attempts_dir, :result_schema]
-  defstruct @enforce_keys ++ [sections: [], stale_refresh: nil]
+  defstruct @enforce_keys ++ [reference_projects: [], sections: [], stale_refresh: nil]
 
   @type t :: %__MODULE__{
           sampling_case_ids: [non_neg_integer()],
           recent_attempts: [AttemptHistory.t()],
           all_attempts_dir: Path.t(),
           result_schema: Path.t(),
+          reference_projects: [ReferenceProject.t()],
           sections: [Section.t()],
           stale_refresh: StaleRefresh.t() | nil
         }
@@ -46,7 +61,7 @@ defmodule Pika.Agent.RolePrompts.Iteration do
   @behaviour Pika.Agent.RolePrompt
 
   alias Pika.Agent.RolePrompt.Sections
-  alias Pika.Agent.RolePrompts.Iteration.{AttemptHistory, Input, StaleRefresh}
+  alias Pika.Agent.RolePrompts.Iteration.{AttemptHistory, Input, ReferenceProject, StaleRefresh}
 
   @sha_pattern ~r/^[0-9a-f]{40}([0-9a-f]{24})?$/
 
@@ -55,6 +70,7 @@ defmodule Pika.Agent.RolePrompts.Iteration do
     with {:ok, rendered_sections} <- Sections.render(input.sections),
          :ok <- validate_case_ids(input.sampling_case_ids),
          :ok <- validate_attempts(input.recent_attempts, input.all_attempts_dir),
+         :ok <- validate_reference_projects(input.reference_projects),
          :ok <- validate_stale_refresh(input.stale_refresh),
          :ok <- validate_result_schema(input.result_schema) do
       case_ids = Enum.join(input.sampling_case_ids, ",")
@@ -64,6 +80,7 @@ defmodule Pika.Agent.RolePrompts.Iteration do
          intro(),
          rendered_sections,
          work_scope(),
+         render_reference_projects(input.reference_projects),
          render_stale_refresh(input.stale_refresh),
          render_history(input.recent_attempts, input.all_attempts_dir),
          development_and_completion(case_ids, input.result_schema)
@@ -95,6 +112,29 @@ defmodule Pika.Agent.RolePrompts.Iteration do
     - 不修改 `pika/best`，不 Push 远端。
     - 可以在 Attempt branch 内创建、修改或合并提交。
     - 正常 Iteration 以创建时的 Base 工作。
+    """
+  end
+
+  defp render_reference_projects([]), do: ""
+
+  defp render_reference_projects(projects) do
+    rows =
+      Enum.map_join(projects, "\n", fn project ->
+        relative = Path.join("ref", project.id)
+
+        "- [#{relative}](<#{project.path}>)：#{project.description}（固定 commit `#{project.sha}`）"
+      end)
+
+    """
+
+
+    ## Reference Projects
+
+    以下仓库是本 Attempt 的只读实现参考：
+
+    #{rows}
+
+    它们通过 Git 忽略的 `ref/<id>` 软链接提供，只能用于阅读和借鉴。不要修改、提交或 `git add -f` 这些路径；它们不属于 Candidate Patch，也不是 Correctness Oracle 或可交付的运行时依赖。
     """
   end
 
@@ -221,6 +261,29 @@ defmodule Pika.Agent.RolePrompts.Iteration do
   end
 
   defp valid_attempt?(_attempt), do: false
+
+  defp validate_reference_projects(projects) when is_list(projects) do
+    ids = Enum.map(projects, & &1.id)
+
+    if Enum.uniq(ids) == ids and Enum.all?(projects, &valid_reference_project?/1),
+      do: :ok,
+      else: {:error, :invalid_reference_projects}
+  end
+
+  defp validate_reference_projects(_projects), do: {:error, :invalid_reference_projects}
+
+  defp valid_reference_project?(%ReferenceProject{
+         id: id,
+         description: description,
+         path: path,
+         sha: sha
+       }) do
+    is_binary(id) and id != "" and is_binary(description) and description != "" and
+      is_binary(path) and File.dir?(path) and is_binary(sha) and
+      Regex.match?(@sha_pattern, sha)
+  end
+
+  defp valid_reference_project?(_project), do: false
 
   defp validate_stale_refresh(nil), do: :ok
 

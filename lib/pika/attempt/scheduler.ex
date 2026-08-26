@@ -119,7 +119,13 @@ defmodule Pika.Attempt.Scheduler do
 
   defp spawn_slots([slot | rest], config, context, attempts) do
     if spawn_allowed?(config.iteration.max_pending_attempts) do
-      case create_attempt(slot, context, config.workspace, config.repo) do
+      case create_attempt(
+             slot,
+             context,
+             config.workspace,
+             config.repo,
+             config.reference_projects
+           ) do
         {:ok, attempt} -> spawn_slots(rest, config, context, [attempt | attempts])
         {:error, reason} -> {:error, reason}
       end
@@ -128,7 +134,7 @@ defmodule Pika.Attempt.Scheduler do
     end
   end
 
-  defp create_attempt(slot_index, context, workspace_root, best_repo) do
+  defp create_attempt(slot_index, context, workspace_root, best_repo, reference_projects) do
     with {:ok, attempt_id} <- Persistence.allocate_attempt_id() do
       paths = Workspace.paths(workspace_root, attempt_id)
 
@@ -140,7 +146,8 @@ defmodule Pika.Attempt.Scheduler do
                  workspace_root,
                  attempt_id,
                  context.best.sha,
-                 context.target_root
+                 context.target_root,
+                 reference_projects
                ),
              {:ok, attempt} <- mark_iterating(attempt_id) do
           {:ok, attempt}

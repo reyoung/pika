@@ -149,6 +149,23 @@ defmodule Pika.Attempt.LifecycleTest do
     assert persisted.status == "iterating"
   end
 
+  test "ready result cannot force-add a Reference Project path", %{
+    config: config,
+    workspace: workspace
+  } do
+    assert {:ok, [attempt]} = Scheduler.spawn_available(config)
+    paths = Workspace.paths(workspace, attempt.id)
+    File.mkdir_p!(Path.join(paths.repo, "ref"))
+    File.ln_s!(System.tmp_dir!(), Path.join(paths.repo, "ref/forced-reference"))
+    Git.run!(paths.repo, ["add", "-f", "ref/forced-reference"])
+    Git.run!(paths.repo, ["commit", "-m", "force-add reference link"])
+    candidate_sha = Git.run!(paths.repo, ["rev-parse", "HEAD"])
+    write_ready_result(paths, attempt, candidate_sha)
+
+    assert {:error, :protected_path_changed} =
+             Lifecycle.finish(attempt.id, paths.root, "iteration-result.json")
+  end
+
   defp write_ready_result(paths, attempt, candidate_sha) do
     verify = full_verify()
     benchmark = full_benchmark()

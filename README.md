@@ -57,6 +57,7 @@ mix release
 - 标准脚本为 `verify_cases.sh` 与 `benchmark_cases.sh`，支持 `--list-cases` 和 `--case-id 0,1,...`。
 - 大型 Definition、Result、Metrics 与历史通过文件传递，并由 Pika 重算 digest、Schema、Metrics 和 Git identity。
 - Attempt 使用从 1 开始且永不复用的整数 ID。每个 Attempt 都保留 `message.jsonl` 和 `summary.jsonl`。
+- 可选 `reference_projects` 在新 Attempt 创建时固定 Git commit，并通过 Git 忽略的 `ref/<id>` 只读路径及 Iteration System Prompt 提供；不会进入 Candidate Patch。
 - Iteration 基于创建时的 Best；到达 FIFO 队首后若 Base 已 stale，会回到新的 Iteration Round merge 当前 Best。
 - Integration 覆盖 Full Case Set；任何 `pika/best` mutation 之前必须获得持久化 Git Intent。
 - Backend 崩溃后创建新 Session，不使用 provider resume。恢复信息来自 SQLite 生成的 `messages.jsonl` 与 `recovery-NN/recovery.json`，Git 现场保持原样。

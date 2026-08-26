@@ -4,8 +4,9 @@ defmodule Pika.Attempt.PromptInput do
   alias Pika.Agent.RolePrompt.Section
   alias Pika.Agent.RolePromptRegistry
   alias Pika.Agent.RolePrompts.Iteration
-  alias Pika.Agent.RolePrompts.Iteration.{AttemptHistory, Input, StaleRefresh}
+  alias Pika.Agent.RolePrompts.Iteration.{AttemptHistory, Input, ReferenceProject, StaleRefresh}
   alias Pika.Attempt.{Lifecycle, Workspace}
+  alias Pika.ReferenceProject, as: ReferenceProjectWorkspace
   alias Pika.Repo
 
   @spec build(pos_integer(), Path.t(), Path.t(), non_neg_integer(), [Section.t()]) ::
@@ -13,13 +14,15 @@ defmodule Pika.Attempt.PromptInput do
   def build(attempt_id, workspace_root, best_repo, history_limit, sections \\ []) do
     with {:ok, attempt} <- Lifecycle.fetch_attempt(attempt_id),
          {:ok, schemas} <- RolePromptRegistry.schemas(),
-         {:ok, sampling_case_ids} <- sampling_case_ids(attempt.sampling_revision_id) do
+         {:ok, sampling_case_ids} <- sampling_case_ids(attempt.sampling_revision_id),
+         {:ok, reference_projects} <- reference_projects(workspace_root, attempt_id) do
       {:ok,
        %Input{
          sampling_case_ids: sampling_case_ids,
          recent_attempts: recent_attempts(attempt_id, workspace_root, history_limit),
          all_attempts_dir: Path.join(workspace_root, "attempts"),
          result_schema: schemas.iteration_result,
+         reference_projects: reference_projects,
          sections: sections,
          stale_refresh: stale_refresh(attempt, best_repo)
        }}
@@ -45,6 +48,23 @@ defmodule Pika.Attempt.PromptInput do
       |> List.flatten()
 
     if ids == [], do: {:error, :sampling_cases_missing}, else: {:ok, ids}
+  end
+
+  defp reference_projects(workspace_root, attempt_id) do
+    with {:ok, snapshots} <-
+           ReferenceProjectWorkspace.load_for_attempt(workspace_root, attempt_id) do
+      repo = Workspace.paths(workspace_root, attempt_id).repo
+
+      {:ok,
+       Enum.map(snapshots, fn snapshot ->
+         %ReferenceProject{
+           id: snapshot["id"],
+           description: snapshot["description"],
+           path: Path.join([repo, "ref", snapshot["id"]]),
+           sha: snapshot["sha"]
+         }
+       end)}
+    end
   end
 
   defp recent_attempts(_attempt_id, _workspace_root, 0), do: []
