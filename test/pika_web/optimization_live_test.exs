@@ -251,6 +251,7 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert html =~ "Write your own answer"
     assert html =~ ~s(phx-value-tab="attempts")
     assert html =~ "No progress summary yet"
+    refute html =~ "Performance timeline"
     refute html =~ ">Sync<"
     refute html =~ "Campaign singleton"
     refute html =~ "diagnostic-hero"
@@ -615,6 +616,11 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert attempts_html =~ "Iteration &amp; Integration"
     assert attempts_html =~ "Iteration Agent"
     assert attempts_html =~ "I am profiling the current Iteration candidate."
+    assert attempts_html =~ "Performance timeline"
+    assert attempts_html =~ "Test-case improvement over time"
+    assert attempts_html =~ ~s(phx-change="filter_performance")
+    refute attempts_html =~ ~s(phx-hook="PerformanceChart")
+    assert attempts_html =~ "No matching measurements yet"
     assert attempts_html =~ ~s(class="ops-attempt-tabs")
     assert attempts_html =~ ~s(role="tablist" aria-label="Optimization attempts")
     assert attempts_html =~ ~s(phx-value-attempt="2" aria-selected="true")
@@ -622,6 +628,26 @@ defmodule PikaWeb.OptimizationLiveTest do
     {attempt_one_position, _length} = :binary.match(attempts_html, ~s(phx-value-attempt="1"))
     {attempt_two_position, _length} = :binary.match(attempts_html, ~s(phx-value-attempt="2"))
     assert attempt_one_position < attempt_two_position
+
+    assert {:noreply, filtered_performance_socket} =
+             PikaWeb.OptimizationLive.handle_event(
+               "filter_performance",
+               %{"case_filter" => "1", "metric_filter" => "latency_us"},
+               attempts_socket
+             )
+
+    assert filtered_performance_socket.assigns.performance_case_filter == "1"
+    assert filtered_performance_socket.assigns.performance_metric_filter == "latency_us"
+
+    assert {:noreply, reset_performance_socket} =
+             PikaWeb.OptimizationLive.handle_event(
+               "reset_performance_filter",
+               %{},
+               filtered_performance_socket
+             )
+
+    assert reset_performance_socket.assigns.performance_case_filter == ""
+    assert reset_performance_socket.assigns.performance_metric_filter == "all"
 
     assert {:noreply, first_attempt_socket} =
              PikaWeb.OptimizationLive.handle_event(

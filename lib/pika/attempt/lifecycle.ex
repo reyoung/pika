@@ -84,18 +84,41 @@ defmodule Pika.Attempt.Lifecycle do
          attempt_root,
          %{"outcome" => "rejected"} = result,
          result_receipt,
-         _schemas
+         schemas
        ) do
-    with {:ok, result_artifact_id} <-
-           ArtifactStore.register(
-             "attempt",
-             to_string(attempt.id),
-             "iteration_result",
-             result_receipt
-           ),
-         {:ok, updated} <- persist_rejected(attempt, result, result_artifact_id),
+    with {:ok, measurement} <- rejected_measurement(attempt, attempt_root, result, schemas),
+         {:ok, artifact_ids} <-
+           register_rejected_artifacts(attempt, result_receipt, measurement),
+         {:ok, updated} <- persist_rejected(attempt, result, artifact_ids, measurement),
          :ok <- record_history(attempt_root, updated, result) do
       {:ok, updated}
+    end
+  end
+
+  defp rejected_measurement(attempt, attempt_root, result, schemas) do
+    case get_in(result, ["files", "benchmark"]) do
+      nil ->
+        {:ok, nil}
+
+      _file ->
+        with {:ok, context} <- sampling_context(attempt.sampling_revision_id),
+             {:ok, benchmark, receipt} <-
+               validate_result_file(
+                 attempt_root,
+                 result,
+                 "benchmark",
+                 schemas.benchmark_record,
+                 :jsonl
+               ),
+             {:ok, statistics} <-
+               Measurement.evaluate(
+                 benchmark,
+                 context.cases,
+                 context.metrics,
+                 context.measurement
+               ) do
+          {:ok, %{receipt: receipt, statistics: statistics}}
+        end
     end
   end
 
@@ -296,34 +319,41 @@ defmodule Pika.Attempt.Lifecycle do
     end
   end
 
+  defp register_rejected_artifacts(attempt, result, nil) do
+    with {:ok, result_id} <-
+           ArtifactStore.register(
+             "attempt",
+             to_string(attempt.id),
+             "iteration_result",
+             result
+           ) do
+      {:ok, %{result: result_id, benchmark: nil}}
+    end
+  end
+
+  defp register_rejected_artifacts(attempt, result, measurement) do
+    owner_id = to_string(attempt.id)
+
+    with {:ok, result_id} <-
+           ArtifactStore.register("attempt", owner_id, "iteration_result", result),
+         {:ok, benchmark_id} <-
+           ArtifactStore.register(
+             "attempt",
+             owner_id,
+             "iteration_benchmark",
+             measurement.receipt
+           ) do
+      {:ok, %{result: result_id, benchmark: benchmark_id}}
+    end
+  end
+
   defp persist_ready(attempt, result, statistics, artifact_ids) do
     now = now_us()
     details = result["details"]
 
     transaction =
       Repo.transaction(fn ->
-        Repo.query!("DELETE FROM attempt_metrics WHERE attempt_id = ?", [attempt.id])
-
-        Enum.each(statistics, fn statistic ->
-          Repo.query!(
-            """
-            INSERT INTO attempt_metrics(
-              attempt_id, case_id, metric_id, target_value, candidate_value,
-              best_relative_improvement, noise_tolerance, valid_pair_count, source_artifact_id
-            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
-            """,
-            [
-              attempt.id,
-              statistic.case_id,
-              statistic.metric_id,
-              statistic.target_value,
-              statistic.development_value,
-              statistic.noise_tolerance,
-              statistic.valid_pair_count,
-              artifact_ids.benchmark
-            ]
-          )
-        end)
+        replace_attempt_metrics(attempt.id, statistics, artifact_ids.benchmark)
 
         Repo.query!(
           """
@@ -358,19 +388,27 @@ defmodule Pika.Attempt.Lifecycle do
     finish(transaction, :iteration_ready_persist_failed)
   end
 
-  defp persist_rejected(attempt, result, result_artifact_id) do
+  defp persist_rejected(attempt, result, artifact_ids, measurement) do
     now = now_us()
     details = result["details"]
 
     transaction =
       Repo.transaction(fn ->
+        if measurement do
+          replace_attempt_metrics(
+            attempt.id,
+            measurement.statistics,
+            artifact_ids.benchmark
+          )
+        end
+
         Repo.query!(
           """
           UPDATE iteration_rounds
           SET result_artifact_id = ?, status = 'rejected', completed_at = ?
           WHERE attempt_id = ? AND round = ? AND status = 'running'
           """,
-          [result_artifact_id, now, attempt.id, attempt.current_iteration_round]
+          [artifact_ids.result, now, attempt.id, attempt.current_iteration_round]
         )
 
         Repo.query!(
@@ -401,6 +439,31 @@ defmodule Pika.Attempt.Lifecycle do
       end)
 
     finish(transaction, :iteration_rejection_persist_failed)
+  end
+
+  defp replace_attempt_metrics(attempt_id, statistics, source_artifact_id) do
+    Repo.query!("DELETE FROM attempt_metrics WHERE attempt_id = ?", [attempt_id])
+
+    Enum.each(statistics, fn statistic ->
+      Repo.query!(
+        """
+        INSERT INTO attempt_metrics(
+          attempt_id, case_id, metric_id, target_value, candidate_value,
+          best_relative_improvement, noise_tolerance, valid_pair_count, source_artifact_id
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
+        """,
+        [
+          attempt_id,
+          statistic.case_id,
+          statistic.metric_id,
+          statistic.target_value,
+          statistic.development_value,
+          statistic.noise_tolerance,
+          statistic.valid_pair_count,
+          source_artifact_id
+        ]
+      )
+    end)
   end
 
   defp record_history(attempt_root, attempt, result) do

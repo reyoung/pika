@@ -172,7 +172,7 @@ defmodule Pika.Agent.RolePrompts.Iteration do
     - 正式采样没有超过噪声的改善；
     - 继续占用 Integration 明显没有价值。
 
-    Reject 可以没有代码修改或完整 Benchmark，但必须提供具体 failure reason 和已有证据。
+    Reject 可以没有代码修改或完整 Benchmark，但必须提供具体 failure reason 和已有证据。如果已经完成了覆盖全部 Iteration Case IDs 的有效 Benchmark，即使决定 Reject，也必须在 `files.benchmark` 中引用该 JSONL；Pika 会保留这些速度数据用于性能时间线和后续 Attempt。不要引用不完整或无效的 Benchmark。
 
     只有在 Sampling Cases 正确、正式测量有合理收益、Candidate 已提交且 worktree 干净时，才能选择 `ready_for_integration`。
 

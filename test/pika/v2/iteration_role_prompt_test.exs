@@ -34,6 +34,8 @@ defmodule Pika.Agent.IterationRolePromptTest do
 
     assert prompt =~ "./verify_cases.sh --case-id 0,3,7"
     assert prompt =~ "./benchmark_cases.sh --case-id 0,3,7"
+    assert prompt =~ "files.benchmark"
+    assert prompt =~ "性能时间线"
     assert prompt =~ "最近2次尝试包含"
     assert prompt =~ "| Attempt 1 | 向量化加载，平均提升2% | 已合入 |"
     assert prompt =~ "| Attempt 2 | 增加stage\\|导致寄存器压力 | 拒绝 |"

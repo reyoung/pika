@@ -6,7 +6,7 @@ defmodule PikaWeb.OptimizationLive do
   alias Pika.Baseline.Lifecycle, as: BaselineLifecycle
   alias Pika.Baseline.Questions
   alias Pika.CommandConsole
-  alias Pika.Optimization.{Persistence, Runtime}
+  alias Pika.Optimization.{PerformanceTimeline, Persistence, Runtime}
   alias Pika.ProgressSummary.Lifecycle, as: ProgressLifecycle
   alias Pika.ProgressSummary.Snapshot
   alias Pika.Repo
@@ -31,6 +31,14 @@ defmodule PikaWeb.OptimizationLive do
        |> assign(:selected_attempt_id, nil)
        |> assign(:attempt_accordion_initialized?, false)
        |> assign(:attempt_accordion_user_selected?, false)
+       |> assign(:performance_version, nil)
+       |> assign(:performance_all_points, [])
+       |> assign(:performance_cases, [])
+       |> assign(:performance_metrics, [])
+       |> assign(:performance_case_filter, "")
+       |> assign(:performance_metric_filter, "all")
+       |> assign(:performance_points_json, "[]")
+       |> assign(:performance_visible_points, 0)
        |> assign(:open_session_id, nil)
        |> assign(:session_accordion_initialized?, false)
        |> assign(:baseline_revision_selection, nil)
@@ -144,6 +152,42 @@ defmodule PikaWeb.OptimizationLive do
 
   def handle_event("toggle_attempt", params, socket),
     do: handle_event("select_attempt", params, socket)
+
+  def handle_event("filter_performance", params, socket) do
+    {:noreply,
+     socket
+     |> assign(:performance_case_filter, String.trim(params["case_filter"] || ""))
+     |> assign(:performance_metric_filter, params["metric_filter"] || "all")
+     |> assign_performance_chart()}
+  end
+
+  def handle_event("reset_performance_filter", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:performance_case_filter, "")
+     |> assign(:performance_metric_filter, "all")
+     |> assign_performance_chart()}
+  end
+
+  def handle_event("select_performance_attempt", %{"attempt" => attempt_id}, socket) do
+    case Integer.parse(to_string(attempt_id)) do
+      {id, ""} when id > 0 ->
+        {:noreply,
+         socket
+         |> assign(:workspace_tab, "attempts")
+         |> assign(:workspace_tab_initialized?, true)
+         |> assign(:workspace_tab_user_selected?, true)
+         |> assign(:selected_attempt_id, id)
+         |> assign(:attempt_accordion_initialized?, true)
+         |> assign(:attempt_accordion_user_selected?, true)
+         |> assign(:open_session_id, nil)
+         |> assign(:session_accordion_initialized?, false)
+         |> refresh()}
+
+      _other ->
+        {:noreply, socket}
+    end
+  end
 
   def handle_event("select_baseline_revision", %{"revision" => revision}, socket) do
     selection =
@@ -339,6 +383,75 @@ defmodule PikaWeb.OptimizationLive do
             </div>
             <small>Controls affect scheduling immediately. No remote writes are performed.</small>
           </div>
+
+          <section :if={@snapshot.attempts != []} class="ops-performance" aria-label="Test case performance over time">
+            <header class="ops-performance-header">
+              <div>
+                <span>Performance timeline</span>
+                <h2>Test-case improvement over time</h2>
+                <p>Relative to the fixed Optimization Target; positive values are faster or better.</p>
+              </div>
+
+              <form class="ops-performance-filters" phx-change="filter_performance" phx-submit="filter_performance">
+                <label>
+                  <span>Test case</span>
+                  <input
+                    type="search"
+                    name="case_filter"
+                    value={@performance_case_filter}
+                    list="performance-case-options"
+                    placeholder="All cases · search ID or name"
+                    autocomplete="off"
+                    phx-debounce="250"
+                  />
+                  <datalist id="performance-case-options">
+                    <option :for={case_ <- @performance_cases} value={"#{case_.id} · #{case_.label}"} />
+                  </datalist>
+                </label>
+
+                <label>
+                  <span>Metric</span>
+                  <select name="metric_filter">
+                    <option value="all" selected={@performance_metric_filter == "all"}>All metrics</option>
+                    <option
+                      :for={metric <- @performance_metrics}
+                      value={metric.id}
+                      selected={@performance_metric_filter == metric.id}
+                    >
+                      {metric.id} · {metric.label}
+                    </option>
+                  </select>
+                </label>
+
+                <button
+                  :if={@performance_case_filter != "" || @performance_metric_filter != "all"}
+                  type="button"
+                  phx-click="reset_performance_filter"
+                >
+                  Clear
+                </button>
+                <small>{@performance_visible_points} measurements</small>
+              </form>
+            </header>
+
+            <div
+              :if={@performance_visible_points > 0}
+              id="performance-timeline-chart"
+              class="ops-performance-chart"
+              phx-hook="PerformanceChart"
+              phx-update="ignore"
+              data-points={@performance_points_json}
+            >
+            </div>
+
+            <div :if={@performance_visible_points == 0} class="ops-performance-empty">
+              <span>⌁</span>
+              <div>
+                <strong>No matching measurements yet</strong>
+                <small>Formal Iteration measurements appear here before Integration begins.</small>
+              </div>
+            </div>
+          </section>
         </section>
 
         <section class="ops-stat-grid" aria-label="Optimization overview">
@@ -1080,6 +1193,7 @@ defmodule PikaWeb.OptimizationLive do
       if socket.assigns.workspace_tab == "attempts", do: attempt_sessions, else: baseline_sessions
 
     socket
+    |> assign_performance()
     |> assign(:snapshot, snapshot)
     |> assign(:baseline, baseline)
     |> assign(:latest_baseline, latest_baseline)
@@ -1096,6 +1210,52 @@ defmodule PikaWeb.OptimizationLive do
     |> assign(:summary, latest_summary())
     |> assign(:workspace, Persistence.current().workspace_canonical_path)
     |> assign_new(:flash_message, fn -> nil end)
+  end
+
+  defp assign_performance(socket) do
+    version = PerformanceTimeline.version()
+
+    if socket.assigns.performance_version == version do
+      socket
+    else
+      timeline = PerformanceTimeline.load()
+
+      socket
+      |> assign(:performance_version, version)
+      |> assign(:performance_all_points, timeline.points)
+      |> assign(:performance_cases, timeline.cases)
+      |> assign(:performance_metrics, timeline.metrics)
+      |> assign_performance_chart()
+    end
+  end
+
+  defp assign_performance_chart(socket) do
+    points =
+      Enum.filter(socket.assigns.performance_all_points, fn point ->
+        performance_case_match?(point, socket.assigns.performance_case_filter) and
+          (socket.assigns.performance_metric_filter == "all" or
+             point.metric_id == socket.assigns.performance_metric_filter)
+      end)
+
+    socket
+    |> assign(:performance_points_json, Jason.encode!(points))
+    |> assign(:performance_visible_points, length(points))
+  end
+
+  defp performance_case_match?(_point, ""), do: true
+
+  defp performance_case_match?(point, filter) do
+    normalized = String.downcase(String.trim(filter))
+    selected_id = normalized |> String.split("·", parts: 2) |> hd() |> String.trim()
+
+    case Integer.parse(selected_id) do
+      {case_id, ""} ->
+        point.case_id == case_id
+
+      _other ->
+        String.contains?(String.downcase(point.case_name), normalized) or
+          String.contains?(to_string(point.case_id), normalized)
+    end
   end
 
   defp selected_baseline([], _selection), do: nil

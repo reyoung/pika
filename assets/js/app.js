@@ -254,7 +254,7 @@ Hooks.ReferenceSyntaxHighlight = {
   }
 }
 
-Hooks.MetricsChart = {
+Hooks.PerformanceChart = {
   mounted() {
     this.chart = echarts.init(this.el, undefined, {renderer: "canvas"})
     this.renderChart()
@@ -262,7 +262,7 @@ Hooks.MetricsChart = {
     window.addEventListener("resize", this.resize)
     this.chart.on("click", params => {
       const attemptId = params?.data?.attemptId
-      if (attemptId) this.pushEvent("select_attempt", {id: attemptId})
+      if (attemptId) this.pushEvent("select_performance_attempt", {attempt: String(attemptId)})
     })
   },
   updated() {
@@ -277,46 +277,46 @@ Hooks.MetricsChart = {
     const grouped = new Map()
 
     points.forEach(point => {
-      const key = `v${point.spec_revision} · ${point.case_id} · ${point.metric_id} · ${point.source}`
+      const key = `Case ${point.case_id} · ${point.metric_id}`
       if (!grouped.has(key)) grouped.set(key, [])
-      const targetImprovement = point.target_relative_improvement ?? point.improvement_ratio
-      const bestImprovement = point.best_relative_improvement ?? point.improvement_ratio
+      const targetImprovement = point.improvement_ratio
       grouped.get(key).push({
         value: [Math.floor(point.measured_at / 1000), targetImprovement == null ? null : targetImprovement * 100],
         attemptId: point.attempt_id,
-        ordinal: point.ordinal,
         status: point.status,
         summary: point.summary,
         rawValue: point.value,
         unit: point.unit,
         source: point.source,
-        specRevision: point.spec_revision,
+        bestRevision: point.best_revision,
         caseId: point.case_id,
+        caseName: point.case_name,
         metricId: point.metric_id,
         targetValue: point.target_value,
         targetImprovement: targetImprovement == null ? null : targetImprovement * 100,
-        bestImprovement: bestImprovement == null ? null : bestImprovement * 100,
         noise: point.noise_tolerance * 100
       })
     })
 
+    const dense = grouped.size > 24
     const series = Array.from(grouped, ([name, data]) => ({
       name,
       type: "line",
-      showSymbol: true,
-      symbolSize: 8,
+      showSymbol: !dense || data.length === 1,
+      symbolSize: dense ? 3 : 7,
       connectNulls: false,
       data: data.sort((left, right) => left.value[0] - right.value[0]),
       emphasis: {focus: "series"},
-      lineStyle: {width: 2}
+      lineStyle: {width: dense ? 1 : 2, opacity: dense ? 0.32 : 0.9}
     }))
 
     this.chart.setOption({
       animationDuration: 350,
       backgroundColor: "transparent",
       color: ["#b8f35a", "#65d9ff", "#ffbd66", "#ce8cff", "#69d5bd", "#f18888"],
-      grid: {top: 58, right: 28, bottom: 54, left: 66},
+      grid: {top: dense ? 22 : 56, right: 28, bottom: 48, left: 62},
       legend: {
+        show: !dense,
         type: "scroll",
         top: 16,
         textStyle: {color: "#82959d", fontSize: 10}
@@ -330,10 +330,10 @@ Hooks.MetricsChart = {
         formatter: params => {
           const point = params.data
           return `<div style="padding:5px 7px;white-space:normal">
-            <strong>Attempt #${point.ordinal} · ${escapeHTML(point.status)}</strong>
-            <div style="margin-top:7px;color:#8fa1a9">Spec v${escapeHTML(point.specRevision)} · ${escapeHTML(point.caseId)} / ${escapeHTML(point.metricId)}</div>
-            <div style="margin-top:5px;font-family:monospace">Development ${formatMetricNumber(point.rawValue)} ${escapeHTML(point.unit)} · Target ${formatMetricNumber(point.targetValue)} ${escapeHTML(point.unit)}</div>
-            <div style="margin-top:4px;font-family:monospace">vs Target ${formatPercent(point.targetImprovement)} · vs Best ${formatPercent(point.bestImprovement)}</div>
+            <strong>${escapeHTML(performancePointLabel(point))}</strong>
+            <div style="margin-top:7px;color:#8fa1a9">Case ${escapeHTML(point.caseId)} · ${escapeHTML(point.caseName)} · ${escapeHTML(point.metricId)}</div>
+            <div style="margin-top:5px;font-family:monospace">Measured ${formatMetricNumber(point.rawValue)} ${escapeHTML(point.unit)} · Target ${formatMetricNumber(point.targetValue)} ${escapeHTML(point.unit)}</div>
+            <div style="margin-top:4px;font-family:monospace">Improvement ${formatPercent(point.targetImprovement)}</div>
             <div style="margin-top:8px;padding-top:8px;border-top:1px solid #2a3940;color:#aab8be;line-height:1.5"><span style="display:block;color:#647780;font-size:9px;text-transform:uppercase">Summary</span>${escapeHTML(point.summary)}</div>
             <div style="margin-top:6px;color:#647780;font-size:9px">${escapeHTML(point.source)} · noise ±${Number(point.noise).toFixed(2)}%</div>
           </div>`
@@ -342,11 +342,12 @@ Hooks.MetricsChart = {
       xAxis: {
         type: "time",
         axisLine: {lineStyle: {color: "#30414a"}},
-        axisLabel: {color: "#70818a", fontSize: 10}
+        axisLabel: {color: "#70818a", fontSize: 10},
+        splitLine: {show: false}
       },
       yAxis: {
         type: "value",
-        name: "相对固定 Target 改善 (%)",
+        name: "vs fixed Target (%)",
         nameTextStyle: {color: "#70818a"},
         axisLabel: {color: "#70818a", formatter: "{value}%"},
         splitLine: {lineStyle: {color: "rgba(111,133,147,.13)"}}
@@ -354,6 +355,12 @@ Hooks.MetricsChart = {
       series
     }, {notMerge: true})
   }
+}
+
+function performancePointLabel(point) {
+  if (point.source === "baseline") return "Baseline"
+  if (point.source === "best") return `Best v${point.bestRevision}`
+  return `Attempt #${point.attemptId} · ${point.status}`
 }
 
 function formatMetricNumber(value) {

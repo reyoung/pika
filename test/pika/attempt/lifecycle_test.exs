@@ -109,6 +109,27 @@ defmodule Pika.Attempt.LifecycleTest do
     assert File.read!(Path.join(paths.root, "message.jsonl")) == ""
   end
 
+  test "rejected result retains complete sampled Benchmark metrics", %{
+    config: config,
+    workspace: workspace
+  } do
+    assert {:ok, [attempt]} = Scheduler.spawn_available(config)
+    paths = Workspace.paths(workspace, attempt.id)
+    write_rejected_result(paths, attempt, benchmark: true)
+
+    assert {:ok, rejected} = Lifecycle.finish(attempt.id, paths.root, "iteration-result.json")
+    assert rejected.status == "rejected"
+
+    assert [[4]] =
+             Repo.query!("SELECT COUNT(*) FROM attempt_metrics WHERE attempt_id = ?", [attempt.id]).rows
+
+    assert [[1]] =
+             Repo.query!(
+               "SELECT COUNT(*) FROM artifacts WHERE owner_type = 'attempt' AND owner_id = ? AND kind = 'iteration_benchmark'",
+               [to_string(attempt.id)]
+             ).rows
+  end
+
   test "ready result cannot change protected Harness paths", %{
     config: config,
     workspace: workspace
@@ -163,14 +184,22 @@ defmodule Pika.Attempt.LifecycleTest do
     V2BaselineFixtures.write_json(paths.root, "iteration-result.json", result)
   end
 
-  defp write_rejected_result(paths, attempt) do
+  defp write_rejected_result(paths, attempt, opts \\ []) do
+    files =
+      if opts[:benchmark] do
+        V2BaselineFixtures.write_jsonl(paths.root, "benchmark.jsonl", full_benchmark())
+        %{"benchmark" => identity(paths.root, "benchmark.jsonl")}
+      else
+        %{}
+      end
+
     result = %{
       "schema_version" => 1,
       "role" => "iteration",
       "work_id" => to_string(attempt.id),
       "outcome" => "rejected",
       "summary" => "direction did not improve",
-      "files" => %{},
+      "files" => files,
       "details" => %{
         "attempt_id" => attempt.id,
         "iteration_round" => attempt.current_iteration_round,
