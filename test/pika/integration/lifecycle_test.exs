@@ -322,6 +322,60 @@ defmodule Pika.Integration.LifecycleTest do
     assert is_binary(result_id)
   end
 
+  test "a rejected Candidate can be queued for a fresh Integration Verify", %{
+    baseline: baseline,
+    config: config,
+    workspace: workspace
+  } do
+    %{attempt: attempt, paths: paths} = ready_attempt(config, workspace)
+
+    rejected_result = %{
+      "schema_version" => 1,
+      "role" => "integration",
+      "work_id" => to_string(attempt.id),
+      "attempt_id" => attempt.id,
+      "outcome" => "rejected",
+      "summary" => "legacy Harness policy rejected the Candidate",
+      "details" => %{
+        "reason" => "adapter was incorrectly classified as protected",
+        "regressed_case_ids" => [],
+        "sampling_feedback" => []
+      }
+    }
+
+    V2BaselineFixtures.write_json(paths.root, "integration-result.json", rejected_result)
+
+    assert {:ok, %{status: "rejected"}} =
+             IntegrationLifecycle.finish(
+               attempt.id,
+               paths.root,
+               "integration-result.json",
+               config
+             )
+
+    assert {:ok, retry} = IntegrationLifecycle.retry_verification(attempt.id)
+    assert retry.status == "ready_for_integration"
+    assert retry.failure_reason == nil
+
+    assert [["retry_requested", nil]] =
+             Repo.query!(
+               "SELECT status, outcome FROM integration_runs WHERE attempt_id = ?",
+               [attempt.id]
+             ).rows
+
+    write_validation(paths, baseline, attempt, benchmark([0, 1], :improved), "accepted")
+
+    assert {:ok, prepared} =
+             IntegrationLifecycle.prepare_best_update(
+               attempt.id,
+               paths.root,
+               "integration-validation.json"
+             )
+
+    assert prepared.run.status == "best_update_prepared"
+    assert prepared.intent.state == "pending"
+  end
+
   test "cannot Reject after a pending intent has already mutated Best", %{
     baseline: baseline,
     config: config,

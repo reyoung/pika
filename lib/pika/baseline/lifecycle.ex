@@ -409,117 +409,171 @@ defmodule Pika.Baseline.Lifecycle do
   defp persist_verification_accept(persisted, result, statistics, sampling, artifact_ids) do
     now = now_us()
 
-    transaction =
-      Repo.transaction(fn ->
-        Repo.query!(
-          """
-          INSERT INTO baseline_verifications(
-            optimization_id, baseline_revision_id, result_artifact_id, outcome,
-            verify_artifact_id, benchmark_artifact_id, development_sha,
-            statistics_json, requested_changes_json, created_at
-          ) VALUES (?, ?, ?, 'accepted', ?, ?, ?, ?, '[]', ?)
-          """,
-          [
-            @optimization_id,
-            persisted.id,
-            artifact_ids.result,
-            artifact_ids.verify,
-            artifact_ids.benchmark,
-            persisted.development_sha,
-            Jason.encode!(statistics),
-            now
-          ]
-        )
+    with :ok <- require_current_best_development(persisted) do
+      transaction =
+        Repo.transaction(fn ->
+          Repo.query!(
+            """
+            INSERT INTO baseline_verifications(
+              optimization_id, baseline_revision_id, result_artifact_id, outcome,
+              verify_artifact_id, benchmark_artifact_id, development_sha,
+              statistics_json, requested_changes_json, created_at
+            ) VALUES (?, ?, ?, 'accepted', ?, ?, ?, ?, '[]', ?)
+            """,
+            [
+              @optimization_id,
+              persisted.id,
+              artifact_ids.result,
+              artifact_ids.verify,
+              artifact_ids.benchmark,
+              persisted.development_sha,
+              Jason.encode!(statistics),
+              now
+            ]
+          )
 
+          best_revision_id =
+            ensure_current_best_revision(persisted, result["summary"], now)
+
+          Repo.query!("DELETE FROM best_metrics WHERE best_revision_id = ?", [best_revision_id])
+
+          Enum.each(statistics, fn statistic ->
+            Repo.query!(
+              """
+              INSERT INTO best_metrics(
+                best_revision_id, case_id, metric_id, target_value, development_value,
+                normalized_ratio, mad, noise_tolerance, valid_pair_count, source_artifact_id
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              """,
+              [
+                best_revision_id,
+                statistic.case_id,
+                statistic.metric_id,
+                statistic.target_value,
+                statistic.development_value,
+                statistic.normalized_ratio,
+                statistic.mad,
+                statistic.noise_tolerance,
+                statistic.valid_pair_count,
+                artifact_ids.benchmark
+              ]
+            )
+          end)
+
+          Repo.query!(
+            """
+            INSERT INTO sampling_revisions(
+              optimization_id, baseline_revision_id, sequence, cause, created_at
+            ) VALUES (?, ?, 0, 'baseline_verification', ?)
+            """,
+            [@optimization_id, persisted.id, now]
+          )
+
+          [[sampling_revision_id]] =
+            Repo.query!(
+              "SELECT id FROM sampling_revisions WHERE baseline_revision_id = ? AND sequence = 0",
+              [persisted.id]
+            ).rows
+
+          Enum.each(sampling, fn %{case_id: case_id, reason: reason} ->
+            Repo.query!(
+              """
+              INSERT INTO sampling_revision_cases(sampling_revision_id, case_id, reason)
+              VALUES (?, ?, ?)
+              """,
+              [sampling_revision_id, case_id, reason]
+            )
+          end)
+
+          Repo.query!(
+            """
+            UPDATE attempts
+            SET sampling_revision_id = ?,
+                status = CASE
+                  WHEN status = 'verification_retry_pending' THEN 'ready_for_integration'
+                  ELSE status
+                END,
+                updated_at = ?
+            WHERE optimization_id = ?
+              AND status IN ('ready_for_integration', 'verification_retry_pending')
+            """,
+            [sampling_revision_id, now, @optimization_id]
+          )
+
+          Repo.query!(
+            "UPDATE baseline_revisions SET status = 'accepted', updated_at = ? WHERE id = ? AND status = 'verifying'",
+            [now, persisted.id]
+          )
+
+          Repo.query!(
+            """
+            UPDATE optimizations
+            SET status = 'optimizing', best_sha = ?, resume_status = NULL, stop_reason = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            [persisted.development_sha, now, @optimization_id]
+          )
+
+          append_event(
+            "baseline_revision",
+            to_string(persisted.revision),
+            "baseline_verification_accepted",
+            %{best_sha: persisted.development_sha, sampling_revision_id: sampling_revision_id},
+            now
+          )
+
+          fetch_revision!(persisted.revision)
+        end)
+
+      finish(transaction, :baseline_verification_accept_failed)
+    end
+  end
+
+  defp require_current_best_development(persisted) do
+    case Repo.query!(
+           "SELECT sha FROM best_revisions WHERE optimization_id = ? ORDER BY sequence DESC LIMIT 1",
+           [@optimization_id]
+         ).rows do
+      [] ->
+        :ok
+
+      [[sha]] when sha == persisted.development_sha ->
+        :ok
+
+      [[sha]] ->
+        {:error,
+         {:baseline_revision_development_must_match_current_best,
+          %{expected: sha, actual: persisted.development_sha}}}
+    end
+  end
+
+  defp ensure_current_best_revision(persisted, summary, now) do
+    case Repo.query!(
+           "SELECT id FROM best_revisions WHERE optimization_id = ? ORDER BY sequence DESC LIMIT 1",
+           [@optimization_id]
+         ).rows do
+      [] ->
         Repo.query!(
           """
           INSERT INTO best_revisions(
             optimization_id, sequence, sha, source_kind, baseline_revision_id, summary, created_at
           ) VALUES (?, 0, ?, 'baseline', ?, ?, ?)
           """,
-          [@optimization_id, persisted.development_sha, persisted.id, result["summary"], now]
+          [@optimization_id, persisted.development_sha, persisted.id, summary, now]
         )
 
-        [[best_revision_id]] =
-          Repo.query!(
-            "SELECT id FROM best_revisions WHERE optimization_id = ? AND sequence = 0",
-            [@optimization_id]
-          ).rows
+        [[id]] = Repo.query!("SELECT last_insert_rowid()").rows
+        id
 
-        Enum.each(statistics, fn statistic ->
-          Repo.query!(
-            """
-            INSERT INTO best_metrics(
-              best_revision_id, case_id, metric_id, target_value, development_value,
-              normalized_ratio, mad, noise_tolerance, valid_pair_count, source_artifact_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-              best_revision_id,
-              statistic.case_id,
-              statistic.metric_id,
-              statistic.target_value,
-              statistic.development_value,
-              statistic.normalized_ratio,
-              statistic.mad,
-              statistic.noise_tolerance,
-              statistic.valid_pair_count,
-              artifact_ids.benchmark
-            ]
-          )
-        end)
-
+      [[id]] ->
         Repo.query!(
-          """
-          INSERT INTO sampling_revisions(
-            optimization_id, baseline_revision_id, sequence, cause, created_at
-          ) VALUES (?, ?, 0, 'baseline_verification', ?)
-          """,
-          [@optimization_id, persisted.id, now]
+          "UPDATE best_revisions SET baseline_revision_id = ? WHERE id = ?",
+          [persisted.id, id]
         )
 
-        [[sampling_revision_id]] =
-          Repo.query!(
-            "SELECT id FROM sampling_revisions WHERE baseline_revision_id = ? AND sequence = 0",
-            [persisted.id]
-          ).rows
-
-        Enum.each(sampling, fn %{case_id: case_id, reason: reason} ->
-          Repo.query!(
-            """
-            INSERT INTO sampling_revision_cases(sampling_revision_id, case_id, reason)
-            VALUES (?, ?, ?)
-            """,
-            [sampling_revision_id, case_id, reason]
-          )
-        end)
-
-        Repo.query!(
-          "UPDATE baseline_revisions SET status = 'accepted', updated_at = ? WHERE id = ? AND status = 'verifying'",
-          [now, persisted.id]
-        )
-
-        Repo.query!(
-          """
-          UPDATE optimizations
-          SET status = 'optimizing', best_sha = ?, updated_at = ?
-          WHERE id = ?
-          """,
-          [persisted.development_sha, now, @optimization_id]
-        )
-
-        append_event(
-          "baseline_revision",
-          to_string(persisted.revision),
-          "baseline_verification_accepted",
-          %{best_sha: persisted.development_sha, sampling_revision_id: sampling_revision_id},
-          now
-        )
-
-        fetch_revision!(persisted.revision)
-      end)
-
-    finish(transaction, :baseline_verification_accept_failed)
+        id
+    end
   end
 
   defp persist_verification_rejection(persisted, result, result_artifact_id) do

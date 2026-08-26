@@ -6,6 +6,7 @@ defmodule PikaWeb.OptimizationLive do
   alias Pika.Baseline.Lifecycle, as: BaselineLifecycle
   alias Pika.Baseline.Questions
   alias Pika.CommandConsole
+  alias Pika.Integration.Lifecycle, as: IntegrationLifecycle
   alias Pika.Optimization.{PerformanceTimeline, Persistence, Runtime}
   alias Pika.ProgressSummary.Lifecycle, as: ProgressLifecycle
   alias Pika.ProgressSummary.Snapshot
@@ -280,6 +281,24 @@ defmodule PikaWeb.OptimizationLive do
      socket
      |> put_result(result, "新的 Iteration Guidance 将对之后创建的 Attempt 生效。")
      |> assign(:guidance_form, to_form(%{"body" => ""}, as: :guidance))
+     |> refresh()}
+  end
+
+  def handle_event("retry_integration", %{"attempt" => id}, socket) do
+    result =
+      with {attempt_id, ""} <- Integer.parse(id),
+           {:ok, attempt} <- IntegrationLifecycle.retry_verification(attempt_id) do
+        {:ok, attempt}
+      else
+        :error -> {:error, :invalid_attempt_id}
+        {:error, _reason} = error -> error
+      end
+
+    if match?({:ok, _attempt}, result), do: Symphony.reconcile()
+
+    {:noreply,
+     socket
+     |> put_result(result, "已安排重新执行 Integration Full Verify。")
      |> refresh()}
   end
 
@@ -924,6 +943,17 @@ defmodule PikaWeb.OptimizationLive do
                       <span>Failure reason</span>
                       <p>{@selected_attempt.failure_reason}</p>
                     </div>
+
+                    <button
+                      :if={@selected_attempt.status == "rejected" && @selected_attempt.candidate_sha}
+                      type="button"
+                      phx-click="retry_integration"
+                      phx-value-attempt={@selected_attempt.id}
+                      phx-disable-with="Scheduling…"
+                      class="ops-button ops-button-secondary"
+                    >
+                      Retry Integration Verify
+                    </button>
 
                     <section id={"attempt-#{@selected_attempt.id}-agent-details"} class="ops-agent-inspector">
                       <header>

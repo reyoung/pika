@@ -25,8 +25,8 @@ defmodule Pika.Baseline.Workspace do
       nil ->
         prepare_and_register(config, 0)
 
-      %{status: "superseded", revision: revision, development_sha: development_sha} ->
-        prepare_and_register(config, revision + 1, development_sha)
+      %{status: "superseded", revision: revision} ->
+        prepare_and_register(config, revision + 1, Persistence.current().best_sha)
 
       revision ->
         {:ok, %{revision: revision, paths: paths(config.workspace, revision.revision)}}

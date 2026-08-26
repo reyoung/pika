@@ -10,6 +10,16 @@ defmodule Pika.Integration.Lifecycle do
 
   @optimization_id "optimization"
 
+  @spec retry_verification(pos_integer()) :: {:ok, map()} | {:error, term()}
+  def retry_verification(attempt_id) when is_integer(attempt_id) and attempt_id > 0 do
+    with {:ok, attempt} <- Lifecycle.fetch_attempt(attempt_id),
+         :ok <- require_retryable(attempt),
+         {:ok, run} <- integration_run(attempt_id),
+         :ok <- require_rejected_run(run) do
+      persist_verification_retry(attempt, run)
+    end
+  end
+
   @spec project_work() :: [map()]
   def project_work do
     case Scheduler.next_queue_action() do
@@ -123,10 +133,172 @@ defmodule Pika.Integration.Lifecycle do
         {:ok, %{run: run, intent: operation_intent!(run.intent_id), decision: decision}}
 
       {:ok, run} ->
-        {:error, {:integration_already_active, run.status}}
+        if run.status == "retry_requested" do
+          update_retry_prepared(
+            run,
+            attempt,
+            validation,
+            receipt,
+            statistics,
+            decision,
+            artifact_ids
+          )
+        else
+          {:error, {:integration_already_active, run.status}}
+        end
 
       {:error, :integration_run_not_found} ->
         insert_prepared(attempt, validation, receipt, statistics, decision, artifact_ids)
+    end
+  end
+
+  defp update_retry_prepared(
+         run,
+         attempt,
+         validation,
+         receipt,
+         statistics,
+         decision,
+         artifact_ids
+       ) do
+    now = now_us()
+    intent_id = Ecto.UUID.generate()
+
+    transaction =
+      Repo.transaction(fn ->
+        Repo.query!(
+          """
+          UPDATE integration_runs
+          SET status = 'best_update_prepared', expected_best_sha = ?,
+              validation_artifact_id = ?, result_artifact_id = NULL,
+              verify_artifact_id = ?, benchmark_artifact_id = ?, validation_sha256 = ?,
+              statistics_json = ?, judgement_json = ?, sampling_feedback_json = ?,
+              outcome = NULL, updated_at = ?
+          WHERE id = ? AND status = 'retry_requested'
+          """,
+          [
+            attempt.base_sha,
+            artifact_ids.validation,
+            artifact_ids.verify,
+            artifact_ids.benchmark,
+            receipt.sha256,
+            Jason.encode!(statistics),
+            Jason.encode!(decision),
+            Jason.encode!(validation["sampling_feedback_case_ids"]),
+            now,
+            run.id
+          ]
+        )
+
+        Repo.query!(
+          """
+          INSERT INTO operation_intents(
+            id, optimization_id, kind, owner_type, owner_id, state,
+            expected_best_sha, candidate_sha, validation_receipt_sha256,
+            idempotency_key, payload_json, created_at, updated_at
+          ) VALUES (?, ?, 'best_update', 'attempt', ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
+          """,
+          [
+            intent_id,
+            @optimization_id,
+            to_string(attempt.id),
+            attempt.base_sha,
+            validation["candidate_sha"],
+            receipt.sha256,
+            "best-update-retry:#{attempt.id}:#{run.id}:#{now}",
+            Jason.encode!(%{integration_run_id: run.id}),
+            now,
+            now
+          ]
+        )
+
+        Repo.query!(
+          "UPDATE attempts SET status = 'integrating', updated_at = ? WHERE id = ? AND status = 'ready_for_integration'",
+          [now, attempt.id]
+        )
+
+        append_event(
+          "attempt",
+          to_string(attempt.id),
+          "integration_retry_best_update_prepared",
+          %{intent_id: intent_id, integration_run_id: run.id},
+          now
+        )
+
+        %{
+          run: integration_run!(attempt.id),
+          intent: operation_intent!(intent_id),
+          decision: decision
+        }
+      end)
+
+    finish_transaction(transaction, :integration_retry_prepare_failed)
+  end
+
+  defp persist_verification_retry(attempt, run) do
+    now = now_us()
+
+    {attempt_status, sampling_revision_id} =
+      case current_sampling_revision() do
+        {:ok, sampling_revision_id} -> {"ready_for_integration", sampling_revision_id}
+        {:error, :accepted_baseline_missing} -> {"verification_retry_pending", nil}
+      end
+
+    transaction =
+      Repo.transaction(fn ->
+        Repo.query!(
+          """
+          UPDATE attempts
+          SET status = ?, outcome = 'ready_for_integration', failure_reason = NULL,
+              sampling_revision_id = COALESCE(?, sampling_revision_id), updated_at = ?
+          WHERE id = ? AND status = 'rejected'
+          """,
+          [attempt_status, sampling_revision_id, now, attempt.id]
+        )
+
+        Repo.query!(
+          """
+          UPDATE integration_runs
+          SET status = 'retry_requested', outcome = NULL, updated_at = ?
+          WHERE id = ? AND status = 'rejected'
+          """,
+          [now, run.id]
+        )
+
+        append_event(
+          "attempt",
+          to_string(attempt.id),
+          "integration_verification_retry_requested",
+          %{integration_run_id: run.id, waiting_for_baseline: is_nil(sampling_revision_id)},
+          now
+        )
+
+        fetch_attempt!(attempt.id)
+      end)
+
+    finish_transaction(transaction, :integration_verification_retry_failed)
+  end
+
+  defp require_retryable(%{status: "rejected", candidate_sha: sha}) when is_binary(sha), do: :ok
+  defp require_retryable(%{status: "rejected"}), do: {:error, :retry_candidate_missing}
+  defp require_retryable(attempt), do: {:error, {:attempt_not_retryable, attempt.status}}
+
+  defp require_rejected_run(%{status: "rejected"}), do: :ok
+  defp require_rejected_run(run), do: {:error, {:integration_run_not_rejected, run.status}}
+
+  defp current_sampling_revision do
+    case Repo.query!(
+           """
+           SELECT sr.id
+           FROM sampling_revisions sr
+           JOIN baseline_revisions br ON br.id = sr.baseline_revision_id
+           WHERE br.optimization_id = ? AND br.status = 'accepted'
+           ORDER BY br.revision DESC, sr.sequence DESC LIMIT 1
+           """,
+           [@optimization_id]
+         ).rows do
+      [[id]] -> {:ok, id}
+      [] -> {:error, :accepted_baseline_missing}
     end
   end
 
@@ -841,7 +1013,8 @@ defmodule Pika.Integration.Lifecycle do
   end
 
   defp require_rejectable(%{status: status})
-       when status in ["ready_for_integration", "integrating"], do: :ok
+       when status in ["ready_for_integration", "integrating"],
+       do: :ok
 
   defp require_rejectable(attempt), do: {:error, {:attempt_not_rejectable, attempt.status}}
 

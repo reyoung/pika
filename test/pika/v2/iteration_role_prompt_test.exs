@@ -44,6 +44,7 @@ defmodule Pika.Agent.IterationRolePromptTest do
     assert prompt =~ "PIKA_CANDIDATE_MANIFEST"
     assert prompt =~ "不得为了选择 `candidate/` 修改 `benchmarks/pika_adapter.py`"
     assert prompt =~ "baseline_harness_missing_candidate_env"
+    assert prompt =~ "details.failure_code"
 
     schema = schemas.iteration_result
     assert prompt =~ "[#{Path.basename(schema)}](<#{schema}>)"
