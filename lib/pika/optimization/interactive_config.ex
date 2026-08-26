@@ -349,17 +349,22 @@ defmodule Pika.Optimization.InteractiveConfig do
 
   defp backend(nil, label, current, true) do
     current = short_backend(current)
-    default = if current == "cursor", do: "2", else: "1"
+    default = %{"codex" => "1", "cursor" => "2", "cursor_headless" => "3"}[current] || "1"
     IO.puts("\n#{label} backend:")
     IO.puts("  1) Codex · Codex App Server")
     IO.puts("  2) Cursor · Agent Client Protocol")
+    IO.puts("  3) Cursor Headless · Local cursor-agent print mode")
 
     case prompt("Select #{label} backend", default) |> parse_backend() do
       {:ok, backend} ->
         {:ok, backend}
 
       {:error, _reason} ->
-        IO.puts(:stderr, "Invalid value: choose 1 for Codex or 2 for Cursor")
+        IO.puts(
+          :stderr,
+          "Invalid value: choose 1 for Codex, 2 for Cursor ACP, or 3 for Cursor Headless"
+        )
+
         backend(nil, label, current, true)
     end
   end
@@ -610,6 +615,10 @@ defmodule Pika.Optimization.InteractiveConfig do
   defp parse_backend(value) when value in [2, "2", :cursor, :cursor_acp, "cursor", "cursor_acp"],
     do: {:ok, :cursor_acp}
 
+  defp parse_backend(value)
+       when value in [3, "3", :cursor_headless, "cursor_headless", "cursor-headless"],
+       do: {:ok, :cursor_headless}
+
   defp parse_backend(value), do: {:error, {:invalid_backend, value}}
 
   defp normalize_backend(value) do
@@ -705,6 +714,11 @@ defmodule Pika.Optimization.InteractiveConfig do
   defp effort_description("ultra"), do: "deepest supported reasoning"
 
   defp short_backend(value) when value in [:cursor_acp, "cursor_acp", "cursor"], do: "cursor"
+
+  defp short_backend(value)
+       when value in [:cursor_headless, "cursor_headless", "cursor-headless"],
+       do: "cursor_headless"
+
   defp short_backend(_value), do: "codex"
 
   defp normalize_opts(opts) when is_map(opts), do: Map.to_list(opts)

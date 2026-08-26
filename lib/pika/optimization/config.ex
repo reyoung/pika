@@ -14,7 +14,7 @@ defmodule Pika.Optimization.Config.Agent do
     options: %{}
   ]
 
-  @type backend :: :codex_app_server | :cursor_acp
+  @type backend :: :codex_app_server | :cursor_acp | :cursor_headless
   @type t :: %__MODULE__{
           backend: backend(),
           command: String.t() | [String.t()] | nil,
@@ -424,7 +424,12 @@ defmodule Pika.Optimization.Config do
   defp backend(value, _path) when value in ["cursor", "cursor_acp", :cursor, :cursor_acp],
     do: {:ok, :cursor_acp}
 
-  defp backend(_value, path), do: error("#{path}: must be codex or cursor")
+  defp backend(value, _path)
+       when value in ["cursor_headless", "cursor-headless", :cursor_headless],
+       do: {:ok, :cursor_headless}
+
+  defp backend(_value, path),
+    do: error("#{path}: must be codex, cursor, or cursor_headless")
 
   defp permission(backend, kind, value, path) do
     with {:ok, value} <- required_string(value, path) do

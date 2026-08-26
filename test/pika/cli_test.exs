@@ -53,6 +53,21 @@ defmodule Pika.CLITest do
     assert {:ok, %{help: true}} = Pika.CLI.parse_reconfiguration(["--help"])
   end
 
+  test "accepts both Cursor Headless CLI spellings" do
+    assert {:ok, %{backend: "cursor_headless"}} =
+             Pika.CLI.parse_init([
+               "/tmp/pika-headless",
+               "--repo",
+               "/tmp/repo",
+               "--backend",
+               "cursor_headless",
+               "--yes"
+             ])
+
+    assert {:ok, %{backend: "cursor-headless"}} =
+             Pika.CLI.parse_reconfiguration(["--help", "--backend", "cursor-headless"])
+  end
+
   test "interactive init accepts omitted paths while --yes requires them" do
     assert {:ok, %{workspace: nil, repo: nil, yes: false}} = Pika.CLI.parse_init([])
     assert {:error, message} = Pika.CLI.parse_init(["--yes"])

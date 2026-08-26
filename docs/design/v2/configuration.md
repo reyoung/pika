@@ -9,6 +9,7 @@
 - Follow-up 与 Progress Summary Role 可省略。
 - Session 创建时冻结当前完整配置；更新只影响以后创建的 Session。
 - Codex 默认使用 `danger-full-access`，Cursor 默认关闭 sandbox；只有用户显式配置时才启用受限 sandbox。
+- `cursor`/`cursor_acp` 使用长期运行的 ACP v1；`cursor_headless` 使用本机已登录的 `cursor-agent -p`，不要求 API key。Headless 每个 turn 启动独立进程，在同一 Pika Session 内用 Cursor chat id 延续上下文；断流不会自动重发 prompt。
 - 根级 `token` 是 Web/API 访问 token。新 Workspace 默认生成随机 256-bit token；也可在初始化时固定。`serve` 在启动时读取它，手工修改后需要重启。旧配置省略该字段时，每次 `serve` 启动仍临时生成随机 token。
 
 ## 2. 交互式配置
@@ -61,6 +62,11 @@ agents:
       - <<: *codex_writer
       - backend: cursor
         model: auto
+        approval_policy: force
+        sandbox: disabled
+      - backend: cursor_headless
+        model: gpt-5.6-sol-high
+        reasoning_effort: high
         approval_policy: force
         sandbox: disabled
 

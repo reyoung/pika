@@ -131,6 +131,24 @@ defmodule Pika.Optimization.InteractiveConfigTest do
     assert byte_size(settings.token) >= 43
   end
 
+  test "non-interactive init selects Cursor Headless independently from Cursor ACP" do
+    assert {:ok, settings} =
+             InteractiveConfig.collect_init(
+               workspace: "/tmp/pika-headless-workspace",
+               repo: "/tmp/pika-headless-repo",
+               backend: "cursor-headless",
+               model: "gpt-headless",
+               reasoning_effort: "max",
+               iteration_agents: 1,
+               yes: true
+             )
+
+    assert settings.agents.baseline_alignment.backend == :cursor_headless
+    assert settings.agents.baseline_alignment.model == "gpt-headless"
+    assert settings.agents.baseline_alignment.reasoning_effort == "max"
+    assert settings.agents.baseline_alignment.sandbox == "disabled"
+  end
+
   test "interactive init accepts the generated random token by default" do
     parent = self()
 

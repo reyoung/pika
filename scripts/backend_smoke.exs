@@ -22,9 +22,11 @@ backend = Keyword.get(opts, :backend, "codex_app_server")
 
 backends =
   case backend do
-    "all" -> [:codex_app_server, :cursor_acp]
+    "all" -> [:codex_app_server, :cursor_acp, :cursor_headless]
     "codex_app_server" -> [:codex_app_server]
     "cursor_acp" -> [:cursor_acp]
+    "cursor_headless" -> [:cursor_headless]
+    "cursor-headless" -> [:cursor_headless]
     other -> Mix.raise("unsupported backend: #{other}")
   end
 

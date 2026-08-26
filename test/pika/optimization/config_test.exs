@@ -64,6 +64,23 @@ defmodule Pika.Optimization.ConfigTest do
              Config.role_agent(config, :progress_summary)
   end
 
+  test "accepts Cursor Headless without changing the legacy cursor alias" do
+    yaml =
+      minimal_yaml()
+      |> String.replace(
+        "  baseline_alignment:\n    backend: codex\n    approval_policy: never\n    sandbox: workspace-write",
+        "  baseline_alignment:\n    backend: cursor_headless\n    approval_policy: force\n    sandbox: disabled"
+      )
+      |> String.replace(
+        "  baseline_verify:\n    backend: codex\n    approval_policy: never\n    sandbox: workspace-write",
+        "  baseline_verify:\n    backend: cursor\n    approval_policy: force\n    sandbox: disabled"
+      )
+
+    assert {:ok, config} = Config.load(config_file(yaml))
+    assert config.baseline_alignment.agent.backend == :cursor_headless
+    assert config.baseline_verify.agent.backend == :cursor_acp
+  end
+
   test "rejects Agent Profile fields and empty Iteration concurrency" do
     profile_yaml =
       String.replace(

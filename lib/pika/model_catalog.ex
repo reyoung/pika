@@ -7,7 +7,7 @@ defmodule Pika.ModelCatalog do
 
   def list(backend, opts \\ [])
 
-  def list("cursor_acp", opts) do
+  def list(backend, opts) when backend in ["cursor_acp", "cursor_headless"] do
     runner = Keyword.get(opts, :cursor_runner, &cursor_models/0)
 
     with {:ok, output} <- runner.() do

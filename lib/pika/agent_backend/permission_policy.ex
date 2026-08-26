@@ -69,22 +69,25 @@ defmodule Pika.AgentBackend.PermissionPolicy do
         }
   def defaults(backend) do
     case normalize_backend(backend) do
-      :cursor_acp -> %{approval_policy: "force", sandbox_policy: "disabled"}
-      :codex_app_server -> %{approval_policy: "never", sandbox_policy: "danger_full_access"}
+      backend when backend in [:cursor_acp, :cursor_headless] ->
+        %{approval_policy: "force", sandbox_policy: "disabled"}
+
+      :codex_app_server ->
+        %{approval_policy: "never", sandbox_policy: "danger_full_access"}
     end
   end
 
   @spec options(atom() | String.t(), :approval_policy | :sandbox_policy) :: [map()]
   def options(backend, :approval_policy) do
     case normalize_backend(backend) do
-      :cursor_acp -> @cursor_approval_options
+      backend when backend in [:cursor_acp, :cursor_headless] -> @cursor_approval_options
       :codex_app_server -> @codex_approval_options
     end
   end
 
   def options(backend, :sandbox_policy) do
     case normalize_backend(backend) do
-      :cursor_acp -> @cursor_sandbox_options
+      backend when backend in [:cursor_acp, :cursor_headless] -> @cursor_sandbox_options
       :codex_app_server -> @codex_sandbox_options
     end
   end
@@ -187,6 +190,10 @@ defmodule Pika.AgentBackend.PermissionPolicy do
 
   defp normalize_backend(value) when value in [:cursor_acp, "cursor_acp", "cursor"],
     do: :cursor_acp
+
+  defp normalize_backend(value)
+       when value in [:cursor_headless, "cursor_headless", "cursor-headless"],
+       do: :cursor_headless
 
   defp normalize_backend(_value), do: :codex_app_server
 

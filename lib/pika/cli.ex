@@ -11,6 +11,7 @@ defmodule Pika.CLI do
   }
 
   @reasoning_efforts ~w(low medium high xhigh max ultra)
+  @backends ~w(codex cursor cursor_headless cursor-headless)
 
   def main([command | argv]) when command in ["init", "init-v2"] do
     case parse_init(argv) do
@@ -64,8 +65,8 @@ defmodule Pika.CLI do
       |> maybe_error(invalid != [], "invalid options: #{inspect(invalid)}")
       |> maybe_error(length(args) > 1, "expected at most one WORKSPACE argument")
       |> maybe_error(
-        not is_nil(opts[:backend]) and opts[:backend] not in ~w(codex cursor),
-        "--backend must be codex or cursor"
+        not is_nil(opts[:backend]) and opts[:backend] not in @backends,
+        "--backend must be codex, cursor, or cursor_headless"
       )
       |> maybe_error(
         not is_nil(opts[:reasoning_effort]) and opts[:reasoning_effort] not in @reasoning_efforts,
@@ -146,8 +147,8 @@ defmodule Pika.CLI do
         "--all and --role cannot be combined"
       )
       |> maybe_error(
-        not is_nil(opts[:backend]) and opts[:backend] not in ~w(codex cursor),
-        "--backend must be codex or cursor"
+        not is_nil(opts[:backend]) and opts[:backend] not in @backends,
+        "--backend must be codex, cursor, or cursor_headless"
       )
       |> maybe_error(
         not is_nil(opts[:reasoning_effort]) and opts[:reasoning_effort] not in @reasoning_efforts,
@@ -395,7 +396,7 @@ defmodule Pika.CLI do
     Without --yes, starts an interactive wizard for every Agent configuration. The repository
     must be a clean Git worktree. Pika never pushes or merges to a remote branch.
 
-      --backend codex|cursor       Default Backend for Agent prompts
+      --backend BACKEND            codex|cursor|cursor_headless
       --token TOKEN                Fixed access token (default: random 256-bit token)
       --model MODEL                Default provider model for Agent prompts
       --reasoning-effort EFFORT    Default effort: low|medium|high|xhigh|max|ultra
@@ -438,7 +439,7 @@ defmodule Pika.CLI do
       --config PATH                Must resolve to WORKSPACE/pika.yaml
       --role ROLE                  Configure one Role without the section menu
       --all                        Configure every Agent Role
-      --backend codex|cursor       Use this Backend for the selected Agent(s)
+      --backend BACKEND            codex|cursor|cursor_headless
       --model MODEL                Use a model id; "default" selects the provider default
       --reasoning-effort EFFORT    low|medium|high|xhigh|max|ultra
       --iteration-agents N         Change Iteration concurrency

@@ -212,8 +212,13 @@ defmodule Pika.Optimization.ConfigFile do
   defp normalize_backend(value) when value in [:cursor_acp, "cursor_acp", "cursor"],
     do: :cursor_acp
 
+  defp normalize_backend(value)
+       when value in [:cursor_headless, "cursor_headless", "cursor-headless"],
+       do: :cursor_headless
+
   defp normalize_backend(_value), do: :codex_app_server
 
   defp short_backend(:cursor_acp), do: "cursor"
+  defp short_backend(:cursor_headless), do: "cursor_headless"
   defp short_backend(_backend), do: "codex"
 end

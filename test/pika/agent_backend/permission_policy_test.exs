@@ -14,11 +14,19 @@ defmodule Pika.AgentBackend.PermissionPolicyTest do
              sandbox_policy: "disabled"
            }
 
+    assert PermissionPolicy.defaults(:cursor_headless) == %{
+             approval_policy: "force",
+             sandbox_policy: "disabled"
+           }
+
     assert {:ok, "on_request"} =
              PermissionPolicy.parse(:codex_app_server, :approval_policy, "on-request")
 
     assert {:error, _message} =
              PermissionPolicy.parse(:cursor_acp, :approval_policy, "on_request")
+
+    assert {:ok, "auto_review"} =
+             PermissionPolicy.parse(:cursor_headless, :approval_policy, "auto-review")
   end
 
   test "maps Codex policies to thread and turn protocol values" do

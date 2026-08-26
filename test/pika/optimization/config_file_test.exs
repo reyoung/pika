@@ -69,4 +69,18 @@ defmodule Pika.Optimization.ConfigFileTest do
 
     assert config.progress_summary.agent.sandbox == "danger_full_access"
   end
+
+  test "renders Cursor Headless as a distinct canonical backend" do
+    root =
+      Path.join(System.tmp_dir!(), "pika-config-headless-#{System.unique_integer([:positive])}")
+
+    path = Path.join(root, "pika.yaml")
+    config = ConfigFile.new(path, Path.join(root, "repo"), root, backend: "cursor-headless")
+
+    yaml = ConfigFile.render(config)
+    assert yaml =~ "backend: cursor_headless"
+    assert config.baseline_alignment.agent.backend == :cursor_headless
+    assert config.baseline_alignment.agent.approval_policy == "force"
+    assert config.baseline_alignment.agent.sandbox == "disabled"
+  end
 end

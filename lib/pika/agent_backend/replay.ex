@@ -86,6 +86,16 @@ defmodule Pika.AgentBackend.Replay do
        ),
        do: [:turn_completed]
 
+  defp event_types(%{"direction" => "in", "payload" => payload}, :cursor_headless) do
+    case {payload["type"], payload["subtype"]} do
+      {"assistant", _} -> [:message_delta]
+      {"tool_call", "started"} -> [:tool_started]
+      {"tool_call", "completed"} -> [:tool_completed]
+      {"result", "success"} -> [:turn_completed]
+      _ -> []
+    end
+  end
+
   defp event_types(_record, _backend), do: []
 
   defp item_event(payload, stage) do

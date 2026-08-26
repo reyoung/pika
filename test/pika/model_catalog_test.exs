@@ -23,6 +23,9 @@ defmodule Pika.ModelCatalogTest do
                description: nil
              }
            ]
+
+    assert {:ok, ^models} =
+             ModelCatalog.list("cursor_headless", cursor_runner: fn -> {:ok, output} end)
   end
 
   test "normalizes Codex models and places the provider default first" do

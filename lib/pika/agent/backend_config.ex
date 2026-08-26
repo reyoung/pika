@@ -26,6 +26,7 @@ defmodule Pika.Agent.BackendConfig do
         case backend do
           :codex_app_server -> Pika.AgentBackend.CodexAppServer
           :cursor_acp -> Pika.AgentBackend.CursorACP
+          :cursor_headless -> Pika.AgentBackend.CursorHeadless
         end
 
     if is_atom(module), do: {:ok, module}, else: {:error, {:unsupported_agent_backend, backend}}
@@ -48,6 +49,7 @@ defmodule Pika.Agent.BackendConfig do
   end
 
   defp command(:cursor_acp, nil), do: {"cursor-agent", []}
+  defp command(:cursor_headless, nil), do: {"cursor-agent", []}
   defp command(:codex_app_server, nil), do: {"codex", []}
   defp command(_backend, [command | args]), do: {command, args}
   defp command(_backend, command) when is_binary(command), do: {command, []}

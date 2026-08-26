@@ -20,6 +20,7 @@ defmodule Pika.AgentBackend.JSONLPort do
     env = Keyword.get(opts, :env, %{})
     stderr_path = Keyword.fetch!(opts, :stderr_path)
     jsonl_path = Keyword.fetch!(opts, :jsonl_path)
+    cwd = Keyword.get(opts, :cwd)
 
     File.mkdir_p!(Path.dirname(stderr_path))
     File.touch!(stderr_path)
@@ -32,16 +33,26 @@ defmodule Pika.AgentBackend.JSONLPort do
       |> Map.put("PIKA_STDERR_LOG", stderr_path)
       |> Enum.map(fn {key, value} -> {to_charlist(key), to_charlist(value)} end)
 
-    port =
-      Port.open({:spawn_executable, wrapper}, [
-        :binary,
-        :exit_status,
-        :hide,
-        args: ["-c", script, "pika-backend", command | args],
-        env: port_env
-      ])
+    port_options = [
+      :binary,
+      :exit_status,
+      :hide,
+      args: ["-c", script, "pika-backend", command | args],
+      env: port_env
+    ]
 
-    {:os_pid, os_pid} = Port.info(port, :os_pid)
+    port_options =
+      if is_binary(cwd),
+        do: [{:cd, to_charlist(Path.expand(cwd))} | port_options],
+        else: port_options
+
+    port = Port.open({:spawn_executable, wrapper}, port_options)
+
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} -> pid
+        nil -> nil
+      end
 
     {:ok,
      %{
@@ -121,10 +132,12 @@ defmodule Pika.AgentBackend.JSONLPort do
     {Enum.drop(parts, -1), List.last(parts) || ""}
   end
 
-  defp stop_os_process(os_pid) do
+  defp stop_os_process(os_pid) when is_integer(os_pid) do
     _ = System.cmd("kill", ["-TERM", Integer.to_string(os_pid)], stderr_to_stdout: true)
     wait_for_exit(os_pid, 10)
   end
+
+  defp stop_os_process(nil), do: :ok
 
   defp wait_for_exit(os_pid, attempts_left) do
     case System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true) do

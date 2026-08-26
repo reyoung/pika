@@ -27,4 +27,23 @@ defmodule Pika.AgentBackend.JSONLPortTest do
     assert File.read!(stderr_path) =~ "separate-stderr"
     refute File.read!(jsonl_path) =~ "separate-stderr"
   end
+
+  test "starts the subprocess in an explicit working directory" do
+    root = Path.join(System.tmp_dir!(), "pika-port-cwd-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+
+    assert {:ok, transport} =
+             JSONLPort.start(
+               owner: self(),
+               command: System.find_executable("sh"),
+               args: ["-c", ~S|printf '{"cwd":"%s"}\n' "$PWD"|],
+               env: %{},
+               cwd: root,
+               stderr_path: Path.join(root, "stderr.log"),
+               jsonl_path: Path.join(root, "wire.jsonl")
+             )
+
+    assert_receive {:backend_wire, ^transport, %{"cwd" => ^root}}, 2_000
+    assert_receive {:backend_process_exited, ^transport, 0, false}, 2_000
+  end
 end
