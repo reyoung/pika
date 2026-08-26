@@ -323,13 +323,31 @@ defmodule Pika.Agent.Actor do
     File.mkdir_p!(artifact_dir)
 
     with {:ok, module} <- BackendConfig.module(state.agent, overrides),
-         launch_config <- BackendConfig.launch_config(state.agent, artifact_dir) do
+         launch_config <-
+           state.agent
+           |> BackendConfig.launch_config(artifact_dir)
+           |> inject_attempt_runtime_env(state.work, state.paths) do
       case Directory.issue(session_binding(state, token_actor: self()), state.directory) do
         {:ok, token} -> start_and_open_backend(state, module, launch_config, token)
         {:error, reason} -> fail_open_session(state, reason)
       end
     end
   end
+
+  # The candidate bundle is an Attempt runtime input, not a Harness change. It
+  # is available before the Agent creates it, so frozen scripts can resolve it
+  # during later verification commands in the same session.
+  defp inject_attempt_runtime_env(launch_config, %Work{role_id: "iteration"}, paths) do
+    env =
+      Map.merge(launch_config.env, %{
+        "PIKA_ATTEMPT_ROOT" => paths.work_root,
+        "PIKA_CANDIDATE_MANIFEST" => Path.join([paths.cwd, "candidate", "manifest.json"])
+      })
+
+    %{launch_config | env: env}
+  end
+
+  defp inject_attempt_runtime_env(launch_config, _work, _paths), do: launch_config
 
   defp start_and_open_backend(state, module, launch_config, token) do
     case AgentBackend.start_link(module, launch_config, self()) do

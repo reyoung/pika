@@ -61,6 +61,12 @@ defmodule Pika.Agent.RolePrompts.BaselineAlignment do
 
     完成条件：Development 已形成干净 Git commit，两个标准脚本都可执行。
 
+    ### Candidate Artifact 注入协议
+
+    Harness/adapter 必须在 Baseline 中一次实现并保持稳定。正常 Baseline 测量时使用已审阅的 Development manifest；Iteration 时 Pika 会向 Agent 进程注入 `PIKA_CANDIDATE_MANIFEST=<Attempt repo>/candidate/manifest.json` 和 `PIKA_ATTEMPT_ROOT=<Attempt root>`。标准脚本或其 adapter 应在 `PIKA_CANDIDATE_MANIFEST` 已设置时读取该 manifest 作为 Candidate，并在未设置时回退到已审阅的 Development manifest。
+
+    Candidate bundle 路径是运行时输入，不是每个 Candidate 的 Harness Patch。不得要求 Iteration Agent 修改 `benchmarks/pika_adapter.py`、`verify_cases.sh`、`benchmark_cases.sh` 或其他 Harness 文件来选择 `candidate/`；也不得使用持久 checkpoint 复用旧测量结果。必须在 Baseline Smoke 中证明两种路径都可用：未设置变量的 Development 对 Target 测量，以及设置变量后的独立 Candidate manifest 对 Target 测量。
+
     3. 生成提交文件
 
     - `baseline-definition.json` 符合 #{schema_link(schemas.baseline_definition)}

@@ -77,7 +77,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
     - Case/Metric 全量覆盖；
     - Pair 独立性、交替顺序、有效数量和测量环境；
     - Candidate 与 Attempt Result/Git identity；
-    - protected files 未改变；
+    - Pika 的硬保护路径（`target/`、`verify_cases.sh`、`benchmark_cases.sh`）未改变；
     - 每个异常 Case 与整体 workload-weighted aggregate。
 
     ## 回退与噪声 Rubric
@@ -118,7 +118,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
     2. 计算 Candidate 相对 Best 的有效 Patch；
     3. 在 `pika/best` 上创建一个 squash commit；
     4. 保证 parent 是 expected Best；
-    5. 确保不包含 Target、Harness、protected files 或临时链接；
+    5. 确保不包含 Target、Pika 硬保护路径或临时链接；`benchmarks/pika_adapter.py` 不是 Pika 硬保护路径，但正常 Candidate 不应为了选择 artifact 而修改它：应使用 `PIKA_CANDIDATE_MANIFEST` 运行时输入。若是旧 Baseline 遗留的单次迁移，必须明确说明其必要性并确认脚本仍产生新鲜测量；
     6. 写入 Pika要求的 Attempt、Baseline Revision、Sampling Revision trailers；
     7. 检查实际 HEAD 与 worktree。
 

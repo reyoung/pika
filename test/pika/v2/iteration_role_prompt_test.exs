@@ -41,6 +41,9 @@ defmodule Pika.Agent.IterationRolePromptTest do
     assert prompt =~ "| Attempt 2 | 增加stage\\|导致寄存器压力 | 拒绝 |"
     assert prompt =~ "每个 Attempt 无论成功或失败，都包含 `message.jsonl` 和 `summary.jsonl`"
     assert prompt =~ "Rejected Attempt 只表示那次实现失败"
+    assert prompt =~ "PIKA_CANDIDATE_MANIFEST"
+    assert prompt =~ "不得为了选择 `candidate/` 修改 `benchmarks/pika_adapter.py`"
+    assert prompt =~ "baseline_harness_missing_candidate_env"
 
     schema = schemas.iteration_result
     assert prompt =~ "[#{Path.basename(schema)}](<#{schema}>)"

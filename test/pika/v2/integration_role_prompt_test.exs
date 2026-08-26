@@ -35,6 +35,8 @@ defmodule Pika.Agent.IntegrationRolePromptTest do
     assert prompt =~ "max(max_regression_ratio, Noise Tolerance)"
     assert prompt =~ "prepare_best_update(validation_path, idempotency_key)"
     assert prompt =~ "finish_integration(result_path, idempotency_key)"
+    assert prompt =~ "`benchmarks/pika_adapter.py` 不是 Pika 硬保护路径"
+    assert prompt =~ "PIKA_CANDIDATE_MANIFEST"
     assert prompt =~ "[integration-validation.schema.json](<#{schemas.integration_validation}>)"
     assert prompt =~ "[integration-result.schema.json](<#{schemas.integration_result}>)"
   end
