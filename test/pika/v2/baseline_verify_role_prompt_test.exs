@@ -30,6 +30,8 @@ defmodule Pika.Agent.BaselineVerifyRolePromptTest do
 
     assert prompt =~ "./verify_cases.sh --list-cases"
     assert prompt =~ "./benchmark_cases.sh --list-cases"
+    assert prompt =~ "PIKA_CANDIDATE_MANIFEST"
+    assert prompt =~ "Candidate Artifact 注入审计"
     assert prompt =~ "Benchmark 单进程门禁"
     assert prompt =~ "同一个长期运行的 Python 进程或同一次 `torchrun`"
     assert prompt =~ "禁止脚本按 Case 循环"

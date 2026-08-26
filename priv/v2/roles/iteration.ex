@@ -109,6 +109,7 @@ defmodule Pika.Agent.RolePrompts.Iteration do
 
     - 只修改当前 Attempt worktree 和分支。
     - 不修改只读 `target/`、Correctness Oracle、`verify_cases.sh`、`benchmark_cases.sh` 或其他 protected files。
+    - Pika 已注入 `PIKA_CANDIDATE_MANIFEST=<当前 Attempt repo>/candidate/manifest.json` 与 `PIKA_ATTEMPT_ROOT`。将新 Candidate bundle 写到该 manifest 路径，让冻结的标准 Harness 自动读取；不得为了选择 `candidate/` 修改 `benchmarks/pika_adapter.py` 或任何 Harness 文件。若已审阅的 Harness 不读取该变量，使用明确原因 `baseline_harness_missing_candidate_env` 拒绝本次 Attempt，并说明需要新的 Baseline Revision；不得以修改 Harness、替换 Development 或重用旧结果绕过。
     - 不修改 `pika/best`，不 Push 远端。
     - 可以在 Attempt branch 内创建、修改或合并提交。
     - 正常 Iteration 以创建时的 Base 工作。
