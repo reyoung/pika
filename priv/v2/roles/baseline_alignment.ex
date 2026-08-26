@@ -65,6 +65,8 @@ defmodule Pika.Agent.RolePrompts.BaselineAlignment do
 
     Harness/adapter 必须在 Baseline 中一次实现并保持稳定。正常 Baseline 测量时使用已审阅的 Development manifest；Iteration 时 Pika 会向 Agent 进程注入 `PIKA_CANDIDATE_MANIFEST=<Attempt repo>/candidate/manifest.json` 和 `PIKA_ATTEMPT_ROOT=<Attempt root>`。标准脚本或其 adapter 应在 `PIKA_CANDIDATE_MANIFEST` 已设置时读取该 manifest 作为 Candidate，并在未设置时回退到已审阅的 Development manifest。
 
+    Optimization 已经存在 accepted Best 时，新 Baseline 的 Development commit 可以等于当前 Best，也可以是在当前 Best 之上只包含本次已审阅 Baseline/Harness 修订的后代 commit。不得为了满足旧 Best identity 而在 Definition、manifest 或 Result 中填写不真实的 SHA；Pika 会在新 Baseline 被接受时把如实验证的后代 Development commit 推进为新的 Best Revision，并让排队 Candidate 执行 stale refresh。
+
     Candidate bundle 路径是运行时输入，不是每个 Candidate 的 Harness Patch。不得要求 Iteration Agent 修改 `benchmarks/pika_adapter.py`、`verify_cases.sh`、`benchmark_cases.sh` 或其他 Harness 文件来选择 `candidate/`；也不得使用持久 checkpoint 复用旧测量结果。必须在 Baseline Smoke 中证明两种路径都可用：未设置变量的 Development 对 Target 测量，以及设置变量后的独立 Candidate manifest 对 Target 测量。
 
     3. 生成提交文件

@@ -4,7 +4,7 @@ defmodule Pika.Baseline.LifecycleTest do
   use ExUnit.Case, async: false
 
   alias Pika.Agent.{ContextBundle, PromptBuilder, Work}
-  alias Pika.Baseline.Lifecycle
+  alias Pika.Baseline.{Lifecycle, Workspace}
   alias Pika.Optimization.{Config, Persistence}
   alias Pika.{Git, Repo}
   alias Pika.Test.V2BaselineFixtures
@@ -267,6 +267,173 @@ defmodule Pika.Baseline.LifecycleTest do
              )
 
     assert Lifecycle.latest_revision().status == "verifying"
+  end
+
+  test "a reviewed descendant Development advances Best during Baseline realignment", %{
+    config: config,
+    work: work
+  } do
+    assert {:ok, first} = accept_baseline(work, 0)
+    assert first.status == "accepted"
+
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      "UPDATE baseline_revisions SET status = 'superseded', terminal_reason = 'harness migration', updated_at = ? WHERE id = ?",
+      [now, first.id]
+    )
+
+    Repo.query!(
+      "UPDATE optimizations SET status = 'aligning_baseline', stop_reason = 'harness migration', updated_at = ? WHERE id = 'optimization'",
+      [now]
+    )
+
+    assert {:ok, %{revision: draft, paths: paths}} = Workspace.ensure_current(config)
+    assert draft.revision == 1
+
+    File.write!(Path.join(paths.repo, "harness-migration.txt"), "runtime manifest support\n")
+    Git.run!(paths.repo, ["add", "harness-migration.txt"])
+    Git.run!(paths.repo, ["commit", "-m", "migrate baseline harness"])
+    intermediate_sha = Git.run!(paths.repo, ["rev-parse", "HEAD"])
+    Git.run!(work.repo, ["update-ref", "refs/heads/pika/best", intermediate_sha])
+
+    File.write!(Path.join(paths.repo, "harness-review.txt"), "reviewed identity\n")
+    Git.run!(paths.repo, ["add", "harness-review.txt"])
+    Git.run!(paths.repo, ["commit", "-m", "record reviewed harness identity"])
+    descendant_sha = Git.run!(paths.repo, ["rev-parse", "HEAD"])
+    V2BaselineFixtures.write_definition_files(paths.root, descendant_sha)
+
+    assert {:ok, accepted} =
+             accept_baseline(%{root: paths.root, development_sha: descendant_sha}, 1)
+
+    assert accepted.status == "accepted"
+    assert Persistence.current().best_sha == descendant_sha
+    assert Git.run!(work.repo, ["rev-parse", "pika/best"]) == descendant_sha
+
+    assert [[1, ^descendant_sha, "baseline"]] =
+             Repo.query!(
+               "SELECT sequence, sha, source_kind FROM best_revisions ORDER BY sequence DESC LIMIT 1"
+             ).rows
+  end
+
+  test "reconsiders complete evidence rejected only by the retired exact-Best gate", %{
+    config: config,
+    work: work
+  } do
+    assert {:ok, first} = accept_baseline(work, 0)
+    old_best = work.development_sha
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      "UPDATE baseline_revisions SET status = 'superseded', terminal_reason = 'harness migration', updated_at = ? WHERE id = ?",
+      [now, first.id]
+    )
+
+    Repo.query!(
+      "UPDATE optimizations SET status = 'aligning_baseline', stop_reason = 'harness migration', updated_at = ? WHERE id = 'optimization'",
+      [now]
+    )
+
+    assert {:ok, %{revision: draft, paths: paths}} = Workspace.ensure_current(config)
+    assert draft.revision == 1
+    File.write!(Path.join(paths.repo, "candidate-env.txt"), "manifest from environment\n")
+    Git.run!(paths.repo, ["add", "candidate-env.txt"])
+    Git.run!(paths.repo, ["commit", "-m", "support candidate manifest env"])
+    candidate_sha = Git.run!(paths.repo, ["rev-parse", "HEAD"])
+    V2BaselineFixtures.write_definition_files(paths.root, candidate_sha)
+
+    assert {:ok, submitted} =
+             Lifecycle.submit_definition(1, paths.root, "baseline-definition.json")
+
+    assert {:ok, approved} =
+             Lifecycle.review(1, :approve, paths.root, "baseline-definition.json")
+
+    accepted =
+      V2BaselineFixtures.write_verification_result(
+        %{root: paths.root, development_sha: candidate_sha},
+        approved.id,
+        :accepted
+      )
+
+    accepted = put_in(accepted, ["details", "baseline_revision"], 1)
+    V2BaselineFixtures.write_json(paths.root, "baseline-verification-result.json", accepted)
+    verify_stat = File.stat!(Path.join(paths.root, "full-verify.json"))
+
+    rejected = %{
+      "schema_version" => 1,
+      "role" => "baseline_verify",
+      "work_id" => to_string(submitted.id),
+      "outcome" => "definition_rejected",
+      "summary" => "complete evidence blocked by old identity gate",
+      "files" => %{},
+      "details" => %{
+        "baseline_revision" => 1,
+        "definition_sha256" => submitted.definition_sha256,
+        "development_sha" => candidate_sha,
+        "failure_kind" => "definition",
+        "reason" =>
+          "Full evidence is valid, but accepted Best #{old_best} differs from Development #{candidate_sha}.",
+        "requested_changes" => ["Align accepted Best with Development identity."]
+      }
+    }
+
+    V2BaselineFixtures.write_json(paths.root, "baseline-verification-result.json", rejected)
+
+    assert {:ok, %{status: "superseded"}} =
+             Lifecycle.finish_verification(1, paths.root, "baseline-verification-result.json")
+
+    assert {:ok, %{revision: successor, paths: successor_paths}} =
+             Workspace.ensure_current(config)
+
+    assert successor.revision == 2
+    assert File.dir?(successor_paths.root)
+
+    assert {:ok, accepted_revision} = Lifecycle.reconsider_verified_revision(1, paths.root)
+    assert accepted_revision.status == "accepted"
+    assert Persistence.current().status == "optimizing"
+    assert Persistence.current().best_sha == candidate_sha
+    assert Git.run!(work.repo, ["rev-parse", "pika/best"]) == candidate_sha
+    assert File.stat!(Path.join(paths.root, "full-verify.json")) == verify_stat
+
+    assert File.regular?(Path.join(paths.root, "baseline-verification-reconsideration.json"))
+
+    assert [["superseded", "replaced_by_reconsidered_baseline_v1"]] =
+             Repo.query!(
+               "SELECT status, terminal_reason FROM baseline_revisions WHERE revision = 2"
+             ).rows
+
+    assert [[2]] =
+             Repo.query!(
+               "SELECT COUNT(*) FROM baseline_verifications WHERE baseline_revision_id = ?",
+               [accepted_revision.id]
+             ).rows
+
+    assert [[1]] =
+             Repo.query!(
+               "SELECT COUNT(*) FROM sampling_revisions WHERE baseline_revision_id = ?",
+               [accepted_revision.id]
+             ).rows
+
+    assert Lifecycle.project_work() == []
+    assert {:ok, ^accepted_revision} = Lifecycle.reconsider_verified_revision(1, paths.root)
+  end
+
+  defp accept_baseline(work, revision) do
+    with {:ok, _draft} <- Lifecycle.ensure_draft(work.root),
+         {:ok, _submitted} <-
+           Lifecycle.submit_definition(revision, work.root, "baseline-definition.json"),
+         {:ok, approved} <-
+           Lifecycle.review(revision, :approve, work.root, "baseline-definition.json") do
+      result = V2BaselineFixtures.write_verification_result(work, approved.id, :accepted)
+      result = put_in(result, ["details", "baseline_revision"], revision)
+      V2BaselineFixtures.write_json(work.root, "baseline-verification-result.json", result)
+
+      Lifecycle.finish_verification(
+        revision,
+        work.root,
+        "baseline-verification-result.json"
+      )
+    end
   end
 
   defp yaml(repo, workspace) do

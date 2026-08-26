@@ -100,6 +100,93 @@ defmodule Pika.Baseline.Lifecycle do
     end
   end
 
+  @doc """
+  Reconsiders a superseded Baseline whose completed evidence was rejected only by the
+  retired exact-Best-SHA identity gate.
+
+  This is an operator recovery path. It validates the frozen Definition, the recorded
+  rejection, the existing Full Verify and Full Benchmark files, and the Development
+  ancestry before writing a new audit result and accepting the revision. It never runs
+  the benchmark or verification commands.
+  """
+  @spec reconsider_verified_revision(non_neg_integer(), Path.t()) ::
+          {:ok, map()} | {:error, term()}
+  def reconsider_verified_revision(revision, work_root)
+      when is_integer(revision) and revision >= 0 and is_binary(work_root) do
+    repo_root = repo_root(work_root)
+
+    with {:ok, persisted} <- fetch_revision(revision) do
+      case persisted.status do
+        "accepted" ->
+          {:ok, persisted}
+
+        "superseded" ->
+          with :ok <- require_revision_work_root(persisted, work_root),
+               :ok <- require_only_draft_successors(persisted),
+               {:ok, schemas} <- RolePromptRegistry.schemas(),
+               {:ok, rejection, rejection_receipt} <-
+                 rejected_verification_result(persisted, schemas),
+               :ok <- verify_result_identity(persisted, rejection),
+               :ok <- require_legacy_best_identity_rejection(persisted, rejection),
+               {:ok, definition} <-
+                 Definition.validate(work_root, "baseline-definition.json", repo_root: repo_root),
+               :ok <- verify_git(repo_root, definition),
+               :ok <- same_review_identity(persisted, definition),
+               {:ok, verify, verify_receipt} <-
+                 FileContract.validate_json(work_root, "full-verify.json", schemas.verify_result),
+               {:ok, benchmark, benchmark_receipt} <-
+                 FileContract.validate_jsonl(
+                   work_root,
+                   "full-benchmark.jsonl",
+                   schemas.benchmark_record
+                 ),
+               :ok <- validate_full_verify(verify, definition.cases),
+               {:ok, statistics} <-
+                 Measurement.evaluate(
+                   benchmark,
+                   definition.cases,
+                   definition.metrics,
+                   definition.manifest["measurement"]
+                 ),
+               {:ok, sampling} <- reconsideration_sampling(persisted, definition.cases),
+               result <-
+                 reconsideration_result(
+                   persisted,
+                   statistics,
+                   sampling,
+                   verify_receipt,
+                   benchmark_receipt
+                 ),
+               {:ok, result_receipt} <-
+                 write_reconsideration_result(work_root, result, schemas),
+               {:ok, artifact_ids} <-
+                 register_verification_artifacts(
+                   persisted,
+                   result_receipt,
+                   verify_receipt,
+                   benchmark_receipt
+                 ),
+               {:ok, updated} <-
+                 persist_verification_accept(
+                   persisted,
+                   result,
+                   statistics,
+                   sampling,
+                   artifact_ids,
+                   from_status: "superseded",
+                   reconsideration: %{
+                     rejection_artifact_sha256: rejection_receipt.sha256
+                   }
+                 ) do
+            {:ok, updated}
+          end
+
+        status ->
+          {:error, {:invalid_baseline_status, status, "superseded"}}
+      end
+    end
+  end
+
   @spec latest_revision() :: map() | nil
   def latest_revision do
     revisions() |> List.last()
@@ -406,12 +493,232 @@ defmodule Pika.Baseline.Lifecycle do
     end
   end
 
-  defp persist_verification_accept(persisted, result, statistics, sampling, artifact_ids) do
-    now = now_us()
+  defp require_revision_work_root(persisted, work_root) do
+    optimization = Persistence.current()
 
-    with :ok <- require_current_best_development(persisted) do
+    with {:ok, relative} <-
+           workspace_relative(optimization.workspace_canonical_path, work_root) do
+      if relative == persisted.work_relative_path,
+        do: :ok,
+        else:
+          {:error,
+           {:baseline_revision_work_root_mismatch,
+            %{expected: persisted.work_relative_path, actual: relative}}}
+    end
+  end
+
+  defp require_only_draft_successors(persisted) do
+    successors =
+      Repo.query!(
+        "SELECT revision, status FROM baseline_revisions WHERE optimization_id = ? AND revision > ? ORDER BY revision",
+        [@optimization_id, persisted.revision]
+      ).rows
+
+    case Enum.reject(successors, fn [_revision, status] -> status == "drafting" end) do
+      [] -> :ok
+      blocked -> {:error, {:baseline_reconsideration_has_nondraft_successors, blocked}}
+    end
+  end
+
+  defp rejected_verification_result(persisted, schemas) do
+    case Repo.query!(
+           """
+           SELECT a.relative_path
+           FROM baseline_verifications bv
+           JOIN artifacts a ON a.id = bv.result_artifact_id
+           WHERE bv.optimization_id = ? AND bv.baseline_revision_id = ?
+             AND bv.outcome = 'definition_rejected'
+           ORDER BY bv.created_at DESC, bv.id DESC
+           LIMIT 1
+           """,
+           [@optimization_id, persisted.id]
+         ).rows do
+      [[relative_path]] ->
+        workspace = Persistence.current().workspace_canonical_path
+        FileContract.validate_json(workspace, relative_path, schemas.baseline_verification_result)
+
+      [] ->
+        {:error, :baseline_reconsideration_rejection_missing}
+    end
+  end
+
+  defp require_legacy_best_identity_rejection(persisted, rejection) do
+    best_sha = Persistence.current().best_sha
+    details = rejection["details"]
+    reason = details["reason"] || ""
+    requested_changes = details["requested_changes"] || []
+    identity_text = Enum.join([reason | requested_changes], "\n")
+
+    valid? =
+      rejection["outcome"] == "definition_rejected" and
+        details["failure_kind"] == "definition" and
+        is_binary(best_sha) and
+        String.contains?(identity_text, best_sha) and
+        String.contains?(identity_text, persisted.development_sha) and
+        (String.contains?(identity_text, "Best") or String.contains?(identity_text, "best")) and
+        (String.contains?(identity_text, "Development") or
+           String.contains?(identity_text, "development"))
+
+    if valid?, do: :ok, else: {:error, :baseline_reconsideration_not_identity_gate_rejection}
+  end
+
+  defp reconsideration_sampling(persisted, cases) do
+    known = MapSet.new(Enum.map(cases, & &1["id"]))
+
+    previous =
+      case Repo.query!(
+             """
+             SELECT sr.id
+             FROM sampling_revisions sr
+             JOIN baseline_revisions br ON br.id = sr.baseline_revision_id
+             WHERE sr.optimization_id = ? AND br.revision < ?
+             ORDER BY sr.created_at DESC, sr.id DESC
+             LIMIT 1
+             """,
+             [@optimization_id, persisted.revision]
+           ).rows do
+        [[sampling_revision_id]] ->
+          Repo.query!(
+            "SELECT case_id, reason FROM sampling_revision_cases WHERE sampling_revision_id = ? ORDER BY case_id",
+            [sampling_revision_id]
+          ).rows
+          |> Enum.flat_map(fn [case_id, reason] ->
+            if MapSet.member?(known, case_id), do: [%{case_id: case_id, reason: reason}], else: []
+          end)
+
+        [] ->
+          []
+      end
+
+    sampling = if previous == [], do: fallback_sampling(cases), else: Enum.take(previous, 10)
+
+    if sampling == [],
+      do: {:error, :baseline_reconsideration_sampling_unavailable},
+      else: {:ok, sampling}
+  end
+
+  defp fallback_sampling(cases) do
+    cases
+    |> Enum.sort_by(fn case_ ->
+      {not case_["critical"], -(case_["weight"] || 0), case_["id"]}
+    end)
+    |> Enum.take(10)
+    |> Enum.map(fn case_ ->
+      %{
+        case_id: case_["id"],
+        reason:
+          if(case_["critical"],
+            do: "critical case retained by system reconsideration",
+            else: "highest-weight representative retained by system reconsideration"
+          )
+      }
+    end)
+  end
+
+  defp reconsideration_result(
+         persisted,
+         statistics,
+         sampling,
+         verify_receipt,
+         benchmark_receipt
+       ) do
+    %{
+      "schema_version" => 1,
+      "role" => "baseline_verify",
+      "work_id" => to_string(persisted.id),
+      "outcome" => "accepted",
+      "summary" =>
+        "Accepted from existing complete evidence after removing the obsolete exact-Best-SHA gate; no commands were rerun.",
+      "files" => %{
+        "verify" => receipt_identity(verify_receipt),
+        "benchmark" => receipt_identity(benchmark_receipt)
+      },
+      "details" => %{
+        "baseline_revision" => persisted.revision,
+        "definition_sha256" => persisted.definition_sha256,
+        "development_sha" => persisted.development_sha,
+        "initial_iteration_case_ids" => Enum.map(sampling, & &1.case_id),
+        "case_selection_reasons" =>
+          Enum.map(sampling, &%{"case_id" => &1.case_id, "reason" => &1.reason}),
+        "case_metrics" => Enum.map(statistics, &reported_metric/1),
+        "judgement" => %{
+          "reasonable" => true,
+          "reason" =>
+            "Frozen Definition, complete raw evidence, calculated metrics, and Development ancestry were revalidated by Pika."
+        }
+      }
+    }
+  end
+
+  defp receipt_identity(receipt),
+    do: %{"path" => receipt.relative_path, "sha256" => receipt.sha256}
+
+  defp reported_metric(statistic) do
+    %{
+      "case_id" => statistic.case_id,
+      "metric_id" => statistic.metric_id,
+      "unit" => statistic.unit,
+      "target_value" => statistic.target_value,
+      "development_value" => statistic.development_value,
+      "relative_difference" => statistic.relative_difference,
+      "noise_tolerance" => statistic.noise_tolerance,
+      "valid_pair_count" => statistic.valid_pair_count
+    }
+  end
+
+  defp write_reconsideration_result(work_root, result, schemas) do
+    relative_path = "baseline-verification-reconsideration.json"
+    absolute_path = Path.join(Pika.Paths.canonical!(work_root), relative_path)
+    contents = Jason.encode!(result)
+
+    with :ok <- write_immutable_file(absolute_path, contents),
+         {:ok, validated, receipt} <-
+           FileContract.validate_json(
+             work_root,
+             relative_path,
+             schemas.baseline_verification_result
+           ),
+         true <- validated == result || {:error, :baseline_reconsideration_result_changed} do
+      {:ok, receipt}
+    end
+  end
+
+  defp write_immutable_file(path, contents) do
+    case File.write(path, contents, [:exclusive]) do
+      :ok ->
+        :ok
+
+      {:error, :eexist} ->
+        case File.read(path) do
+          {:ok, ^contents} -> :ok
+          {:ok, _other} -> {:error, {:baseline_reconsideration_result_conflict, path}}
+          {:error, reason} -> {:error, {:baseline_reconsideration_result_read_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:baseline_reconsideration_result_write_failed, reason}}
+    end
+  end
+
+  defp persist_verification_accept(
+         persisted,
+         result,
+         statistics,
+         sampling,
+         artifact_ids,
+         opts \\ []
+       ) do
+    now = now_us()
+    from_status = Keyword.get(opts, :from_status, "verifying")
+    reconsideration = Keyword.get(opts, :reconsideration)
+
+    with {:ok, best_transition} <- prepare_baseline_best_transition(persisted) do
       transaction =
         Repo.transaction(fn ->
+          if reconsideration do
+            supersede_reconsideration_successors(persisted, now)
+          end
+
           Repo.query!(
             """
             INSERT INTO baseline_verifications(
@@ -433,7 +740,12 @@ defmodule Pika.Baseline.Lifecycle do
           )
 
           best_revision_id =
-            ensure_current_best_revision(persisted, result["summary"], now)
+            ensure_current_best_revision(
+              persisted,
+              result["summary"],
+              best_transition,
+              now
+            )
 
           Repo.query!("DELETE FROM best_metrics WHERE best_revision_id = ?", [best_revision_id])
 
@@ -500,10 +812,13 @@ defmodule Pika.Baseline.Lifecycle do
             [sampling_revision_id, now, @optimization_id]
           )
 
-          Repo.query!(
-            "UPDATE baseline_revisions SET status = 'accepted', updated_at = ? WHERE id = ? AND status = 'verifying'",
-            [now, persisted.id]
-          )
+          case Repo.query!(
+                 "UPDATE baseline_revisions SET status = 'accepted', terminal_reason = NULL, updated_at = ? WHERE id = ? AND status = ?",
+                 [now, persisted.id, from_status]
+               ).num_rows do
+            1 -> :ok
+            0 -> Repo.rollback({:baseline_status_changed, persisted.revision, from_status})
+          end
 
           Repo.query!(
             """
@@ -518,8 +833,15 @@ defmodule Pika.Baseline.Lifecycle do
           append_event(
             "baseline_revision",
             to_string(persisted.revision),
-            "baseline_verification_accepted",
-            %{best_sha: persisted.development_sha, sampling_revision_id: sampling_revision_id},
+            if(reconsideration,
+              do: "baseline_verification_reconsidered",
+              else: "baseline_verification_accepted"
+            ),
+            %{
+              best_sha: persisted.development_sha,
+              sampling_revision_id: sampling_revision_id,
+              reconsideration: reconsideration
+            },
             now
           )
 
@@ -530,27 +852,123 @@ defmodule Pika.Baseline.Lifecycle do
     end
   end
 
-  defp require_current_best_development(persisted) do
-    case Repo.query!(
-           "SELECT sha FROM best_revisions WHERE optimization_id = ? ORDER BY sequence DESC LIMIT 1",
-           [@optimization_id]
-         ).rows do
-      [] ->
-        :ok
+  defp supersede_reconsideration_successors(persisted, now) do
+    successors =
+      Repo.query!(
+        "SELECT id, revision FROM baseline_revisions WHERE optimization_id = ? AND revision > ? AND status = 'drafting'",
+        [@optimization_id, persisted.revision]
+      ).rows
 
-      [[sha]] when sha == persisted.development_sha ->
-        :ok
+    Enum.each(successors, fn [successor_id, successor_revision] ->
+      Repo.query!(
+        "UPDATE baseline_question_batches SET status = 'cancelled' WHERE baseline_revision_id = ? AND status = 'pending'",
+        [successor_id]
+      )
 
-      [[sha]] ->
-        {:error,
-         {:baseline_revision_development_must_match_current_best,
-          %{expected: sha, actual: persisted.development_sha}}}
+      Repo.query!(
+        """
+        UPDATE conversation_turns
+        SET ended_reason = 'interrupted', ended_at = ?
+        WHERE optimization_id = ? AND role = 'baseline_alignment'
+          AND work_kind = 'baseline_revision' AND work_id = ? AND partial = 1
+        """,
+        [now, @optimization_id, to_string(successor_id)]
+      )
+
+      Repo.query!(
+        """
+        UPDATE agent_sessions
+        SET status = 'interrupted', ended_reason = 'baseline_revision_reconsidered', ended_at = ?
+        WHERE optimization_id = ? AND role = 'baseline_alignment'
+          AND work_kind = 'baseline_revision' AND work_id = ?
+          AND status IN ('running', 'awaiting_report', 'awaiting_followup')
+        """,
+        [now, @optimization_id, to_string(successor_id)]
+      )
+
+      Repo.query!(
+        """
+        UPDATE baseline_revisions
+        SET status = 'superseded', terminal_reason = ?, updated_at = ?
+        WHERE id = ? AND status = 'drafting'
+        """,
+        ["replaced_by_reconsidered_baseline_v#{persisted.revision}", now, successor_id]
+      )
+
+      append_event(
+        "baseline_revision",
+        to_string(successor_revision),
+        "baseline_revision_superseded_by_reconsideration",
+        %{accepted_revision: persisted.revision},
+        now
+      )
+    end)
+  end
+
+  defp prepare_baseline_best_transition(persisted) do
+    optimization = Persistence.current()
+    repo = optimization.repo_canonical_path
+    expected = optimization.best_sha
+    candidate = persisted.development_sha
+    best_ref = "refs/heads/#{optimization.best_branch}"
+
+    with {:ok, actual} <- Git.run(repo, ["rev-parse", best_ref]),
+         :ok <- prepare_baseline_best_ref(repo, best_ref, actual, expected, candidate) do
+      {:ok, %{previous_sha: expected, candidate_sha: candidate}}
     end
   end
 
-  defp ensure_current_best_revision(persisted, summary, now) do
+  defp prepare_baseline_best_ref(_repo, _ref, candidate, nil, candidate), do: :ok
+
+  defp prepare_baseline_best_ref(_repo, ref, actual, nil, candidate) do
+    {:error,
+     {:initial_baseline_best_ref_mismatch, %{ref: ref, actual: actual, expected: candidate}}}
+  end
+
+  defp prepare_baseline_best_ref(repo, ref, actual, expected, candidate) do
+    with :ok <- require_descendant(repo, expected, candidate),
+         do: advance_baseline_best_ref(repo, ref, actual, expected, candidate)
+  end
+
+  defp require_descendant(_repo, sha, sha), do: :ok
+
+  defp require_descendant(repo, expected, candidate) do
+    case Git.run(repo, ["merge-base", "--is-ancestor", expected, candidate]) do
+      {:ok, _output} ->
+        :ok
+
+      {:error, reason} ->
+        {:error,
+         {:baseline_revision_development_not_descendant,
+          %{expected: expected, actual: candidate, git: reason}}}
+    end
+  end
+
+  defp advance_baseline_best_ref(_repo, _ref, candidate, _expected, candidate), do: :ok
+
+  defp advance_baseline_best_ref(repo, ref, expected, expected, candidate) do
+    case Git.run(repo, ["update-ref", ref, candidate, expected]) do
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, {:baseline_best_ref_update_failed, reason}}
+    end
+  end
+
+  defp advance_baseline_best_ref(repo, ref, actual, expected, candidate) do
+    with :ok <- require_descendant(repo, expected, actual),
+         :ok <- require_descendant(repo, actual, candidate),
+         {:ok, _output} <- Git.run(repo, ["update-ref", ref, candidate, actual]) do
+      :ok
+    else
+      {:error, reason} ->
+        {:error,
+         {:baseline_best_ref_mismatch,
+          %{ref: ref, actual: actual, expected: expected, candidate: candidate, reason: reason}}}
+    end
+  end
+
+  defp ensure_current_best_revision(persisted, summary, best_transition, now) do
     case Repo.query!(
-           "SELECT id FROM best_revisions WHERE optimization_id = ? ORDER BY sequence DESC LIMIT 1",
+           "SELECT id, sequence, sha FROM best_revisions WHERE optimization_id = ? ORDER BY sequence DESC LIMIT 1",
            [@optimization_id]
          ).rows do
       [] ->
@@ -566,13 +984,39 @@ defmodule Pika.Baseline.Lifecycle do
         [[id]] = Repo.query!("SELECT last_insert_rowid()").rows
         id
 
-      [[id]] ->
+      [[id, _sequence, sha]] when sha == persisted.development_sha ->
         Repo.query!(
           "UPDATE best_revisions SET baseline_revision_id = ? WHERE id = ?",
           [persisted.id, id]
         )
 
         id
+
+      [[_id, sequence, sha]] when sha == best_transition.previous_sha ->
+        Repo.query!(
+          """
+          INSERT INTO best_revisions(
+            optimization_id, sequence, sha, source_kind, baseline_revision_id, summary, created_at
+          ) VALUES (?, ?, ?, 'baseline', ?, ?, ?)
+          """,
+          [
+            @optimization_id,
+            sequence + 1,
+            persisted.development_sha,
+            persisted.id,
+            summary,
+            now
+          ]
+        )
+
+        [[id]] = Repo.query!("SELECT last_insert_rowid()").rows
+        id
+
+      [[_id, _sequence, sha]] ->
+        Repo.rollback(
+          {:baseline_best_database_mismatch,
+           %{actual: sha, expected: best_transition.previous_sha}}
+        )
     end
   end
 

@@ -15,7 +15,7 @@ defmodule Pika.Agent.ContextBundle do
     directory = Path.join([config.workspace, "agent-sessions", session_id, "context"])
 
     with :ok <- require_new_directory(directory),
-         {:ok, baseline} <- baseline_context(config.workspace),
+         {:ok, baseline} <- baseline_context(config.workspace, role),
          {:ok, facts} <- work_facts(role, work_kind, work_id, baseline),
          {:ok, files} <- materialize_files(directory, baseline, facts),
          context <- context(config, role, work_kind, work_id, baseline, facts, files),
@@ -41,15 +41,28 @@ defmodule Pika.Agent.ContextBundle do
     end
   end
 
-  defp baseline_context(workspace) do
+  defp baseline_context(workspace, role) do
+    {where, params} =
+      if role in [
+           "iteration",
+           "integration",
+           "iteration_followup",
+           "integration_followup",
+           "progress_summary"
+         ] do
+        {"AND status = 'accepted'", [@optimization_id]}
+      else
+        {"", [@optimization_id]}
+      end
+
     case Repo.query!(
            """
            SELECT id, revision, status, work_relative_path, development_sha
            FROM baseline_revisions
-           WHERE optimization_id = ?
+           WHERE optimization_id = ? #{where}
            ORDER BY revision DESC LIMIT 1
            """,
-           [@optimization_id]
+           params
          ).rows do
       [[id, revision, status, relative_path, development_sha]] ->
         root = Path.join(workspace, relative_path)

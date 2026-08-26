@@ -219,7 +219,7 @@ defmodule Pika.Agent.PromptBuilder do
 
             #{reason}
 
-            这是 Campaign 级阻塞，不是普通性能 Reject。保持当前 Best SHA 作为 Development，并确保标准 Harness 在 Baseline/未设置变量时读取已审阅 Development，在 Iteration 与 Integration/设置 `PIKA_CANDIDATE_MANIFEST` 时读取该绝对 Candidate manifest。完成新 Baseline 的用户 Review 与 Verify 后，Pika 才会恢复排队中的 Integration Verify 重试。
+            这是 Campaign 级阻塞，不是普通性能 Reject。新 Development commit 必须以当前 Best SHA 为祖先；如果修订 Harness 产生了新 commit，Definition 和 Result 必须如实使用该新 SHA，Pika 会在 Baseline 被接受时将它作为新的 Best Revision 原子推进。确保标准 Harness 在 Baseline/未设置变量时读取已审阅 Development，在 Iteration 与 Integration/设置 `PIKA_CANDIDATE_MANIFEST` 时读取该绝对 Candidate manifest。完成新 Baseline 的用户 Review 与 Verify 后，Pika 才会恢复排队中的 Integration Verify 重试。
             """
           }
 
@@ -280,7 +280,7 @@ defmodule Pika.Agent.PromptBuilder do
   end
 
   defp baseline_realignment_prompt(context) do
-    "Pika 已因结构性 Attempt 错误回到新的 Baseline Revision。具体 failure code、来源 Attempt 和旧 Baseline terminal reason 已注入 System Prompt 与 Context Bundle #{context}；只修复该 Campaign 级阻塞，保持当前 Best 作为 Development，并按协议调用 ask_questions。"
+    "Pika 已因结构性 Attempt 错误回到新的 Baseline Revision。具体 failure code、来源 Attempt 和旧 Baseline terminal reason 已注入 System Prompt 与 Context Bundle #{context}；只修复该 Campaign 级阻塞，以当前 Best 为 parent 创建并如实记录新的 Development commit，并按协议调用 ask_questions。"
   end
 
   defp stale_refresh_prompt(attempt_id, context) do

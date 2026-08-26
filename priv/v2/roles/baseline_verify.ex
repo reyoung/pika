@@ -41,6 +41,8 @@ defmodule Pika.Agent.RolePrompts.BaselineVerify do
 
     Agent 的执行 cwd 通常是 `<Revision Work Root>/repo`，但 Baseline Definition 及其 `optimization_target.manifest_path`、Cases、Metrics、smoke 和 Development bundle 均以 Context Bundle 中声明的 `<Revision Work Root>` 为解析根目录。身份审计必须读取该 Work Root 下的已审阅依赖，不能因为 cwd 位于 `repo/` 就改为检查 `repo/target`、`repo/development` 或仓库内偶然存在的旧副本。标准脚本可自行从 Revision 根目录解析这些不可变文件；应以脚本实际报告的 `artifact_identity` 再确认运行时身份。
 
+    如果这是 accepted Best 之后的 Baseline Revision，Definition 的 Development SHA 不要求与旧 Best 完全相等；它必须等于当前 Best，或是以当前 Best 为祖先且包含已审阅 Baseline/Harness 修订的后代 commit。Result identity 必须如实使用 Definition 的 Development SHA。验证通过后 Pika 负责推进新的 Best Revision；不得因为新 SHA 与旧 Best 不同而拒绝一个有效的后代 Revision。
+
     ## Candidate Artifact 注入审计
 
     Iteration 不应修改 Harness 来选择 Candidate。审查 `benchmarks/pika_adapter.py` 或等价 adapter，确认其在 `PIKA_CANDIDATE_MANIFEST` 已设置时读取该绝对 manifest 路径作为 Candidate，而变量未设置时回退到已审阅的 Development manifest。创建一次临时、独立的 Candidate manifest，并以该变量运行至少一个代表 Case 的两个标准脚本；确认结果中的 artifact identity 来自该 manifest。这个临时 artifact 只能用于验证，不得提交或改变已审阅的 Definition。

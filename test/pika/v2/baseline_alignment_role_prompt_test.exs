@@ -53,6 +53,8 @@ defmodule Pika.Agent.BaselineAlignmentRolePromptTest do
     assert prompt =~ "`max_regression_ratio`"
     assert prompt =~ "例如 `0.01` 表示 1%"
     assert prompt =~ "PIKA_CANDIDATE_MANIFEST"
+    assert prompt =~ "当前 Best 之上"
+    assert prompt =~ "新的 Best Revision"
     assert prompt =~ "PIKA_ATTEMPT_ROOT"
     assert prompt =~ "不得要求 Iteration Agent 修改 `benchmarks/pika_adapter.py`"
 

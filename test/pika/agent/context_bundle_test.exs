@@ -60,6 +60,19 @@ defmodule Pika.Agent.ContextBundleTest do
   test "freezes baseline, sampling, guidance, Best, and events for one Session", %{config: config} do
     assert {:ok, guidance} = Scheduler.add_guidance("优先优化访存合并")
     assert {:ok, [attempt]} = Scheduler.spawn_available(config)
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      """
+      INSERT INTO baseline_revisions(
+        optimization_id, revision, status, work_relative_path, terminal_reason,
+        inserted_at, updated_at
+      ) VALUES ('optimization', 1, 'superseded', 'baseline/revisions/000001',
+                'replaced by reconsidered v0', ?, ?)
+      """,
+      [now, now]
+    )
+
     session_id = ConversationJournal.allocate_session_id()
 
     assert {:ok, bundle} =
@@ -75,6 +88,7 @@ defmodule Pika.Agent.ContextBundleTest do
     assert bundle.context.role == "iteration"
     assert bundle.context.attempt_id == attempt.id
     assert bundle.context.iteration_round == 1
+    assert bundle.context.baseline_revision == 0
     assert bundle.context.sampling_case_ids == [0, 1]
     assert bundle.context.best_sha_at_session_start == attempt.base_sha
 
