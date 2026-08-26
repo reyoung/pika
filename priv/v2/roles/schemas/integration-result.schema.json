@@ -8,11 +8,13 @@
     "role": {"const": "integration"},
     "work_id": {"type": "string", "minLength": 1},
     "attempt_id": {"type": "integer", "minimum": 1},
+    "integration_run_id": {"type": "integer", "minimum": 1},
+    "run_sequence": {"type": "integer", "minimum": 1},
     "outcome": {"enum": ["accepted", "rejected"]},
     "summary": {"type": "string", "minLength": 1},
     "details": {"type": "object"}
   },
-  "required": ["schema_version", "role", "work_id", "attempt_id", "outcome", "summary", "details"],
+  "required": ["schema_version", "role", "work_id", "attempt_id", "integration_run_id", "run_sequence", "outcome", "summary", "details"],
   "allOf": [
     {
       "if": {"properties": {"outcome": {"const": "accepted"}}, "required": ["outcome"]},

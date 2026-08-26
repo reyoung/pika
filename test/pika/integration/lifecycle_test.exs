@@ -82,7 +82,7 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               "integration-validation.json"
+               integration_path(attempt, :validation)
              )
 
     assert prepared.run.status == "best_update_prepared"
@@ -94,7 +94,7 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               "integration-validation.json"
+               integration_path(attempt, :validation)
              )
 
     assert repeated.intent.id == prepared.intent.id
@@ -106,7 +106,7 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.finish(
                attempt.id,
                paths.root,
-               "integration-result.json",
+               integration_path(attempt, :result),
                config
              )
 
@@ -163,14 +163,14 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               "integration-validation.json"
+               integration_path(attempt, :validation)
              )
 
     assert decision.outcome == :rejected
     assert decision.reason =~ "critical Case"
     assert {:ok, persisted} = AttemptLifecycle.fetch_attempt(attempt.id)
     assert persisted.status == "ready_for_integration"
-    assert Repo.query!("SELECT COUNT(*) FROM integration_runs").rows == [[0]]
+    assert Repo.query!("SELECT status FROM integration_runs").rows == [["queued"]]
     assert Repo.query!("SELECT COUNT(*) FROM operation_intents").rows == [[0]]
     assert Git.run!(baseline.repo, ["rev-parse", "pika/best"]) == attempt.base_sha
   end
@@ -194,7 +194,7 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               "integration-validation.json"
+               integration_path(attempt, :validation)
              )
 
     guard =
@@ -240,7 +240,7 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               "integration-validation.json"
+               integration_path(attempt, :validation)
              )
 
     best_after = squash_candidate(baseline.repo, attempt)
@@ -250,7 +250,7 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.finish(
                attempt.id,
                paths.root,
-               "integration-result.json",
+               integration_path(attempt, :result),
                config
              )
 
@@ -278,6 +278,8 @@ defmodule Pika.Integration.LifecycleTest do
       "role" => "integration",
       "work_id" => to_string(attempt.id),
       "attempt_id" => attempt.id,
+      "integration_run_id" => integration_run(attempt).id,
+      "run_sequence" => integration_run(attempt).run_sequence,
       "outcome" => "rejected",
       "summary" => "full validation found a large-case regression",
       "details" => %{
@@ -289,13 +291,13 @@ defmodule Pika.Integration.LifecycleTest do
       }
     }
 
-    V2BaselineFixtures.write_json(paths.root, "integration-result.json", result)
+    V2BaselineFixtures.write_json(paths.root, integration_path(attempt, :result), result)
 
     assert {:ok, rejected} =
              IntegrationLifecycle.finish(
                attempt.id,
                paths.root,
-               "integration-result.json",
+               integration_path(attempt, :result),
                config
              )
 
@@ -334,6 +336,8 @@ defmodule Pika.Integration.LifecycleTest do
       "role" => "integration",
       "work_id" => to_string(attempt.id),
       "attempt_id" => attempt.id,
+      "integration_run_id" => integration_run(attempt).id,
+      "run_sequence" => integration_run(attempt).run_sequence,
       "outcome" => "rejected",
       "summary" => "legacy Harness policy rejected the Candidate",
       "details" => %{
@@ -343,13 +347,17 @@ defmodule Pika.Integration.LifecycleTest do
       }
     }
 
-    V2BaselineFixtures.write_json(paths.root, "integration-result.json", rejected_result)
+    V2BaselineFixtures.write_json(
+      paths.root,
+      integration_path(attempt, :result),
+      rejected_result
+    )
 
     assert {:ok, %{status: "rejected"}} =
              IntegrationLifecycle.finish(
                attempt.id,
                paths.root,
-               "integration-result.json",
+               integration_path(attempt, :result),
                config
              )
 
@@ -357,9 +365,9 @@ defmodule Pika.Integration.LifecycleTest do
     assert retry.status == "ready_for_integration"
     assert retry.failure_reason == nil
 
-    assert [["retry_requested", nil]] =
+    assert [[1, "rejected", "rejected"], [2, "queued", nil]] =
              Repo.query!(
-               "SELECT status, outcome FROM integration_runs WHERE attempt_id = ?",
+               "SELECT run_sequence, status, outcome FROM integration_runs WHERE attempt_id = ? ORDER BY run_sequence",
                [attempt.id]
              ).rows
 
@@ -369,11 +377,64 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               "integration-validation.json"
+               integration_path(attempt, :validation)
              )
 
     assert prepared.run.status == "best_update_prepared"
     assert prepared.intent.state == "pending"
+
+    assert [[1, first_run_id], [2, second_run_id]] =
+             Repo.query!(
+               "SELECT run_sequence, id FROM integration_runs WHERE attempt_id = ? ORDER BY run_sequence",
+               [attempt.id]
+             ).rows
+
+    refute first_run_id == second_run_id
+
+    artifact_paths =
+      Repo.query!(
+        "SELECT owner_id, relative_path FROM artifacts WHERE owner_type = 'integration_run' ORDER BY relative_path"
+      ).rows
+
+    assert Enum.any?(artifact_paths, fn [owner_id, path] ->
+             owner_id == to_string(first_run_id) and
+               String.ends_with?(path, "integration/runs/000001/integration-result.json")
+           end)
+
+    assert Enum.count(artifact_paths, fn [owner_id, path] ->
+             owner_id == to_string(second_run_id) and
+               String.contains?(path, "integration/runs/000002/")
+           end) == 3
+  end
+
+  test "administrative cleanup rejects every ready Attempt without advancing Best", %{
+    baseline: baseline,
+    config: config,
+    workspace: workspace
+  } do
+    %{attempt: first} = ready_attempt(config, workspace)
+    %{attempt: second} = ready_attempt(config, workspace)
+    best_before = Git.run!(baseline.repo, ["rev-parse", "pika/best"])
+
+    assert {:ok, ids} =
+             IntegrationLifecycle.reject_ready_attempts(
+               "operator cleanup: discard queued Integration work"
+             )
+
+    assert ids == [first.id, second.id]
+    assert Git.run!(baseline.repo, ["rev-parse", "pika/best"]) == best_before
+
+    assert [[first.id, "rejected"], [second.id, "rejected"]] ==
+             Repo.query!(
+               "SELECT id, status FROM attempts WHERE id IN (?, ?) ORDER BY id",
+               [first.id, second.id]
+             ).rows
+
+    assert [[first.id, "rejected"], [second.id, "rejected"]] ==
+             Repo.query!(
+               "SELECT attempt_id, status FROM integration_runs WHERE attempt_id IN (?, ?) ORDER BY attempt_id",
+               [first.id, second.id]
+             ).rows
   end
 
   test "cannot Reject after a pending intent has already mutated Best", %{
@@ -388,7 +449,7 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               "integration-validation.json"
+               integration_path(attempt, :validation)
              )
 
     best_after = squash_candidate(baseline.repo, attempt)
@@ -398,6 +459,8 @@ defmodule Pika.Integration.LifecycleTest do
       "role" => "integration",
       "work_id" => to_string(attempt.id),
       "attempt_id" => attempt.id,
+      "integration_run_id" => integration_run(attempt).id,
+      "run_sequence" => integration_run(attempt).run_sequence,
       "outcome" => "rejected",
       "summary" => "cannot safely accept",
       "details" => %{
@@ -407,13 +470,13 @@ defmodule Pika.Integration.LifecycleTest do
       }
     }
 
-    V2BaselineFixtures.write_json(paths.root, "integration-result.json", rejected)
+    V2BaselineFixtures.write_json(paths.root, integration_path(attempt, :result), rejected)
 
     assert {:error, {:best_mutated_pending_intent, expected, ^best_after}} =
              IntegrationLifecycle.finish(
                attempt.id,
                paths.root,
-               "integration-result.json",
+               integration_path(attempt, :result),
                config
              )
 
@@ -433,6 +496,10 @@ defmodule Pika.Integration.LifecycleTest do
 
     assert {:ok, ready} =
              AttemptLifecycle.finish(attempt.id, paths.root, "iteration-result.json")
+
+    assert {:ok, run} = IntegrationLifecycle.ensure_active_run(ready)
+
+    File.mkdir_p!(Path.join(paths.root, Pika.Integration.RunPaths.for_run(run.run_sequence).root))
 
     %{attempt: ready, paths: paths}
   end
@@ -485,8 +552,11 @@ defmodule Pika.Integration.LifecycleTest do
          feedback_case_ids \\ []
        ) do
     verify = verify([0, 1])
-    File.write!(Path.join(paths.root, "integration-verify.json"), Jason.encode!(verify))
-    V2BaselineFixtures.write_jsonl(paths.root, "integration-benchmark.jsonl", samples)
+    verify_path = integration_path(attempt, :verify)
+    benchmark_path = integration_path(attempt, :benchmark)
+    File.mkdir_p!(Path.join(paths.root, Path.dirname(verify_path)))
+    File.write!(Path.join(paths.root, verify_path), Jason.encode!(verify))
+    V2BaselineFixtures.write_jsonl(paths.root, benchmark_path, samples)
 
     cases = V2BaselineFixtures.read_json(baseline.root, "cases.json")["cases"]
     metrics = V2BaselineFixtures.read_json(baseline.root, "metrics.json")["metrics"]
@@ -504,13 +574,15 @@ defmodule Pika.Integration.LifecycleTest do
       "role" => "integration",
       "work_id" => to_string(attempt.id),
       "attempt_id" => attempt.id,
+      "integration_run_id" => integration_run(attempt).id,
+      "run_sequence" => integration_run(attempt).run_sequence,
       "base_sha" => attempt.base_sha,
       "candidate_sha" => attempt.candidate_sha,
       "sampling_revision" => sampling_sequence(attempt.sampling_revision_id),
       "recommended_outcome" => recommendation,
       "files" => %{
-        "verify" => identity(paths.root, "integration-verify.json"),
-        "benchmark" => identity(paths.root, "integration-benchmark.jsonl")
+        "verify" => identity(paths.root, verify_path),
+        "benchmark" => identity(paths.root, benchmark_path)
       },
       "judgements" => judgements,
       "weighted_aggregates" =>
@@ -524,7 +596,7 @@ defmodule Pika.Integration.LifecycleTest do
       "summary" => "full-set validation complete"
     }
 
-    V2BaselineFixtures.write_json(paths.root, "integration-validation.json", validation)
+    V2BaselineFixtures.write_json(paths.root, integration_path(attempt, :validation), validation)
   end
 
   defp write_accepted_result(paths, attempt, intent_id, best_after) do
@@ -533,6 +605,8 @@ defmodule Pika.Integration.LifecycleTest do
       "role" => "integration",
       "work_id" => to_string(attempt.id),
       "attempt_id" => attempt.id,
+      "integration_run_id" => integration_run(attempt).id,
+      "run_sequence" => integration_run(attempt).run_sequence,
       "outcome" => "accepted",
       "summary" => "candidate accepted after full validation",
       "details" => %{
@@ -544,7 +618,25 @@ defmodule Pika.Integration.LifecycleTest do
       }
     }
 
-    V2BaselineFixtures.write_json(paths.root, "integration-result.json", result)
+    V2BaselineFixtures.write_json(paths.root, integration_path(attempt, :result), result)
+  end
+
+  defp integration_path(attempt, key) do
+    attempt
+    |> integration_run()
+    |> Map.fetch!(:run_sequence)
+    |> Pika.Integration.RunPaths.for_run()
+    |> Map.fetch!(key)
+  end
+
+  defp integration_run(attempt) do
+    [[id, run_sequence]] =
+      Repo.query!(
+        "SELECT id, run_sequence FROM integration_runs WHERE attempt_id = ? ORDER BY run_sequence DESC LIMIT 1",
+        [attempt.id]
+      ).rows
+
+    %{id: id, run_sequence: run_sequence}
   end
 
   defp squash_candidate(repo, attempt) do

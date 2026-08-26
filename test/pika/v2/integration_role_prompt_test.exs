@@ -5,6 +5,7 @@ defmodule Pika.Agent.IntegrationRolePromptTest do
   alias Pika.Agent.RolePromptRegistry
   alias Pika.Agent.RolePrompts.Integration
   alias Pika.Agent.RolePrompts.Integration.Input
+  alias Pika.Integration.RunPaths
 
   @project_root Path.expand("../../..", __DIR__)
   @fixture_dir Path.join(@project_root, "test/fixtures/v2/roles/integration")
@@ -37,6 +38,8 @@ defmodule Pika.Agent.IntegrationRolePromptTest do
     assert prompt =~ "finish_integration(result_path, idempotency_key)"
     assert prompt =~ "`benchmarks/pika_adapter.py` 不是 Pika 硬保护路径"
     assert prompt =~ "PIKA_CANDIDATE_MANIFEST"
+    assert prompt =~ "Integration Run 是 ID `42`、sequence `2`"
+    assert prompt =~ "`integration/runs/000002/integration-result.json`"
     assert prompt =~ "[integration-validation.schema.json](<#{schemas.integration_validation}>)"
     assert prompt =~ "[integration-result.schema.json](<#{schemas.integration_result}>)"
   end
@@ -71,6 +74,9 @@ defmodule Pika.Agent.IntegrationRolePromptTest do
       full_case_ids: case_ids,
       validation_schema: schemas.integration_validation,
       result_schema: schemas.integration_result,
+      run_id: 42,
+      run_sequence: 2,
+      paths: RunPaths.for_run(2),
       sections: sections
     }
   end

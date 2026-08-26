@@ -6,6 +6,8 @@ defmodule Pika.Integration.PromptInput do
   alias Pika.Agent.RolePrompts.Integration
   alias Pika.Agent.RolePrompts.Integration.Input
   alias Pika.Attempt.Lifecycle
+  alias Pika.Integration.Lifecycle, as: IntegrationLifecycle
+  alias Pika.Integration.RunPaths
   alias Pika.Repo
 
   @active_statuses ~w(ready_for_integration integrating)
@@ -14,6 +16,7 @@ defmodule Pika.Integration.PromptInput do
   def build(attempt_id, sections \\ []) do
     with {:ok, attempt} <- Lifecycle.fetch_attempt(attempt_id),
          :ok <- require_active(attempt),
+         {:ok, run} <- IntegrationLifecycle.ensure_active_run(attempt),
          {:ok, schemas} <- RolePromptRegistry.schemas(),
          {:ok, case_ids} <- full_case_ids(attempt.sampling_revision_id) do
       {:ok,
@@ -21,6 +24,9 @@ defmodule Pika.Integration.PromptInput do
          full_case_ids: case_ids,
          validation_schema: schemas.integration_validation,
          result_schema: schemas.integration_result,
+         run_id: run.id,
+         run_sequence: run.run_sequence,
+         paths: RunPaths.for_run(run.run_sequence),
          sections: sections
        }}
     end

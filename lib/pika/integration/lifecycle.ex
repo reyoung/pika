@@ -5,6 +5,7 @@ defmodule Pika.Integration.Lifecycle do
   alias Pika.Attempt.{History, Lifecycle, Scheduler}
   alias Pika.Baseline.TargetSnapshot
   alias Pika.Integration.Decision
+  alias Pika.Integration.RunPaths
   alias Pika.Optimization.{ArtifactStore, Config, FileContract, Measurement, Persistence}
   alias Pika.{Git, Repo}
 
@@ -23,11 +24,65 @@ defmodule Pika.Integration.Lifecycle do
   @spec project_work() :: [map()]
   def project_work do
     case Scheduler.next_queue_action() do
-      {:integrate, attempt} -> [work_projection(attempt)]
-      {:waiting, %{status: "integrating"} = attempt} -> [work_projection(attempt)]
-      {:refresh, _attempt} -> []
-      {:waiting, _attempt} -> []
-      {:none, nil} -> []
+      {:integrate, attempt} ->
+        [work_projection(attempt, ensure_active_run!(attempt))]
+
+      {:waiting, %{status: "integrating"} = attempt} ->
+        [work_projection(attempt, ensure_active_run!(attempt))]
+
+      {:refresh, _attempt} ->
+        []
+
+      {:waiting, _attempt} ->
+        []
+
+      {:none, nil} ->
+        []
+    end
+  end
+
+  @spec ensure_active_run(map()) :: {:ok, map()} | {:error, term()}
+  def ensure_active_run(%{id: attempt_id, status: "ready_for_integration"} = attempt)
+      when is_integer(attempt_id) do
+    case integration_run(attempt_id) do
+      {:ok, %{status: status} = run}
+      when status in ["queued", "retry_requested", "best_update_prepared"] ->
+        {:ok, run}
+
+      {:ok, _terminal_run} ->
+        insert_run(attempt)
+
+      {:error, :integration_run_not_found} ->
+        insert_run(attempt)
+    end
+  end
+
+  def ensure_active_run(%{id: attempt_id, status: "integrating"})
+      when is_integer(attempt_id) do
+    case integration_run(attempt_id) do
+      {:ok, %{status: status} = run}
+      when status in ["queued", "retry_requested", "best_update_prepared"] ->
+        {:ok, run}
+
+      {:ok, run} ->
+        {:error, {:integration_run_not_active, run.status}}
+
+      {:error, :integration_run_not_found} ->
+        {:error, :integration_run_not_found}
+    end
+  end
+
+  def ensure_active_run(attempt), do: {:error, {:attempt_not_integrating, attempt.status}}
+
+  @doc "Administratively rejects every queued Attempt without mutating Best or deleting evidence."
+  @spec reject_ready_attempts(String.t()) :: {:ok, [pos_integer()]} | {:error, term()}
+  def reject_ready_attempts(reason) when is_binary(reason) do
+    reason = String.trim(reason)
+
+    if reason == "" do
+      {:error, :rejection_reason_required}
+    else
+      persist_ready_rejections(reason)
     end
   end
 
@@ -35,6 +90,8 @@ defmodule Pika.Integration.Lifecycle do
   def prepare_best_update(attempt_id, attempt_root, validation_path) do
     with {:ok, attempt} <- Lifecycle.fetch_attempt(attempt_id),
          :ok <- require_queue_head(attempt),
+         {:ok, run} <- ensure_active_run(attempt),
+         :ok <- require_path(validation_path, RunPaths.for_run(run.run_sequence).validation),
          {:ok, schemas} <- RolePromptRegistry.schemas(),
          {:ok, validation, validation_receipt} <-
            FileContract.validate_json(
@@ -42,7 +99,8 @@ defmodule Pika.Integration.Lifecycle do
              validation_path,
              schemas.integration_validation
            ),
-         :ok <- validate_validation_identity(attempt, validation),
+         :ok <- validate_validation_identity(attempt, run, validation),
+         :ok <- validate_validation_paths(run, validation),
          {:ok, context} <- full_context(attempt),
          {:ok, verify, verify_receipt} <-
            validate_file(attempt_root, validation, "verify", schemas.verify_result, :json),
@@ -69,13 +127,14 @@ defmodule Pika.Integration.Lifecycle do
          :ok <- validate_reported_aggregates(validation, decision),
          {:ok, artifact_ids} <-
            register_validation_artifacts(
-             attempt,
+             run,
              validation_receipt,
              verify_receipt,
              benchmark_receipt
            ),
          {:ok, prepared} <-
            persist_prepared(
+             run,
              attempt,
              validation,
              validation_receipt,
@@ -90,69 +149,99 @@ defmodule Pika.Integration.Lifecycle do
   @spec finish(pos_integer(), Path.t(), Path.t(), Config.t()) :: {:ok, map()} | {:error, term()}
   def finish(attempt_id, attempt_root, result_path, %Config{} = config) do
     with {:ok, attempt} <- Lifecycle.fetch_attempt(attempt_id),
+         {:ok, run} <- ensure_active_run(attempt),
+         :ok <- require_path(result_path, RunPaths.for_run(run.run_sequence).result),
          {:ok, schemas} <- RolePromptRegistry.schemas(),
          {:ok, result, result_receipt} <-
            FileContract.validate_json(attempt_root, result_path, schemas.integration_result),
-         :ok <- validate_result_identity(attempt, result),
-         {:ok, updated} <- finish_outcome(attempt, attempt_root, result, result_receipt, config) do
+         :ok <- validate_result_identity(attempt, run, result),
+         {:ok, updated} <-
+           finish_outcome(run, attempt, attempt_root, result, result_receipt, config) do
       {:ok, updated}
     end
   end
 
-  defp finish_outcome(attempt, attempt_root, %{"outcome" => "rejected"} = result, receipt, config) do
+  defp finish_outcome(
+         run,
+         attempt,
+         attempt_root,
+         %{"outcome" => "rejected"} = result,
+         receipt,
+         config
+       ) do
     with :ok <- require_rejectable(attempt),
          :ok <- require_best_unchanged_for_reject(attempt, config.repo),
          :ok <- validate_feedback(result, config.integration.regression_feedback_cases),
          {:ok, result_artifact_id} <-
-           ArtifactStore.register("attempt", to_string(attempt.id), "integration_result", receipt),
-         {:ok, updated} <- persist_rejected(attempt, result, result_artifact_id),
+           ArtifactStore.register(
+             "integration_run",
+             to_string(run.id),
+             "integration_result",
+             receipt
+           ),
+         {:ok, updated} <- persist_rejected(run, attempt, result, result_artifact_id),
          :ok <- record_history(attempt_root, updated, result) do
       {:ok, updated}
     end
   end
 
-  defp finish_outcome(attempt, attempt_root, %{"outcome" => "accepted"} = result, receipt, config) do
+  defp finish_outcome(
+         run,
+         attempt,
+         attempt_root,
+         %{"outcome" => "accepted"} = result,
+         receipt,
+         config
+       ) do
     with :ok <- require_integrating(attempt),
-         {:ok, run} <- integration_run(attempt.id),
          {:ok, intent} <- operation_intent(run.intent_id),
          :ok <- validate_accept_feedback(run, config.integration.regression_feedback_cases),
          :ok <- validate_accept_identity(attempt, result, run, intent),
          :ok <- verify_best_git(config.repo, attempt, result, intent),
          {:ok, result_artifact_id} <-
-           ArtifactStore.register("attempt", to_string(attempt.id), "integration_result", receipt),
+           ArtifactStore.register(
+             "integration_run",
+             to_string(run.id),
+             "integration_result",
+             receipt
+           ),
          {:ok, updated} <- persist_accepted(attempt, result, run, intent, result_artifact_id),
          :ok <- record_history(attempt_root, updated, result) do
       {:ok, updated}
     end
   end
 
-  defp persist_prepared(attempt, validation, receipt, statistics, decision, artifact_ids) do
-    case integration_run(attempt.id) do
-      {:ok, %{status: "best_update_prepared", validation_sha256: sha256} = run}
+  defp persist_prepared(
+         run,
+         attempt,
+         validation,
+         receipt,
+         statistics,
+         decision,
+         artifact_ids
+       ) do
+    case run do
+      %{status: "best_update_prepared", validation_sha256: sha256}
       when sha256 == receipt.sha256 ->
         {:ok, %{run: run, intent: operation_intent!(run.intent_id), decision: decision}}
 
-      {:ok, run} ->
-        if run.status == "retry_requested" do
-          update_retry_prepared(
-            run,
-            attempt,
-            validation,
-            receipt,
-            statistics,
-            decision,
-            artifact_ids
-          )
-        else
-          {:error, {:integration_already_active, run.status}}
-        end
+      %{status: status} when status in ["queued", "retry_requested"] ->
+        update_run_prepared(
+          run,
+          attempt,
+          validation,
+          receipt,
+          statistics,
+          decision,
+          artifact_ids
+        )
 
-      {:error, :integration_run_not_found} ->
-        insert_prepared(attempt, validation, receipt, statistics, decision, artifact_ids)
+      _other ->
+        {:error, {:integration_already_active, run.status}}
     end
   end
 
-  defp update_retry_prepared(
+  defp update_run_prepared(
          run,
          attempt,
          validation,
@@ -174,7 +263,7 @@ defmodule Pika.Integration.Lifecycle do
               verify_artifact_id = ?, benchmark_artifact_id = ?, validation_sha256 = ?,
               statistics_json = ?, judgement_json = ?, sampling_feedback_json = ?,
               outcome = NULL, updated_at = ?
-          WHERE id = ? AND status = 'retry_requested'
+          WHERE id = ? AND status IN ('queued', 'retry_requested')
           """,
           [
             attempt.base_sha,
@@ -205,7 +294,7 @@ defmodule Pika.Integration.Lifecycle do
             attempt.base_sha,
             validation["candidate_sha"],
             receipt.sha256,
-            "best-update-retry:#{attempt.id}:#{run.id}:#{now}",
+            "best-update:#{attempt.id}:#{run.id}:#{receipt.sha256}",
             Jason.encode!(%{integration_run_id: run.id}),
             now,
             now
@@ -220,7 +309,7 @@ defmodule Pika.Integration.Lifecycle do
         append_event(
           "attempt",
           to_string(attempt.id),
-          "integration_retry_best_update_prepared",
+          "integration_best_update_prepared",
           %{intent_id: intent_id, integration_run_id: run.id},
           now
         )
@@ -232,7 +321,7 @@ defmodule Pika.Integration.Lifecycle do
         }
       end)
 
-    finish_transaction(transaction, :integration_retry_prepare_failed)
+    finish_transaction(transaction, :integration_prepare_failed)
   end
 
   defp persist_verification_retry(attempt, run) do
@@ -256,20 +345,18 @@ defmodule Pika.Integration.Lifecycle do
           [attempt_status, sampling_revision_id, now, attempt.id]
         )
 
-        Repo.query!(
-          """
-          UPDATE integration_runs
-          SET status = 'retry_requested', outcome = NULL, updated_at = ?
-          WHERE id = ? AND status = 'rejected'
-          """,
-          [now, run.id]
-        )
+        new_run = insert_run_row(attempt, now)
 
         append_event(
           "attempt",
           to_string(attempt.id),
           "integration_verification_retry_requested",
-          %{integration_run_id: run.id, waiting_for_baseline: is_nil(sampling_revision_id)},
+          %{
+            previous_integration_run_id: run.id,
+            integration_run_id: new_run.id,
+            run_sequence: new_run.run_sequence,
+            waiting_for_baseline: is_nil(sampling_revision_id)
+          },
           now
         )
 
@@ -302,96 +389,12 @@ defmodule Pika.Integration.Lifecycle do
     end
   end
 
-  defp insert_prepared(attempt, validation, receipt, statistics, decision, artifact_ids) do
-    now = now_us()
-    intent_id = Ecto.UUID.generate()
-
-    transaction =
-      Repo.transaction(fn ->
-        [[fifo_sequence]] =
-          Repo.query!(
-            "SELECT COALESCE(MAX(fifo_sequence), 0) + 1 FROM integration_runs WHERE optimization_id = ?",
-            [@optimization_id]
-          ).rows
-
-        Repo.query!(
-          """
-          INSERT INTO integration_runs(
-            optimization_id, attempt_id, fifo_sequence, status, expected_best_sha,
-            validation_artifact_id, verify_artifact_id, benchmark_artifact_id,
-            validation_sha256, statistics_json, judgement_json, sampling_feedback_json,
-            created_at, updated_at
-          ) VALUES (?, ?, ?, 'best_update_prepared', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          """,
-          [
-            @optimization_id,
-            attempt.id,
-            fifo_sequence,
-            attempt.base_sha,
-            artifact_ids.validation,
-            artifact_ids.verify,
-            artifact_ids.benchmark,
-            receipt.sha256,
-            Jason.encode!(statistics),
-            Jason.encode!(decision),
-            Jason.encode!(validation["sampling_feedback_case_ids"]),
-            now,
-            now
-          ]
-        )
-
-        [[run_id]] = Repo.query!("SELECT last_insert_rowid()").rows
-
-        Repo.query!(
-          """
-          INSERT INTO operation_intents(
-            id, optimization_id, kind, owner_type, owner_id, state,
-            expected_best_sha, candidate_sha, validation_receipt_sha256,
-            idempotency_key, payload_json, created_at, updated_at
-          ) VALUES (?, ?, 'best_update', 'attempt', ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
-          """,
-          [
-            intent_id,
-            @optimization_id,
-            to_string(attempt.id),
-            attempt.base_sha,
-            validation["candidate_sha"],
-            receipt.sha256,
-            "best-update:#{attempt.id}:#{receipt.sha256}",
-            Jason.encode!(%{integration_run_id: run_id}),
-            now,
-            now
-          ]
-        )
-
-        Repo.query!(
-          "UPDATE attempts SET status = 'integrating', updated_at = ? WHERE id = ? AND status = 'ready_for_integration'",
-          [now, attempt.id]
-        )
-
-        append_event(
-          "attempt",
-          to_string(attempt.id),
-          "integration_best_update_prepared",
-          %{intent_id: intent_id},
-          now
-        )
-
-        run = integration_run!(attempt.id)
-        %{run: run, intent: operation_intent!(intent_id), decision: decision}
-      end)
-
-    finish_transaction(transaction, :integration_prepare_failed)
-  end
-
-  defp persist_rejected(attempt, result, result_artifact_id) do
+  defp persist_rejected(run, attempt, result, result_artifact_id) do
     now = now_us()
     details = result["details"]
 
     transaction =
       Repo.transaction(fn ->
-        run_id = ensure_rejected_run(attempt, result_artifact_id, now)
-
         sampling_revision_id =
           append_sampling_feedback(attempt, details["sampling_feedback"], now)
 
@@ -406,7 +409,7 @@ defmodule Pika.Integration.Lifecycle do
 
         Repo.query!(
           "UPDATE integration_runs SET status = 'rejected', outcome = 'rejected', result_artifact_id = ?, updated_at = ? WHERE id = ?",
-          [result_artifact_id, now, run_id]
+          [result_artifact_id, now, run.id]
         )
 
         Repo.query!(
@@ -538,41 +541,6 @@ defmodule Pika.Integration.Lifecycle do
     finish_transaction(transaction, :integration_accept_failed)
   end
 
-  defp ensure_rejected_run(attempt, result_artifact_id, now) do
-    case integration_run(attempt.id) do
-      {:ok, run} ->
-        run.id
-
-      {:error, :integration_run_not_found} ->
-        [[fifo_sequence]] =
-          Repo.query!(
-            "SELECT COALESCE(MAX(fifo_sequence), 0) + 1 FROM integration_runs WHERE optimization_id = ?",
-            [@optimization_id]
-          ).rows
-
-        Repo.query!(
-          """
-          INSERT INTO integration_runs(
-            optimization_id, attempt_id, fifo_sequence, status, expected_best_sha,
-            result_artifact_id, created_at, updated_at
-          ) VALUES (?, ?, ?, 'rejected', ?, ?, ?, ?)
-          """,
-          [
-            @optimization_id,
-            attempt.id,
-            fifo_sequence,
-            attempt.base_sha,
-            result_artifact_id,
-            now,
-            now
-          ]
-        )
-
-        [[id]] = Repo.query!("SELECT last_insert_rowid()").rows
-        id
-    end
-  end
-
   defp append_sampling_feedback(_attempt, [], _now), do: nil
 
   defp append_sampling_feedback(attempt, feedback, now) do
@@ -679,7 +647,7 @@ defmodule Pika.Integration.Lifecycle do
     MapSet.subset?(MapSet.new(ids), known)
   end
 
-  defp validate_validation_identity(attempt, validation) do
+  defp validate_validation_identity(attempt, run, validation) do
     cond do
       validation["role"] != "integration" ->
         {:error, :integration_role_mismatch}
@@ -689,6 +657,12 @@ defmodule Pika.Integration.Lifecycle do
 
       validation["attempt_id"] != attempt.id ->
         {:error, :integration_attempt_mismatch}
+
+      validation["integration_run_id"] != run.id ->
+        {:error, :integration_run_mismatch}
+
+      validation["run_sequence"] != run.run_sequence ->
+        {:error, :integration_run_sequence_mismatch}
 
       validation["base_sha"] != attempt.base_sha ->
         {:error, :integration_base_mismatch}
@@ -704,12 +678,24 @@ defmodule Pika.Integration.Lifecycle do
     end
   end
 
-  defp validate_result_identity(attempt, result) do
+  defp validate_result_identity(attempt, run, result) do
     cond do
       result["role"] != "integration" -> {:error, :integration_role_mismatch}
       result["work_id"] != to_string(attempt.id) -> {:error, :integration_work_mismatch}
       result["attempt_id"] != attempt.id -> {:error, :integration_attempt_mismatch}
+      result["integration_run_id"] != run.id -> {:error, :integration_run_mismatch}
+      result["run_sequence"] != run.run_sequence -> {:error, :integration_run_sequence_mismatch}
       true -> :ok
+    end
+  end
+
+  defp validate_validation_paths(run, validation) do
+    paths = RunPaths.for_run(run.run_sequence)
+
+    with :ok <- require_path(get_in(validation, ["files", "verify", "path"]), paths.verify),
+         :ok <-
+           require_path(get_in(validation, ["files", "benchmark", "path"]), paths.benchmark) do
+      :ok
     end
   end
 
@@ -873,15 +859,25 @@ defmodule Pika.Integration.Lifecycle do
     if passed?, do: :ok, else: {:error, :integration_verify_failed_or_incomplete}
   end
 
-  defp register_validation_artifacts(attempt, validation, verify, benchmark) do
-    owner_id = to_string(attempt.id)
+  defp register_validation_artifacts(run, validation, verify, benchmark) do
+    owner_id = to_string(run.id)
 
     with {:ok, validation_id} <-
-           ArtifactStore.register("attempt", owner_id, "integration_validation", validation),
+           ArtifactStore.register(
+             "integration_run",
+             owner_id,
+             "integration_validation",
+             validation
+           ),
          {:ok, verify_id} <-
-           ArtifactStore.register("attempt", owner_id, "integration_verify", verify),
+           ArtifactStore.register("integration_run", owner_id, "integration_verify", verify),
          {:ok, benchmark_id} <-
-           ArtifactStore.register("attempt", owner_id, "integration_benchmark", benchmark) do
+           ArtifactStore.register(
+             "integration_run",
+             owner_id,
+             "integration_benchmark",
+             benchmark
+           ) do
       {:ok, %{validation: validation_id, verify: verify_id, benchmark: benchmark_id}}
     end
   end
@@ -1034,12 +1030,19 @@ defmodule Pika.Integration.Lifecycle do
   defp require_integrating(%{status: "integrating"}), do: :ok
   defp require_integrating(attempt), do: {:error, {:attempt_not_integrating, attempt.status}}
 
+  defp require_path(path, path), do: :ok
+
+  defp require_path(actual, expected),
+    do: {:error, {:integration_run_path_mismatch, expected, actual}}
+
   defp integration_run(attempt_id) do
     case Repo.query!(
            """
            SELECT id, status, expected_best_sha, validation_sha256, statistics_json,
-                  benchmark_artifact_id, judgement_json, sampling_feedback_json, outcome
+                  benchmark_artifact_id, judgement_json, sampling_feedback_json, outcome,
+                  run_sequence, result_artifact_id
            FROM integration_runs WHERE attempt_id = ?
+           ORDER BY run_sequence DESC LIMIT 1
            """,
            [attempt_id]
          ).rows do
@@ -1053,13 +1056,15 @@ defmodule Pika.Integration.Lifecycle do
           benchmark_artifact_id,
           judgement_json,
           sampling_feedback_json,
-          outcome
+          outcome,
+          run_sequence,
+          result_artifact_id
         ]
       ] ->
         intent_id =
           case Repo.query!(
-                 "SELECT id FROM operation_intents WHERE owner_type = 'attempt' AND owner_id = ? ORDER BY created_at DESC LIMIT 1",
-                 [to_string(attempt_id)]
+                 "SELECT id FROM operation_intents WHERE owner_type = 'attempt' AND owner_id = ? AND json_extract(payload_json, '$.integration_run_id') = ? ORDER BY created_at DESC LIMIT 1",
+                 [to_string(attempt_id), id]
                ).rows do
             [[id]] -> id
             [] -> nil
@@ -1076,6 +1081,8 @@ defmodule Pika.Integration.Lifecycle do
            judgement_json: judgement_json,
            sampling_feedback_json: sampling_feedback_json,
            outcome: outcome,
+           run_sequence: run_sequence,
+           result_artifact_id: result_artifact_id,
            intent_id: intent_id
          }}
 
@@ -1087,6 +1094,142 @@ defmodule Pika.Integration.Lifecycle do
   defp integration_run!(attempt_id) do
     {:ok, run} = integration_run(attempt_id)
     run
+  end
+
+  defp ensure_active_run!(attempt) do
+    {:ok, run} = ensure_active_run(attempt)
+    run
+  end
+
+  defp insert_run(attempt) do
+    case Repo.transaction(fn -> insert_run_row(attempt, now_us()) end) do
+      {:ok, run} -> {:ok, run}
+      {:error, reason} -> {:error, {:integration_run_creation_failed, reason}}
+    end
+  end
+
+  defp insert_run_row(attempt, now) do
+    [[run_sequence]] =
+      Repo.query!(
+        "SELECT COALESCE(MAX(run_sequence), 0) + 1 FROM integration_runs WHERE attempt_id = ?",
+        [attempt.id]
+      ).rows
+
+    [[fifo_sequence]] =
+      Repo.query!(
+        "SELECT COALESCE(MAX(fifo_sequence), 0) + 1 FROM integration_runs WHERE optimization_id = ?",
+        [@optimization_id]
+      ).rows
+
+    Repo.query!(
+      """
+      INSERT INTO integration_runs(
+        optimization_id, attempt_id, fifo_sequence, run_sequence, status,
+        expected_best_sha, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)
+      """,
+      [
+        @optimization_id,
+        attempt.id,
+        fifo_sequence,
+        run_sequence,
+        attempt.base_sha,
+        now,
+        now
+      ]
+    )
+
+    [[id]] = Repo.query!("SELECT last_insert_rowid()").rows
+
+    append_event(
+      "attempt",
+      to_string(attempt.id),
+      "integration_run_queued",
+      %{integration_run_id: id, run_sequence: run_sequence},
+      now
+    )
+
+    integration_run!(attempt.id)
+  end
+
+  defp persist_ready_rejections(reason) do
+    now = now_us()
+
+    transaction =
+      Repo.transaction(fn ->
+        attempt_ids =
+          Repo.query!(
+            "SELECT id FROM attempts WHERE optimization_id = ? AND status = 'ready_for_integration' ORDER BY id",
+            [@optimization_id]
+          ).rows
+          |> List.flatten()
+
+        Enum.each(attempt_ids, fn attempt_id ->
+          attempt = fetch_attempt!(attempt_id)
+          work_id = to_string(attempt_id)
+
+          run =
+            case integration_run(attempt_id) do
+              {:ok, %{status: status} = run}
+              when status in ["queued", "retry_requested"] ->
+                run
+
+              _other ->
+                insert_run_row(attempt, now)
+            end
+
+          Repo.query!(
+            "UPDATE attempts SET status = 'rejected', outcome = 'rejected', failure_reason = ?, updated_at = ? WHERE id = ? AND status = 'ready_for_integration'",
+            [reason, now, attempt_id]
+          )
+
+          Repo.query!(
+            "UPDATE integration_runs SET status = 'rejected', outcome = 'rejected', updated_at = ? WHERE id = ? AND status IN ('queued', 'retry_requested')",
+            [now, run.id]
+          )
+
+          Repo.query!(
+            "UPDATE agent_sessions SET status = 'interrupted', ended_reason = ?, ended_at = ? WHERE role = 'integration' AND work_kind = 'attempt' AND work_id = ? AND status IN ('running', 'awaiting_report', 'awaiting_followup')",
+            [reason, now, work_id]
+          )
+
+          followup_ids =
+            Repo.query!(
+              "SELECT id FROM followup_requests WHERE target_role = 'integration' AND target_work_kind = 'attempt' AND target_work_id = ? AND status IN ('requested', 'generating', 'generator_running', 'generated', 'delivered', 'target_turn_running')",
+              [work_id]
+            ).rows
+            |> List.flatten()
+
+          Enum.each(followup_ids, fn followup_id ->
+            Repo.query!(
+              "UPDATE followup_requests SET status = 'cancelled', failure_reason = ?, updated_at = ?, completed_at = ? WHERE id = ?",
+              [reason, now, now, followup_id]
+            )
+
+            Repo.query!(
+              "UPDATE agent_sessions SET status = 'interrupted', ended_reason = ?, ended_at = ? WHERE role = 'integration_followup' AND work_id = ? AND status IN ('running', 'awaiting_report', 'awaiting_followup')",
+              [reason, now, to_string(followup_id)]
+            )
+          end)
+
+          Repo.query!(
+            "UPDATE operation_intents SET state = 'aborted', updated_at = ? WHERE owner_type = 'attempt' AND owner_id = ? AND state = 'pending'",
+            [now, work_id]
+          )
+
+          append_event(
+            "attempt",
+            to_string(attempt_id),
+            "integration_administratively_rejected",
+            %{integration_run_id: run.id, cancelled_followup_ids: followup_ids, reason: reason},
+            now
+          )
+        end)
+
+        attempt_ids
+      end)
+
+    finish_transaction(transaction, :ready_attempt_rejection_failed)
   end
 
   defp operation_intent(id) do
@@ -1140,12 +1283,13 @@ defmodule Pika.Integration.Lifecycle do
     })
   end
 
-  defp work_projection(attempt) do
+  defp work_projection(attempt, run) do
     %{
       role_id: "integration",
       work_kind: :attempt,
       work_id: to_string(attempt.id),
-      attempt: attempt
+      attempt: attempt,
+      integration_run: run
     }
   end
 

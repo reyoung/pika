@@ -3,13 +3,23 @@ defmodule Pika.Agent.RolePrompts.Integration.Input do
 
   alias Pika.Agent.RolePrompt.Section
 
-  @enforce_keys [:full_case_ids, :validation_schema, :result_schema]
+  @enforce_keys [
+    :full_case_ids,
+    :validation_schema,
+    :result_schema,
+    :run_id,
+    :run_sequence,
+    :paths
+  ]
   defstruct @enforce_keys ++ [sections: []]
 
   @type t :: %__MODULE__{
           full_case_ids: [non_neg_integer()],
           validation_schema: Path.t(),
           result_schema: Path.t(),
+          run_id: pos_integer(),
+          run_sequence: pos_integer(),
+          paths: map(),
           sections: [Section.t()]
         }
 end
@@ -34,7 +44,14 @@ defmodule Pika.Agent.RolePrompts.Integration do
        [
          intro(),
          rendered_sections,
-         instructions(case_ids, input.validation_schema, input.result_schema)
+         instructions(
+           case_ids,
+           input.validation_schema,
+           input.result_schema,
+           input.run_id,
+           input.run_sequence,
+           input.paths
+         )
        ]
        |> IO.iodata_to_binary()
        |> String.trim()}
@@ -52,7 +69,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
     |> String.trim()
   end
 
-  defp instructions(case_ids, validation_schema, result_schema) do
+  defp instructions(case_ids, validation_schema, result_schema, run_id, run_sequence, paths) do
     """
 
 
@@ -61,6 +78,15 @@ defmodule Pika.Agent.RolePrompts.Integration do
     Integration 只处理 Base 等于当前 Best 的 FIFO 队首 Attempt。stale Attempt 应在你启动前返回 Iteration；如果 Context 或实际 Git 显示 Base 已 stale，不要修改 Best，报告状态并等待 Pika重新调度。
 
     没有 `prepare_best_update` 返回的有效 Git Intent，绝不能修改 `pika/best`。
+
+    本次验证的不可变 Integration Run 是 ID `#{run_id}`、sequence `#{run_sequence}`。所有新 evidence 和终态文件只能写入本 Run 的专属目录 `#{paths.root}`：
+
+    - Full Verify：`#{paths.verify}`
+    - Full Benchmark：`#{paths.benchmark}`
+    - Accept validation：`#{paths.validation}`
+    - Accept/Reject result：`#{paths.result}`
+
+    必要时先创建该目录。不得覆盖 Attempt 根目录或其他 Run 的同名文件；恢复时也不得把旧 Run Artifact 当作本 Run 输出。Validation/Result 中必须填写 `integration_run_id=#{run_id}` 和 `run_sequence=#{run_sequence}`，Validation 引用的 Verify/Benchmark path 必须与上面完全一致。
 
     ## Full Case Set 验证
 
@@ -97,7 +123,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
 
     ## Reject
 
-    正确性失败、硬门禁失败、明显回退或工程风险不可接受时，写符合 #{schema_link(result_schema)} 的 `integration-result.json`，outcome=`rejected`。同一文件包含：
+    正确性失败、硬门禁失败、明显回退或工程风险不可接受时，写符合 #{schema_link(result_schema)} 的 `#{paths.result}`，outcome=`rejected`。同一文件包含：
 
     - 具体 reason；
     - 所有 regressed Case IDs；
@@ -108,7 +134,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
 
     ## Accept 与 Git mutation
 
-    先写符合 #{schema_link(validation_schema)} 的 `integration-validation.json`，引用 Full Verify/Benchmark、per-Case judgement、聚合结果、推荐 outcome 和 feedback。调用：
+    先写符合 #{schema_link(validation_schema)} 的 `#{paths.validation}`，引用本 Run 的 Full Verify/Benchmark、per-Case judgement、聚合结果、推荐 outcome 和 feedback。调用：
 
         prepare_best_update(validation_path, idempotency_key)
 
@@ -122,7 +148,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
     6. 写入 Pika要求的 Attempt、Baseline Revision、Sampling Revision trailers；
     7. 检查实际 HEAD 与 worktree。
 
-    然后写符合 #{schema_link(result_schema)} 的 accepted `integration-result.json`，包含 Intent、Best before/after SHA、squash commit 和 trailers，调用：
+    然后写符合 #{schema_link(result_schema)} 的 accepted `#{paths.result}`，包含 Intent、Best before/after SHA、squash commit 和 trailers，调用：
 
         finish_integration(result_path, idempotency_key)
 
