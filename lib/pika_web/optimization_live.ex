@@ -25,6 +25,12 @@ defmodule PikaWeb.OptimizationLive do
        |> assign(:guidance_form, to_form(%{"body" => ""}, as: :guidance))
        |> assign(:question_answers, %{})
        |> assign(:question_batch_id, nil)
+       |> assign(:workspace_tab, nil)
+       |> assign(:workspace_tab_initialized?, false)
+       |> assign(:workspace_tab_user_selected?, false)
+       |> assign(:selected_attempt_id, nil)
+       |> assign(:attempt_accordion_initialized?, false)
+       |> assign(:attempt_accordion_user_selected?, false)
        |> assign(:open_session_id, nil)
        |> assign(:session_accordion_initialized?, false)
        |> assign(:baseline_revision_selection, nil)
@@ -55,11 +61,13 @@ defmodule PikaWeb.OptimizationLive do
   @impl true
   def handle_event("send_message", %{"message" => %{"body" => body}}, socket) do
     body = String.trim(body)
+    revision = BaselineLifecycle.latest_revision()
+    role = revision && baseline_message_role(revision.status)
 
     result =
       with false <- body == "",
-           %{id: baseline_id} <- BaselineLifecycle.latest_revision(),
-           :ok <- Symphony.kickoff("baseline_alignment", to_string(baseline_id), body) do
+           %{id: baseline_id} <- revision,
+           :ok <- Symphony.kickoff(role, to_string(baseline_id), body) do
         :ok
       else
         true -> {:error, :message_required}
@@ -69,7 +77,7 @@ defmodule PikaWeb.OptimizationLive do
 
     {:noreply,
      socket
-     |> put_result(result, "消息已发送给 Baseline Alignment Agent。")
+     |> put_result(result, "消息已发送给 #{role_name(role)}。")
      |> update_message_form(result, body)
      |> refresh()}
   end
@@ -98,6 +106,40 @@ defmodule PikaWeb.OptimizationLive do
      socket
      |> assign(:open_session_id, open_session_id)
      |> assign(:session_accordion_initialized?, true)}
+  end
+
+  def handle_event("select_workspace_tab", %{"tab" => tab}, socket)
+      when tab in ["baseline", "attempts"] do
+    {:noreply,
+     socket
+     |> assign(:workspace_tab, tab)
+     |> assign(:workspace_tab_initialized?, true)
+     |> assign(:workspace_tab_user_selected?, true)
+     |> assign(:open_session_id, nil)
+     |> assign(:session_accordion_initialized?, false)
+     |> refresh()}
+  end
+
+  def handle_event("select_workspace_tab", _params, socket), do: {:noreply, socket}
+
+  def handle_event("toggle_attempt", %{"attempt" => attempt_id}, socket) do
+    selected_attempt_id =
+      case Integer.parse(attempt_id) do
+        {id, ""} when id > 0 ->
+          if socket.assigns.selected_attempt_id == id, do: nil, else: id
+
+        _other ->
+          socket.assigns.selected_attempt_id
+      end
+
+    {:noreply,
+     socket
+     |> assign(:selected_attempt_id, selected_attempt_id)
+     |> assign(:attempt_accordion_initialized?, true)
+     |> assign(:attempt_accordion_user_selected?, true)
+     |> assign(:open_session_id, nil)
+     |> assign(:session_accordion_initialized?, false)
+     |> refresh()}
   end
 
   def handle_event("select_baseline_revision", %{"revision" => revision}, socket) do
@@ -320,7 +362,37 @@ defmodule PikaWeb.OptimizationLive do
         </section>
 
         <div class="ops-primary-grid">
-          <section class="ops-panel ops-baseline-panel">
+          <section class="ops-panel ops-workspace-panel">
+            <nav class="ops-workspace-tabs" role="tablist" aria-label="Optimization workspace">
+              <button
+                type="button"
+                role="tab"
+                class={if @workspace_tab == "baseline", do: "is-active", else: nil}
+                aria-selected={to_string(@workspace_tab == "baseline")}
+                phx-click="select_workspace_tab"
+                phx-value-tab="baseline"
+              >
+                <span class="ops-workspace-tab-icon">B</span>
+                <span><strong>Baseline</strong><small>Alignment &amp; verification</small></span>
+                <.pill :if={@latest_baseline} kind={status_kind(@latest_baseline.status)}>
+                  {humanize_status(@latest_baseline.status)}
+                </.pill>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                class={if @workspace_tab == "attempts", do: "is-active", else: nil}
+                aria-selected={to_string(@workspace_tab == "attempts")}
+                phx-click="select_workspace_tab"
+                phx-value-tab="attempts"
+              >
+                <span class="ops-workspace-tab-icon">A</span>
+                <span><strong>Attempts</strong><small>Iteration &amp; integration</small></span>
+                <span class="ops-count">{length(@snapshot.attempts)}</span>
+              </button>
+            </nav>
+
+            <section :if={@workspace_tab == "baseline"} class="ops-baseline-panel">
             <header class="ops-panel-header">
               <div>
                 <p class="ops-eyebrow">Baseline workspace</p>
@@ -395,7 +467,7 @@ defmodule PikaWeb.OptimizationLive do
                     <strong>{role_name(session.role)}</strong>
                     <small>
                       {backend_name(session)} · Session {session.session_sequence} · {length(
-                        session_turns(@turns, session.id)
+                        session_turns(@baseline_turns, session.id)
                       )} turns
                     </small>
                   </span>
@@ -444,20 +516,20 @@ defmodule PikaWeb.OptimizationLive do
                   </div>
 
                   <div
-                    :if={session_turns(@turns, session.id) == []}
+                    :if={session_turns(@baseline_turns, session.id) == []}
                     class="ops-agent-conversation-empty"
                   >
                     No conversation turns have been recorded for this session yet.
                   </div>
 
                   <div
-                    :if={session_turns(@turns, session.id) != []}
+                    :if={session_turns(@baseline_turns, session.id) != []}
                     class="ops-agent-conversation"
                     id={"agent-conversation-#{session.id}"}
                     phx-hook="ConversationScroll"
                   >
                     <section
-                      :for={turn <- session_turns(@turns, session.id)}
+                      :for={turn <- session_turns(@baseline_turns, session.id)}
                       class="ops-chat-turn"
                     >
                       <div class="ops-chat-turn-divider">
@@ -477,7 +549,7 @@ defmodule PikaWeb.OptimizationLive do
                           </span>
                           <div>
                             <header>
-                              <strong>{message_author(item.message, item.fallback_role)}</strong>
+                              <strong>{message_author(item.message, item.fallback_role, session.role)}</strong>
                               <small>{timeline_message_caption(turn, item)}</small>
                             </header>
                             <pre>{message_text(item.message)}</pre>
@@ -539,7 +611,7 @@ defmodule PikaWeb.OptimizationLive do
                       >
                         <span class="ops-chat-avatar">AI</span>
                         <div>
-                          <strong>Baseline Agent</strong>
+                          <strong>{role_name(session.role)}</strong>
                           <span><i></i><i></i><i></i></span>
                         </div>
                       </div>
@@ -638,19 +710,33 @@ defmodule PikaWeb.OptimizationLive do
                 <span>{baseline_artifacts_title(@baseline)}</span>
                 <p>{baseline_artifacts_description(@baseline)}</p>
               </div>
-              <details open>
+              <details
+                id={"baseline-definition-details-#{@baseline.id}"}
+                phx-hook="PersistDetails"
+                open
+              >
                 <summary><span>01</span>Baseline Definition <b>JSON</b></summary>
                 <pre>{@review_bundle.definition}</pre>
               </details>
-              <details>
+              <details
+                id={"baseline-smoke-verify-details-#{@baseline.id}"}
+                phx-hook="PersistDetails"
+              >
                 <summary><span>02</span>Smoke Verify <b>JSON</b></summary>
                 <pre>{@review_bundle.smoke_verify}</pre>
               </details>
-              <details>
+              <details
+                id={"baseline-smoke-benchmark-details-#{@baseline.id}"}
+                phx-hook="PersistDetails"
+              >
                 <summary><span>03</span>Smoke Benchmark <b>LOG</b></summary>
                 <pre>{@review_bundle.smoke_benchmark}</pre>
               </details>
-              <details :if={@review_bundle.verification_result != "unavailable"}>
+              <details
+                :if={@review_bundle.verification_result != "unavailable"}
+                id={"baseline-verification-result-details-#{@baseline.id}"}
+                phx-hook="PersistDetails"
+              >
                 <summary><span>04</span>Baseline Verification Result <b>JSON</b></summary>
                 <pre>{@review_bundle.verification_result}</pre>
               </details>
@@ -672,6 +758,245 @@ defmodule PikaWeb.OptimizationLive do
                 </.form>
               </div>
             </div>
+          </section>
+
+            <section :if={@workspace_tab == "attempts"} class="ops-attempts-panel">
+              <header class="ops-panel-header">
+                <div>
+                  <p class="ops-eyebrow">Attempts workspace</p>
+                  <h2>Iteration &amp; Integration</h2>
+                  <p>Inspect every candidate in chronological order and follow its live Agent output.</p>
+                </div>
+                <span class="ops-count">{length(@snapshot.attempts)} total</span>
+              </header>
+
+              <div :if={@snapshot.attempts != []} class="ops-attempt-list">
+                <section :for={attempt <- @snapshot.attempts} class="ops-attempt-entry">
+                  <button
+                    type="button"
+                    class="ops-attempt-toggle"
+                    phx-click="toggle_attempt"
+                    phx-value-attempt={attempt.id}
+                    aria-expanded={to_string(@selected_attempt_id == attempt.id)}
+                    aria-controls={"attempt-#{attempt.id}-details"}
+                  >
+                    <span class="ops-attempt-index">#{attempt.id}</span>
+                    <span class="ops-attempt-summary">
+                      <strong>Iteration {attempt.iteration_round || 1}</strong>
+                      <small>{attempt.summary || attempt.failure_reason || "Agent is preparing this candidate…"}</small>
+                    </span>
+                    <code>{short_sha(attempt.base_sha)}</code>
+                    <.pill kind={status_kind(attempt.status)}>{humanize_status(attempt.status)}</.pill>
+                    <span class="ops-chevron">›</span>
+                  </button>
+
+                  <div
+                    :if={@selected_attempt_id == attempt.id}
+                    id={"attempt-#{attempt.id}-details"}
+                    class="ops-attempt-body"
+                  >
+                    <dl class="ops-attempt-facts">
+                      <div><dt>Attempt</dt><dd>#{attempt.id}</dd></div>
+                      <div><dt>Round</dt><dd>{attempt.iteration_round || "—"}</dd></div>
+                      <div><dt>Base SHA</dt><dd><code>{short_sha(attempt.base_sha)}</code></dd></div>
+                      <div><dt>Candidate</dt><dd><code>{short_sha(attempt.candidate_sha)}</code></dd></div>
+                    </dl>
+
+                    <div :if={attempt.failure_reason} class="ops-attempt-failure">
+                      <span>Failure reason</span>
+                      <p>{attempt.failure_reason}</p>
+                    </div>
+
+                    <section id={"attempt-#{attempt.id}-agent-details"} class="ops-agent-inspector">
+                      <header>
+                        <div>
+                          <p class="ops-eyebrow">Attempt agent</p>
+                          <h3>Session details &amp; conversation</h3>
+                          <p>Live Iteration and Integration output, messages, and tool activity.</p>
+                        </div>
+                        <span class="ops-count">{length(@attempt_sessions)} sessions</span>
+                      </header>
+
+                      <div :if={@attempt_sessions == []} class="ops-agent-empty">
+                        <span>···</span>
+                        <div>
+                          <strong>Waiting for an Agent Session</strong>
+                          <small>The conversation appears as soon as this Attempt is dispatched.</small>
+                        </div>
+                      </div>
+
+                      <section :for={session <- @attempt_sessions} class="ops-agent-session">
+                        <button
+                          type="button"
+                          class="ops-agent-session-toggle"
+                          phx-click="toggle_agent_session"
+                          phx-value-session={session.id}
+                          aria-expanded={to_string(@open_session_id == session.id)}
+                          aria-controls={"agent-session-#{session.id}"}
+                        >
+                          <span class="ops-agent-avatar">AI</span>
+                          <span class="ops-agent-summary-copy">
+                            <strong>{role_name(session.role)}</strong>
+                            <small>
+                              {backend_name(session)} · Session {session.session_sequence} · {length(
+                                session_turns(@attempt_turns, session.id)
+                              )} turns
+                            </small>
+                          </span>
+                          <.pill kind={status_kind(session.status)}>{humanize_status(session.status)}</.pill>
+                          <span class="ops-chevron">›</span>
+                        </button>
+
+                        <div
+                          id={"agent-session-#{session.id}"}
+                          class="ops-agent-session-body"
+                          hidden={@open_session_id != session.id}
+                        >
+                          <dl class="ops-agent-config">
+                            <div><dt>Backend</dt><dd>{backend_name(session)}</dd></div>
+                            <div><dt>Model</dt><dd>{config_value(session, "model")}</dd></div>
+                            <div><dt>Reasoning</dt><dd>{config_value(session, "reasoning_effort")}</dd></div>
+                            <div><dt>Started</dt><dd>{format_timestamp(session.started_at)}</dd></div>
+                          </dl>
+
+                          <div class="ops-agent-identifiers">
+                            <span>Session ID <code title={session.id}>{session.id}</code></span>
+                            <span :if={session.provider_session_id}>
+                              Provider ID <code title={session.provider_session_id}>{session.provider_session_id}</code>
+                            </span>
+                            <span :if={session.recovery_sequence > 0}>
+                              Recovery <code>#{session.recovery_sequence}</code>
+                            </span>
+                          </div>
+
+                          <div :if={active_session?(session)} class="ops-agent-restart">
+                            <span>
+                              <strong>Restart this agent</strong>
+                              <small>Interrupt the backend, preserve recovery state, and continue in a new Session.</small>
+                            </span>
+                            <button
+                              type="button"
+                              phx-click="restart_agent_session"
+                              phx-value-session={session.id}
+                              phx-disable-with="Restarting…"
+                              class="ops-button ops-button-danger"
+                            >
+                              Interrupt &amp; restart
+                            </button>
+                          </div>
+
+                          <div
+                            :if={session_turns(@attempt_turns, session.id) == []}
+                            class="ops-agent-conversation-empty"
+                          >
+                            No conversation turns have been recorded for this session yet.
+                          </div>
+
+                          <div
+                            :if={session_turns(@attempt_turns, session.id) != []}
+                            class="ops-agent-conversation"
+                            id={"agent-conversation-#{session.id}"}
+                            phx-hook="ConversationScroll"
+                          >
+                            <section
+                              :for={turn <- session_turns(@attempt_turns, session.id)}
+                              class="ops-chat-turn"
+                            >
+                              <div class="ops-chat-turn-divider">
+                                <span>Turn {turn.turn}</span>
+                                <.pill kind={status_kind(turn_status(turn))}>
+                                  {humanize_status(turn_status(turn))}
+                                </.pill>
+                              </div>
+
+                              <%= for item <- conversation_items(turn) do %>
+                                <article :if={item.kind == :message} class={timeline_message_class(item)}>
+                                  <span class="ops-chat-avatar">
+                                    {message_avatar(item.message, item.fallback_role)}
+                                  </span>
+                                  <div>
+                                    <header>
+                                      <strong>{message_author(item.message, item.fallback_role, session.role)}</strong>
+                                      <small>{timeline_message_caption(turn, item)}</small>
+                                    </header>
+                                    <pre>{message_text(item.message)}</pre>
+                                    <i
+                                      :if={timeline_streaming_message?(turn, item)}
+                                      class="ops-stream-cursor"
+                                      aria-label="Generating"
+                                    >
+                                    </i>
+                                  </div>
+                                </article>
+
+                                <details
+                                  :if={item.kind == :tools}
+                                  id={item.id}
+                                  class="ops-chat-tools"
+                                  phx-hook="PersistDetails"
+                                >
+                                  <summary>
+                                    <span class="ops-chat-tools-icon">⌕</span>
+                                    <div>
+                                      <strong>{tool_activity_title(item.calls)}</strong>
+                                      <small>{tool_activity_meta(item.calls)}</small>
+                                    </div>
+                                    <.pill kind={status_kind(tool_activity_status(item.calls))}>
+                                      {humanize_status(tool_activity_status(item.calls))}
+                                    </.pill>
+                                    <span class="ops-chevron">›</span>
+                                  </summary>
+                                  <div class="ops-chat-tools-list">
+                                    <article :for={call <- item.calls} class="ops-chat-tool-row">
+                                      <span class={"ops-chat-tool-icon kind-#{tool_kind(call)}"}>
+                                        {tool_icon(call)}
+                                      </span>
+                                      <div>
+                                        <strong>{tool_name(call)}</strong>
+                                        <small :if={tool_detail(call)}>{tool_detail(call)}</small>
+                                      </div>
+                                      <.pill kind={status_kind(tool_call_status(call))}>
+                                        {humanize_status(tool_call_status(call))}
+                                      </.pill>
+                                      <button
+                                        :if={call["command_ref"]}
+                                        type="button"
+                                        class="ops-chat-tool-output"
+                                        phx-click="open_command_console"
+                                        phx-value-ref={call["command_ref"]}
+                                      >
+                                        View output
+                                      </button>
+                                    </article>
+                                  </div>
+                                </details>
+                              <% end %>
+
+                              <div
+                                :if={turn.partial && turn.output_messages == []}
+                                class="ops-chat-thinking"
+                              >
+                                <span class="ops-chat-avatar">AI</span>
+                                <div>
+                                  <strong>{role_name(session.role)}</strong>
+                                  <span><i></i><i></i><i></i></span>
+                                </div>
+                              </div>
+                            </section>
+                          </div>
+                        </div>
+                      </section>
+                    </section>
+                  </div>
+                </section>
+              </div>
+
+              <div :if={@snapshot.attempts == []} class="ops-empty-state ops-history-empty">
+                <span>00</span>
+                <strong>No attempts yet</strong>
+                <p>Attempts begin after the baseline definition and verification are accepted.</p>
+              </div>
+            </section>
           </section>
 
           <section class="ops-panel ops-summary-panel">
@@ -713,38 +1038,6 @@ defmodule PikaWeb.OptimizationLive do
           </section>
         </div>
 
-        <section class="ops-panel ops-history-panel">
-          <header class="ops-panel-header">
-            <div>
-              <p class="ops-eyebrow">Attempts</p>
-              <h2>Optimization History</h2>
-              <p>Every candidate, its base revision, and the resulting outcome.</p>
-            </div>
-            <span class="ops-count">{length(@snapshot.attempts)} total</span>
-          </header>
-          <div :if={@snapshot.attempts != []} class="ops-table-wrap">
-            <table class="ops-table">
-              <thead>
-                <tr><th>Attempt</th><th>Status</th><th>Round</th><th>Base SHA</th><th>Summary / reason</th></tr>
-              </thead>
-              <tbody>
-                <tr :for={attempt <- Enum.reverse(@snapshot.attempts)}>
-                  <td><strong>#{attempt.id}</strong></td>
-                  <td><.pill kind={status_kind(attempt.status)}>{humanize_status(attempt.status)}</.pill></td>
-                  <td>{attempt.iteration_round || "—"}</td>
-                  <td><code>{short_sha(attempt.base_sha)}</code></td>
-                  <td>{attempt.summary || attempt.failure_reason || "No summary yet"}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div :if={@snapshot.attempts == []} class="ops-empty-state ops-history-empty">
-            <span>00</span>
-            <strong>No attempts yet</strong>
-            <p>Attempts begin after the baseline definition and verification are accepted.</p>
-          </div>
-        </section>
-
       </div>
     </main>
     <.command_console console={@command_console} />
@@ -771,7 +1064,17 @@ defmodule PikaWeb.OptimizationLive do
     questions =
       if current_baseline? and Process.whereis(Questions), do: Questions.pending(), else: nil
 
-    {baseline_sessions, turns} = baseline_activity(baseline)
+    socket =
+      socket
+      |> assign_workspace_tab(snapshot)
+      |> assign_selected_attempt(snapshot.attempts)
+
+    selected_attempt = selected_attempt(snapshot.attempts, socket.assigns.selected_attempt_id)
+    {baseline_sessions, baseline_turns} = baseline_activity(baseline)
+    {attempt_sessions, attempt_turns} = attempt_conversation(selected_attempt)
+
+    visible_sessions =
+      if socket.assigns.workspace_tab == "attempts", do: attempt_sessions, else: baseline_sessions
 
     socket
     |> assign(:snapshot, snapshot)
@@ -780,9 +1083,12 @@ defmodule PikaWeb.OptimizationLive do
     |> assign(:baseline_revisions, baseline_revisions)
     |> assign(:current_baseline?, current_baseline?)
     |> assign(:baseline_sessions, baseline_sessions)
-    |> assign_open_session(baseline_sessions)
+    |> assign(:baseline_turns, baseline_turns)
+    |> assign(:selected_attempt, selected_attempt)
+    |> assign(:attempt_sessions, attempt_sessions)
+    |> assign(:attempt_turns, attempt_turns)
+    |> assign_open_session(visible_sessions)
     |> assign_questions(questions)
-    |> assign(:turns, turns)
     |> assign(:review_bundle, review_bundle(baseline))
     |> assign(:summary, latest_summary())
     |> assign(:workspace, Persistence.current().workspace_canonical_path)
@@ -795,6 +1101,60 @@ defmodule PikaWeb.OptimizationLive do
   defp selected_baseline(revisions, selection) do
     Enum.find(revisions, &(&1.revision == selection)) || List.last(revisions)
   end
+
+  defp assign_workspace_tab(
+         %{assigns: %{workspace_tab_user_selected?: true}} = socket,
+         _snapshot
+       ),
+       do: socket
+
+  defp assign_workspace_tab(socket, snapshot) do
+    tab = if iteration_started?(snapshot), do: "attempts", else: "baseline"
+
+    socket
+    |> assign(:workspace_tab, tab)
+    |> assign(:workspace_tab_initialized?, true)
+  end
+
+  defp iteration_started?(snapshot) do
+    Enum.any?(snapshot.active_agent_sessions, &(&1.role in ["iteration", "integration"])) or
+      Enum.any?(snapshot.attempts, fn attempt ->
+        attempt.status not in ["accepted", "rejected", "cancelled"]
+      end)
+  end
+
+  defp assign_selected_attempt(
+         %{assigns: %{attempt_accordion_user_selected?: true}} = socket,
+         attempts
+       ) do
+    selected_attempt_id = socket.assigns.selected_attempt_id
+
+    if is_nil(selected_attempt_id) or Enum.any?(attempts, &(&1.id == selected_attempt_id)) do
+      socket
+    else
+      assign(socket, :selected_attempt_id, default_attempt_id(attempts))
+    end
+  end
+
+  defp assign_selected_attempt(socket, attempts) do
+    socket
+    |> assign(:selected_attempt_id, default_attempt_id(attempts))
+    |> assign(:attempt_accordion_initialized?, true)
+  end
+
+  defp default_attempt_id(attempts) do
+    active =
+      Enum.find(Enum.reverse(attempts), fn attempt ->
+        attempt.status not in ["accepted", "rejected", "cancelled"]
+      end)
+
+    case active || List.last(attempts) do
+      nil -> nil
+      attempt -> attempt.id
+    end
+  end
+
+  defp selected_attempt(attempts, id), do: Enum.find(attempts, &(&1.id == id))
 
   defp baseline_activity(nil), do: {[], []}
 
@@ -810,6 +1170,25 @@ defmodule PikaWeb.OptimizationLive do
     turns =
       roles
       |> Enum.flat_map(&ConversationJournal.work_turns(&1, "baseline_revision", work_id))
+      |> Enum.sort_by(&{&1.started_at, &1.id})
+
+    {sessions, turns}
+  end
+
+  defp attempt_conversation(nil), do: {[], []}
+
+  defp attempt_conversation(attempt) do
+    roles = ["iteration", "integration"]
+    work_id = to_string(attempt.id)
+
+    sessions =
+      roles
+      |> Enum.flat_map(&ConversationJournal.work_sessions(&1, "attempt", work_id))
+      |> Enum.sort_by(&{&1.started_at, &1.session_sequence})
+
+    turns =
+      roles
+      |> Enum.flat_map(&ConversationJournal.work_turns(&1, "attempt", work_id))
       |> Enum.sort_by(&{&1.started_at, &1.id})
 
     {sessions, turns}
@@ -1051,16 +1430,17 @@ defmodule PikaWeb.OptimizationLive do
     end
   end
 
-  defp message_author(message, fallback) do
+  defp message_author(message, fallback, role) do
     case message_role(message, fallback) do
       "user" -> "You"
       "system" -> "System"
-      _assistant -> "Baseline Agent"
+      _assistant -> role_name(role)
     end
   end
 
   defp message_phase(%{"phase" => "final_answer"}), do: "final"
   defp message_phase(%{"phase" => "commentary"}), do: "update"
+  defp message_phase(%{"phase" => "reasoning"}), do: "reasoning"
   defp message_phase(_message), do: "default"
 
   defp message_caption(turn, message, index) do
@@ -1068,6 +1448,7 @@ defmodule PikaWeb.OptimizationLive do
       streaming_message?(turn, message, index) -> "Streaming"
       message["phase"] == "final_answer" -> "Final answer"
       message["phase"] == "commentary" -> "Update #{index}"
+      message["phase"] == "reasoning" -> "Reasoning"
       true -> "Turn #{turn.turn} · Message #{index}"
     end
   end
@@ -1285,6 +1666,8 @@ defmodule PikaWeb.OptimizationLive do
 
   defp role_name("baseline_alignment"), do: "Baseline Alignment"
   defp role_name("baseline_verify"), do: "Baseline Verify"
+  defp role_name("iteration"), do: "Iteration Agent"
+  defp role_name("integration"), do: "Integration Agent"
   defp role_name(role), do: humanize_status(role)
 
   defp backend_name(session) do
@@ -1377,6 +1760,9 @@ defmodule PikaWeb.OptimizationLive do
     do: "Pika is coordinating the optimization lifecycle and recording every decision."
 
   defp terminal_status?(status), do: status in ["completed", "stopped", "failed"]
+
+  defp baseline_message_role("verifying"), do: "baseline_verify"
+  defp baseline_message_role(_status), do: "baseline_alignment"
 
   defp attempt_activity([]), do: "Begins after baseline approval"
 

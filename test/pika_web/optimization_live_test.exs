@@ -9,11 +9,15 @@ defmodule PikaWeb.OptimizationLiveTest do
   defmodule SymphonyStub do
     use GenServer
 
-    def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: Pika.Agent.Symphony)
-    def init(:ok), do: {:ok, nil}
+    def start_link(opts),
+      do: GenServer.start_link(__MODULE__, Keyword.get(opts, :owner), name: Pika.Agent.Symphony)
 
-    def handle_call({:kickoff, _role, _work_id, _message}, _from, state),
-      do: {:reply, :ok, state}
+    def init(owner), do: {:ok, owner}
+
+    def handle_call({:kickoff, role, work_id, message}, _from, owner) do
+      if owner, do: send(owner, {:kickoff, role, work_id, message})
+      {:reply, :ok, owner}
+    end
 
     def handle_call({:restart_session, _session_id}, _from, state),
       do: {:reply, :ok, state}
@@ -245,11 +249,37 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert html =~ ~s(name="answers[target][custom]")
     assert html =~ ~s(phx-change="change_question_answers")
     assert html =~ "Write your own answer"
-    assert html =~ "No attempts yet"
+    assert html =~ ~s(phx-value-tab="attempts")
     assert html =~ "No progress summary yet"
     refute html =~ ">Sync<"
     refute html =~ "Campaign singleton"
     refute html =~ "diagnostic-hero"
+
+    artifact_html =
+      socket
+      |> Phoenix.Component.assign(:baseline, %{baseline | definition_artifact_id: 1})
+      |> Phoenix.Component.assign(:review_bundle, %{
+        definition: "{}",
+        smoke_verify: "{}",
+        smoke_benchmark: "ok",
+        verification_result: "{}"
+      })
+      |> Map.fetch!(:assigns)
+      |> PikaWeb.OptimizationLive.render()
+      |> Phoenix.HTML.Safe.to_iodata()
+      |> IO.iodata_to_binary()
+
+    assert artifact_html =~
+             ~s(id="baseline-definition-details-#{baseline.id}" phx-hook="PersistDetails" open)
+
+    assert artifact_html =~
+             ~s(id="baseline-smoke-verify-details-#{baseline.id}" phx-hook="PersistDetails")
+
+    assert artifact_html =~
+             ~s(id="baseline-smoke-benchmark-details-#{baseline.id}" phx-hook="PersistDetails")
+
+    assert artifact_html =~
+             ~s(id="baseline-verification-result-details-#{baseline.id}" phx-hook="PersistDetails")
 
     {session_one_position, _length} = :binary.match(html, "Session 1")
     {session_two_position, _length} = :binary.match(html, "Session 2")
@@ -394,7 +424,7 @@ defmodule PikaWeb.OptimizationLiveTest do
                 }
               ]}
 
-    start_supervised!(SymphonyStub)
+    start_supervised!({SymphonyStub, owner: self()})
 
     assert {:noreply, restarted_socket} =
              PikaWeb.OptimizationLive.handle_event(
@@ -412,9 +442,31 @@ defmodule PikaWeb.OptimizationLiveTest do
 
     assert sent_socket.assigns.message_form.params == %{"body" => ""}
 
+    assert_receive {:kickoff, "baseline_alignment", baseline_id,
+                    "Keep the case set deterministic"}
+
+    assert baseline_id == to_string(baseline.id)
+
     assert Phoenix.LiveView.Utils.get_push_events(sent_socket) == [
              ["clear-form", %{id: "baseline-message-form"}]
            ]
+
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      "UPDATE baseline_revisions SET status = 'verifying', updated_at = ? WHERE id = ?",
+      [now, baseline.id]
+    )
+
+    assert {:noreply, _verify_message_socket} =
+             PikaWeb.OptimizationLive.handle_event(
+               "send_message",
+               %{"message" => %{"body" => "Finish aggregating the completed benchmark"}},
+               sent_socket
+             )
+
+    assert_receive {:kickoff, "baseline_verify", ^baseline_id,
+                    "Finish aggregating the completed benchmark"}
 
     assert {:ok, _session} =
              ConversationJournal.interrupt_session(active_session.id, "revision superseded")
@@ -475,6 +527,127 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert revision_zero_html =~ session.id
     refute revision_zero_html =~ next_session.id
     refute revision_zero_html =~ ~s(id="baseline-message-form")
+
+    now = System.system_time(:microsecond)
+    base_sha = Git.run!(repo, ["rev-parse", "HEAD"])
+
+    Repo.query!(
+      "INSERT INTO sampling_revisions(optimization_id, baseline_revision_id, sequence, cause, created_at) VALUES ('optimization', ?, 1, 'test', ?)",
+      [next_baseline.id, now]
+    )
+
+    [[sampling_revision_id]] = Repo.query!("SELECT last_insert_rowid()").rows
+
+    for {attempt_id, status, failure_reason} <- [
+          {1, "rejected", "target setup failed"},
+          {2, "iterating", nil}
+        ] do
+      Repo.query!(
+        """
+        INSERT INTO attempts(
+          id, optimization_id, status, work_relative_path, branch, slot_index,
+          base_best_revision, base_sha, sampling_revision_id, current_iteration_round,
+          failure_reason, inserted_at, updated_at
+        ) VALUES (?, 'optimization', ?, ?, ?, 0, 0, ?, ?, 1, ?, ?, ?)
+        """,
+        [
+          attempt_id,
+          status,
+          "attempts/#{String.pad_leading(to_string(attempt_id), 6, "0")}",
+          "pika/attempt/#{String.pad_leading(to_string(attempt_id), 6, "0")}",
+          base_sha,
+          sampling_revision_id,
+          failure_reason,
+          now + attempt_id,
+          now + attempt_id
+        ]
+      )
+    end
+
+    Repo.query!(
+      "UPDATE optimizations SET status = 'optimizing', best_sha = ?, updated_at = ? WHERE id = 'optimization'",
+      [base_sha, now]
+    )
+
+    assert {:ok, iteration_session} =
+             ConversationJournal.start_session(
+               "iteration",
+               :attempt,
+               "2",
+               %{
+                 "backend" => "cursor_acp",
+                 "model" => "cursor-test",
+                 "reasoning_effort" => "low"
+               },
+               "iteration system prompt",
+               "iteration context"
+             )
+
+    assert {:ok, iteration_turn} =
+             ConversationJournal.start_turn(iteration_session.id, [
+               %{"role" => "user", "content" => "Optimize the sampled attention cases"}
+             ])
+
+    assert {:ok, _iteration_turn} =
+             ConversationJournal.stream_output(iteration_turn.id, %{
+               "role" => "assistant",
+               "content" => "I am profiling the current Iteration candidate."
+             })
+
+    assert {:noreply, transitioned_socket} =
+             PikaWeb.OptimizationLive.handle_info(:refresh, revisions_socket)
+
+    assert transitioned_socket.assigns.workspace_tab == "attempts"
+    assert transitioned_socket.assigns.selected_attempt_id == 2
+    assert transitioned_socket.assigns.open_session_id == iteration_session.id
+
+    assert {:ok, attempts_socket} =
+             PikaWeb.OptimizationLive.mount(
+               %{},
+               %{"pika_auth" => marker},
+               %Phoenix.LiveView.Socket{}
+             )
+
+    attempts_html = render_socket(attempts_socket)
+    assert attempts_socket.assigns.workspace_tab == "attempts"
+    assert attempts_socket.assigns.selected_attempt_id == 2
+    assert attempts_socket.assigns.open_session_id == iteration_session.id
+    assert attempts_html =~ "Iteration &amp; Integration"
+    assert attempts_html =~ "Iteration Agent"
+    assert attempts_html =~ "I am profiling the current Iteration candidate."
+    assert attempts_html =~ ~s(phx-value-attempt="2" aria-expanded="true")
+
+    {attempt_one_position, _length} = :binary.match(attempts_html, ~s(phx-value-attempt="1"))
+    {attempt_two_position, _length} = :binary.match(attempts_html, ~s(phx-value-attempt="2"))
+    assert attempt_one_position < attempt_two_position
+
+    assert {:noreply, collapsed_attempt_socket} =
+             PikaWeb.OptimizationLive.handle_event(
+               "toggle_attempt",
+               %{"attempt" => "2"},
+               attempts_socket
+             )
+
+    assert collapsed_attempt_socket.assigns.selected_attempt_id == nil
+
+    refute render_socket(collapsed_attempt_socket) =~
+             "I am profiling the current Iteration candidate."
+
+    assert {:noreply, baseline_tab_socket} =
+             PikaWeb.OptimizationLive.handle_event(
+               "select_workspace_tab",
+               %{"tab" => "baseline"},
+               attempts_socket
+             )
+
+    assert baseline_tab_socket.assigns.workspace_tab == "baseline"
+    assert render_socket(baseline_tab_socket) =~ "Alignment &amp; Review"
+    refute render_socket(baseline_tab_socket) =~ "I am profiling the current Iteration candidate."
+
+    assert {:noreply, refreshed_baseline_tab_socket} =
+             PikaWeb.OptimizationLive.handle_info(:refresh, baseline_tab_socket)
+
+    assert refreshed_baseline_tab_socket.assigns.workspace_tab == "baseline"
 
     GenServer.stop(bootstrap)
     Auth.clear()

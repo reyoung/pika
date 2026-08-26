@@ -66,6 +66,35 @@ defmodule Pika.Test.FakeAgentBackend do
           stage: :completed
         })
 
+      "emit reasoning around tools" ->
+        emit(server, :message_delta, %{
+          item_id: "reasoning-1",
+          phase: "reasoning",
+          delta: "Inspect the repository."
+        })
+
+        tool = %{
+          "id" => "read-1",
+          "type" => "commandExecution",
+          "command" => "sed -n '1,20p' lib/pika.ex",
+          "status" => "inProgress"
+        }
+
+        emit(server, :tool_started, %{item: tool, stage: :started})
+        emit(server, :tool_completed, %{item: %{tool | "status" => "completed"}})
+
+        emit(server, :message_delta, %{
+          item_id: "reasoning-2",
+          phase: "reasoning",
+          delta: "Measure the candidate."
+        })
+
+        emit(server, :message_delta, %{
+          item_id: "commentary-3",
+          phase: "commentary",
+          delta: "Candidate is ready."
+        })
+
       "hold turn open" ->
         :ok
 

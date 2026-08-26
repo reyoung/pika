@@ -28,6 +28,16 @@ defmodule Pika.Baseline.DefinitionTest do
     assert byte_size(definition.dependencies_sha256) == 64
   end
 
+  test "normalizes the Definition path in dependency identity", %{root: root} do
+    assert {:ok, relative} = Definition.validate(root, "baseline-definition.json")
+
+    assert {:ok, absolute} =
+             Definition.validate(root, Path.join(root, "baseline-definition.json"))
+
+    assert relative.dependencies_sha256 == absolute.dependencies_sha256
+    assert relative.dependency_receipts == absolute.dependency_receipts
+  end
+
   test "rejects a tampered Target bundle", %{root: root} do
     File.write!(Path.join(root, "target/target.py"), "tampered\n")
 

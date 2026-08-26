@@ -204,6 +204,33 @@ defmodule Pika.Attempt.SchedulerTest do
     assert prompt =~ "--case-id 0,1"
   end
 
+  test "Iteration Prompt skips legacy failed Attempts without journals", %{
+    config: config,
+    workspace: workspace
+  } do
+    assert {:ok, [first, second]} = Scheduler.spawn_available(config)
+
+    Repo.query!(
+      "UPDATE attempts SET status = 'rejected', summary = 'workspace setup failed' WHERE id = ?",
+      [first.id]
+    )
+
+    first_root = Workspace.paths(workspace, first.id).root
+    File.rm!(Path.join(first_root, "message.jsonl"))
+    File.rm!(Path.join(first_root, "summary.jsonl"))
+
+    assert {:ok, prompt} =
+             PromptInput.render(
+               second.id,
+               config.workspace,
+               config.repo,
+               config.iteration.history_limit
+             )
+
+    refute prompt =~ "workspace setup failed"
+    assert prompt =~ "最近没有历史尝试。"
+  end
+
   defp set_status(id, status) do
     Repo.query!("UPDATE attempts SET status = ? WHERE id = ?", [status, id])
   end

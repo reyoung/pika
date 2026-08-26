@@ -223,6 +223,7 @@ defmodule Pika.Agent.Actor do
         {:noreply, state}
 
       type when type in [:tool_started, :tool_updated, :tool_completed, :file_changed] ->
+        state = maybe_flush_stream_output(state, true)
         {:noreply, record_tool_activity(state, event)}
 
       :turn_completed ->
@@ -731,6 +732,8 @@ defmodule Pika.Agent.Actor do
       |> Map.put("role", "assistant")
       |> Map.put("content", (message["content"] || "") <> delta)
       |> Map.put("complete", false)
+      |> put_message_metadata("phase", event.data[:phase] || event.data["phase"])
+      |> put_message_metadata("delivery", event.data[:delivery] || event.data["delivery"])
     end)
   end
 

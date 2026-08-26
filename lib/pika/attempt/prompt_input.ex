@@ -55,10 +55,14 @@ defmodule Pika.Attempt.PromptInput do
       SELECT id, summary, status
       FROM attempts
       WHERE id != ? AND status IN ('accepted', 'rejected')
-      ORDER BY id DESC LIMIT ?
+      ORDER BY id DESC
       """,
-      [attempt_id, history_limit]
+      [attempt_id]
     ).rows
+    |> Enum.filter(fn [id, _summary, _status] ->
+      attempt_history_available?(workspace_root, id)
+    end)
+    |> Enum.take(history_limit)
     |> Enum.reverse()
     |> Enum.map(fn [id, summary, status] ->
       %AttemptHistory{
@@ -68,6 +72,15 @@ defmodule Pika.Attempt.PromptInput do
         path: Workspace.paths(workspace_root, id).root
       }
     end)
+  end
+
+  defp attempt_history_available?(workspace_root, attempt_id) do
+    root = Workspace.paths(workspace_root, attempt_id).root
+
+    File.dir?(root) and
+      Enum.all?(~w(message.jsonl summary.jsonl), fn filename ->
+        File.regular?(Path.join(root, filename))
+      end)
   end
 
   defp stale_refresh(%{status: "refreshing_iteration", base_sha: best_sha}, best_repo) do

@@ -123,10 +123,46 @@ defmodule Pika.Test.FakeJSONLProvider do
       })
     end
 
-    notify_cursor(%{
-      "sessionUpdate" => "agent_message_chunk",
-      "content" => %{"type" => "text", "text" => "fake"}
-    })
+    if contains?(params["prompt"], "reasoning-stream") do
+      notify_cursor(%{
+        "sessionUpdate" => "agent_thought_chunk",
+        "content" => %{"type" => "text", "text" => "Inspect "}
+      })
+
+      notify_cursor(%{
+        "sessionUpdate" => "agent_thought_chunk",
+        "content" => %{"type" => "text", "text" => "the repository."}
+      })
+
+      notify_cursor(%{
+        "sessionUpdate" => "tool_call",
+        "toolCallId" => "reasoning-tool",
+        "kind" => "read",
+        "title" => "Read File",
+        "status" => "pending"
+      })
+
+      notify_cursor(%{
+        "sessionUpdate" => "tool_call_update",
+        "toolCallId" => "reasoning-tool",
+        "status" => "completed"
+      })
+
+      notify_cursor(%{
+        "sessionUpdate" => "agent_thought_chunk",
+        "content" => %{"type" => "text", "text" => "Measure the candidate."}
+      })
+
+      notify_cursor(%{
+        "sessionUpdate" => "agent_message_chunk",
+        "content" => %{"type" => "text", "text" => "Candidate is ready."}
+      })
+    else
+      notify_cursor(%{
+        "sessionUpdate" => "agent_message_chunk",
+        "content" => %{"type" => "text", "text" => "fake"}
+      })
+    end
 
     if contains?(params["prompt"], "hold") do
       %{state | prompt_id: id, active_turn: id}

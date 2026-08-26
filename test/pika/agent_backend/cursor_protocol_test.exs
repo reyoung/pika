@@ -182,6 +182,68 @@ defmodule Pika.AgentBackend.CursorProtocolTest do
     assert :ok = AgentBackend.close_session(backend)
   end
 
+  test "maps thought chunks into segmented reasoning messages around tools" do
+    workspace = git_workspace("cursor-reasoning-workspace")
+
+    profile = %{
+      backend: :cursor_acp,
+      command: System.find_executable("mix"),
+      args: ["run", "--no-compile", "--no-start", fake_provider(), "--"],
+      env: %{"PIKA_FAKE_PROTOCOL" => "cursor"},
+      artifact_dir: temp_dir("cursor-reasoning")
+    }
+
+    {:ok, backend} = AgentBackend.start_link(Pika.AgentBackend.CursorACP, profile, self())
+
+    assert {:ok, _session} =
+             AgentBackend.open_session(
+               backend,
+               workspace,
+               nil,
+               nil,
+               %{url: "http://127.0.0.1:1/mcp", token: "secret"},
+               [],
+               "Pika reasoning instructions"
+             )
+
+    assert_event(:session_started)
+    assert {:ok, _turn} = AgentBackend.start_turn(backend, "reasoning-stream")
+    assert_event(:turn_started)
+
+    assert %{data: %{item_id: "cursor-reasoning-1", phase: "reasoning", delta: "Inspect "}} =
+             assert_event(:message_delta)
+
+    assert %{
+             data: %{
+               item_id: "cursor-reasoning-1",
+               phase: "reasoning",
+               delta: "the repository."
+             }
+           } = assert_event(:message_delta)
+
+    assert_event(:tool_started)
+    assert_event(:tool_completed)
+
+    assert %{
+             data: %{
+               item_id: "cursor-reasoning-2",
+               phase: "reasoning",
+               delta: "Measure the candidate."
+             }
+           } = assert_event(:message_delta)
+
+    assert %{
+             data: %{
+               item_id: "cursor-commentary-3",
+               phase: "commentary",
+               delta: "Candidate is ready."
+             }
+           } = assert_event(:message_delta)
+
+    assert_event(:turn_completed)
+    assert :ok = AgentBackend.close_session(backend)
+  end
+
   test "loads a persisted ACP session when the provider advertises loadSession" do
     workspace = git_workspace("cursor-resume-workspace")
 

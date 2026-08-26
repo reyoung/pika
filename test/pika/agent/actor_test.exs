@@ -198,6 +198,45 @@ defmodule Pika.Agent.ActorTest do
            ]
   end
 
+  test "persists reasoning messages on both sides of tool activity", %{
+    opts: opts,
+    work: work
+  } do
+    actor = start_supervised!({Actor, opts})
+    assert_receive {:agent_actor_started, ^work, _session_id}, 2_000
+
+    assert :ok = Actor.kickoff(actor, "emit reasoning around tools")
+    assert eventually(fn -> Actor.status(actor).phase == :awaiting_user end)
+
+    [turn] = ConversationJournal.work_turns(work.role_id, work.kind, work.id)
+
+    assert Enum.map(turn.output_messages, &Map.take(&1, ["id", "phase", "content"])) == [
+             %{
+               "id" => "reasoning-1",
+               "phase" => "reasoning",
+               "content" => "Inspect the repository."
+             },
+             %{
+               "id" => "reasoning-2",
+               "phase" => "reasoning",
+               "content" => "Measure the candidate."
+             },
+             %{
+               "id" => "commentary-3",
+               "phase" => "commentary",
+               "content" => "Candidate is ready."
+             }
+           ]
+
+    assert turn.timeline_items == [
+             %{sequence: 1, kind: "input", item_index: 0},
+             %{sequence: 2, kind: "output", item_index: 0},
+             %{sequence: 3, kind: "tool", item_index: 0},
+             %{sequence: 4, kind: "output", item_index: 1},
+             %{sequence: 5, kind: "output", item_index: 2}
+           ]
+  end
+
   test "steers an active turn and keeps replacement-turn completion isolated", %{
     opts: opts,
     work: work

@@ -22,10 +22,10 @@ defmodule Pika.Attempt.Workspace do
     paths = paths(workspace_root, attempt_id)
 
     with :ok <- File.mkdir_p(paths.root),
+         :ok <- ensure_journals(paths.root),
          :ok <- prepare_worktree(best_repo, paths, best_sha),
          :ok <- verify_worktree(paths, best_sha),
-         :ok <- expose_target(paths.repo, target_root),
-         :ok <- ensure_journals(paths.root) do
+         :ok <- expose_target(paths.repo, target_root) do
       {:ok, paths}
     end
   end
@@ -65,6 +65,9 @@ defmodule Pika.Attempt.Workspace do
       File.exists?(link) and File.read_link(link) == {:ok, target_root} ->
         :ok
 
+      File.dir?(link) ->
+        replace_checked_out_target(repo, link, target_root)
+
       File.exists?(link) ->
         {:error, {:target_link_conflict, link}}
 
@@ -73,6 +76,30 @@ defmodule Pika.Attempt.Workspace do
              :ok <- exclude_target(repo) do
           :ok
         end
+    end
+  end
+
+  defp replace_checked_out_target(repo, link, target_root) do
+    with {:ok, status} <- Git.run(repo, ["status", "--porcelain=v1", "--", "target"]),
+         true <- String.trim(status) == "",
+         {:ok, output} <- Git.run(repo, ["ls-files", "-z", "--", "target"]),
+         tracked when tracked != [] <- String.split(output, "\0", trim: true),
+         :ok <- mark_skip_worktree(repo, tracked),
+         {:ok, _removed} <- File.rm_rf(link),
+         :ok <- File.ln_s(target_root, link),
+         :ok <- exclude_target(repo) do
+      :ok
+    else
+      false -> {:error, {:target_link_conflict, link}}
+      [] -> {:error, {:target_link_conflict, link}}
+      {:error, reason} -> {:error, {:target_link_conflict, link, reason}}
+    end
+  end
+
+  defp mark_skip_worktree(repo, paths) do
+    case Git.run(repo, ["update-index", "--skip-worktree", "--" | paths]) do
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 

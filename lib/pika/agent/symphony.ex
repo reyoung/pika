@@ -3,6 +3,8 @@ defmodule Pika.Agent.Symphony do
 
   use GenServer
 
+  require Logger
+
   alias Pika.Agent.{Actor, ConversationJournal, Directory, Work, WorkProjector}
   alias Pika.Baseline.Questions
   alias Pika.Optimization.{RoleRegistry, RuntimeConfig}
@@ -112,6 +114,12 @@ defmodule Pika.Agent.Symphony do
   def handle_info({:DOWN, monitor, :process, _pid, reason}, state) do
     {removed, actors} = pop_monitor(state.actors, monitor)
 
+    if removed && reason not in [:normal, :shutdown] do
+      Logger.error(
+        "Agent actor exited for #{inspect(Work.key(removed.work))}: #{inspect(reason)}"
+      )
+    end
+
     errors =
       if removed && reason not in [:normal, :shutdown],
         do: [{removed.work, reason} | Enum.take(state.errors, 19)],
@@ -145,10 +153,14 @@ defmodule Pika.Agent.Symphony do
       |> start_eligible(works, config)
       |> maybe_complete_draining()
     else
-      {:error, reason} -> %{state | errors: [reason | Enum.take(state.errors, 19)]}
+      {:error, reason} ->
+        Logger.error("Agent reconciliation failed: #{inspect(reason)}")
+        %{state | errors: [reason | Enum.take(state.errors, 19)]}
     end
   rescue
-    error -> %{state | errors: [Exception.message(error) | Enum.take(state.errors, 19)]}
+    error ->
+      Logger.error("Agent reconciliation raised: #{Exception.format(:error, error, __STACKTRACE__)}")
+      %{state | errors: [Exception.message(error) | Enum.take(state.errors, 19)]}
   end
 
   defp start_eligible(state, works, config) do
@@ -180,7 +192,9 @@ defmodule Pika.Agent.Symphony do
     case result do
       {:ok, pid} -> put_actor(state, work, pid)
       {:error, {:already_started, pid}} -> put_actor(state, work, pid)
-      {:error, reason} -> %{state | errors: [{work, reason} | Enum.take(state.errors, 19)]}
+      {:error, reason} ->
+        Logger.error("Agent actor failed to start for #{inspect(Work.key(work))}: #{inspect(reason)}")
+        %{state | errors: [{work, reason} | Enum.take(state.errors, 19)]}
     end
   end
 

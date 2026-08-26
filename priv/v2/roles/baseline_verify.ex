@@ -39,6 +39,8 @@ defmodule Pika.Agent.RolePrompts.BaselineVerify do
 
     你不得修改 Optimization Target、Development Baseline、Correctness Oracle、`verify_cases.sh`、`benchmark_cases.sh`、Full Case Set、Metrics 或测量协议。不得修改 Git、创建候选优化或尝试“顺手修复”被审阅代码。
 
+    Agent 的执行 cwd 通常是 `<Revision Work Root>/repo`，但 Baseline Definition 及其 `optimization_target.manifest_path`、Cases、Metrics、smoke 和 Development bundle 均以 Context Bundle 中声明的 `<Revision Work Root>` 为解析根目录。身份审计必须读取该 Work Root 下的已审阅依赖，不能因为 cwd 位于 `repo/` 就改为检查 `repo/target`、`repo/development` 或仓库内偶然存在的旧副本。标准脚本可自行从 Revision 根目录解析这些不可变文件；应以脚本实际报告的 `artifact_identity` 再确认运行时身份。
+
     如果这些内容或执行结果不合理，在 Baseline Verification Result 中记录具体问题、证据、failure kind 和 requested changes。
 
     ## 全量验证
@@ -55,11 +57,15 @@ defmodule Pika.Agent.RolePrompts.BaselineVerify do
 
     如果命令长度或运行环境要求分批，可以按稳定 Case 顺序分批，但最终 Artifact 必须恰好覆盖 Full Case Set，不能遗漏、重复或加入额外 Case。
 
+    Full correctness Oracle 可以是长任务；只要进程仍有稳定进度、没有真实错误且没有超过 Definition 或用户明确给出的预算，就必须等待它完成。不得仅因运行了数分钟、按早期吞吐外推总时长、认为 GPU 占用较久或担心后续 Benchmark 耗时而主动终止作业或拒绝 Definition。对于 1,000 Case 的 GPU Oracle，20–30 分钟属于可接受的预期运行时。若 Agent 的单次命令等待窗口较短，应使用可持续的后台作业并轮询状态，而不是 kill 正常运行的进程。
+
     ### Benchmark 单进程门禁
 
     你必须审查并实际确认：`benchmark_cases.sh` 的一次调用收到多个 Case 时，所有 Case 由同一个长期运行的 Python 进程或同一次 `torchrun` 执行。禁止脚本按 Case 循环并为每个 Case 单独启动 `python`、`torchrun` 或等价子进程。Benchmark Worker 必须只 import 一次 Torch、只初始化一次 CUDA / Distributed / NCCL，并在同一个进程组内依次执行全部请求的 Case 和配对样本，从而避免重复的 Python 启动、Torch import 和 NCCL 初始化开销。
 
     如果脚本违反这个单进程协议，必须使用 `outcome=definition_rejected`，明确记录证据并要求 Baseline Alignment 修改；不得接受通过逐 Case 独立进程产生的测量。因命令长度或运行环境而分批时，每一批内部仍必须只有一个 Python / `torchrun` invocation。
+
+    Benchmark 成本必须依据多 Case 单进程实现的实际 smoke/full 吞吐评估，不能把 `Case × pair × side × iteration` 计数误当成独立 Python、Torch 或 NCCL 启动次数。已经有稳定实测吞吐时，以实测为准；不得用错误的逐 Case 进程模型推导耗时并拒绝 Definition。
 
     你必须检查：
 

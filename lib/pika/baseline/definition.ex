@@ -75,7 +75,7 @@ defmodule Pika.Baseline.Definition do
              metrics_file["metrics"]
            ) do
       receipts = %{
-        manifest_path => manifest_receipt,
+        manifest_receipt.relative_path => manifest_receipt,
         get_in(manifest, ["optimization_target", "manifest_path"]) => target_receipt,
         manifest["cases_path"] => cases_receipt,
         manifest["metrics_path"] => metrics_receipt,

@@ -108,6 +108,8 @@ defmodule Pika.AgentBackend.CursorACP do
        next_id: 1,
        backend_session_id: nil,
        active_turn_id: nil,
+       text_segment_sequence: 0,
+       text_segment_kind: nil,
        steer_waiter: nil,
        cwd: nil,
        model: nil,
@@ -403,7 +405,13 @@ defmodule Pika.AgentBackend.CursorACP do
         {:prompt, turn_id}
       )
 
-    state = %{state | active_turn_id: turn_id}
+    state =
+      Map.merge(state, %{
+        active_turn_id: turn_id,
+        text_segment_sequence: 0,
+        text_segment_kind: nil
+      })
+
     emit(state, :turn_started, turn_id: turn_id)
     {turn_id, state}
   end
@@ -485,9 +493,11 @@ defmodule Pika.AgentBackend.CursorACP do
   end
 
   defp map_session_update(%{"sessionUpdate" => "agent_message_chunk"} = update, state) do
-    content = update["content"] || %{}
-    emit(state, :message_delta, data: %{delta: content["text"] || update["textDelta"] || ""})
-    state
+    emit_text_chunk(update, state, "commentary")
+  end
+
+  defp map_session_update(%{"sessionUpdate" => "agent_thought_chunk"} = update, state) do
+    emit_text_chunk(update, state, "reasoning")
   end
 
   defp map_session_update(%{"sessionUpdate" => "plan"} = update, state) do
@@ -497,7 +507,7 @@ defmodule Pika.AgentBackend.CursorACP do
 
   defp map_session_update(%{"sessionUpdate" => "tool_call"} = update, state) do
     emit(state, :tool_started, data: update)
-    state
+    Map.put(state, :text_segment_kind, nil)
   end
 
   defp map_session_update(%{"sessionUpdate" => "tool_call_update"} = update, state) do
@@ -550,6 +560,33 @@ defmodule Pika.AgentBackend.CursorACP do
   end
 
   defp map_session_update(_update, state), do: state
+
+  defp emit_text_chunk(update, state, phase) do
+    content = update["content"] || %{}
+    delta = content["text"] || update["textDelta"] || ""
+    {item_id, state} = text_segment(state, phase)
+
+    emit(state, :message_delta,
+      data: %{delta: delta, item_id: item_id, phase: phase, delivery: "stream"}
+    )
+
+    state
+  end
+
+  defp text_segment(state, phase) do
+    sequence = Map.get(state, :text_segment_sequence, 0)
+
+    if Map.get(state, :text_segment_kind) == phase and sequence > 0 do
+      {"cursor-#{phase}-#{sequence}", state}
+    else
+      sequence = sequence + 1
+
+      {"cursor-#{phase}-#{sequence}",
+       state
+       |> Map.put(:text_segment_sequence, sequence)
+       |> Map.put(:text_segment_kind, phase)}
+    end
+  end
 
   defp cursor_raw_output(output) when is_binary(output), do: output
 
