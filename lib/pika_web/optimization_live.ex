@@ -122,11 +122,11 @@ defmodule PikaWeb.OptimizationLive do
 
   def handle_event("select_workspace_tab", _params, socket), do: {:noreply, socket}
 
-  def handle_event("toggle_attempt", %{"attempt" => attempt_id}, socket) do
+  def handle_event("select_attempt", %{"attempt" => attempt_id}, socket) do
     selected_attempt_id =
       case Integer.parse(attempt_id) do
         {id, ""} when id > 0 ->
-          if socket.assigns.selected_attempt_id == id, do: nil, else: id
+          id
 
         _other ->
           socket.assigns.selected_attempt_id
@@ -141,6 +141,9 @@ defmodule PikaWeb.OptimizationLive do
      |> assign(:session_accordion_initialized?, false)
      |> refresh()}
   end
+
+  def handle_event("toggle_attempt", params, socket),
+    do: handle_event("select_attempt", params, socket)
 
   def handle_event("select_baseline_revision", %{"revision" => revision}, socket) do
     selection =
@@ -770,44 +773,46 @@ defmodule PikaWeb.OptimizationLive do
                 <span class="ops-count">{length(@snapshot.attempts)} total</span>
               </header>
 
-              <div :if={@snapshot.attempts != []} class="ops-attempt-list">
-                <section :for={attempt <- @snapshot.attempts} class="ops-attempt-entry">
+              <nav
+                :if={@snapshot.attempts != []}
+                class="ops-attempt-tabs"
+                role="tablist"
+                aria-label="Optimization attempts"
+              >
                   <button
+                    :for={attempt <- @snapshot.attempts}
                     type="button"
-                    class="ops-attempt-toggle"
-                    phx-click="toggle_attempt"
+                    role="tab"
+                    class={if @selected_attempt_id == attempt.id, do: "is-active", else: nil}
+                    phx-click="select_attempt"
                     phx-value-attempt={attempt.id}
-                    aria-expanded={to_string(@selected_attempt_id == attempt.id)}
+                    aria-selected={to_string(@selected_attempt_id == attempt.id)}
                     aria-controls={"attempt-#{attempt.id}-details"}
+                    title={attempt.summary || attempt.failure_reason || "Agent is preparing this candidate…"}
                   >
-                    <span class="ops-attempt-index">#{attempt.id}</span>
-                    <span class="ops-attempt-summary">
-                      <strong>Iteration {attempt.iteration_round || 1}</strong>
-                      <small>{attempt.summary || attempt.failure_reason || "Agent is preparing this candidate…"}</small>
-                    </span>
-                    <code>{short_sha(attempt.base_sha)}</code>
-                    <.pill kind={status_kind(attempt.status)}>{humanize_status(attempt.status)}</.pill>
-                    <span class="ops-chevron">›</span>
+                    <strong>#{attempt.id}</strong>
+                    <span>{humanize_status(attempt.status)}</span>
                   </button>
+              </nav>
 
                   <div
-                    :if={@selected_attempt_id == attempt.id}
-                    id={"attempt-#{attempt.id}-details"}
+                    :if={@selected_attempt}
+                    id={"attempt-#{@selected_attempt.id}-details"}
                     class="ops-attempt-body"
                   >
                     <dl class="ops-attempt-facts">
-                      <div><dt>Attempt</dt><dd>#{attempt.id}</dd></div>
-                      <div><dt>Round</dt><dd>{attempt.iteration_round || "—"}</dd></div>
-                      <div><dt>Base SHA</dt><dd><code>{short_sha(attempt.base_sha)}</code></dd></div>
-                      <div><dt>Candidate</dt><dd><code>{short_sha(attempt.candidate_sha)}</code></dd></div>
+                      <div><dt>Attempt</dt><dd>#{@selected_attempt.id}</dd></div>
+                      <div><dt>Round</dt><dd>{@selected_attempt.iteration_round || "—"}</dd></div>
+                      <div><dt>Base SHA</dt><dd><code>{short_sha(@selected_attempt.base_sha)}</code></dd></div>
+                      <div><dt>Candidate</dt><dd><code>{short_sha(@selected_attempt.candidate_sha)}</code></dd></div>
                     </dl>
 
-                    <div :if={attempt.failure_reason} class="ops-attempt-failure">
+                    <div :if={@selected_attempt.failure_reason} class="ops-attempt-failure">
                       <span>Failure reason</span>
-                      <p>{attempt.failure_reason}</p>
+                      <p>{@selected_attempt.failure_reason}</p>
                     </div>
 
-                    <section id={"attempt-#{attempt.id}-agent-details"} class="ops-agent-inspector">
+                    <section id={"attempt-#{@selected_attempt.id}-agent-details"} class="ops-agent-inspector">
                       <header>
                         <div>
                           <p class="ops-eyebrow">Attempt agent</p>
@@ -988,8 +993,6 @@ defmodule PikaWeb.OptimizationLive do
                       </section>
                     </section>
                   </div>
-                </section>
-              </div>
 
               <div :if={@snapshot.attempts == []} class="ops-empty-state ops-history-empty">
                 <span>00</span>

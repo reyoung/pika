@@ -615,23 +615,27 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert attempts_html =~ "Iteration &amp; Integration"
     assert attempts_html =~ "Iteration Agent"
     assert attempts_html =~ "I am profiling the current Iteration candidate."
-    assert attempts_html =~ ~s(phx-value-attempt="2" aria-expanded="true")
+    assert attempts_html =~ ~s(class="ops-attempt-tabs")
+    assert attempts_html =~ ~s(role="tablist" aria-label="Optimization attempts")
+    assert attempts_html =~ ~s(phx-value-attempt="2" aria-selected="true")
 
     {attempt_one_position, _length} = :binary.match(attempts_html, ~s(phx-value-attempt="1"))
     {attempt_two_position, _length} = :binary.match(attempts_html, ~s(phx-value-attempt="2"))
     assert attempt_one_position < attempt_two_position
 
-    assert {:noreply, collapsed_attempt_socket} =
+    assert {:noreply, first_attempt_socket} =
              PikaWeb.OptimizationLive.handle_event(
-               "toggle_attempt",
-               %{"attempt" => "2"},
+               "select_attempt",
+               %{"attempt" => "1"},
                attempts_socket
              )
 
-    assert collapsed_attempt_socket.assigns.selected_attempt_id == nil
+    assert first_attempt_socket.assigns.selected_attempt_id == 1
+    first_attempt_html = render_socket(first_attempt_socket)
+    assert first_attempt_html =~ "target setup failed"
+    assert first_attempt_html =~ ~s(phx-value-attempt="1" aria-selected="true")
 
-    refute render_socket(collapsed_attempt_socket) =~
-             "I am profiling the current Iteration candidate."
+    refute first_attempt_html =~ "I am profiling the current Iteration candidate."
 
     assert {:noreply, baseline_tab_socket} =
              PikaWeb.OptimizationLive.handle_event(
