@@ -88,15 +88,30 @@ defmodule Pika.Attempt.SchedulerTest do
     assert {:ok, []} = Scheduler.spawn_available(config)
   end
 
-  test "max pending gate defaults to unlimited but positive values pause spawn", %{config: config} do
+  test "max pending gate defaults to waiting for all pending Attempts", %{config: config} do
     assert config.iteration.max_pending_attempts == 0
     assert {:ok, [first, second]} = Scheduler.spawn_available(config)
     set_status(first.id, "ready_for_integration")
     set_status(second.id, "rejected")
 
-    limited = %{config | iteration: %{config.iteration | max_pending_attempts: 1}}
     assert Scheduler.pending_count() == 1
-    assert {:ok, []} = Scheduler.spawn_available(limited)
+    assert {:ok, []} = Scheduler.spawn_available(config)
+
+    set_status(first.id, "rejected")
+    assert Scheduler.pending_count() == 0
+    assert {:ok, [_first, _second]} = Scheduler.spawn_available(config)
+  end
+
+  test "positive max pending values allow new work below the configured threshold", %{
+    config: config
+  } do
+    assert {:ok, [first, second]} = Scheduler.spawn_available(config)
+    set_status(first.id, "ready_for_integration")
+    set_status(second.id, "rejected")
+
+    limited = %{config | iteration: %{config.iteration | max_pending_attempts: 2}}
+    assert Scheduler.pending_count() == 1
+    assert {:ok, [_first, _second]} = Scheduler.spawn_available(limited)
   end
 
   test "refuses to spawn from a mutated Target Snapshot", %{config: config} do

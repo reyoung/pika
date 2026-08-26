@@ -119,7 +119,7 @@ agents:
 
 缺少 `baseline_alignment`、`baseline_verify`、非空 `iteration.agents` 或 `integration` 时拒绝启动。可选 Role一旦出现就必须包含完整合法 Backend 配置。
 
-`history_limit` 是非负整数；Iteration Context 取最近这些终态 Attempt，不区分 Accepted/Rejected。`max_pending_attempts=0` 表示无限制。`regression_feedback_cases` 是 Integration 每次最多加入 Iteration Sample 的回退 Case 数。`progress_summary.timezone` 是 IANA 时区名，默认 `Asia/Shanghai`。
+`history_limit` 是非负整数；Iteration Context 取最近这些终态 Attempt，不区分 Accepted/Rejected。`max_pending_attempts=0` 表示只在所有待验证 Attempt 都已终态后才启动新的 Iteration 批次；正整数表示 pending 数量低于该阈值时允许启动新批次。`regression_feedback_cases` 是 Integration 每次最多加入 Iteration Sample 的回退 Case 数。`progress_summary.timezone` 是 IANA 时区名，默认 `Asia/Shanghai`。
 
 ### Reference Projects
 

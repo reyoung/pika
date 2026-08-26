@@ -476,8 +476,9 @@ defmodule Pika.Integration.LifecycleTest do
     config: config,
     workspace: workspace
   } do
-    %{attempt: first} = ready_attempt(config, workspace)
-    %{attempt: second} = ready_attempt(config, workspace)
+    queue_config = %{config | iteration: %{config.iteration | max_pending_attempts: 2}}
+    %{attempt: first} = ready_attempt(queue_config, workspace)
+    %{attempt: second} = ready_attempt(queue_config, workspace)
     best_before = Git.run!(baseline.repo, ["rev-parse", "pika/best"])
 
     assert {:ok, ids} =

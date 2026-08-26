@@ -390,7 +390,7 @@ defmodule Pika.Attempt.Scheduler do
     end
   end
 
-  defp spawn_allowed?(0), do: true
+  defp spawn_allowed?(0), do: pending_count() == 0
   defp spawn_allowed?(limit), do: pending_count() < limit
 
   defp require_optimizing do

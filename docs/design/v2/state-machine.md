@@ -128,7 +128,7 @@ scheduled
 
 pending 数量包括 `ready_for_integration`、`refreshing_iteration` 和 `integrating`。普通 `iterating` 不计入。
 
-- `max_pending_attempts=0`：不限制。
+- `max_pending_attempts=0`：只在 pending 队列为空时启动新的 Iteration 批次。
 - 正整数：pending 达到该值时停止创建新 Attempt。
 - 已运行 Iteration 不被取消。
 - 数量下降到阈值以下时恢复 spawn。

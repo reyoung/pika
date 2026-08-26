@@ -82,7 +82,7 @@ project_work()
 
 ### Attempt Scheduler
 
-分配整数 Attempt ID、冻结创建时 Best/Sampling/Guidance/Reference Projects、按 `iteration.agents` slots 启动并发工作、维护最近历史投影并施加 pending gate。`max_pending_attempts=0` 表示不限制。
+分配整数 Attempt ID、冻结创建时 Best/Sampling/Guidance/Reference Projects、按 `iteration.agents` slots 启动并发工作、维护最近历史投影并施加 pending gate。`max_pending_attempts=0` 表示 pending 队列清空后才启动新的 Iteration 批次。
 
 当 FIFO 队首 Attempt 的 Base 落后于当前 Best 时，Scheduler 不启动 Integration，而是给同一 Attempt 新建 Iteration Round。该 Attempt 保持队首，Initial User Prompt 要求 `git merge <current-best-sha>`；队列在 refresh 完成前不越过它。
 

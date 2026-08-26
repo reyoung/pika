@@ -123,6 +123,6 @@ Request 保存 snapshot cursor、previous summary、status 和目录；Result �
 
 ## 7. Pending 与索引
 
-pending 查询覆盖 Attempt status `ready_for_integration|refreshing_iteration|integrating`。`max_pending_attempts=0` 时不施加 gate。
+pending 查询覆盖 Attempt status `ready_for_integration|refreshing_iteration|integrating`。`max_pending_attempts=0` 时，只有 pending 查询结果为 0 才允许启动新的 Iteration 批次。
 
 必须建立：Attempt status/id、Integration FIFO/status、Agent Session Work/status、Backend failure Work/chain/endpoint、Conversation Work/sequence、Follow-up target/status、Progress active status、Domain Event aggregate/sequence 与 Artifact owner/path 索引。
