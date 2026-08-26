@@ -162,11 +162,17 @@ defmodule Pika.Agent.CommandRouter do
          binding,
          "prepare_best_update",
          %{"validation_path" => path},
-         _config,
+         config,
          _opts
        ) do
     with {:ok, attempt_id} <- integer_id(binding.work_id),
-         do: IntegrationLifecycle.prepare_best_update(attempt_id, binding.work_root, path)
+         do:
+           IntegrationLifecycle.prepare_best_update(
+             attempt_id,
+             binding.work_root,
+             path,
+             config
+           )
   end
 
   defp dispatch_command(

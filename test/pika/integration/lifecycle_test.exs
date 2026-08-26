@@ -74,15 +74,20 @@ defmodule Pika.Integration.LifecycleTest do
 
     assert [%{role_id: "integration", work_id: work_id}] = IntegrationLifecycle.project_work()
     assert work_id == to_string(attempt.id)
-    assert {:ok, prompt} = PromptInput.render(attempt.id)
+
+    assert {:ok, prompt} =
+             PromptInput.render(attempt.id, config.integration.regression_feedback_cases)
+
     assert prompt =~ "./verify_cases.sh --case-id 0,1"
     assert prompt =~ "./benchmark_cases.sh --case-id 0,1"
+    assert prompt =~ "最多 2 个 Sampling Feedback Case IDs"
 
     assert {:ok, prepared} =
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               integration_path(attempt, :validation)
+               integration_path(attempt, :validation),
+               config
              )
 
     assert prepared.run.status == "best_update_prepared"
@@ -94,7 +99,8 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               integration_path(attempt, :validation)
+               integration_path(attempt, :validation),
+               config
              )
 
     assert repeated.intent.id == prepared.intent.id
@@ -163,7 +169,8 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               integration_path(attempt, :validation)
+               integration_path(attempt, :validation),
+               config
              )
 
     assert decision.outcome == :rejected
@@ -173,6 +180,60 @@ defmodule Pika.Integration.LifecycleTest do
     assert Repo.query!("SELECT status FROM integration_runs").rows == [["queued"]]
     assert Repo.query!("SELECT COUNT(*) FROM operation_intents").rows == [[0]]
     assert Git.run!(baseline.repo, ["rev-parse", "pika/best"]) == attempt.base_sha
+  end
+
+  test "rejects excess Validation feedback before freezing artifacts or issuing an Intent", %{
+    baseline: baseline,
+    config: config,
+    workspace: workspace
+  } do
+    %{attempt: attempt, paths: paths} = ready_attempt(config, workspace)
+    strict_config = put_in(config.integration.regression_feedback_cases, 1)
+
+    write_validation(
+      paths,
+      baseline,
+      attempt,
+      benchmark([0, 1], :improved),
+      "accepted",
+      [],
+      [0, 1]
+    )
+
+    assert {:error, {:sampling_feedback_limit_exceeded, 1}} =
+             IntegrationLifecycle.prepare_best_update(
+               attempt.id,
+               paths.root,
+               integration_path(attempt, :validation),
+               strict_config
+             )
+
+    assert Repo.query!("SELECT status FROM integration_runs WHERE attempt_id = ?", [attempt.id]).rows ==
+             [["queued"]]
+
+    assert Repo.query!("SELECT COUNT(*) FROM operation_intents").rows == [[0]]
+
+    assert Repo.query!("SELECT COUNT(*) FROM artifacts WHERE owner_type = 'integration_run'").rows ==
+             [[0]]
+
+    write_validation(
+      paths,
+      baseline,
+      attempt,
+      benchmark([0, 1], :improved),
+      "accepted"
+    )
+
+    assert {:ok, prepared} =
+             IntegrationLifecycle.prepare_best_update(
+               attempt.id,
+               paths.root,
+               integration_path(attempt, :validation),
+               strict_config
+             )
+
+    assert prepared.run.status == "best_update_prepared"
+    assert prepared.intent.state == "pending"
   end
 
   test "uses the persisted guard max regression ratio during Integration", %{
@@ -194,7 +255,8 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               integration_path(attempt, :validation)
+               integration_path(attempt, :validation),
+               config
              )
 
     guard =
@@ -240,7 +302,8 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               integration_path(attempt, :validation)
+               integration_path(attempt, :validation),
+               config
              )
 
     best_after = squash_candidate(baseline.repo, attempt)
@@ -377,7 +440,8 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               integration_path(attempt, :validation)
+               integration_path(attempt, :validation),
+               config
              )
 
     assert prepared.run.status == "best_update_prepared"
@@ -449,7 +513,8 @@ defmodule Pika.Integration.LifecycleTest do
              IntegrationLifecycle.prepare_best_update(
                attempt.id,
                paths.root,
-               integration_path(attempt, :validation)
+               integration_path(attempt, :validation),
+               config
              )
 
     best_after = squash_candidate(baseline.repo, attempt)

@@ -12,8 +12,10 @@ defmodule Pika.Integration.PromptInput do
 
   @active_statuses ~w(ready_for_integration integrating)
 
-  @spec build(pos_integer(), [Section.t()]) :: {:ok, Input.t()} | {:error, term()}
-  def build(attempt_id, sections \\ []) do
+  @spec build(pos_integer(), non_neg_integer(), [Section.t()]) ::
+          {:ok, Input.t()} | {:error, term()}
+  def build(attempt_id, regression_feedback_cases, sections \\ [])
+      when is_integer(regression_feedback_cases) and regression_feedback_cases >= 0 do
     with {:ok, attempt} <- Lifecycle.fetch_attempt(attempt_id),
          :ok <- require_active(attempt),
          {:ok, run} <- IntegrationLifecycle.ensure_active_run(attempt),
@@ -27,14 +29,17 @@ defmodule Pika.Integration.PromptInput do
          run_id: run.id,
          run_sequence: run.run_sequence,
          paths: RunPaths.for_run(run.run_sequence),
+         regression_feedback_cases: regression_feedback_cases,
          sections: sections
        }}
     end
   end
 
-  @spec render(pos_integer(), [Section.t()]) :: {:ok, String.t()} | {:error, term()}
-  def render(attempt_id, sections \\ []) do
-    with {:ok, input} <- build(attempt_id, sections), do: Integration.system_prompt(input)
+  @spec render(pos_integer(), non_neg_integer(), [Section.t()]) ::
+          {:ok, String.t()} | {:error, term()}
+  def render(attempt_id, regression_feedback_cases, sections \\ []) do
+    with {:ok, input} <- build(attempt_id, regression_feedback_cases, sections),
+         do: Integration.system_prompt(input)
   end
 
   defp require_active(%{status: status}) when status in @active_statuses, do: :ok

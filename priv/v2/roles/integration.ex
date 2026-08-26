@@ -9,7 +9,8 @@ defmodule Pika.Agent.RolePrompts.Integration.Input do
     :result_schema,
     :run_id,
     :run_sequence,
-    :paths
+    :paths,
+    :regression_feedback_cases
   ]
   defstruct @enforce_keys ++ [sections: []]
 
@@ -20,6 +21,7 @@ defmodule Pika.Agent.RolePrompts.Integration.Input do
           run_id: pos_integer(),
           run_sequence: pos_integer(),
           paths: map(),
+          regression_feedback_cases: non_neg_integer(),
           sections: [Section.t()]
         }
 end
@@ -50,7 +52,8 @@ defmodule Pika.Agent.RolePrompts.Integration do
            input.result_schema,
            input.run_id,
            input.run_sequence,
-           input.paths
+           input.paths,
+           input.regression_feedback_cases
          )
        ]
        |> IO.iodata_to_binary()
@@ -69,7 +72,15 @@ defmodule Pika.Agent.RolePrompts.Integration do
     |> String.trim()
   end
 
-  defp instructions(case_ids, validation_schema, result_schema, run_id, run_sequence, paths) do
+  defp instructions(
+         case_ids,
+         validation_schema,
+         result_schema,
+         run_id,
+         run_sequence,
+         paths,
+         regression_feedback_cases
+       ) do
     """
 
 
@@ -127,7 +138,7 @@ defmodule Pika.Agent.RolePrompts.Integration do
 
     - 具体 reason；
     - 所有 regressed Case IDs；
-    - 最多 `regression_feedback_cases` 个 Sampling Feedback Case IDs；
+    - 最多 #{regression_feedback_cases} 个 Sampling Feedback Case IDs；超过该上限的 Validation 会在签发 Git Intent 前被拒绝，此时应缩减列表并重新提交同一个 Run 的 Validation；
     - 每个反馈 Case 的选择理由。
 
     然后调用 `finish_integration(result_path, idempotency_key)`。Reject 不得修改 Best。

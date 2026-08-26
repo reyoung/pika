@@ -64,9 +64,14 @@ defmodule Pika.Agent.PromptBuilder do
     end
   end
 
-  defp system_prompt(_config, %Work{role_id: "integration", id: id}, _context, sections) do
+  defp system_prompt(config, %Work{role_id: "integration", id: id}, _context, sections) do
     with {:ok, attempt_id} <- integer_id(id),
-         do: IntegrationPromptInput.render(attempt_id, sections)
+         do:
+           IntegrationPromptInput.render(
+             attempt_id,
+             config.integration.regression_feedback_cases,
+             sections
+           )
   end
 
   defp system_prompt(

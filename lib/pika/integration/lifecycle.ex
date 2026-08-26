@@ -86,8 +86,9 @@ defmodule Pika.Integration.Lifecycle do
     end
   end
 
-  @spec prepare_best_update(pos_integer(), Path.t(), Path.t()) :: {:ok, map()} | {:error, term()}
-  def prepare_best_update(attempt_id, attempt_root, validation_path) do
+  @spec prepare_best_update(pos_integer(), Path.t(), Path.t(), Config.t()) ::
+          {:ok, map()} | {:error, term()}
+  def prepare_best_update(attempt_id, attempt_root, validation_path, %Config{} = config) do
     with {:ok, attempt} <- Lifecycle.fetch_attempt(attempt_id),
          :ok <- require_queue_head(attempt),
          {:ok, run} <- ensure_active_run(attempt),
@@ -122,6 +123,12 @@ defmodule Pika.Integration.Lifecycle do
              context.cases,
              context.metrics,
              validation["judgements"]
+           ),
+         :ok <-
+           validate_validation_feedback(
+             validation,
+             decision,
+             config.integration.regression_feedback_cases
            ),
          :ok <- require_accepted_decision(validation, decision),
          :ok <- validate_reported_aggregates(validation, decision),
@@ -916,6 +923,17 @@ defmodule Pika.Integration.Lifecycle do
     decision = Jason.decode!(run.judgement_json)
     regressed = MapSet.new(decision["regressed_case_ids"] || [])
 
+    validate_feedback_ids(feedback_ids, regressed, limit)
+  end
+
+  defp validate_validation_feedback(validation, decision, limit) do
+    feedback_ids = validation["sampling_feedback_case_ids"]
+    regressed = MapSet.new(decision.regressed_case_ids || [])
+
+    validate_feedback_ids(feedback_ids, regressed, limit)
+  end
+
+  defp validate_feedback_ids(feedback_ids, regressed, limit) do
     cond do
       length(feedback_ids) > limit ->
         {:error, {:sampling_feedback_limit_exceeded, limit}}

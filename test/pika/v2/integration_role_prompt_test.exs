@@ -40,6 +40,8 @@ defmodule Pika.Agent.IntegrationRolePromptTest do
     assert prompt =~ "PIKA_CANDIDATE_MANIFEST"
     assert prompt =~ "Integration Run 是 ID `42`、sequence `2`"
     assert prompt =~ "`integration/runs/000002/integration-result.json`"
+    assert prompt =~ "最多 3 个 Sampling Feedback Case IDs"
+    refute prompt =~ "最多 `regression_feedback_cases` 个"
     assert prompt =~ "[integration-validation.schema.json](<#{schemas.integration_validation}>)"
     assert prompt =~ "[integration-result.schema.json](<#{schemas.integration_result}>)"
   end
@@ -77,6 +79,7 @@ defmodule Pika.Agent.IntegrationRolePromptTest do
       run_id: 42,
       run_sequence: 2,
       paths: RunPaths.for_run(2),
+      regression_feedback_cases: 3,
       sections: sections
     }
   end
