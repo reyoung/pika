@@ -34,16 +34,21 @@ defmodule Pika.Agent.BackendConfigTest do
       artifact_dir: "/tmp/artifacts"
     }
 
-    paths = %{work_root: "/workspace/attempts/000007", cwd: "/workspace/best"}
+    paths = %{
+      work_root: "/workspace/attempts/000007/rounds/000002",
+      cwd: "/workspace/attempts/000007/rounds/000002/repo",
+      candidate_repo: "/workspace/attempts/000007/rounds/000002/repo"
+    }
 
     for role_id <- ["iteration", "integration"] do
       work = %Work{role_id: role_id, kind: :attempt, id: "7"}
       configured = BackendConfig.inject_attempt_runtime_env(launch_config, work, paths)
 
-      assert configured.env["PIKA_ATTEMPT_ROOT"] == "/workspace/attempts/000007"
+      assert configured.env["PIKA_ATTEMPT_ROOT"] ==
+               "/workspace/attempts/000007/rounds/000002"
 
       assert configured.env["PIKA_CANDIDATE_MANIFEST"] ==
-               "/workspace/attempts/000007/repo/candidate/manifest.json"
+               "/workspace/attempts/000007/rounds/000002/repo/candidate/manifest.json"
 
       assert configured.env["KEEP_ME"] == "yes"
     end

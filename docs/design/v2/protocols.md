@@ -304,7 +304,7 @@ outcome 是 `accepted` 或 `definition_rejected`。accepted details 包含 Basel
 
 ### Iteration
 
-`iteration-result.json` 必须符合 Pika-owned `iteration-result.schema.json`。outcome 是 `ready_for_integration` 或 `rejected`。ready details 包含 Attempt ID、Iteration Round、Base/Candidate SHA、Sampling Revision、hypothesis、changes 与 risks，并引用完整 sampled Verify、Benchmark 和 Patch。rejected 可以没有正式测量或代码修改，但必须包含具体 failure reason 和已有证据。
+每个 Iteration Round 使用独立的 `attempts/<attempt>/rounds/<round>/` workspace 和 Git worktree；首轮为兼容现有布局可使用 Attempt 根目录。Result、Verify、Benchmark、Patch 与 Candidate 都只能写入当前 Round workspace，不能覆盖前一轮 Artifact。当前 Round 根目录中的 `iteration-result.json` 必须符合 Pika-owned `iteration-result.schema.json`，且 `finish_iteration` 只接受该固定相对路径。outcome 是 `ready_for_integration` 或 `rejected`。ready details 包含 Attempt ID、Iteration Round、Base/Candidate SHA、Sampling Revision、hypothesis、changes 与 risks，并引用完整 sampled Verify、Benchmark 和 Patch。rejected 可以没有正式测量或代码修改，但必须包含具体 failure reason 和已有证据。
 
 ### Integration
 

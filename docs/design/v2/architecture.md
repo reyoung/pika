@@ -13,7 +13,12 @@ Optimization Workspace
 │   ├── revisions/<revision>/
 │   └── target/                        # 当前只读 Target Snapshot
 ├── attempts/<integer-id>/
-│   └── reference-projects.json        # 该 Attempt 冻结的 Reference manifest
+│   ├── repo/                           # Round 1 Git worktree（兼容首轮布局）
+│   ├── reference-projects.json         # 该 Attempt 冻结的 Reference manifest
+│   └── rounds/<round>/
+│       ├── repo/                       # stale refresh 的独立 Git worktree
+│       ├── iteration-result.json
+│       └── artifacts/                  # 当前 Round 独占测量与 Patch
 ├── refs/<id>/                         # Pika-owned 固定 Git checkout
 ├── agent-sessions/<session-id>/
 ├── follow-ups/<role>/<work-id>/
@@ -84,7 +89,7 @@ project_work()
 
 分配整数 Attempt ID、冻结创建时 Best/Sampling/Guidance/Reference Projects、按 `iteration.agents` slots 启动并发工作、维护最近历史投影并施加 pending gate。`max_pending_attempts=0` 表示 pending 队列清空后才启动新的 Iteration 批次。
 
-当 FIFO 队首 Attempt 的 Base 落后于当前 Best 时，Scheduler 不启动 Integration，而是给同一 Attempt 新建 Iteration Round。该 Attempt 保持队首，Initial User Prompt 要求 `git merge <current-best-sha>`；队列在 refresh 完成前不越过它。
+当 FIFO 队首 Attempt 的 Base 落后于当前 Best 时，Scheduler 不启动 Integration，而是给同一 Attempt 新建独立 Iteration Round workspace、Git worktree 和 branch。该 Attempt 保持队首，Initial User Prompt 要求只在当前 Round 执行 `git merge <current-best-sha>`；队列在 refresh 完成前不越过它。Actor 的 cwd、`PIKA_ATTEMPT_ROOT`、Candidate manifest 与终态 MCP 文件解析都绑定当前 Round；Integration 通过 `iteration_rounds` 定位当前 Candidate，不假设 `attempt/repo` 永远是最新候选。
 
 ### Integration Lifecycle
 

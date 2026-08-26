@@ -302,7 +302,7 @@ defmodule Pika.Agent.PromptBuilder do
         [attempt_id]
       ).rows
 
-    "Attempt #{attempt_id} 的旧 Base #{previous_base} 已 stale，当前 Best 是 #{current_base}。先读取 #{context}，在本 Attempt branch 上执行 `git merge #{current_base}`，解决冲突并重新运行当前 Sampling Cases；重新估算结果后调用 `finish_iteration`。"
+    "Attempt #{attempt_id} 的旧 Base #{previous_base} 已 stale，当前 Best 是 #{current_base}。本次 Session 已进入独立的 Round workspace；先读取 #{context}，只在当前 Round 的 Git branch 上执行 `git merge #{current_base}`，解决冲突并重新运行当前 Sampling Cases。不要覆盖上一 Round 的任何 Result 或测量文件；完成后在当前 Round 根目录写 `iteration-result.json`，并以该固定相对路径调用 `finish_iteration`。"
   end
 
   defp attempt_status(attempt_id) do

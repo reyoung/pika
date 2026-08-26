@@ -53,7 +53,7 @@ Best Revision 0 来自 accepted Baseline Verification；之后每个 Accepted At
 
 ### `iteration_rounds`
 
-保存 Attempt ID、round number、kind=`initial|stale_refresh|recovery`、Base SHA、Session identity、Result Manifest 与终态。`(attempt_id, round)` 唯一。
+保存 Attempt ID、round number、kind=`initial|stale_refresh|recovery`、Base SHA、Round 独占的 `work_relative_path`/branch、该轮 Candidate SHA、Session identity、Result Manifest 与终态。`(attempt_id, round)` 唯一。旧数据库迁移时历史 Round 指向原 Attempt workspace；迁移后创建的 stale refresh 必须使用新的 `attempts/<id>/rounds/<round>/` workspace。
 
 ### `attempt_metrics`
 

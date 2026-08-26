@@ -126,7 +126,60 @@ defmodule Pika.Attempt.LifecycleTest do
     assert [[1]] =
              Repo.query!(
                "SELECT COUNT(*) FROM artifacts WHERE owner_type = 'attempt' AND owner_id = ? AND kind = 'iteration_benchmark'",
-               [to_string(attempt.id)]
+               ["#{attempt.id}:round:1"]
+             ).rows
+  end
+
+  test "stale refresh writes immutable artifacts in an independent Round workspace", %{
+    baseline: baseline,
+    config: config,
+    workspace: workspace
+  } do
+    assert {:ok, [attempt]} = Scheduler.spawn_available(config)
+    first_paths = Workspace.paths(workspace, attempt.id)
+    candidate_sha = commit_candidate(first_paths.repo, "round one candidate")
+    write_ready_result(first_paths, attempt, candidate_sha)
+
+    assert {:ok, ready} = Lifecycle.finish(attempt.id, first_paths.root, "iteration-result.json")
+    first_result = File.read!(Path.join(first_paths.root, "iteration-result.json"))
+    advance_best(baseline.repo, candidate_sha, attempt.id)
+
+    assert {:refresh, refreshed} = Scheduler.next_queue_action()
+    second_paths = Workspace.round_paths(workspace, attempt.id, 2)
+    assert second_paths.root != first_paths.root
+    assert File.dir?(second_paths.repo)
+    assert Git.run!(second_paths.repo, ["rev-parse", "HEAD"]) == ready.candidate_sha
+
+    write_rejected_result(second_paths, refreshed)
+
+    assert {:error, {:iteration_round_workspace_mismatch, _details}} =
+             Lifecycle.finish(attempt.id, first_paths.root, "iteration-result.json")
+
+    assert {:error, {:iteration_result_path_mismatch, "iteration-result-round2.json"}} =
+             Lifecycle.finish(attempt.id, second_paths.root, "iteration-result-round2.json")
+
+    assert {:ok, rejected} =
+             Lifecycle.finish(attempt.id, second_paths.root, "iteration-result.json")
+
+    assert rejected.status == "rejected"
+    assert File.read!(Path.join(first_paths.root, "iteration-result.json")) == first_result
+
+    assert [
+             [1, first_relative, "completed"],
+             [2, second_relative, "rejected"]
+           ] =
+             Repo.query!(
+               "SELECT round, work_relative_path, status FROM iteration_rounds WHERE attempt_id = ? ORDER BY round",
+               [attempt.id]
+             ).rows
+
+    assert first_relative == first_paths.relative_root
+    assert second_relative == second_paths.relative_root
+
+    assert [[2]] =
+             Repo.query!(
+               "SELECT COUNT(*) FROM artifacts WHERE owner_type = 'attempt' AND owner_id IN (?, ?) AND kind = 'iteration_result'",
+               ["#{attempt.id}:round:1", "#{attempt.id}:round:2"]
              ).rows
   end
 
@@ -272,6 +325,26 @@ defmodule Pika.Attempt.LifecycleTest do
     Git.run!(repo, ["add", "candidate.txt"])
     Git.run!(repo, ["commit", "-m", message])
     Git.run!(repo, ["rev-parse", "HEAD"])
+  end
+
+  defp advance_best(repo, sha, attempt_id) do
+    Git.run!(repo, ["branch", "-f", "pika/best", sha])
+    now = System.system_time(:microsecond)
+
+    [[baseline_revision_id]] =
+      Repo.query!("SELECT id FROM baseline_revisions WHERE status = 'accepted'").rows
+
+    Repo.query!(
+      """
+      INSERT INTO best_revisions(
+        optimization_id, sequence, sha, source_kind, source_attempt_id,
+        baseline_revision_id, summary, created_at
+      ) VALUES ('optimization', 1, ?, 'attempt', ?, ?, 'advanced', ?)
+      """,
+      [sha, attempt_id, baseline_revision_id, now]
+    )
+
+    Repo.query!("UPDATE optimizations SET best_sha = ? WHERE id = 'optimization'", [sha])
   end
 
   defp full_verify do

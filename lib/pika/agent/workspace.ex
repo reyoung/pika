@@ -27,16 +27,22 @@ defmodule Pika.Agent.Workspace do
   end
 
   def resolve(%Config{} = config, %Work{role_id: "iteration", id: id}) do
-    with {:ok, attempt_id} <- integer_id(id) do
-      paths = AttemptWorkspace.paths(config.workspace, attempt_id)
-      {:ok, %{work_root: paths.root, cwd: paths.repo}}
+    with {:ok, attempt_id} <- integer_id(id),
+         {:ok, round_paths} <- current_round_paths(config.workspace, attempt_id) do
+      {:ok,
+       %{
+         work_root: round_paths.root,
+         cwd: round_paths.repo,
+         candidate_repo: round_paths.repo
+       }}
     end
   end
 
   def resolve(%Config{} = config, %Work{role_id: "integration", id: id}) do
-    with {:ok, attempt_id} <- integer_id(id) do
+    with {:ok, attempt_id} <- integer_id(id),
+         {:ok, round_paths} <- current_round_paths(config.workspace, attempt_id) do
       paths = AttemptWorkspace.paths(config.workspace, attempt_id)
-      {:ok, %{work_root: paths.root, cwd: config.repo}}
+      {:ok, %{work_root: paths.root, cwd: config.repo, candidate_repo: round_paths.repo}}
     end
   end
 
@@ -102,6 +108,30 @@ defmodule Pika.Agent.Workspace do
       status
     else
       _other -> nil
+    end
+  end
+
+  defp current_round_paths(workspace, attempt_id) do
+    case Repo.query!(
+           """
+           SELECT r.work_relative_path
+           FROM attempts a
+           JOIN iteration_rounds r
+             ON r.attempt_id = a.id AND r.round = a.current_iteration_round
+           WHERE a.id = ?
+           """,
+           [attempt_id]
+         ).rows do
+      [[relative_root]] when is_binary(relative_root) ->
+        root = Path.join(workspace, relative_root)
+        {:ok, %{root: root, repo: Path.join(root, "repo")}}
+
+      [] ->
+        {:error, {:attempt_round_not_found, attempt_id}}
+
+      [[nil]] ->
+        paths = AttemptWorkspace.paths(workspace, attempt_id)
+        {:ok, %{root: paths.root, repo: paths.repo}}
     end
   end
 

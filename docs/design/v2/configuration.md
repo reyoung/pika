@@ -125,7 +125,7 @@ agents:
 
 每个条目必须包含能安全映射到 `ref/<id>` 的唯一 `id` 与 Git `url`；`url` 可以是 HTTP/SSH/Git URL、scp 风格地址或本地绝对路径。`description` 可省略，`revision` 可指定 branch、tag 或完整 commit SHA；省略 `revision` 时，首次使用该 ID 创建 Attempt 所观察到的默认 `HEAD` 会被固定。
 
-Pika 把首次解析的独立 checkout 放在 Workspace `refs/<id>`，把 URL、revision 与完整 SHA 写入 Pika-owned metadata。随后新建的 Attempt 在自身根目录保存 `reference-projects.json`，并在 Candidate repo 中创建 Git 忽略的 `ref/<id>` 软链接。Iteration System Prompt 只注入这个 Attempt manifest 中的项目说明、路径与固定 SHA；已有 Attempt 和恢复 Session 不读取新的列表。
+Pika 把首次解析的独立 checkout 放在 Workspace `refs/<id>`，把 URL、revision 与完整 SHA 写入 Pika-owned metadata。随后新建的 Attempt 在自身根目录保存 `reference-projects.json`，并在每个 Iteration Round 的独立 Candidate repo 中创建 Git 忽略的 `ref/<id>` 软链接。Iteration System Prompt 只注入这个 Attempt manifest 中的项目说明、当前 Round 路径与固定 SHA；已有 Attempt 和恢复 Session 不读取新的列表。
 
 同一 Workspace 内已物化 ID 的 URL/revision 不允许原地改变，因为仍在运行或保留的 Attempt 可能引用它。需要升级或替换仓库时使用新的 ID。checkout dirty、origin/metadata 不匹配、clone 或 revision 解析失败都会使新 Attempt 的准备失败，不会静默跳过 Reference。`ref/**` 是 protected path，即使 Agent 使用 `git add -f` 也不能进入 Candidate Patch；Reference 也不能作为 Correctness Oracle 或交付时的运行时依赖。
 

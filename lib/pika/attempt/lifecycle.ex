@@ -15,6 +15,8 @@ defmodule Pika.Attempt.Lifecycle do
              is_binary(result_path) do
     with {:ok, attempt} <- fetch_attempt(attempt_id),
          :ok <- require_open(attempt),
+         :ok <- require_round_workspace(attempt, attempt_root),
+         :ok <- require_result_path(result_path),
          {:ok, schemas} <- RolePromptRegistry.schemas(),
          {:ok, result, result_receipt} <-
            FileContract.validate_json(attempt_root, result_path, schemas.iteration_result),
@@ -308,7 +310,7 @@ defmodule Pika.Attempt.Lifecycle do
   end
 
   defp register_artifacts(attempt, result, verify, benchmark, patch) do
-    owner_id = to_string(attempt.id)
+    owner_id = round_owner_id(attempt)
 
     with {:ok, result_id} <-
            ArtifactStore.register("attempt", owner_id, "iteration_result", result),
@@ -325,7 +327,7 @@ defmodule Pika.Attempt.Lifecycle do
     with {:ok, result_id} <-
            ArtifactStore.register(
              "attempt",
-             to_string(attempt.id),
+             round_owner_id(attempt),
              "iteration_result",
              result
            ) do
@@ -334,7 +336,7 @@ defmodule Pika.Attempt.Lifecycle do
   end
 
   defp register_rejected_artifacts(attempt, result, measurement) do
-    owner_id = to_string(attempt.id)
+    owner_id = round_owner_id(attempt)
 
     with {:ok, result_id} <-
            ArtifactStore.register("attempt", owner_id, "iteration_result", result),
@@ -360,10 +362,16 @@ defmodule Pika.Attempt.Lifecycle do
         Repo.query!(
           """
           UPDATE iteration_rounds
-          SET result_artifact_id = ?, status = 'completed', completed_at = ?
+          SET result_artifact_id = ?, candidate_sha = ?, status = 'completed', completed_at = ?
           WHERE attempt_id = ? AND round = ? AND status = 'running'
           """,
-          [artifact_ids.result, now, attempt.id, attempt.current_iteration_round]
+          [
+            artifact_ids.result,
+            details["candidate_sha"],
+            now,
+            attempt.id,
+            attempt.current_iteration_round
+          ]
         )
 
         Repo.query!(
@@ -407,10 +415,16 @@ defmodule Pika.Attempt.Lifecycle do
         Repo.query!(
           """
           UPDATE iteration_rounds
-          SET result_artifact_id = ?, status = 'rejected', completed_at = ?
+          SET result_artifact_id = ?, candidate_sha = ?, status = 'rejected', completed_at = ?
           WHERE attempt_id = ? AND round = ? AND status = 'running'
           """,
-          [artifact_ids.result, now, attempt.id, attempt.current_iteration_round]
+          [
+            artifact_ids.result,
+            details["candidate_sha"],
+            now,
+            attempt.id,
+            attempt.current_iteration_round
+          ]
         )
 
         Repo.query!(
@@ -527,7 +541,10 @@ defmodule Pika.Attempt.Lifecycle do
     end)
   end
 
-  defp record_history(attempt_root, attempt, result) do
+  defp record_history(_round_root, attempt, result) do
+    optimization = Persistence.current()
+    attempt_root = Path.join(optimization.workspace_canonical_path, attempt.work_relative_path)
+
     History.record(attempt_root, attempt.id, %{
       attempt_id: attempt.id,
       iteration_round: attempt.current_iteration_round,
@@ -540,6 +557,32 @@ defmodule Pika.Attempt.Lifecycle do
 
   defp require_open(%{status: status}) when status in @open_statuses, do: :ok
   defp require_open(attempt), do: {:error, {:attempt_not_iterating, attempt.status}}
+
+  defp require_round_workspace(attempt, actual_root) do
+    case Repo.query!(
+           "SELECT work_relative_path FROM iteration_rounds WHERE attempt_id = ? AND round = ?",
+           [attempt.id, attempt.current_iteration_round]
+         ).rows do
+      [[relative_root]] when is_binary(relative_root) ->
+        workspace = Persistence.current().workspace_canonical_path
+        expected = Pika.Paths.canonical!(Path.join(workspace, relative_root))
+        actual = Pika.Paths.canonical!(actual_root)
+
+        if actual == expected,
+          do: :ok,
+          else:
+            {:error, {:iteration_round_workspace_mismatch, %{expected: expected, actual: actual}}}
+
+      _other ->
+        {:error, {:iteration_round_workspace_missing, attempt.current_iteration_round}}
+    end
+  end
+
+  defp require_result_path("iteration-result.json"), do: :ok
+  defp require_result_path(path), do: {:error, {:iteration_result_path_mismatch, path}}
+
+  defp round_owner_id(attempt),
+    do: "#{attempt.id}:round:#{attempt.current_iteration_round}"
 
   defp sampling_sequence(sampling_revision_id) do
     [[sequence]] =

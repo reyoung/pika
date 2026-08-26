@@ -50,6 +50,9 @@ defmodule Pika.Agent.IterationRolePromptTest do
     schema = schemas.iteration_result
     assert prompt =~ "[#{Path.basename(schema)}](<#{schema}>)"
     assert prompt =~ "finish_iteration(result_path, idempotency_key)"
+    assert prompt =~ "PIKA_ATTEMPT_ROOT"
+    assert prompt =~ "独占的 workspace"
+    assert prompt =~ "必须严格为 `iteration-result.json`"
 
     refute prompt =~ "Pika自行核验文件 digest、Git、Patch、protected paths 和 Metrics"
     refute prompt =~ "Turn 结束但没有终态 MCP"

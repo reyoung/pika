@@ -74,13 +74,15 @@ defmodule Pika.Agent.BackendConfig do
   def inject_attempt_runtime_env(
         %LaunchConfig{} = launch_config,
         %Work{role_id: role_id},
-        %{work_root: work_root}
+        %{work_root: work_root} = paths
       )
       when role_id in ["iteration", "integration"] do
+    candidate_repo = Map.get(paths, :candidate_repo, Path.join(work_root, "repo"))
+
     env =
       Map.merge(launch_config.env, %{
         "PIKA_ATTEMPT_ROOT" => work_root,
-        "PIKA_CANDIDATE_MANIFEST" => Path.join([work_root, "repo", "candidate", "manifest.json"])
+        "PIKA_CANDIDATE_MANIFEST" => Path.join([candidate_repo, "candidate", "manifest.json"])
       })
 
     %{launch_config | env: env}

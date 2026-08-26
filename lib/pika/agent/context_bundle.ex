@@ -141,13 +141,26 @@ defmodule Pika.Agent.ContextBundle do
          [row] <-
            Repo.query!(
              """
-             SELECT current_iteration_round, base_sha, sampling_revision_id,
-                    guidance_revision_id, candidate_sha, status, work_relative_path
-             FROM attempts WHERE optimization_id = ? AND id = ?
+             SELECT a.current_iteration_round, a.base_sha, a.sampling_revision_id,
+                    a.guidance_revision_id, a.candidate_sha, a.status, a.work_relative_path,
+                    r.work_relative_path
+             FROM attempts a
+             JOIN iteration_rounds r
+               ON r.attempt_id = a.id AND r.round = a.current_iteration_round
+             WHERE a.optimization_id = ? AND a.id = ?
              """,
              [@optimization_id, attempt_id]
            ).rows do
-      [round, base_sha, sampling_id, guidance_id, candidate_sha, status, work_relative_path] = row
+      [
+        round,
+        base_sha,
+        sampling_id,
+        guidance_id,
+        candidate_sha,
+        status,
+        work_relative_path,
+        round_work_relative_path
+      ] = row
 
       [[sampling_revision]] =
         Repo.query!("SELECT sequence FROM sampling_revisions WHERE id = ?", [sampling_id]).rows
@@ -166,6 +179,7 @@ defmodule Pika.Agent.ContextBundle do
          candidate_sha: candidate_sha,
          status: status,
          work_relative_path: work_relative_path,
+         round_work_relative_path: round_work_relative_path || work_relative_path,
          sampling_revision: sampling_revision,
          sampling_case_ids: case_ids,
          guidance: guidance(guidance_id)
@@ -221,6 +235,7 @@ defmodule Pika.Agent.ContextBundle do
       workspace_root: config.workspace,
       work_root: work_root,
       execution_cwd: execution_cwd,
+      round_workspace_root: if(role == "iteration", do: work_root, else: nil),
       files: Map.new(files, fn {key, path} -> {key, path} end)
     }
   end
@@ -232,7 +247,7 @@ defmodule Pika.Agent.ContextBundle do
   end
 
   defp context_paths(config, "iteration", _baseline, facts) do
-    root = Path.join(config.workspace, facts.work_relative_path)
+    root = Path.join(config.workspace, facts.round_work_relative_path)
     {root, Path.join(root, "repo")}
   end
 

@@ -17,6 +17,23 @@ defmodule Pika.Attempt.Workspace do
     }
   end
 
+  @spec round_paths(Path.t(), pos_integer(), pos_integer()) :: map()
+  def round_paths(workspace_root, attempt_id, 1), do: paths(workspace_root, attempt_id)
+
+  def round_paths(workspace_root, attempt_id, round)
+      when is_integer(round) and round > 1 do
+    attempt = paths(workspace_root, attempt_id)
+    round_name = round |> Integer.to_string() |> String.pad_leading(6, "0")
+    root = Path.join([attempt.root, "rounds", round_name])
+
+    %{
+      root: root,
+      repo: Path.join(root, "repo"),
+      branch: "#{attempt.branch}-round-#{round_name}",
+      relative_root: Path.join([attempt.relative_root, "rounds", round_name])
+    }
+  end
+
   @spec prepare(Path.t(), Path.t(), pos_integer(), String.t(), Path.t(), [ReferenceProject.t()]) ::
           {:ok, map()} | {:error, term()}
   def prepare(
@@ -41,6 +58,30 @@ defmodule Pika.Attempt.Workspace do
              paths.repo,
              reference_projects
            ) do
+      {:ok, paths}
+    end
+  end
+
+  @spec prepare_round(
+          Path.t(),
+          Path.t(),
+          pos_integer(),
+          pos_integer(),
+          String.t(),
+          Path.t()
+        ) :: {:ok, map()} | {:error, term()}
+  def prepare_round(best_repo, workspace_root, attempt_id, round, start_sha, target_root)
+      when is_integer(round) and round > 1 do
+    attempt = paths(workspace_root, attempt_id)
+    paths = round_paths(workspace_root, attempt_id, round)
+
+    with :ok <- File.mkdir_p(paths.root),
+         :ok <- ensure_journals(paths.root),
+         :ok <- prepare_worktree(best_repo, paths, start_sha),
+         :ok <- verify_worktree(paths, start_sha),
+         :ok <- expose_target(paths.repo, target_root),
+         {:ok, _snapshots} <-
+           Pika.ReferenceProject.prepare(workspace_root, attempt.root, paths.repo, []) do
       {:ok, paths}
     end
   end

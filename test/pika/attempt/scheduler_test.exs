@@ -210,6 +210,21 @@ defmodule Pika.Attempt.SchedulerTest do
     assert refreshed.current_iteration_round == 2
     assert refreshed.base_sha == new_best
 
+    round_paths = Workspace.round_paths(config.workspace, first.id, 2)
+    initial_paths = Workspace.paths(config.workspace, first.id)
+    assert round_paths.root != initial_paths.root
+    assert File.dir?(round_paths.repo)
+    assert Git.run!(round_paths.repo, ["rev-parse", "HEAD"]) == first.base_sha
+
+    assert [[relative_root, branch]] =
+             Repo.query!(
+               "SELECT work_relative_path, branch FROM iteration_rounds WHERE attempt_id = ? AND round = 2",
+               [first.id]
+             ).rows
+
+    assert relative_root == round_paths.relative_root
+    assert branch == round_paths.branch
+
     assert [%{attempt: projected}] = Scheduler.project_work()
     assert projected.id == first.id
     assert {:waiting, waiting} = Scheduler.next_queue_action()
@@ -238,11 +253,19 @@ defmodule Pika.Attempt.SchedulerTest do
       payload: %{attempt: refreshed}
     }
 
+    assert {:ok, agent_paths} = Pika.Agent.Workspace.resolve(config, work)
+    assert agent_paths.work_root == round_paths.root
+    assert agent_paths.cwd == round_paths.repo
+    assert bundle.context.work_root == round_paths.root
+    assert bundle.context.round_workspace_root == round_paths.root
+
     assert {:ok, rendered} = PromptBuilder.build(config, work, bundle)
     assert {:start_turn, initial_user_prompt} = rendered.activation
     assert initial_user_prompt =~ "旧 Base #{baseline.development_sha} 已 stale"
     assert initial_user_prompt =~ "当前 Best 是 #{new_best}"
     assert initial_user_prompt =~ "git merge #{new_best}"
+    assert initial_user_prompt =~ "独立的 Round workspace"
+    assert initial_user_prompt =~ "iteration-result.json"
   end
 
   test "Iteration Prompt contains the configured recent terminal Attempt history", %{
@@ -296,7 +319,14 @@ defmodule Pika.Attempt.SchedulerTest do
   end
 
   defp set_status(id, status) do
-    Repo.query!("UPDATE attempts SET status = ? WHERE id = ?", [status, id])
+    if status == "ready_for_integration" do
+      Repo.query!("UPDATE attempts SET status = ?, candidate_sha = base_sha WHERE id = ?", [
+        status,
+        id
+      ])
+    else
+      Repo.query!("UPDATE attempts SET status = ? WHERE id = ?", [status, id])
+    end
   end
 
   defp attempt_guidance(id) do

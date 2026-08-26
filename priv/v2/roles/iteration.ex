@@ -219,7 +219,9 @@ defmodule Pika.Agent.RolePrompts.Iteration do
 
     ## 完成
 
-    写出 `iteration-result.json`，并确保它符合 #{schema_link(result_schema)}。Result 包含 Attempt ID、Iteration Round、Base/Candidate SHA、Sampling Revision、hypothesis、changes、risks、文件引用和 outcome：
+    当前 `PIKA_ATTEMPT_ROOT` 是本 Iteration Round 独占的 workspace，当前目录中的 `repo/` 也是本 Round 独占的 Git worktree。不得把结果、Verify、Benchmark、Patch 或 Candidate 写回 Attempt 的其他 Round。即使这是 stale refresh，也不要覆盖上一轮的任何文件。
+
+    在当前 Round workspace 根目录写出且只写出 `iteration-result.json`，并确保它符合 #{schema_link(result_schema)}。传给 `finish_iteration` 的 `result_path` 必须严格为 `iteration-result.json`；Pika 会把它解析到当前 Round workspace，并拒绝其他 Round 或 Attempt 根目录中的路径。Result 包含 Attempt ID、Iteration Round、Base/Candidate SHA、Sampling Revision、hypothesis、changes、risks、文件引用和 outcome：
 
     - `ready_for_integration`
     - `rejected`

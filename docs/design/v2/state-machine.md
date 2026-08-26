@@ -71,7 +71,9 @@ stateDiagram-v2
 
 Attempt 创建时分配从 1 开始、永不复用的整数 ID，并冻结 Base Best、Sampling Revision 与 Guidance Revision。普通 Iteration 不因其他 BestAdvanced 热切换 Base。
 
-stale 只在 Attempt 到达 FIFO 队首时检查。它保持队首，创建下一 Iteration Round 和新 Session；Initial User Prompt 明确旧/新 Best SHA，并要求在 Attempt branch 上 `git merge <current-best-sha>`、解决冲突和重跑采样。刷新期间后续 Attempt 不得越过队首。
+stale 只在 Attempt 到达 FIFO 队首时检查。它保持队首，创建下一 Iteration Round、独立 Round workspace/Git branch 和新 Session；新 worktree 从上一轮 Candidate SHA 创建，Initial User Prompt 明确旧/新 Best SHA，并要求只在当前 Round branch 上 `git merge <current-best-sha>`、解决冲突和重跑采样。刷新期间后续 Attempt 不得越过队首。
+
+每轮 Result、Verify、Benchmark、Patch 与 Candidate 路径都相对于该 Round workspace。`finish_iteration` 校验 Session 绑定的当前 Round 根目录，并只接受固定的 `iteration-result.json`；上一轮文件不能作为当前轮终态提交，也不能被覆盖。每轮 Artifact owner identity 包含 Attempt ID 与 Round number。
 
 ## 4. Integration
 

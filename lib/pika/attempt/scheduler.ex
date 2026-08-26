@@ -29,7 +29,8 @@ defmodule Pika.Attempt.Scheduler do
     Repo.query!(
       """
       SELECT id, status, slot_index, current_iteration_round, base_sha,
-             sampling_revision_id, guidance_revision_id, work_relative_path, branch
+             sampling_revision_id, guidance_revision_id, work_relative_path, branch,
+             candidate_sha
       FROM attempts
       WHERE optimization_id = ? AND status IN ('iterating', 'refreshing_iteration')
       ORDER BY slot_index, id
@@ -194,10 +195,11 @@ defmodule Pika.Attempt.Scheduler do
 
         Repo.query!(
           """
-          INSERT INTO iteration_rounds(attempt_id, round, kind, base_sha, status, created_at)
-          VALUES (?, 1, 'initial', ?, 'queued', ?)
+          INSERT INTO iteration_rounds(
+            attempt_id, round, kind, base_sha, status, work_relative_path, branch, created_at
+          ) VALUES (?, 1, 'initial', ?, 'queued', ?, ?, ?)
           """,
-          [attempt_id, context.best.sha, now]
+          [attempt_id, context.best.sha, paths.relative_root, paths.branch, now]
         )
 
         append_event(
@@ -255,40 +257,57 @@ defmodule Pika.Attempt.Scheduler do
     now = now_us()
     next_round = attempt.current_iteration_round + 1
 
-    result =
-      Repo.transaction(fn ->
-        Repo.query!(
-          """
-          UPDATE attempts
-          SET status = 'refreshing_iteration', base_best_revision = ?, base_sha = ?,
-              current_iteration_round = ?, candidate_sha = NULL, updated_at = ?
-          WHERE id = ? AND status = 'ready_for_integration'
-          """,
-          [best.sequence, best.sha, next_round, now, attempt.id]
-        )
+    with candidate_sha when is_binary(candidate_sha) <- attempt.candidate_sha,
+         {:ok, target_root} <- current_target_root(),
+         optimization when is_map(optimization) <- Persistence.current(),
+         {:ok, paths} <-
+           Workspace.prepare_round(
+             optimization.repo_canonical_path,
+             optimization.workspace_canonical_path,
+             attempt.id,
+             next_round,
+             candidate_sha,
+             target_root
+           ) do
+      result =
+        Repo.transaction(fn ->
+          Repo.query!(
+            """
+            UPDATE attempts
+            SET status = 'refreshing_iteration', base_best_revision = ?, base_sha = ?,
+                current_iteration_round = ?, candidate_sha = NULL, branch = ?, updated_at = ?
+            WHERE id = ? AND status = 'ready_for_integration'
+            """,
+            [best.sequence, best.sha, next_round, paths.branch, now, attempt.id]
+          )
 
-        Repo.query!(
-          """
-          INSERT INTO iteration_rounds(attempt_id, round, kind, base_sha, status, created_at)
-          VALUES (?, ?, 'stale_refresh', ?, 'running', ?)
-          """,
-          [attempt.id, next_round, best.sha, now]
-        )
+          Repo.query!(
+            """
+            INSERT INTO iteration_rounds(
+              attempt_id, round, kind, base_sha, status, work_relative_path, branch, created_at
+            ) VALUES (?, ?, 'stale_refresh', ?, 'running', ?, ?, ?)
+            """,
+            [attempt.id, next_round, best.sha, paths.relative_root, paths.branch, now]
+          )
 
-        append_event(
-          "attempt",
-          to_string(attempt.id),
-          "attempt_stale_refreshing",
-          %{old_base_sha: attempt.base_sha, best_sha: best.sha, round: next_round},
-          now
-        )
+          append_event(
+            "attempt",
+            to_string(attempt.id),
+            "attempt_stale_refreshing",
+            %{old_base_sha: attempt.base_sha, best_sha: best.sha, round: next_round},
+            now
+          )
 
-        fetch_attempt!(attempt.id)
-      end)
+          fetch_attempt!(attempt.id)
+        end)
 
-    case result do
-      {:ok, refreshed} -> {:ok, refreshed}
-      {:error, reason} -> {:error, {:attempt_refresh_failed, reason}}
+      case result do
+        {:ok, refreshed} -> {:ok, refreshed}
+        {:error, reason} -> {:error, {:attempt_refresh_failed, reason}}
+      end
+    else
+      nil -> {:error, :attempt_refresh_candidate_missing}
+      {:error, reason} -> {:error, {:attempt_refresh_workspace_failed, reason}}
     end
   end
 
@@ -405,7 +424,8 @@ defmodule Pika.Attempt.Scheduler do
     case Repo.query!(
            """
            SELECT id, status, slot_index, current_iteration_round, base_sha,
-                  sampling_revision_id, guidance_revision_id, work_relative_path, branch
+                  sampling_revision_id, guidance_revision_id, work_relative_path, branch,
+                  candidate_sha
            FROM attempts
            WHERE optimization_id = ?
              AND status IN ('ready_for_integration', 'refreshing_iteration', 'integrating')
@@ -423,7 +443,8 @@ defmodule Pika.Attempt.Scheduler do
       Repo.query!(
         """
         SELECT id, status, slot_index, current_iteration_round, base_sha,
-               sampling_revision_id, guidance_revision_id, work_relative_path, branch
+               sampling_revision_id, guidance_revision_id, work_relative_path, branch,
+               candidate_sha
         FROM attempts WHERE id = ?
         """,
         [attempt_id]
@@ -441,7 +462,8 @@ defmodule Pika.Attempt.Scheduler do
          sampling_revision_id,
          guidance_revision_id,
          work_relative_path,
-         branch
+         branch,
+         candidate_sha
        ]) do
     %{
       id: id,
@@ -452,7 +474,8 @@ defmodule Pika.Attempt.Scheduler do
       sampling_revision_id: sampling_revision_id,
       guidance_revision_id: guidance_revision_id,
       work_relative_path: work_relative_path,
-      branch: branch
+      branch: branch,
+      candidate_sha: candidate_sha
     }
   end
 

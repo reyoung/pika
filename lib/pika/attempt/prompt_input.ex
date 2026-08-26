@@ -15,7 +15,8 @@ defmodule Pika.Attempt.PromptInput do
     with {:ok, attempt} <- Lifecycle.fetch_attempt(attempt_id),
          {:ok, schemas} <- RolePromptRegistry.schemas(),
          {:ok, sampling_case_ids} <- sampling_case_ids(attempt.sampling_revision_id),
-         {:ok, reference_projects} <- reference_projects(workspace_root, attempt_id) do
+         {:ok, reference_projects} <-
+           reference_projects(workspace_root, attempt_id, attempt.current_iteration_round) do
       {:ok,
        %Input{
          sampling_case_ids: sampling_case_ids,
@@ -50,10 +51,10 @@ defmodule Pika.Attempt.PromptInput do
     if ids == [], do: {:error, :sampling_cases_missing}, else: {:ok, ids}
   end
 
-  defp reference_projects(workspace_root, attempt_id) do
+  defp reference_projects(workspace_root, attempt_id, round) do
     with {:ok, snapshots} <-
            ReferenceProjectWorkspace.load_for_attempt(workspace_root, attempt_id) do
-      repo = Workspace.paths(workspace_root, attempt_id).repo
+      repo = current_round_repo(workspace_root, attempt_id, round)
 
       {:ok,
        Enum.map(snapshots, fn snapshot ->
@@ -64,6 +65,19 @@ defmodule Pika.Attempt.PromptInput do
            sha: snapshot["sha"]
          }
        end)}
+    end
+  end
+
+  defp current_round_repo(workspace_root, attempt_id, round) do
+    case Repo.query!(
+           "SELECT work_relative_path FROM iteration_rounds WHERE attempt_id = ? AND round = ?",
+           [attempt_id, round]
+         ).rows do
+      [[relative_root]] when is_binary(relative_root) ->
+        Path.join([workspace_root, relative_root, "repo"])
+
+      _other ->
+        Workspace.paths(workspace_root, attempt_id).repo
     end
   end
 
