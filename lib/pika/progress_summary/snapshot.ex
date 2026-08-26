@@ -2,10 +2,12 @@ defmodule Pika.ProgressSummary.Snapshot do
   @moduledoc "Builds the frozen, user-facing v2 Optimization status used by Progress Summary."
 
   alias Pika.Agent.BackendFailover
-  alias Pika.Optimization.Persistence
+  alias Pika.Optimization.{FileContract, Persistence}
   alias Pika.Repo
 
   @optimization_id "optimization"
+  @best_history_limit 20
+  @max_iteration_evidence_bytes 1_048_576
 
   @spec build(non_neg_integer(), DateTime.t()) :: map()
   def build(cursor, %DateTime{} = generated_at) do
@@ -16,6 +18,7 @@ defmodule Pika.ProgressSummary.Snapshot do
       optimization: optimization(),
       baseline: latest_baseline(),
       best: latest_best(),
+      best_history: best_history(),
       sampling: latest_sampling(),
       attempts: attempts(),
       integrations: integrations(),
@@ -117,6 +120,76 @@ defmodule Pika.ProgressSummary.Snapshot do
       }
     end)
   end
+
+  defp best_history do
+    Repo.query!(
+      """
+      SELECT br.sequence, br.sha, br.source_kind, br.source_attempt_id, br.summary,
+             br.created_at, artifact.relative_path, artifact.sha256, artifact.byte_size
+      FROM best_revisions br
+      LEFT JOIN attempts attempt ON attempt.id = br.source_attempt_id
+      LEFT JOIN iteration_rounds round
+        ON round.attempt_id = attempt.id AND round.round = attempt.current_iteration_round
+      LEFT JOIN artifacts artifact ON artifact.id = round.result_artifact_id
+      WHERE br.optimization_id = ?
+      ORDER BY br.sequence DESC
+      LIMIT ?
+      """,
+      [@optimization_id, @best_history_limit]
+    ).rows
+    |> Enum.map(fn [
+                     sequence,
+                     sha,
+                     source_kind,
+                     source_attempt_id,
+                     summary,
+                     created_at,
+                     artifact_path,
+                     artifact_sha256,
+                     artifact_bytes
+                   ] ->
+      %{
+        revision: sequence,
+        sha: sha,
+        source_kind: source_kind,
+        source_attempt_id: source_attempt_id,
+        summary: summary,
+        created_at: created_at,
+        iteration_evidence: iteration_evidence(artifact_path, artifact_sha256, artifact_bytes)
+      }
+    end)
+  end
+
+  defp iteration_evidence(nil, _sha256, _byte_size), do: nil
+
+  defp iteration_evidence(relative_path, expected_sha256, artifact_byte_size)
+       when is_binary(relative_path) and is_binary(expected_sha256) and
+              is_integer(artifact_byte_size) and
+              artifact_byte_size <= @max_iteration_evidence_bytes do
+    workspace = Persistence.current().workspace_canonical_path
+
+    with {:ok, contents, receipt} <-
+           FileContract.read(workspace, relative_path, max_bytes: @max_iteration_evidence_bytes),
+         true <- receipt.byte_size == artifact_byte_size,
+         true <- receipt.sha256 == expected_sha256,
+         {:ok, result} when is_map(result) <- Jason.decode(contents) do
+      details = result["details"] || %{}
+
+      %{
+        artifact_path: relative_path,
+        status: "verified",
+        summary: result["summary"],
+        hypothesis: details["hypothesis"],
+        changes: details["changes"] || [],
+        risks: details["risks"] || []
+      }
+    else
+      _reason -> %{artifact_path: relative_path, status: "unavailable_or_changed"}
+    end
+  end
+
+  defp iteration_evidence(relative_path, _sha256, _byte_size),
+    do: %{artifact_path: relative_path, status: "too_large"}
 
   defp latest_sampling do
     case Repo.query!(

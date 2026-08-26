@@ -321,7 +321,7 @@ Reject 直接调用 `finish_integration`，同一 result 中携带 regressed Cas
 
 ### Progress Summary
 
-Progress Summary 是 Result Manifest Envelope 的例外。Agent只写尽量不超过 500 字的 `summary.md`，然后调用 `submit_progress_summary(summary_path, idempotency_key)`；它不生成 `progress-summary.json`，也不改变任何领域状态。
+Progress Summary 是 Result Manifest Envelope 的例外。Agent只写尽量不超过 800 字的 `summary.md`，然后调用 `submit_progress_summary(summary_path, idempotency_key)`；它不生成 `progress-summary.json`，也不改变任何领域状态。摘要必须包含“关键优化”，从已验证的 Best history 说明当前 Best 实际包含了哪些实现改动、为何能提速、受益指标和全量测量证据；运行中或仅待集成的候选必须单独标记，不能写成已生效优化。
 
 ## 10. MCP Role interface
 
@@ -352,4 +352,4 @@ progress-summaries/
         └── summary.md
 ```
 
-`status.json` 是完整状态，`messages.jsonl` 只含上一份成功 Summary 之后的 Turn，`previous-summary.md` 是上一份结果。首次请求包含启动以来全部 Turn。`summary.md` 是唯一输出。编号是全局单调序号、日期分片只改善可浏览性；运行一个月不自动删除目录。
+`status.json` 是完整状态，并包含最近的 `best_history`；来自 Attempt 的 Best Revision 会附带经过 Artifact digest 复核的 Iteration hypothesis、changes、risks 与 summary，供 Agent解释已接受优化的实现机制。`messages.jsonl` 只含上一份成功 Summary 之后的 Turn，`previous-summary.md` 是上一份结果。首次请求包含启动以来全部 Turn。`summary.md` 是唯一输出。编号是全局单调序号、日期分片只改善可浏览性；运行一个月不自动删除目录。

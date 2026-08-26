@@ -40,13 +40,23 @@ defmodule Pika.Agent.RolePrompts.ProgressSummary do
 
        ## 摘要要求
 
-       摘要必须用户友好、事实优先、简洁但具体，尽量控制在 500 字以内，并明确区分：
+       摘要必须用户友好、事实优先、简洁但具体，尽量控制在 800 字以内，并明确区分：
 
        - 已完成：已经由持久化状态或 Result 证明的工作；
        - 进行中：当前活跃 Role、Attempt、Round、Integration 或验证；
        - 结果：最新 Best、Accepted/Rejected Attempt 和可用性能数值；
+       - 关键优化：当前 Best 已实际包含的主要实现改动、它们提升性能的机制、受益指标和测量证据；
        - 风险：正确性、回退、测量、Follow-up、恢复或队列风险；
        - 下一步：系统已经安排的具体工作，而不是泛泛建议。
+
+       `status.json.best_history` 按 Best Revision 从新到旧提供已接受历史。`iteration_evidence.status=verified` 时，其中的 hypothesis、changes、risks 和 Iteration summary 是解释实现机制的首选证据；Best summary 是 Integration 全量验证后的性能证据。摘要必须包含“关键优化”小节，并遵守：
+
+       - 只把 `best_history` 中已经进入 Best 的改动称为已生效优化，并标明 Best Revision 或来源 Attempt；
+       - 用具体实现描述说明“改了什么”，例如访存向量化、减少同步、融合 Kernel、改变 tile/CTA 或避免重复计算；不要只写“性能优化”或复述 Attempt 状态；
+       - 说明“为什么可能更快”，但因果解释必须能由 hypothesis/changes 支持，不得自行编造硬件机制；
+       - 紧邻列出 Integration/Benchmark 已证明的关键指标与幅度，并保留必要的回退、outlier 或适用范围；
+       - 正在运行或仅 ready_for_integration 的候选只能放在“进行中/候选方向”，不能混入已生效的关键优化；
+       - 如果尚无来自 Attempt 的 Accepted Best Revision，明确写“尚无已接受的代码优化”，不要用 Baseline 冒充优化成果。
 
        不得把 Agent自然语言计划描述为已完成，不得把运行中的命令描述为成功，不得自行推断未提交的 Accept/Reject。若本次五分钟窗口没有实质变化，应明确写“本周期无新的终态结果”，并说明仍在运行的工作。
 

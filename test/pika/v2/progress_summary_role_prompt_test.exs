@@ -24,7 +24,11 @@ defmodule Pika.Agent.ProgressSummaryRolePromptTest do
     refute prompt =~ "progress-summary.json"
     refute prompt =~ "result_path"
 
-    assert prompt =~ "尽量控制在 500 字以内"
+    assert prompt =~ "尽量控制在 800 字以内"
+    assert prompt =~ "摘要必须包含“关键优化”小节"
+    assert prompt =~ "status.json.best_history"
+    assert prompt =~ "为什么可能更快"
+    assert prompt =~ "尚无已接受的代码优化"
     assert prompt =~ "在当前目录写 `summary.md`"
     assert prompt =~ "submit_progress_summary(summary_path, idempotency_key)"
     assert prompt =~ "本次独立工作目录：`#{input.summary_workdir}`"

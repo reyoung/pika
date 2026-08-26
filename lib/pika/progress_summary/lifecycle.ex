@@ -16,6 +16,16 @@ defmodule Pika.ProgressSummary.Lifecycle do
   def tick(%Config{progress_summary: nil}, %DateTime{}), do: {:ok, :disabled}
 
   def tick(%Config{} = config, %DateTime{} = now) do
+    case active_request() do
+      %{status: "preparing"} = orphaned ->
+        recover_orphaned_preparing(orphaned, config, now)
+
+      _other ->
+        tick_schedule(config, now)
+    end
+  end
+
+  defp tick_schedule(config, now) do
     now_us = DateTime.to_unix(now, :microsecond)
     [[due, next_due_at]] = summary_schedule()
 
@@ -39,6 +49,11 @@ defmodule Pika.ProgressSummary.Lifecycle do
       true ->
         {:ok, :not_due}
     end
+  end
+
+  defp recover_orphaned_preparing(request, config, now) do
+    fail_materialization(request.id, :orphaned_preparing_recovered)
+    reserve_and_materialize(config, now)
   end
 
   @spec project_work() :: [map()]

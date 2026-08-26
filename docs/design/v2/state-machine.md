@@ -126,6 +126,8 @@ scheduled
 
 同一时刻至多一个 active Request。active 期间到达的五分钟 tick 只记录 `summary_due=true`；当前请求终态后，如仍到期，以最新状态创建一个请求，不追补每个错过的 tick。
 
+`preparing` 只允许存在于一次同步快照物化调用期间；后续 tick 若仍观察到该状态，说明进程在物化过程中中断。Pika 将旧 Request 标记为 failed，并立即以新序号重新冻结当前状态，避免 Summary 永久停滞。
+
 ## 7. Pending gate
 
 pending 数量包括 `ready_for_integration`、`refreshing_iteration` 和 `integrating`。普通 `iterating` 不计入。
