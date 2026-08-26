@@ -960,27 +960,89 @@ defmodule PikaWeb.OptimizationLive do
                 <span class="ops-count">{length(@snapshot.attempts)} total</span>
               </header>
 
-              <nav
-                :if={@snapshot.attempts != []}
-                class="ops-attempt-tabs"
-                role="tablist"
-                aria-label="Optimization attempts"
-              >
-                  <button
-                    :for={attempt <- @snapshot.attempts}
-                    type="button"
-                    role="tab"
-                    class={if @selected_attempt_id == attempt.id, do: "is-active", else: nil}
-                    phx-click="select_attempt"
-                    phx-value-attempt={attempt.id}
-                    aria-selected={to_string(@selected_attempt_id == attempt.id)}
-                    aria-controls={"attempt-#{attempt.id}-details"}
-                    title={attempt.summary || attempt.failure_reason || "Agent is preparing this candidate…"}
+              <div :if={@snapshot.attempts != []} class="ops-attempt-groups">
+                <section
+                  :if={active_attempts(@snapshot.attempts, @snapshot.active_agent_sessions) != []}
+                  class="ops-attempt-group ops-attempt-group-active"
+                >
+                  <header>
+                    <strong>Active</strong>
+                    <span>
+                      {running_attempt_count(
+                        @snapshot.attempts,
+                        @snapshot.active_agent_sessions
+                      )} running
+                    </span>
+                    <span>
+                      {length(active_attempts(@snapshot.attempts, @snapshot.active_agent_sessions))} total
+                    </span>
+                  </header>
+                  <nav
+                    class="ops-attempt-tabs"
+                    role="tablist"
+                    aria-label="Active optimization attempts"
                   >
-                    <strong>#{attempt.id}</strong>
-                    <span>{humanize_status(attempt.status)}</span>
-                  </button>
-              </nav>
+                    <button
+                      :for={attempt <- active_attempts(
+                        @snapshot.attempts,
+                        @snapshot.active_agent_sessions
+                      )}
+                      type="button"
+                      role="tab"
+                      class={[
+                        @selected_attempt_id == attempt.id && "is-active",
+                        running_attempt?(attempt, @snapshot.active_agent_sessions) && "is-running"
+                      ]}
+                      phx-click="select_attempt"
+                      phx-value-attempt={attempt.id}
+                      aria-selected={to_string(@selected_attempt_id == attempt.id)}
+                      aria-controls={"attempt-#{attempt.id}-details"}
+                      title={attempt_tab_title(
+                        attempt,
+                        running_attempt?(attempt, @snapshot.active_agent_sessions)
+                      )}
+                    >
+                      <strong>
+                        <i
+                          :if={running_attempt?(attempt, @snapshot.active_agent_sessions)}
+                          aria-hidden="true"
+                        ></i>#{attempt.id}
+                      </strong>
+                      <span>{humanize_status(attempt.status)}</span>
+                    </button>
+                  </nav>
+                </section>
+
+                <section
+                  :if={historical_attempts(@snapshot.attempts) != []}
+                  class="ops-attempt-group ops-attempt-group-history"
+                >
+                  <header>
+                    <strong>History</strong>
+                    <span>{length(historical_attempts(@snapshot.attempts))}</span>
+                  </header>
+                  <nav
+                    class="ops-attempt-tabs"
+                    role="tablist"
+                    aria-label="Historical optimization attempts"
+                  >
+                    <button
+                      :for={attempt <- historical_attempts(@snapshot.attempts)}
+                      type="button"
+                      role="tab"
+                      class={if @selected_attempt_id == attempt.id, do: "is-active", else: nil}
+                      phx-click="select_attempt"
+                      phx-value-attempt={attempt.id}
+                      aria-selected={to_string(@selected_attempt_id == attempt.id)}
+                      aria-controls={"attempt-#{attempt.id}-details"}
+                      title={attempt.summary || attempt.failure_reason || "No summary available"}
+                    >
+                      <strong>#{attempt.id}</strong>
+                      <span>{humanize_status(attempt.status)}</span>
+                    </button>
+                  </nav>
+                </section>
+              </div>
 
                   <div
                     :if={@selected_attempt}
@@ -1366,9 +1428,7 @@ defmodule PikaWeb.OptimizationLive do
 
   defp iteration_started?(snapshot) do
     Enum.any?(snapshot.active_agent_sessions, &(&1.role in ["iteration", "integration"])) or
-      Enum.any?(snapshot.attempts, fn attempt ->
-        attempt.status not in ["accepted", "rejected", "cancelled"]
-      end)
+      Enum.any?(snapshot.attempts, &active_attempt?/1)
   end
 
   defp assign_selected_attempt(
@@ -1391,10 +1451,7 @@ defmodule PikaWeb.OptimizationLive do
   end
 
   defp default_attempt_id(attempts) do
-    active =
-      Enum.find(Enum.reverse(attempts), fn attempt ->
-        attempt.status not in ["accepted", "rejected", "cancelled"]
-      end)
+    active = Enum.find(Enum.reverse(attempts), &active_attempt?/1)
 
     case active || List.last(attempts) do
       nil -> nil
@@ -1403,6 +1460,37 @@ defmodule PikaWeb.OptimizationLive do
   end
 
   defp selected_attempt(attempts, id), do: Enum.find(attempts, &(&1.id == id))
+
+  defp active_attempts(attempts, sessions) do
+    attempts
+    |> Enum.filter(&active_attempt?/1)
+    |> Enum.sort_by(fn attempt ->
+      {if(running_attempt?(attempt, sessions), do: 0, else: 1), attempt.id}
+    end)
+  end
+
+  defp historical_attempts(attempts), do: Enum.reject(attempts, &active_attempt?/1)
+
+  defp active_attempt?(attempt),
+    do: attempt.status not in ["accepted", "rejected", "cancelled"]
+
+  defp running_attempt?(attempt, sessions) do
+    Enum.any?(sessions, fn session ->
+      session.role in ["iteration", "integration"] and session.work_kind == "attempt" and
+        session.work_id == to_string(attempt.id)
+    end)
+  end
+
+  defp running_attempt_count(attempts, sessions),
+    do: Enum.count(attempts, &(active_attempt?(&1) and running_attempt?(&1, sessions)))
+
+  defp attempt_tab_title(attempt, true) do
+    "Agent running · " <>
+      (attempt.summary || attempt.failure_reason || humanize_status(attempt.status))
+  end
+
+  defp attempt_tab_title(attempt, false),
+    do: attempt.summary || attempt.failure_reason || "Waiting for an Agent slot…"
 
   defp baseline_activity(nil), do: {[], []}
 

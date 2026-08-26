@@ -658,13 +658,18 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert attempts_html =~ ~s(phx-change="filter_performance")
     refute attempts_html =~ ~s(phx-hook="PerformanceChart")
     assert attempts_html =~ "No matching measurements yet"
-    assert attempts_html =~ ~s(class="ops-attempt-tabs")
-    assert attempts_html =~ ~s(role="tablist" aria-label="Optimization attempts")
+    assert attempts_html =~ ~s(class="ops-attempt-group ops-attempt-group-active")
+    assert attempts_html =~ ~s(class="ops-attempt-group ops-attempt-group-history")
+    assert attempts_html =~ ~s(role="tablist" aria-label="Active optimization attempts")
+    assert attempts_html =~ ~s(role="tablist" aria-label="Historical optimization attempts")
+    assert attempts_html =~ "1 running"
+    assert attempts_html =~ ~s(class="is-active is-running")
+    assert attempts_html =~ "Agent running ·"
     assert attempts_html =~ ~s(phx-value-attempt="2" aria-selected="true")
 
     {attempt_one_position, _length} = :binary.match(attempts_html, ~s(phx-value-attempt="1"))
     {attempt_two_position, _length} = :binary.match(attempts_html, ~s(phx-value-attempt="2"))
-    assert attempt_one_position < attempt_two_position
+    assert attempt_two_position < attempt_one_position
 
     assert {:noreply, filtered_performance_socket} =
              PikaWeb.OptimizationLive.handle_event(
