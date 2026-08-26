@@ -437,11 +437,70 @@ defmodule Pika.Attempt.Lifecycle do
           now
         )
 
+        maybe_request_baseline_realignment(attempt.id, details, now)
+
         fetch_attempt!(attempt.id)
       end)
 
     finish(transaction, :iteration_rejection_persist_failed)
   end
+
+  defp maybe_request_baseline_realignment(attempt_id, details, now) do
+    case structural_rejection_code(details) do
+      nil ->
+        :ok
+
+      code ->
+        reason = details["failure_reason"]
+
+        Repo.query!(
+          """
+          UPDATE baseline_revisions
+          SET status = 'superseded', terminal_reason = ?, updated_at = ?
+          WHERE optimization_id = ? AND status = 'accepted'
+          """,
+          [reason, now, @optimization_id]
+        )
+
+        Repo.query!(
+          """
+          UPDATE attempts
+          SET status = 'cancelled', outcome = 'rejected', failure_reason = ?, updated_at = ?
+          WHERE optimization_id = ? AND id != ?
+            AND status IN ('preparing', 'iterating', 'refreshing_iteration')
+          """,
+          ["blocked_by_#{code}", now, @optimization_id, attempt_id]
+        )
+
+        Repo.query!(
+          """
+          UPDATE optimizations
+          SET status = 'aligning_baseline', resume_status = NULL, stop_reason = ?, updated_at = ?
+          WHERE id = ? AND status IN ('optimizing', 'paused')
+          """,
+          [code, now, @optimization_id]
+        )
+
+        append_event(
+          "optimization",
+          @optimization_id,
+          "baseline_realignment_requested",
+          %{failure_code: code, source_attempt_id: attempt_id},
+          now
+        )
+    end
+  end
+
+  defp structural_rejection_code(%{"failure_code" => "baseline_harness_missing_candidate_env"}),
+    do: "baseline_harness_missing_candidate_env"
+
+  defp structural_rejection_code(%{"failure_reason" => reason}) when is_binary(reason) do
+    if String.starts_with?(reason, "baseline_harness_missing_candidate_env"),
+      do: "baseline_harness_missing_candidate_env",
+      else: nil
+  end
+
+  defp structural_rejection_code(_details), do: nil
 
   defp replace_attempt_metrics(attempt_id, statistics, source_artifact_id) do
     Repo.query!("DELETE FROM attempt_metrics WHERE attempt_id = ?", [attempt_id])

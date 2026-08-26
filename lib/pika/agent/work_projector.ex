@@ -22,16 +22,22 @@ defmodule Pika.Agent.WorkProjector do
          :ok <- maybe_apply_stop_policy(Persistence.current(), now),
          :ok <- maybe_spawn_attempts(Persistence.current(), config) do
       works =
-        if optimization.status in @terminal_optimization or optimization.status == "paused" do
-          summary_and_followup_work()
-        else
-          integration = IntegrationLifecycle.project_work()
+        cond do
+          optimization.status in @terminal_optimization or optimization.status == "paused" ->
+            summary_and_followup_work()
 
-          BaselineLifecycle.project_work() ++
-            integration ++
-            Scheduler.project_work() ++
-            FollowupLifecycle.project_work() ++
-            ProgressSummaryLifecycle.project_work()
+          optimization.status in [
+            "aligning_baseline",
+            "awaiting_baseline_review",
+            "verifying_baseline"
+          ] ->
+            BaselineLifecycle.project_work() ++ summary_and_followup_work()
+
+          true ->
+            IntegrationLifecycle.project_work() ++
+              Scheduler.project_work() ++
+              FollowupLifecycle.project_work() ++
+              ProgressSummaryLifecycle.project_work()
         end
 
       {:ok,

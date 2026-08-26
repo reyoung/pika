@@ -130,6 +130,33 @@ defmodule Pika.Attempt.LifecycleTest do
              ).rows
   end
 
+  test "structural Harness rejection supersedes Baseline and stops new Attempts", %{
+    config: config,
+    workspace: workspace
+  } do
+    assert {:ok, [first]} = Scheduler.spawn_available(config)
+    paths = Workspace.paths(workspace, first.id)
+
+    write_rejected_result(paths, first,
+      failure_code: "baseline_harness_missing_candidate_env",
+      failure_reason: "baseline_harness_missing_candidate_env: adapter ignores runtime manifest"
+    )
+
+    assert {:ok, rejected} = Lifecycle.finish(first.id, paths.root, "iteration-result.json")
+    assert rejected.status == "rejected"
+    assert Persistence.current().status == "aligning_baseline"
+    assert Persistence.current().stop_reason == "baseline_harness_missing_candidate_env"
+    assert BaselineLifecycle.latest_revision().status == "superseded"
+
+    assert {:error, {:optimization_not_spawning, "aligning_baseline"}} =
+             Scheduler.spawn_available(config)
+
+    assert [["baseline_realignment_requested"]] =
+             Repo.query!(
+               "SELECT event_type FROM domain_events WHERE event_type = 'baseline_realignment_requested'"
+             ).rows
+  end
+
   test "ready result cannot change protected Harness paths", %{
     config: config,
     workspace: workspace
@@ -210,6 +237,23 @@ defmodule Pika.Attempt.LifecycleTest do
         %{}
       end
 
+    details = %{
+      "attempt_id" => attempt.id,
+      "iteration_round" => attempt.current_iteration_round,
+      "base_sha" => attempt.base_sha,
+      "candidate_sha" => nil,
+      "sampling_revision" => 0,
+      "hypothesis" => "increase stages",
+      "changes" => [],
+      "risks" => [],
+      "failure_reason" => opts[:failure_reason] || "no improvement"
+    }
+
+    details =
+      if opts[:failure_code],
+        do: Map.put(details, "failure_code", opts[:failure_code]),
+        else: details
+
     result = %{
       "schema_version" => 1,
       "role" => "iteration",
@@ -217,17 +261,7 @@ defmodule Pika.Attempt.LifecycleTest do
       "outcome" => "rejected",
       "summary" => "direction did not improve",
       "files" => files,
-      "details" => %{
-        "attempt_id" => attempt.id,
-        "iteration_round" => attempt.current_iteration_round,
-        "base_sha" => attempt.base_sha,
-        "candidate_sha" => nil,
-        "sampling_revision" => 0,
-        "hypothesis" => "increase stages",
-        "changes" => [],
-        "risks" => [],
-        "failure_reason" => "no improvement"
-      }
+      "details" => details
     }
 
     V2BaselineFixtures.write_json(paths.root, "iteration-result.json", result)

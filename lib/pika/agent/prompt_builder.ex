@@ -33,9 +33,15 @@ defmodule Pika.Agent.PromptBuilder do
 
   defp system_prompt(_config, %Work{role_id: "baseline_alignment"}, _context, sections) do
     with {:ok, schemas} <- RolePromptRegistry.schemas() do
+      baseline_sections =
+        case baseline_realignment_section() do
+          nil -> verification_failure_sections()
+          section -> [section]
+        end
+
       BaselineAlignment.system_prompt(%Context{
         schemas: schemas,
-        sections: sections ++ verification_failure_sections()
+        sections: sections ++ baseline_sections
       })
     end
   end
@@ -84,10 +90,15 @@ defmodule Pika.Agent.PromptBuilder do
     do: {:error, {:unsupported_prompt_work, work.role_id, work.kind}}
 
   defp activation(_config, %Work{role_id: "baseline_alignment"}, context, []) do
-    if verification_rejected?() do
-      {:ok, {:start_turn, verification_rejection_prompt(context)}}
-    else
-      {:ok, :await_user_kickoff}
+    cond do
+      baseline_realignment_requested?() ->
+        {:ok, {:start_turn, baseline_realignment_prompt(context)}}
+
+      verification_rejected?() ->
+        {:ok, {:start_turn, verification_rejection_prompt(context)}}
+
+      true ->
+        {:ok, :await_user_kickoff}
     end
   end
 
@@ -100,6 +111,9 @@ defmodule Pika.Agent.PromptBuilder do
     cond do
       alignment_started?(work_id) ->
         {:ok, {:start_turn, recovery_prompt(context, recoveries)}}
+
+      baseline_realignment_requested?() ->
+        {:ok, {:start_turn, baseline_realignment_prompt(context)}}
 
       verification_rejected?() ->
         {:ok, {:start_turn, verification_rejection_prompt(context)}}
@@ -176,6 +190,56 @@ defmodule Pika.Agent.PromptBuilder do
     end)
   end
 
+  defp baseline_realignment_section do
+    optimization = Pika.Optimization.Persistence.current()
+
+    if baseline_realignment_requested?() do
+      case Repo.query!("""
+             SELECT revision, terminal_reason, work_relative_path
+           FROM baseline_revisions
+           WHERE optimization_id = 'optimization' AND status = 'superseded'
+           ORDER BY revision DESC LIMIT 1
+           """).rows do
+        [[revision, reason, relative_path]] ->
+          baseline_root =
+            Path.join(optimization.workspace_canonical_path, relative_path)
+
+          %Section{
+            title: "required baseline realignment",
+            required?: true,
+            files: [
+              %FileRef{
+                label: "被替代的 Baseline Revision",
+                path: baseline_root,
+                kind: :directory
+              }
+            ],
+            content: """
+            Pika 因结构性错误 `#{optimization.stop_reason}` 从已接受的 Baseline v#{revision} 自动回到新 Revision。必须优先修复以下阻塞，再提交 Definition：
+
+            #{reason}
+
+            这是 Campaign 级阻塞，不是普通性能 Reject。保持当前 Best SHA 作为 Development，并确保标准 Harness 在 Baseline/未设置变量时读取已审阅 Development，在 Iteration 与 Integration/设置 `PIKA_CANDIDATE_MANIFEST` 时读取该绝对 Candidate manifest。完成新 Baseline 的用户 Review 与 Verify 后，Pika 才会恢复排队中的 Integration Verify 重试。
+            """
+          }
+
+        [] ->
+          nil
+      end
+    end
+  end
+
+  defp baseline_realignment_requested? do
+    case Pika.Optimization.Persistence.current() do
+      %{status: "aligning_baseline", stop_reason: reason}
+      when is_binary(reason) and reason != "" ->
+        true
+
+      _optimization ->
+        false
+    end
+  end
+
   defp verification_rejected? do
     Repo.query!("""
     SELECT 1
@@ -213,6 +277,10 @@ defmodule Pika.Agent.PromptBuilder do
 
   defp verification_rejection_prompt(context) do
     "上一轮 Baseline Verify 已拒绝 Definition。拒绝原因和 requested_changes 已注入 System Prompt；先读取 Context Bundle #{context} 和失败结果，逐项修订，并按协议调用 ask_questions。"
+  end
+
+  defp baseline_realignment_prompt(context) do
+    "Pika 已因结构性 Attempt 错误回到新的 Baseline Revision。具体 failure code、来源 Attempt 和旧 Baseline terminal reason 已注入 System Prompt 与 Context Bundle #{context}；只修复该 Campaign 级阻塞，保持当前 Best 作为 Development，并按协议调用 ask_questions。"
   end
 
   defp stale_refresh_prompt(attempt_id, context) do

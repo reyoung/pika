@@ -2,6 +2,7 @@ defmodule PikaWeb.ControlController do
   use PikaWeb, :controller
 
   alias Pika.Attempt.Scheduler
+  alias Pika.Integration.Lifecycle, as: IntegrationLifecycle
   alias Pika.Optimization.Runtime
   alias Pika.ProgressSummary.Snapshot
   alias Pika.Repo
@@ -65,6 +66,17 @@ defmodule PikaWeb.ControlController do
          {:ok, guidance} <- Scheduler.add_guidance(params["body"] || "") do
       conn |> put_status(201) |> json(guidance)
     else
+      {:error, reason} -> error(conn, 409, reason)
+    end
+  end
+
+  def retry_integration(conn, %{"id" => id} = params) do
+    with {:ok, _key} <- idempotency_key(conn, params),
+         {attempt_id, ""} <- Integer.parse(id),
+         {:ok, attempt} <- IntegrationLifecycle.retry_verification(attempt_id) do
+      json(conn, attempt)
+    else
+      :error -> error(conn, 400, :invalid_attempt_id)
       {:error, reason} -> error(conn, 409, reason)
     end
   end

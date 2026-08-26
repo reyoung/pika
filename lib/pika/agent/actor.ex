@@ -368,7 +368,8 @@ defmodule Pika.Agent.Actor do
   # The candidate bundle is an Attempt runtime input, not a Harness change. It
   # is available before the Agent creates it, so frozen scripts can resolve it
   # during later verification commands in the same session.
-  defp inject_attempt_runtime_env(launch_config, %Work{role_id: "iteration"}, paths) do
+  defp inject_attempt_runtime_env(launch_config, %Work{role_id: role_id}, paths)
+       when role_id in ["iteration", "integration"] do
     env =
       Map.merge(launch_config.env, %{
         "PIKA_ATTEMPT_ROOT" => paths.work_root,

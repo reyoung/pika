@@ -46,6 +46,7 @@ defmodule PikaWeb.Router do
     post("/control/stop", ControlController, :stop)
     post("/control/resume", ControlController, :resume)
     post("/attempts/:id/btw", ControlController, :create_btw)
+    post("/attempts/:id/retry-integration", ControlController, :retry_integration)
   end
 
   scope "/", PikaWeb do
