@@ -156,6 +156,78 @@ defmodule Pika.AgentBackend.CodexProtocolTest do
     assert :ok = AgentBackend.close_session(backend)
   end
 
+  test "classifies terminal failures and waits through retriable error diagnostics" do
+    profile = %{
+      backend: :codex_app_server,
+      command: System.find_executable("mix"),
+      args: ["run", "--no-compile", "--no-start", fake_provider(), "--"],
+      env: %{"PIKA_FAKE_PROTOCOL" => "codex"},
+      artifact_dir: temp_dir("codex-failures")
+    }
+
+    {:ok, backend} =
+      AgentBackend.start_link(Pika.AgentBackend.CodexAppServer, profile, self())
+
+    assert {:ok, _session} =
+             AgentBackend.open_session(
+               backend,
+               File.cwd!(),
+               "fake-model",
+               :low,
+               %{url: "http://127.0.0.1:1/mcp", token: "failure-secret"},
+               [],
+               "Pika failure instructions"
+             )
+
+    assert_event(:session_started)
+
+    assert {:ok, _turn} = AgentBackend.start_turn(backend, "usage failure")
+    assert_event(:turn_started)
+
+    assert %{data: %{failure: %{category: "capacity_exhausted", retry_at: retry_at}}} =
+             assert_event(:backend_error)
+
+    assert is_integer(retry_at)
+
+    assert {:ok, _turn} = AgentBackend.start_turn(backend, "unauthorized failure")
+    assert_event(:turn_started)
+
+    assert %{data: %{failure: %{category: "authentication_failed"}}} =
+             assert_event(:backend_error)
+
+    assert {:ok, _turn} = AgentBackend.start_turn(backend, "context failure")
+    assert_event(:turn_started)
+
+    assert %{data: %{failure: %{category: "context_exhausted"}}} =
+             assert_event(:backend_error)
+
+    assert {:ok, _turn} = AgentBackend.start_turn(backend, "session budget failure")
+    assert_event(:turn_started)
+
+    assert %{data: %{failure: %{category: "session_budget_exhausted"}}} =
+             assert_event(:backend_error)
+
+    assert {:ok, _turn} = AgentBackend.start_turn(backend, "network failure")
+    assert_event(:turn_started)
+
+    assert %{data: %{failure: %{category: "transient"}}} =
+             assert_event(:backend_error)
+
+    assert {:ok, successful_turn} =
+             AgentBackend.start_turn(backend, "rate notification success")
+
+    assert_event(:turn_started)
+    assert %{turn_id: ^successful_turn} = assert_event(:turn_completed)
+    refute_receive {:pika_backend_event, %{type: :backend_error}}, 100
+
+    assert {:ok, retry_turn} = AgentBackend.start_turn(backend, "retry then success")
+    assert_event(:turn_started)
+    assert %{turn_id: ^retry_turn} = assert_event(:turn_completed)
+    refute_receive {:pika_backend_event, %{type: :backend_error}}, 100
+
+    assert :ok = AgentBackend.close_session(backend)
+  end
+
   defp assert_event(type) do
     receive do
       {:pika_backend_event, %{type: ^type} = event} -> event

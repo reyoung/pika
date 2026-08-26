@@ -11,7 +11,8 @@ defmodule Pika.Optimization.Init do
     repo = Path.expand(repo)
     config_path = Path.join(workspace, "pika.yaml")
 
-    with :ok <- validate_repo(repo),
+    with :ok <- validate_new_backends(opts),
+         :ok <- validate_repo(repo),
          :ok <- prepare_workspace(workspace, config_path),
          contents <- ConfigFile.new(config_path, repo, workspace, opts) |> ConfigFile.render(),
          :ok <- FileSystem.atomic_write(config_path, contents),
@@ -20,6 +21,29 @@ defmodule Pika.Optimization.Init do
       {:ok, config}
     end
   end
+
+  defp validate_new_backends(opts) do
+    deprecated_option? =
+      Keyword.get(opts, :backend) in [:cursor, :cursor_acp, "cursor", "cursor_acp"]
+
+    configured_agents =
+      opts
+      |> Keyword.get(:agents, %{})
+      |> Map.values()
+      |> List.flatten()
+      |> Enum.reject(&is_nil/1)
+
+    if deprecated_option? or Enum.any?(configured_agents, &legacy_endpoint?/1),
+      do: {:error, :cursor_acp_deprecated},
+      else: :ok
+  end
+
+  defp legacy_endpoint?(%Config.Agent{backend: :cursor_acp}), do: true
+
+  defp legacy_endpoint?(%Config.Agent{fallbacks: fallbacks}),
+    do: Enum.any?(fallbacks, &legacy_endpoint?/1)
+
+  defp legacy_endpoint?(_value), do: false
 
   defp validate_repo(repo) do
     cond do

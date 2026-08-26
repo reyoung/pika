@@ -53,7 +53,7 @@ defmodule Pika.Test.FakeCursorHeadless do
 
     if String.contains?(prompt, "failure") do
       assistant(session_id, "partial")
-      IO.puts(:stderr, "simulated cursor transport failure")
+      IO.puts(:stderr, "Usage limit exceeded; quota exhausted (unstructured fake stderr)")
       System.halt(7)
     end
 
@@ -80,14 +80,21 @@ defmodule Pika.Test.FakeCursorHeadless do
 
     final = if String.contains?(prompt, "diverge"), do: "Correct final", else: "Hello world"
 
-    output(%{
+    result = %{
       "type" => "result",
       "subtype" => "success",
       "is_error" => false,
       "result" => final,
       "session_id" => session_id,
       "request_id" => "fake-request"
-    })
+    }
+
+    result =
+      if String.contains?(prompt, "usage"),
+        do: Map.put(result, "usage", %{"inputTokens" => 17, "outputTokens" => 3}),
+        else: result
+
+    output(result)
   end
 
   defp assistant(session_id, text) do

@@ -8,6 +8,7 @@ defmodule Pika.AgentBackend.CodexAppServer do
     CodexExecutable,
     Error,
     Event,
+    Failure,
     JSONLPort,
     LaunchConfig,
     PermissionPolicy,
@@ -140,7 +141,9 @@ defmodule Pika.AgentBackend.CodexAppServer do
        skill_roots: [],
        jsonl_path: nil,
        closed: false,
-       process_exit_emitted: false
+       process_exit_emitted: false,
+       last_turn_error: nil,
+       rate_limits: %{}
      }}
   end
 
@@ -338,7 +341,15 @@ defmodule Pika.AgentBackend.CodexAppServer do
           {:ok, result}
 
         %{"error" => error} ->
-          rpc_error(:provider_error, error["message"] || "Codex RPC error", error)
+          failure = codex_failure(error, state)
+
+          {:error,
+           %Error{
+             code: :provider_error,
+             message: error["message"] || "Codex RPC error",
+             details: %{raw: error},
+             failure: failure
+           }}
       end
 
     GenServer.reply(from, reply)
@@ -424,16 +435,33 @@ defmodule Pika.AgentBackend.CodexAppServer do
     state
   end
 
+  defp map_notification("account/rateLimits/updated", params, state) do
+    %{state | rate_limits: params}
+  end
+
   defp map_notification("turn/completed", params, state) do
     turn = params["turn"] || %{}
     turn_id = turn["id"] || params["turnId"]
-    emit(state, :turn_completed, turn_id: turn_id, data: turn)
-    %{state | active_turn_id: nil}
+
+    if turn["status"] == "failed" do
+      provider_error = turn["error"] || state.last_turn_error || %{}
+      failure = codex_failure(provider_error, state)
+
+      emit(state, :backend_error,
+        turn_id: turn_id,
+        data: %{failure: Failure.to_map(failure), provider: provider_error}
+      )
+    else
+      emit(state, :turn_completed, turn_id: turn_id, data: turn)
+    end
+
+    %{state | active_turn_id: nil, last_turn_error: nil}
   end
 
   defp map_notification("error", params, state) do
-    emit(state, :backend_error, turn_id: params["turnId"], data: params)
-    state
+    # App-server follows this diagnostic with an authoritative failed turn. Keep the latest
+    # payload so retriable diagnostics do not prematurely terminate the Actor.
+    %{state | last_turn_error: params["error"] || params}
   end
 
   defp map_notification(_unknown, _params, state), do: state
@@ -591,6 +619,97 @@ defmodule Pika.AgentBackend.CodexAppServer do
   defp normalize_effort(value), do: value
 
   defp compact(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
+
+  defp codex_failure(payload, state) when is_map(payload) do
+    error = payload["error"] || payload
+    info = error["codexErrorInfo"] || payload["codexErrorInfo"]
+    provider_code = codex_info_code(info)
+    normalized = normalize_failure_code(provider_code)
+    message = error["message"] || payload["message"] || "Codex request failed"
+
+    category =
+      case normalized do
+        "usagelimitexceeded" ->
+          :capacity_exhausted
+
+        "unauthorized" ->
+          :authentication_failed
+
+        "contextwindowexceeded" ->
+          :context_exhausted
+
+        "sessionbudgetexceeded" ->
+          :session_budget_exhausted
+
+        code
+        when code in [
+               "httpconnectionfailed",
+               "responsestreamconnectionfailed",
+               "responsestreamdisconnected",
+               "responsetoomanyfailedattempts",
+               "internalservererror"
+             ] ->
+          :transient
+
+        code when code in ["badrequest", "sandboxerror"] ->
+          :fatal
+
+        _other ->
+          :unknown
+      end
+
+    Failure.new(category, message,
+      code: provider_code,
+      retry_at: if(category == :capacity_exhausted, do: rate_limit_reset(state.rate_limits)),
+      details: %{provider: payload}
+    )
+  end
+
+  defp codex_failure(payload, _state) do
+    Failure.unknown("Codex request failed", details: %{provider: payload})
+  end
+
+  defp codex_info_code(value) when is_binary(value) or is_atom(value), do: value
+
+  defp codex_info_code(value) when is_map(value) do
+    value["type"] || value["code"] || value[:type] || value[:code] ||
+      value |> Map.keys() |> List.first()
+  end
+
+  defp codex_info_code(_value), do: nil
+
+  defp normalize_failure_code(nil), do: ""
+
+  defp normalize_failure_code(value) do
+    value
+    |> to_string()
+    |> String.replace(~r/[^a-zA-Z]/, "")
+    |> String.downcase()
+  end
+
+  defp rate_limit_reset(rate_limits) do
+    now = System.system_time(:second)
+
+    rate_limits
+    |> collect_resets([])
+    |> Enum.filter(&(is_integer(&1) and &1 > now))
+    |> Enum.min(fn -> nil end)
+  end
+
+  defp collect_resets(%{} = value, acc) do
+    Enum.reduce(value, acc, fn
+      {key, reset}, acc when key in ["resetsAt", :resetsAt] and is_integer(reset) ->
+        [reset | acc]
+
+      {_key, nested}, acc ->
+        collect_resets(nested, acc)
+    end)
+  end
+
+  defp collect_resets(values, acc) when is_list(values),
+    do: Enum.reduce(values, acc, &collect_resets/2)
+
+  defp collect_resets(_value, acc), do: acc
 
   defp steer_error, do: rpc_error(:steer_failed, "there is no active Codex turn to steer", nil)
   defp no_active_turn_error, do: rpc_error(:no_active_turn, "there is no active Codex turn", nil)

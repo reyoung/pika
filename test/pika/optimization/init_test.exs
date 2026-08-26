@@ -1,7 +1,7 @@
 defmodule Pika.Optimization.InitTest do
   use ExUnit.Case, async: true
 
-  alias Pika.Optimization.{Config, Init}
+  alias Pika.Optimization.{Config, ConfigFile, Init}
   alias Pika.Git
 
   test "creates a self-contained v2 YAML with expanded Role configs" do
@@ -40,5 +40,16 @@ defmodule Pika.Optimization.InitTest do
     assert contents =~ "token: #{Jason.encode!(config.token)}"
 
     assert {:error, {:v2_config_already_exists, _path}} = Init.run(workspace, repo)
+
+    assert {:error, :cursor_acp_deprecated} =
+             Init.run(Path.join(root, "legacy-workspace"), repo, backend: "cursor")
+
+    primary = ConfigFile.agent("codex", "model", "high")
+    legacy = ConfigFile.agent("cursor_acp", "legacy", "high")
+
+    assert {:error, :cursor_acp_deprecated} =
+             Init.run(Path.join(root, "legacy-fallback-workspace"), repo,
+               agents: %{integration: %{primary | fallbacks: [legacy]}}
+             )
   end
 end

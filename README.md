@@ -32,7 +32,7 @@ mix release
   --workspace /absolute/path/to/workspace
 ```
 
-`pika init` 默认启动交互式向导。向导首先生成一个随机 256-bit 访问 token，可直接回车接受，也可输入固定 token；最终 token 会写入权限为 `0600` 的 Workspace `pika.yaml`，因此重启 `pika serve` 后保持不变。手工修改 token 后需要重启 `pika serve`。每个必选 Role、每个 Iteration Agent，以及启用的可选 Role 都可以分别选择 Codex/Cursor、provider 返回的完整模型列表和 reasoning effort。脚本中可加 `--yes`，用命令行参数和默认值非交互初始化。
+`pika init` 默认启动交互式向导。向导首先生成一个随机 256-bit 访问 token，可直接回车接受，也可输入固定 token；最终 token 会写入权限为 `0600` 的 Workspace `pika.yaml`，因此重启 `pika serve` 后保持不变。手工修改 token 后需要重启 `pika serve`。每个必选 Role、每个 Iteration Agent，以及启用的可选 Role 都可以分别选择 Codex/Cursor Headless、provider 返回的完整模型列表、reasoning effort 和有序 fallback Endpoint。Cursor ACP 已软退役，不能用于新配置；旧 YAML 仍可运行并产生 warning。脚本中可加 `--yes`，用命令行参数和默认值非交互初始化。
 
 在 Workspace 目录内运行 `pika reconfiguration`（也可用 `pika reconfigure`）可以交互式修改某个 Role 或全部 Agent 配置；修改只影响之后创建的 Session。`pika init` 和 `pika reconfiguration --help` 列出了相应的非交互参数。
 
@@ -60,6 +60,7 @@ mix release
 - Iteration 基于创建时的 Best；到达 FIFO 队首后若 Base 已 stale，会回到新的 Iteration Round merge 当前 Best。
 - Integration 覆盖 Full Case Set；任何 `pika/best` mutation 之前必须获得持久化 Git Intent。
 - Backend 崩溃后创建新 Session，不使用 provider resume。恢复信息来自 SQLite 生成的 `messages.jsonl` 与 `recovery-NN/recovery.json`，Git 现场保持原样。
+- Backend Fallback Chain 只在账户容量耗尽或认证失败时推进，并按 Work 持久化；网络、上下文窗口、Session budget 和未知失败重试当前可用 Endpoint。全链不可用时 UI 显示阻塞原因并允许手动重试。
 - Follow-up Role 可省略；省略时直接发送“继续”。Baseline Verify 耗尽使进程失败，Iteration/Integration 耗尽拒绝 Attempt。
 - Progress Summary 默认可每五分钟生成一次，按日期分片保存；运行一个月不会清理历史目录。
 

@@ -4,7 +4,7 @@ defmodule Pika.AgentBackend.CursorHeadless do
   use GenServer
   @behaviour Pika.AgentBackend
 
-  alias Pika.AgentBackend.{Error, Event, Id, JSONLPort, JSONLWriter, LaunchConfig}
+  alias Pika.AgentBackend.{Error, Event, Failure, Id, JSONLPort, JSONLWriter, LaunchConfig}
   alias Pika.AgentBackend.{PermissionPolicy, Session}
 
   @protocol "cursor-headless-stream-json-v1"
@@ -212,12 +212,19 @@ defmodule Pika.AgentBackend.CursorHeadless do
         {:backend_wire_error, transport, line, decode_error},
         %{transport: transport} = state
       ) do
+    failure =
+      Failure.unknown("Cursor headless emitted invalid stream JSON",
+        code: :invalid_stream_json,
+        details: %{line: line, error: Exception.message(decode_error)}
+      )
+
     emit(state, :backend_error,
       data: %{
         code: :invalid_stream_json,
         line: line,
         error: Exception.message(decode_error),
-        retry: false
+        retry: false,
+        failure: Failure.to_map(failure)
       }
     )
 
@@ -245,12 +252,19 @@ defmodule Pika.AgentBackend.CursorHeadless do
         {:noreply, reset_turn_state(state)}
 
       true ->
+        failure =
+          Failure.unknown("Cursor headless turn failed",
+            code: :headless_turn_failed,
+            details: %{status: status, terminal_result: state.terminal_result}
+          )
+
         failure = %{
           code: :headless_turn_failed,
           status: status,
           terminal_result: state.terminal_result,
           retry: false,
-          message: stderr_tail(state.stderr_path)
+          message: stderr_tail(state.stderr_path),
+          failure: Failure.to_map(failure)
         }
 
         emit(state, :backend_error, data: failure)
@@ -381,6 +395,10 @@ defmodule Pika.AgentBackend.CursorHeadless do
   end
 
   defp map_stream_event(%{"type" => "result"} = result, state) do
+    if is_map(result["usage"]) do
+      emit(state, :usage_updated, data: result["usage"])
+    end
+
     state
     |> reconcile_terminal_text(result["result"])
     |> Map.put(:terminal_result, result)
@@ -446,21 +464,43 @@ defmodule Pika.AgentBackend.CursorHeadless do
 
         if String.contains?(normalized, "not authenticated") or
              String.contains?(normalized, "not logged in") do
+          failure =
+            Failure.new(:authentication_failed, "Cursor CLI is not authenticated",
+              code: :not_authenticated,
+              details: %{output: output}
+            )
+
           error(
             :not_authenticated,
             "Cursor CLI is not authenticated; run cursor-agent login",
-            output
+            output,
+            failure
           )
         else
           :ok
         end
 
       {:error, reason} ->
-        error(
-          :not_authenticated,
-          "Cursor CLI authentication check failed; run cursor-agent login",
-          reason
-        )
+        output = control_error_output(reason)
+        normalized = String.downcase(to_string(output))
+
+        if String.contains?(normalized, "not authenticated") or
+             String.contains?(normalized, "not logged in") do
+          failure =
+            Failure.new(:authentication_failed, "Cursor CLI is not authenticated",
+              code: :not_authenticated,
+              details: %{raw: reason}
+            )
+
+          error(
+            :not_authenticated,
+            "Cursor CLI is not authenticated; run cursor-agent login",
+            reason,
+            failure
+          )
+        else
+          error(:authentication_check_failed, "Cursor CLI authentication check failed", reason)
+        end
     end
   end
 
@@ -516,6 +556,11 @@ defmodule Pika.AgentBackend.CursorHeadless do
 
     if candidate == "", do: {:error, :missing_chat_id}, else: {:ok, candidate}
   end
+
+  defp control_error_output(reason) when is_map(reason),
+    do: reason[:output] || reason["output"] || ""
+
+  defp control_error_output(_reason), do: ""
 
   defp install_session_plugin(state, mcp, skill_roots, instructions) do
     suffix = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
@@ -812,8 +857,8 @@ defmodule Pika.AgentBackend.CursorHeadless do
     end
   end
 
-  defp error(code, message, details),
-    do: {:error, %Error{code: code, message: message, details: %{raw: details}}}
+  defp error(code, message, details, failure \\ nil),
+    do: {:error, %Error{code: code, message: message, details: %{raw: details}, failure: failure}}
 
   defp unwrap({:error, %Error{} = reason}), do: reason
 end

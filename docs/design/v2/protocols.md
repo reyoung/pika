@@ -108,6 +108,8 @@ agent-sessions/<session-id>/
 
 旧 System Prompt、秘密、完整命令输出和大文件不进入消息文件。实际 Git repo 保持原样，由新 Agent检查和接管。
 
+Backend failover 也遵守相同恢复协议：eligible failure 先关闭失败 Session，再由 Symphony 为同一 Agent Work 创建新 Session 和下一份 Recovery Context。provider session identity 不跨 Endpoint 继承，失败请求不在原 provider Session 内自动重放。
+
 ## 5. Follow-up Context
 
 目标 Agent Turn 结束但尚未完成终态 MCP 时，Pika先从 SQLite 为该 Follow-up Request 生成独立目录：

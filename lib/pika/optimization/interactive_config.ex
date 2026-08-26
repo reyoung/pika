@@ -332,28 +332,86 @@ defmodule Pika.Optimization.InteractiveConfig do
   end
 
   defp collect_agent(label, %Agent{} = current, opts, cache, interactive?) do
+    current_endpoint = %{current | fallbacks: []}
+
+    with {:ok, endpoint, cache} <-
+           collect_endpoint(label, current_endpoint, opts, cache, interactive?),
+         {:ok, fallbacks, cache} <-
+           collect_fallbacks(label, current.fallbacks, endpoint, opts, cache, interactive?) do
+      {:ok, %{endpoint | fallbacks: fallbacks}, cache}
+    end
+  end
+
+  defp collect_endpoint(label, %Agent{} = current, opts, cache, interactive?) do
     with {:ok, backend} <- backend(opts[:backend], label, current.backend, interactive?),
          current_model <- if(backend == current.backend, do: current.model, else: nil),
          {:ok, model, cache} <-
            model(opts, label, backend, current_model, cache, interactive?),
          {:ok, effort} <-
            effort(opts[:reasoning_effort], label, current.reasoning_effort, interactive?) do
-      {:ok, update_agent(current, backend, model, effort), cache}
+      {:ok, %{update_agent(current, backend, model, effort) | fallbacks: []}, cache}
     end
   end
 
-  defp backend(nil, _label, current, false), do: {:ok, normalize_backend(current)}
+  defp collect_fallbacks(_label, fallbacks, _endpoint, _opts, cache, false) do
+    if Enum.any?(fallbacks, &(&1.backend == :cursor_acp)) do
+      {:error, :cursor_acp_deprecated_requires_interactive_migration}
+    else
+      {:ok, fallbacks, cache}
+    end
+  end
+
+  defp collect_fallbacks(label, fallbacks, endpoint, opts, cache, true) do
+    with {:ok, count} <-
+           non_negative_integer(
+             nil,
+             "#{label} Backend fallback count",
+             length(fallbacks),
+             true
+           ) do
+      fallback_opts = Keyword.drop(opts, [:backend, :model, :reasoning_effort])
+      default = %{endpoint | fallbacks: []}
+
+      if count == 0 do
+        {:ok, [], cache}
+      else
+        1..count
+        |> Enum.reduce_while({:ok, [], cache}, fn index, {:ok, parsed, current_cache} ->
+          current = Enum.at(fallbacks, index - 1) || default
+
+          case collect_endpoint(
+                 "#{label} Fallback #{index}",
+                 %{current | fallbacks: []},
+                 fallback_opts,
+                 current_cache,
+                 true
+               ) do
+            {:ok, fallback, next_cache} ->
+              {:cont, {:ok, [fallback | parsed], next_cache}}
+
+            {:error, _reason} = error ->
+              {:halt, error}
+          end
+        end)
+        |> case do
+          {:ok, parsed, next_cache} -> {:ok, Enum.reverse(parsed), next_cache}
+          {:error, _reason} = error -> error
+        end
+      end
+    end
+  end
+
+  defp backend(nil, _label, current, false), do: parse_backend(current)
 
   defp backend(value, _label, _current, _interactive?) when not is_nil(value),
     do: parse_backend(value)
 
   defp backend(nil, label, current, true) do
     current = short_backend(current)
-    default = %{"codex" => "1", "cursor" => "2", "cursor_headless" => "3"}[current] || "1"
+    default = %{"codex" => "1", "cursor_headless" => "2"}[current] || "2"
     IO.puts("\n#{label} backend:")
     IO.puts("  1) Codex · Codex App Server")
-    IO.puts("  2) Cursor · Agent Client Protocol")
-    IO.puts("  3) Cursor Headless · Local cursor-agent print mode")
+    IO.puts("  2) Cursor Headless · Local cursor-agent print mode")
 
     case prompt("Select #{label} backend", default) |> parse_backend() do
       {:ok, backend} ->
@@ -362,7 +420,7 @@ defmodule Pika.Optimization.InteractiveConfig do
       {:error, _reason} ->
         IO.puts(
           :stderr,
-          "Invalid value: choose 1 for Codex, 2 for Cursor ACP, or 3 for Cursor Headless"
+          "Invalid value: choose 1 for Codex or 2 for Cursor Headless; Cursor ACP is deprecated"
         )
 
         backend(nil, label, current, true)
@@ -508,6 +566,29 @@ defmodule Pika.Optimization.InteractiveConfig do
     end
   end
 
+  defp non_negative_integer(value, _label, _default, _interactive?)
+       when is_integer(value) and value >= 0,
+       do: {:ok, value}
+
+  defp non_negative_integer(nil, _label, default, false), do: {:ok, default}
+
+  defp non_negative_integer(value, _label, _default, false),
+    do: {:error, {:invalid_non_negative_integer, value}}
+
+  defp non_negative_integer(value, label, default, true) do
+    selected =
+      if is_nil(value), do: prompt(label, Integer.to_string(default)), else: to_string(value)
+
+    case Integer.parse(selected) do
+      {integer, ""} when integer >= 0 ->
+        {:ok, integer}
+
+      _other ->
+        IO.puts(:stderr, "Invalid value: enter a non-negative integer")
+        non_negative_integer(nil, label, default, true)
+    end
+  end
+
   defp path(value, _label, _default, _interactive?) when is_binary(value) and value != "",
     do: {:ok, Path.expand(value, System.get_env("PIKA_CLI_CWD") || File.cwd!())}
 
@@ -612,21 +693,14 @@ defmodule Pika.Optimization.InteractiveConfig do
        when value in [1, "1", :codex, :codex_app_server, "codex", "codex_app_server"],
        do: {:ok, :codex_app_server}
 
-  defp parse_backend(value) when value in [2, "2", :cursor, :cursor_acp, "cursor", "cursor_acp"],
-    do: {:ok, :cursor_acp}
-
   defp parse_backend(value)
-       when value in [3, "3", :cursor_headless, "cursor_headless", "cursor-headless"],
+       when value in [2, "2", :cursor_headless, "cursor_headless", "cursor-headless"],
        do: {:ok, :cursor_headless}
 
-  defp parse_backend(value), do: {:error, {:invalid_backend, value}}
+  defp parse_backend(value) when value in [:cursor, :cursor_acp, "cursor", "cursor_acp"],
+    do: {:error, :cursor_acp_deprecated}
 
-  defp normalize_backend(value) do
-    case parse_backend(value) do
-      {:ok, backend} -> backend
-      {:error, _reason} -> :codex_app_server
-    end
-  end
+  defp parse_backend(value), do: {:error, {:invalid_backend, value}}
 
   defp parse_effort(value) when is_atom(value), do: parse_effort(Atom.to_string(value))
 
@@ -713,7 +787,8 @@ defmodule Pika.Optimization.InteractiveConfig do
   defp effort_description("max"), do: "maximum supported reasoning"
   defp effort_description("ultra"), do: "deepest supported reasoning"
 
-  defp short_backend(value) when value in [:cursor_acp, "cursor_acp", "cursor"], do: "cursor"
+  defp short_backend(value) when value in [:cursor_acp, "cursor_acp", "cursor"],
+    do: "cursor_acp"
 
   defp short_backend(value)
        when value in [:cursor_headless, "cursor_headless", "cursor-headless"],

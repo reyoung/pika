@@ -1,6 +1,8 @@
 defmodule Pika.Optimization.ConfigTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Pika.Optimization.Config
   alias Pika.Optimization.Config.Agent
   alias Pika.Optimization.RoleRegistry
@@ -76,9 +78,83 @@ defmodule Pika.Optimization.ConfigTest do
         "  baseline_verify:\n    backend: cursor\n    approval_policy: force\n    sandbox: disabled"
       )
 
-    assert {:ok, config} = Config.load(config_file(yaml))
+    path = config_file(yaml)
+
+    log =
+      capture_log(fn ->
+        assert {:ok, config} = Config.load(path)
+        send(self(), {:loaded_config, config})
+      end)
+
+    assert_receive {:loaded_config, config}
     assert config.baseline_alignment.agent.backend == :cursor_headless
     assert config.baseline_verify.agent.backend == :cursor_acp
+    assert log =~ "Cursor ACP is deprecated"
+    assert log =~ "cursor_headless"
+  end
+
+  test "loads an ordered Backend Fallback Chain and rejects nesting" do
+    yaml =
+      String.replace(
+        minimal_yaml(),
+        "  integration:\n    backend: codex\n    approval_policy: never\n    sandbox: workspace-write",
+        """
+          integration:
+            backend: codex
+            model: primary
+            approval_policy: never
+            sandbox: workspace-write
+            fallbacks:
+              - backend: cursor_headless
+                model: second
+                reasoning_effort: high
+                approval_policy: force
+                sandbox: disabled
+              - backend: codex
+                model: third
+                reasoning_effort: medium
+                approval_policy: never
+                sandbox: danger-full-access
+        """
+      )
+
+    assert {:ok, config} = Config.load(config_file(yaml))
+    agent = config.integration.agent
+
+    assert Enum.map(Agent.chain(agent), &{&1.backend, &1.model}) == [
+             {:codex_app_server, "primary"},
+             {:cursor_headless, "second"},
+             {:codex_app_server, "third"}
+           ]
+
+    assert is_binary(Agent.chain_sha256(agent))
+    assert byte_size(Agent.chain_sha256(agent)) == 64
+    assert Config.role_agent(config, :integration) == {:ok, agent}
+    assert {:ok, integration_role} = RoleRegistry.fetch(:integration)
+    assert RoleRegistry.concurrency(integration_role, config) == 1
+
+    [iteration_agent] = config.iteration.agents
+
+    config_with_iteration_fallbacks = %{
+      config
+      | iteration: %{
+          config.iteration
+          | agents: [%{iteration_agent | fallbacks: agent.fallbacks}]
+        }
+    }
+
+    assert {:ok, iteration_role} = RoleRegistry.fetch(:iteration)
+    assert RoleRegistry.concurrency(iteration_role, config_with_iteration_fallbacks) == 1
+
+    nested =
+      String.replace(
+        yaml,
+        "        sandbox: disabled",
+        "        sandbox: disabled\n        fallbacks: []"
+      )
+
+    assert {:error, {:invalid_v2_config, [message]}} = Config.load(config_file(nested))
+    assert message =~ "nested Backend fallback chains are not allowed"
   end
 
   test "rejects Agent Profile fields and empty Iteration concurrency" do

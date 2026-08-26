@@ -5,7 +5,16 @@ defmodule Pika.Agent.Symphony do
 
   require Logger
 
-  alias Pika.Agent.{Actor, ConversationJournal, Directory, Work, WorkProjector}
+  alias Pika.Agent.{
+    Actor,
+    BackendConfig,
+    BackendFailover,
+    ConversationJournal,
+    Directory,
+    Work,
+    WorkProjector
+  }
+
   alias Pika.Baseline.Questions
   alias Pika.Optimization.{RoleRegistry, RuntimeConfig}
   alias Pika.Optimization.Persistence
@@ -30,6 +39,11 @@ defmodule Pika.Agent.Symphony do
 
   def restart_session(session_id, server \\ __MODULE__) when is_binary(session_id) do
     GenServer.call(server, {:restart_session, session_id}, :infinity)
+  end
+
+  def retry_backend_chain(role, work_kind, work_id, server \\ __MODULE__)
+      when is_binary(role) and is_binary(work_id) do
+    GenServer.call(server, {:retry_backend_chain, role, work_kind, work_id}, :infinity)
   end
 
   @impl true
@@ -107,6 +121,20 @@ defmodule Pika.Agent.Symphony do
     end
   end
 
+  def handle_call({:retry_backend_chain, role, work_kind, work_id}, _from, state) do
+    reply =
+      with {:ok, work_kind} <- normalize_work_kind(work_kind),
+           work <- %Work{role_id: role, kind: work_kind, id: work_id},
+           {:ok, config} <- RuntimeConfig.load(state.workspace),
+           {:ok, configured} <- BackendConfig.configured(config, work),
+           :ok <- BackendFailover.retry(work, configured) do
+        :ok
+      end
+
+    state = if reply == :ok, do: do_reconcile(state), else: state
+    {:reply, reply, state}
+  end
+
   @impl true
   def handle_info(:reconcile, state),
     do: {:noreply, state |> Map.put(:timer, nil) |> do_reconcile() |> schedule()}
@@ -159,7 +187,10 @@ defmodule Pika.Agent.Symphony do
     end
   rescue
     error ->
-      Logger.error("Agent reconciliation raised: #{Exception.format(:error, error, __STACKTRACE__)}")
+      Logger.error(
+        "Agent reconciliation raised: #{Exception.format(:error, error, __STACKTRACE__)}"
+      )
+
       %{state | errors: [Exception.message(error) | Enum.take(state.errors, 19)]}
   end
 
@@ -168,9 +199,26 @@ defmodule Pika.Agent.Symphony do
       cond do
         active?(work, state) -> state
         role_active_count(work.role_id, state) >= role_concurrency(work.role_id, config) -> state
-        true -> start_actor(work, state)
+        true -> maybe_start_actor(work, config, state)
       end
     end)
+  end
+
+  defp maybe_start_actor(work, config, state) do
+    case BackendConfig.select(config, work) do
+      {:ok, _selection} ->
+        start_actor(work, state)
+
+      {:blocked, _blocked} ->
+        state
+
+      {:error, reason} ->
+        Logger.error(
+          "Backend chain selection failed for #{inspect(Work.key(work))}: #{inspect(reason)}"
+        )
+
+        %{state | errors: [{work, reason} | Enum.take(state.errors, 19)]}
+    end
   end
 
   defp start_actor(work, state) do
@@ -190,10 +238,17 @@ defmodule Pika.Agent.Symphony do
       end
 
     case result do
-      {:ok, pid} -> put_actor(state, work, pid)
-      {:error, {:already_started, pid}} -> put_actor(state, work, pid)
+      {:ok, pid} ->
+        put_actor(state, work, pid)
+
+      {:error, {:already_started, pid}} ->
+        put_actor(state, work, pid)
+
       {:error, reason} ->
-        Logger.error("Agent actor failed to start for #{inspect(Work.key(work))}: #{inspect(reason)}")
+        Logger.error(
+          "Agent actor failed to start for #{inspect(Work.key(work))}: #{inspect(reason)}"
+        )
+
         %{state | errors: [{work, reason} | Enum.take(state.errors, 19)]}
     end
   end
@@ -312,4 +367,29 @@ defmodule Pika.Agent.Symphony do
       do: state,
       else: %{state | timer: Process.send_after(self(), :reconcile, delay)}
   end
+
+  defp normalize_work_kind(value)
+       when value in [
+              :baseline_revision,
+              :baseline_followup_request,
+              :attempt,
+              :attempt_followup_request,
+              :integration_followup_request,
+              :progress_summary_request
+            ],
+       do: {:ok, value}
+
+  defp normalize_work_kind(value) when is_binary(value) do
+    case value do
+      "baseline_revision" -> {:ok, :baseline_revision}
+      "baseline_followup_request" -> {:ok, :baseline_followup_request}
+      "attempt" -> {:ok, :attempt}
+      "attempt_followup_request" -> {:ok, :attempt_followup_request}
+      "integration_followup_request" -> {:ok, :integration_followup_request}
+      "progress_summary_request" -> {:ok, :progress_summary_request}
+      _other -> {:error, {:invalid_work_kind, value}}
+    end
+  end
+
+  defp normalize_work_kind(value), do: {:error, {:invalid_work_kind, value}}
 end

@@ -25,6 +25,8 @@ defmodule Pika.Agent.ConversationJournal do
     now = now_us()
     id = Keyword.get(opts, :id, allocate_session_id())
     recovery_sequence = Keyword.get(opts, :recovery_sequence, 0)
+    backend_chain_sha256 = Keyword.get(opts, :backend_chain_sha256)
+    backend_chain_index = Keyword.get(opts, :backend_chain_index, 0)
 
     transaction =
       Repo.transaction(fn ->
@@ -43,8 +45,8 @@ defmodule Pika.Agent.ConversationJournal do
           INSERT INTO agent_sessions(
             id, optimization_id, role, work_kind, work_id, session_sequence,
             backend_config_json, system_prompt_sha256, context_sha256,
-            status, recovery_sequence, started_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+            backend_chain_sha256, backend_chain_index, status, recovery_sequence, started_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
           """,
           [
             id,
@@ -56,6 +58,8 @@ defmodule Pika.Agent.ConversationJournal do
             Jason.encode!(backend_config),
             sha256(system_prompt),
             sha256(context_contents),
+            backend_chain_sha256,
+            backend_chain_index,
             recovery_sequence,
             now
           ]
@@ -350,7 +354,8 @@ defmodule Pika.Agent.ConversationJournal do
     Repo.query!(
       """
       SELECT id, role, work_kind, work_id, session_sequence, backend_config_json,
-             system_prompt_sha256, context_sha256, provider_session_id, status,
+             system_prompt_sha256, context_sha256, backend_chain_sha256,
+             backend_chain_index, provider_session_id, status,
              recovery_sequence, ended_reason, started_at, ended_at
       FROM agent_sessions
       WHERE optimization_id = ? AND role = ? AND work_kind = ? AND work_id = ?
@@ -366,7 +371,8 @@ defmodule Pika.Agent.ConversationJournal do
     case Repo.query!(
            """
            SELECT id, role, work_kind, work_id, session_sequence, backend_config_json,
-                  system_prompt_sha256, context_sha256, provider_session_id, status,
+                  system_prompt_sha256, context_sha256, backend_chain_sha256,
+                  backend_chain_index, provider_session_id, status,
                   recovery_sequence, ended_reason, started_at, ended_at
            FROM agent_sessions WHERE id = ?
            """,
@@ -478,6 +484,8 @@ defmodule Pika.Agent.ConversationJournal do
          backend_config,
          system_prompt_sha256,
          context_sha256,
+         backend_chain_sha256,
+         backend_chain_index,
          provider_session_id,
          status,
          recovery_sequence,
@@ -494,6 +502,8 @@ defmodule Pika.Agent.ConversationJournal do
       backend_config: Jason.decode!(backend_config),
       system_prompt_sha256: system_prompt_sha256,
       context_sha256: context_sha256,
+      backend_chain_sha256: backend_chain_sha256,
+      backend_chain_index: backend_chain_index,
       provider_session_id: provider_session_id,
       status: status,
       recovery_sequence: recovery_sequence,

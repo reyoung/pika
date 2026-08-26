@@ -46,11 +46,80 @@ defmodule Pika.Test.FakeJSONLProvider do
     respond(id, %{"turn" => %{"id" => turn_id, "status" => "inProgress", "items" => []}})
     notify("turn/started", %{"threadId" => params["threadId"], "turn" => %{"id" => turn_id}})
 
-    if contains?(params["input"], "hold") do
-      %{state | active_turn: turn_id}
-    else
-      complete_codex_turn(params["threadId"], turn_id, "fake complete")
-      %{state | active_turn: nil}
+    cond do
+      contains?(params["input"], "usage failure") ->
+        reset_at = System.system_time(:second) + 60
+
+        notify("account/rateLimits/updated", %{
+          "rateLimits" => %{
+            "primary" => %{"usedPercent" => 100, "resetsAt" => reset_at},
+            "rateLimitReachedType" => "usage_limit"
+          }
+        })
+
+        fail_codex_turn(params["threadId"], turn_id, "UsageLimitExceeded", "quota reached")
+        %{state | active_turn: nil}
+
+      contains?(params["input"], "unauthorized failure") ->
+        fail_codex_turn(params["threadId"], turn_id, "Unauthorized", "login expired")
+        %{state | active_turn: nil}
+
+      contains?(params["input"], "context failure") ->
+        fail_codex_turn(params["threadId"], turn_id, "ContextWindowExceeded", "too much context")
+        %{state | active_turn: nil}
+
+      contains?(params["input"], "session budget failure") ->
+        fail_codex_turn(params["threadId"], turn_id, "SessionBudgetExceeded", "budget reached")
+        %{state | active_turn: nil}
+
+      contains?(params["input"], "network failure") ->
+        fail_codex_turn(
+          params["threadId"],
+          turn_id,
+          "ResponseStreamDisconnected",
+          "network disconnected"
+        )
+
+        %{state | active_turn: nil}
+
+      contains?(params["input"], "rate notification success") ->
+        notify("account/rateLimits/updated", %{
+          "rateLimits" => %{
+            "primary" => %{
+              "usedPercent" => 100,
+              "resetsAt" => System.system_time(:second) + 60
+            }
+          }
+        })
+
+        notify("thread/tokenUsage/updated", %{
+          "threadId" => params["threadId"],
+          "tokenUsage" => %{"totalTokens" => 999_999}
+        })
+
+        complete_codex_turn(params["threadId"], turn_id, "rate notice did not fail")
+        %{state | active_turn: nil}
+
+      contains?(params["input"], "retry then success") ->
+        notify("error", %{
+          "threadId" => params["threadId"],
+          "turnId" => turn_id,
+          "willRetry" => true,
+          "error" => %{
+            "message" => "temporary disconnect",
+            "codexErrorInfo" => "ResponseStreamDisconnected"
+          }
+        })
+
+        complete_codex_turn(params["threadId"], turn_id, "retry complete")
+        %{state | active_turn: nil}
+
+      contains?(params["input"], "hold") ->
+        %{state | active_turn: turn_id}
+
+      true ->
+        complete_codex_turn(params["threadId"], turn_id, "fake complete")
+        %{state | active_turn: nil}
     end
   end
 
@@ -215,6 +284,22 @@ defmodule Pika.Test.FakeJSONLProvider do
     notify("turn/completed", %{
       "threadId" => thread_id,
       "turn" => %{"id" => turn_id, "status" => "completed", "items" => []}
+    })
+  end
+
+  defp fail_codex_turn(thread_id, turn_id, code, message) do
+    error = %{"message" => message, "codexErrorInfo" => code}
+
+    notify("error", %{
+      "threadId" => thread_id,
+      "turnId" => turn_id,
+      "willRetry" => false,
+      "error" => error
+    })
+
+    notify("turn/completed", %{
+      "threadId" => thread_id,
+      "turn" => %{"id" => turn_id, "status" => "failed", "items" => [], "error" => error}
     })
   end
 

@@ -21,6 +21,11 @@ defmodule PikaWeb.OptimizationLiveTest do
 
     def handle_call({:restart_session, _session_id}, _from, state),
       do: {:reply, :ok, state}
+
+    def handle_call({:retry_backend_chain, role, work_kind, work_id}, _from, owner) do
+      if owner, do: send(owner, {:retry_backend_chain, role, work_kind, work_id})
+      {:reply, :ok, owner}
+    end
   end
 
   test "renders the singleton v2 Optimization without removed workflow controls" do
@@ -190,6 +195,22 @@ defmodule PikaWeb.OptimizationLiveTest do
 
     question_task = Task.async(fn -> Questions.ask(binding, questions) end)
     assert eventually(fn -> Questions.pending() != nil end)
+
+    now = System.system_time(:microsecond)
+
+    Repo.query!(
+      """
+      INSERT INTO agent_backend_failures(
+        optimization_id, role, work_kind, work_id, chain_sha256, chain_length,
+        endpoint_index, backend, category, provider_code, message, retry_at,
+        details_json, active, failed_at, updated_at, cleared_at
+      ) VALUES ('optimization', 'integration', 'attempt', '7', ?, 1, 0,
+                'cursor_headless', 'authentication_failed', 'Unauthorized',
+                'Cursor login expired', NULL, '{}', 1, ?, ?, NULL)
+      """,
+      [String.duplicate("b", 64), now, now]
+    )
+
     %{marker: marker} = Auth.generate()
 
     assert {:ok, socket} =
@@ -251,6 +272,13 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert html =~ "Write your own answer"
     assert html =~ ~s(phx-value-tab="attempts")
     assert html =~ "No progress summary yet"
+    assert html =~ "Blocked agent work"
+    assert html =~ "Endpoint 1"
+    assert html =~ "Cursor headless"
+    assert html =~ "Authentication failed: Cursor login expired"
+    assert html =~ "manual retry or reconfiguration required"
+    assert html =~ "Retry backend chain"
+    assert html =~ ~s(phx-click="retry_backend_chain")
     refute html =~ "Performance timeline"
     refute html =~ ">Sync<"
     refute html =~ "Campaign singleton"
@@ -305,6 +333,17 @@ defmodule PikaWeb.OptimizationLiveTest do
     assert second_tool_position < third_tool_position
     assert third_tool_position < user_reply_position
     assert user_reply_position < final_agent_position
+
+    start_supervised!({SymphonyStub, owner: self()})
+
+    assert {:noreply, _retried_socket} =
+             PikaWeb.OptimizationLive.handle_event(
+               "retry_backend_chain",
+               %{"role" => "integration", "work-kind" => "attempt", "work-id" => "7"},
+               socket
+             )
+
+    assert_receive {:retry_backend_chain, "integration", "attempt", "7"}
 
     assert {:noreply, opened_first_socket} =
              PikaWeb.OptimizationLive.handle_event(
@@ -424,8 +463,6 @@ defmodule PikaWeb.OptimizationLiveTest do
                   "custom" => true
                 }
               ]}
-
-    start_supervised!({SymphonyStub, owner: self()})
 
     assert {:noreply, restarted_socket} =
              PikaWeb.OptimizationLive.handle_event(

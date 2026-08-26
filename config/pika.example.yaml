@@ -24,6 +24,17 @@ agents:
 
   integration:
     <<: *writer
+    fallbacks:
+      - backend: cursor_headless
+        model: gpt-5.6-sol-high
+        reasoning_effort: high
+        approval_policy: force
+        sandbox: disabled
+      - backend: codex
+        model: another-model
+        reasoning_effort: medium
+        approval_policy: never
+        sandbox: danger-full-access
     max_followups: 8
     regression_feedback_cases: 3
 

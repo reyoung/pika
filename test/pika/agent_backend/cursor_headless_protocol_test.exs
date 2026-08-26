@@ -132,8 +132,17 @@ defmodule Pika.AgentBackend.CursorHeadlessProtocolTest do
     assert_event(:turn_started)
     assert_event(:message_delta)
 
-    assert %{turn_id: ^turn_id, data: %{code: :headless_turn_failed, retry: false}} =
-             assert_event(:backend_error)
+    assert %{
+             turn_id: ^turn_id,
+             data: %{
+               code: :headless_turn_failed,
+               retry: false,
+               failure: %{category: "unknown"},
+               message: message
+             }
+           } = assert_event(:backend_error)
+
+    assert message =~ "quota exhausted"
 
     assert %{turn_id: ^turn_id, data: %{expected: false, retry: false}} =
              assert_event(:process_exited)
@@ -148,7 +157,12 @@ defmodule Pika.AgentBackend.CursorHeadlessProtocolTest do
     profile = %{profile | env: Map.put(profile.env, "PIKA_FAKE_CURSOR_AUTH", "failed")}
     {:ok, backend} = AgentBackend.start_link(Pika.AgentBackend.CursorHeadless, profile, self())
 
-    assert {:error, %{code: :not_authenticated, message: message}} =
+    assert {:error,
+            %{
+              code: :not_authenticated,
+              message: message,
+              failure: %{category: :authentication_failed}
+            }} =
              AgentBackend.open_session(
                backend,
                artifact_dir,
@@ -160,6 +174,23 @@ defmodule Pika.AgentBackend.CursorHeadlessProtocolTest do
              )
 
     assert message =~ "cursor-agent login"
+    assert :ok = AgentBackend.close_session(backend)
+  end
+
+  test "forwards optional terminal usage without treating it as capacity state" do
+    artifact_dir = temp_dir("cursor-headless-usage")
+    {:ok, backend} = start_backend(artifact_dir)
+    open_backend(backend, artifact_dir)
+
+    assert {:ok, turn_id} = AgentBackend.start_turn(backend, "report usage")
+    assert_event(:turn_started)
+
+    assert %{turn_id: ^turn_id, data: %{"inputTokens" => 17, "outputTokens" => 3}} =
+             assert_event(:usage_updated)
+
+    assert %{turn_id: ^turn_id, data: %{"status" => "completed"}} =
+             assert_event(:turn_completed)
+
     assert :ok = AgentBackend.close_session(backend)
   end
 

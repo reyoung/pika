@@ -13,7 +13,7 @@ defmodule Pika.Optimization.InteractiveConfigTest do
     workspace = Path.join(root, "workspace")
 
     catalog = fn backend ->
-      prefix = if backend == "cursor_acp", do: "cursor", else: "codex"
+      prefix = if backend == "cursor_headless", do: "cursor", else: "codex"
 
       {:ok,
        Enum.map(1..16, fn index ->
@@ -30,22 +30,26 @@ defmodule Pika.Optimization.InteractiveConfigTest do
           "1",
           "2",
           "1",
-          # Baseline Verify: cursor / cursor-2 / medium
+          "0",
+          # Baseline Verify: cursor headless / cursor-2 / medium
           "2",
           "3",
           "2",
+          "0",
           # Baseline Verify Follow-up disabled
           "n",
           # Iteration: codex / the formerly truncated codex-16 / high
           "1",
           "17",
           "3",
+          "0",
           # Iteration Follow-up disabled
           "n",
           # Integration: cursor / cursor-1 / ultra
           "2",
           "2",
           "6",
+          "0",
           # Integration Follow-up and Progress Summary disabled
           "n",
           "n"
@@ -75,7 +79,7 @@ defmodule Pika.Optimization.InteractiveConfigTest do
     assert settings.agents.baseline_alignment.reasoning_effort == "low"
     assert settings.agents.baseline_alignment.sandbox == "danger_full_access"
 
-    assert settings.agents.baseline_verify.backend == :cursor_acp
+    assert settings.agents.baseline_verify.backend == :cursor_headless
     assert settings.agents.baseline_verify.model == "cursor-2"
     assert settings.agents.baseline_verify.reasoning_effort == "medium"
     assert settings.agents.baseline_verify.sandbox == "disabled"
@@ -86,7 +90,7 @@ defmodule Pika.Optimization.InteractiveConfigTest do
     assert iteration.reasoning_effort == "high"
     assert iteration.sandbox == "danger_full_access"
 
-    assert settings.agents.integration.backend == :cursor_acp
+    assert settings.agents.integration.backend == :cursor_headless
     assert settings.agents.integration.model == "cursor-1"
     assert settings.agents.integration.reasoning_effort == "ultra"
     assert settings.agents.integration.sandbox == "disabled"
@@ -96,12 +100,25 @@ defmodule Pika.Optimization.InteractiveConfigTest do
     assert output =~ "6) ultra"
   end
 
-  test "non-interactive init applies explicit defaults and optional Roles" do
-    assert {:ok, settings} =
+  test "non-interactive init rejects Cursor ACP and recommends Cursor Headless" do
+    assert {:error, :cursor_acp_deprecated} =
              InteractiveConfig.collect_init(
                workspace: "/tmp/pika-workspace",
                repo: "/tmp/pika-repo",
                backend: "cursor",
+               model: "cursor-model",
+               reasoning_effort: "xhigh",
+               iteration_agents: 2,
+               yes: true
+             )
+  end
+
+  test "non-interactive init applies Cursor Headless to optional Roles" do
+    assert {:ok, settings} =
+             InteractiveConfig.collect_init(
+               workspace: "/tmp/pika-workspace",
+               repo: "/tmp/pika-repo",
+               backend: "cursor-headless",
                model: "cursor-model",
                reasoning_effort: "xhigh",
                iteration_agents: 2,
@@ -123,7 +140,7 @@ defmodule Pika.Optimization.InteractiveConfigTest do
       | settings.agents.iteration
     ]
 
-    assert Enum.all?(configured, &(&1.backend == :cursor_acp))
+    assert Enum.all?(configured, &(&1.backend == :cursor_headless))
     assert Enum.all?(configured, &(&1.model == "cursor-model"))
     assert Enum.all?(configured, &(&1.sandbox == "disabled"))
     assert length(settings.agents.iteration) == 2

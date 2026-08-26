@@ -22,7 +22,11 @@ defmodule Pika.Optimization.ConfigFileTest do
         model: "writer-model",
         reasoning_effort: "xhigh",
         env: %{"PIKA_TEST" => "configured"},
-        protocol_config: %{"nested" => %{"enabled" => true}}
+        protocol_config: %{"nested" => %{"enabled" => true}},
+        fallbacks: [
+          ConfigFile.agent("cursor-headless", "fallback-model", "high"),
+          ConfigFile.agent("codex", "last-model", "medium")
+        ]
     }
 
     followup = %Role{agent: %{rich_agent | reasoning_effort: "medium"}, generator_max_attempts: 7}
@@ -49,6 +53,11 @@ defmodule Pika.Optimization.ConfigFileTest do
 
     assert Config.Agent.snapshot(loaded.baseline_alignment.agent) ==
              Config.Agent.snapshot(rich_agent)
+
+    assert Enum.map(loaded.baseline_alignment.agent.fallbacks, &{&1.backend, &1.model}) == [
+             {:cursor_headless, "fallback-model"},
+             {:codex_app_server, "last-model"}
+           ]
 
     assert loaded.baseline_verify_followup.generator_max_attempts == 7
     assert loaded.iteration_followup.generator_max_attempts == 7
@@ -82,5 +91,14 @@ defmodule Pika.Optimization.ConfigFileTest do
     assert config.baseline_alignment.agent.backend == :cursor_headless
     assert config.baseline_alignment.agent.approval_policy == "force"
     assert config.baseline_alignment.agent.sandbox == "disabled"
+  end
+
+  test "renders a legacy Cursor ACP value explicitly instead of changing providers" do
+    root = Path.join(System.tmp_dir!(), "pika-config-acp-#{System.unique_integer([:positive])}")
+    path = Path.join(root, "pika.yaml")
+    config = ConfigFile.new(path, Path.join(root, "repo"), root, backend: "cursor")
+
+    assert ConfigFile.render(config) =~ "backend: cursor_acp"
+    assert config.baseline_alignment.agent.backend == :cursor_acp
   end
 end

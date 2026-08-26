@@ -11,7 +11,8 @@ defmodule Pika.Optimization.Config.Agent do
     :sandbox,
     env: %{},
     protocol_config: %{},
-    options: %{}
+    options: %{},
+    fallbacks: []
   ]
 
   @type backend :: :codex_app_server | :cursor_acp | :cursor_headless
@@ -24,7 +25,8 @@ defmodule Pika.Optimization.Config.Agent do
           sandbox: String.t(),
           env: %{optional(String.t()) => String.t()},
           protocol_config: map(),
-          options: map()
+          options: map(),
+          fallbacks: [t()]
         }
 
   @spec snapshot(t()) :: map()
@@ -42,6 +44,21 @@ defmodule Pika.Optimization.Config.Agent do
     |> Map.merge(agent.options)
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
+  end
+
+  @spec chain(t()) :: [t(), ...]
+  def chain(%__MODULE__{} = agent) do
+    [%{agent | fallbacks: []} | Enum.map(agent.fallbacks, &%{&1 | fallbacks: []})]
+  end
+
+  @spec chain_sha256(t()) :: String.t()
+  def chain_sha256(%__MODULE__{} = agent) do
+    agent
+    |> chain()
+    |> Enum.map(&snapshot/1)
+    |> :erlang.term_to_binary([:deterministic])
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
   end
 end
 
@@ -98,9 +115,11 @@ defmodule Pika.Optimization.Config do
 
   alias Pika.Optimization.Config.{Agent, Iteration, ProgressSummary, Role}
 
+  require Logger
+
   @root_fields ~w(version repo workspace token agents)
   @reserved_agent_fields ~w(
-    backend command model reasoning_effort approval_policy sandbox env protocol_config
+    backend command model reasoning_effort approval_policy sandbox env protocol_config fallbacks
     max_followups generator_max_attempts regression_feedback_cases interval timezone agents
     history_limit max_pending_attempts
   )
@@ -145,7 +164,7 @@ defmodule Pika.Optimization.Config do
 
     with true <- File.regular?(expanded) || error("config: file does not exist: #{expanded}"),
          {:ok, yaml} <- read_yaml(expanded),
-         {:ok, config} <- build(expanded, yaml) do
+         {:ok, config} <- with_config_source(expanded, fn -> build(expanded, yaml) end) do
       {:ok, config}
     else
       {:error, {:invalid_v2_config, _errors}} = error -> error
@@ -347,10 +366,11 @@ defmodule Pika.Optimization.Config do
     end
   end
 
-  defp agent(value, path, control_keys) do
+  defp agent(value, path, control_keys, allow_fallbacks \\ true) do
     forbidden = Enum.filter(@forbidden_agent_fields, &Map.has_key?(value, &1))
 
     with [] <- forbidden,
+         :ok <- reject_nested_fallbacks(value, path, allow_fallbacks),
          {:ok, backend} <- backend(value["backend"], "agents.#{path}.backend"),
          {:ok, command} <- command(value["command"], "agents.#{path}.command"),
          {:ok, model} <- optional_string(value["model"], "agents.#{path}.model"),
@@ -367,7 +387,8 @@ defmodule Pika.Optimization.Config do
            permission(backend, :sandbox_policy, value["sandbox"], "agents.#{path}.sandbox"),
          {:ok, env} <- string_map(value["env"] || %{}, "agents.#{path}.env"),
          {:ok, protocol_config} <-
-           required_map(value["protocol_config"] || %{}, "agents.#{path}.protocol_config") do
+           required_map(value["protocol_config"] || %{}, "agents.#{path}.protocol_config"),
+         {:ok, fallbacks} <- fallbacks(value["fallbacks"], path, allow_fallbacks) do
       reserved = MapSet.new(@reserved_agent_fields ++ Enum.map(control_keys, &Atom.to_string/1))
 
       options =
@@ -386,7 +407,8 @@ defmodule Pika.Optimization.Config do
            sandbox: sandbox,
            env: env,
            protocol_config: protocol_config,
-           options: %{}
+           options: %{},
+           fallbacks: fallbacks
          }}
       else
         error(
@@ -398,6 +420,41 @@ defmodule Pika.Optimization.Config do
       [_ | _] -> error("agents.#{path}: Agent Profile fields are not allowed")
     end
   end
+
+  defp reject_nested_fallbacks(value, path, false) do
+    if Map.has_key?(value, "fallbacks"),
+      do: error("agents.#{path}.fallbacks: nested Backend fallback chains are not allowed"),
+      else: :ok
+  end
+
+  defp reject_nested_fallbacks(_value, _path, true), do: :ok
+
+  defp fallbacks(nil, _path, _allow_fallbacks), do: {:ok, []}
+
+  defp fallbacks(values, path, true) when is_list(values) do
+    values
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {value, index}, {:ok, parsed} ->
+      fallback_path = "#{path}.fallbacks[#{index}]"
+
+      with {:ok, value} <- required_map(value, "agents.#{fallback_path}"),
+           {:ok, fallback} <- agent(value, fallback_path, [], false) do
+        {:cont, {:ok, [fallback | parsed]}}
+      else
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, parsed} -> {:ok, Enum.reverse(parsed)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp fallbacks(_values, path, true),
+    do: error("agents.#{path}.fallbacks: must be a list")
+
+  defp fallbacks(_values, path, false),
+    do: error("agents.#{path}.fallbacks: nested Backend fallback chains are not allowed")
 
   defp controls(value, path, controls) do
     Enum.reduce_while(controls, {:ok, []}, fn {key, {kind, default}}, {:ok, parsed} ->
@@ -421,15 +478,31 @@ defmodule Pika.Optimization.Config do
        when value in ["codex", "codex_app_server", :codex, :codex_app_server],
        do: {:ok, :codex_app_server}
 
-  defp backend(value, _path) when value in ["cursor", "cursor_acp", :cursor, :cursor_acp],
-    do: {:ok, :cursor_acp}
+  defp backend(value, path) when value in ["cursor", "cursor_acp", :cursor, :cursor_acp] do
+    warning_key = {
+      __MODULE__,
+      :cursor_acp_deprecation,
+      Process.get({__MODULE__, :config_source}, :unknown),
+      path
+    }
+
+    unless :persistent_term.get(warning_key, false) do
+      Logger.warning(
+        "#{path}: Cursor ACP is deprecated; migrate this Backend Endpoint to cursor_headless"
+      )
+
+      :persistent_term.put(warning_key, true)
+    end
+
+    {:ok, :cursor_acp}
+  end
 
   defp backend(value, _path)
        when value in ["cursor_headless", "cursor-headless", :cursor_headless],
        do: {:ok, :cursor_headless}
 
   defp backend(_value, path),
-    do: error("#{path}: must be codex, cursor, or cursor_headless")
+    do: error("#{path}: must be codex, cursor_acp, or cursor_headless")
 
   defp permission(backend, kind, value, path) do
     with {:ok, value} <- required_string(value, path) do
@@ -480,6 +553,18 @@ defmodule Pika.Optimization.Config do
 
   defp time_zone(value),
     do: error("agents.progress_summary.timezone: must be a time zone name, got #{inspect(value)}")
+
+  defp with_config_source(source, fun) do
+    key = {__MODULE__, :config_source}
+    previous = Process.get(key)
+    Process.put(key, source)
+
+    try do
+      fun.()
+    after
+      if is_nil(previous), do: Process.delete(key), else: Process.put(key, previous)
+    end
+  end
 
   defp integer(nil, default, _minimum, _path), do: {:ok, default}
 

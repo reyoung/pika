@@ -104,6 +104,19 @@ defmodule PikaWeb.OptimizationLive do
   def handle_event("restart_agent_session", %{"session-id" => session_id}, socket),
     do: handle_event("restart_agent_session", %{"session" => session_id}, socket)
 
+  def handle_event(
+        "retry_backend_chain",
+        %{"role" => role, "work-kind" => work_kind, "work-id" => work_id},
+        socket
+      ) do
+    result = Symphony.retry_backend_chain(role, work_kind, work_id)
+
+    {:noreply,
+     socket
+     |> put_result(result, "Backend fallback chain 已从主节点重新启用。")
+     |> refresh()}
+  end
+
   def handle_event("toggle_agent_session", %{"session" => session_id}, socket) do
     open_session_id =
       if socket.assigns.open_session_id == session_id,
@@ -468,13 +481,55 @@ defmodule PikaWeb.OptimizationLive do
           <article class="ops-stat-card">
             <span>Active agents</span>
             <strong>{length(@snapshot.active_agent_sessions)}</strong>
-            <small>{agent_activity(@snapshot.active_agent_sessions)}</small>
+            <small>
+              {agent_activity(@snapshot.active_agent_sessions)} · {length(
+                @snapshot.blocked_agent_works
+              )} backend blocked
+            </small>
           </article>
           <article class="ops-stat-card">
             <span>Follow-ups</span>
             <strong>{length(@snapshot.active_followups)}</strong>
             <small>{followup_activity(@snapshot.active_followups)}</small>
           </article>
+        </section>
+
+        <section :if={@snapshot.blocked_agent_works != []} class="ops-panel ops-agent-inspector">
+          <header>
+            <div>
+              <p class="ops-eyebrow">Backend fallback</p>
+              <h2>Blocked agent work</h2>
+              <p>Every configured Backend Endpoint is unavailable for these Works.</p>
+            </div>
+            <span class="ops-count">{length(@snapshot.blocked_agent_works)}</span>
+          </header>
+
+          <div :for={blocked <- @snapshot.blocked_agent_works} class="ops-agent-restart">
+            <span>
+              <strong>{role_name(blocked.role)} · {blocked.work_kind} {blocked.work_id}</strong>
+              <small>
+                {blocked.chain_length} endpoints unavailable · {blocked_retry_label(
+                  blocked.next_retry_at
+                )}
+              </small>
+              <small :for={failure <- blocked.failures}>
+                Endpoint {failure.endpoint_index + 1} · {backend_label(failure.backend)} · {humanize_status(
+                  failure.category
+                )}: {failure.message}
+              </small>
+            </span>
+            <button
+              type="button"
+              phx-click="retry_backend_chain"
+              phx-value-role={blocked.role}
+              phx-value-work-kind={blocked.work_kind}
+              phx-value-work-id={blocked.work_id}
+              phx-disable-with="Retrying…"
+              class="ops-button ops-button-danger"
+            >
+              Retry backend chain
+            </button>
+          </div>
         </section>
 
         <div class="ops-primary-grid">
@@ -1383,6 +1438,27 @@ defmodule PikaWeb.OptimizationLive do
       session -> session.id
     end
   end
+
+  defp blocked_retry_label(nil), do: "manual retry or reconfiguration required"
+
+  defp blocked_retry_label(unix_seconds) when is_integer(unix_seconds) do
+    case DateTime.from_unix(unix_seconds) do
+      {:ok, datetime} ->
+        "automatic retry after #{Calendar.strftime(datetime, "%Y-%m-%d %H:%M UTC")}"
+
+      {:error, _reason} ->
+        "automatic retry scheduled"
+    end
+  end
+
+  defp backend_label(value) when value in [:codex_app_server, "codex_app_server"],
+    do: "Codex app server"
+
+  defp backend_label(value) when value in [:cursor_headless, "cursor_headless"],
+    do: "Cursor headless"
+
+  defp backend_label(value) when value in [:cursor_acp, "cursor_acp"], do: "Cursor ACP (legacy)"
+  defp backend_label(value), do: humanize_status(value)
 
   defp normalize_question_answers(questions, answers) when is_map(answers) do
     Enum.map(questions, fn question ->

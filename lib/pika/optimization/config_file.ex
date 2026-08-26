@@ -60,7 +60,8 @@ defmodule Pika.Optimization.ConfigFile do
       sandbox: permissions.sandbox_policy,
       env: %{},
       protocol_config: %{},
-      options: %{}
+      options: %{},
+      fallbacks: []
     }
   end
 
@@ -186,7 +187,22 @@ defmodule Pika.Optimization.ConfigFile do
       "#{indent}approval_policy: #{scalar(configured_agent.approval_policy)}\n",
       "#{indent}sandbox: #{scalar(configured_agent.sandbox)}\n",
       optional_map("env", configured_agent.env, indent),
-      optional_map("protocol_config", configured_agent.protocol_config, indent)
+      optional_map("protocol_config", configured_agent.protocol_config, indent),
+      fallbacks_yaml(configured_agent.fallbacks, indent)
+    ]
+  end
+
+  defp fallbacks_yaml([], _indent), do: ""
+
+  defp fallbacks_yaml(fallbacks, indent) do
+    [
+      "#{indent}fallbacks:\n",
+      Enum.map(fallbacks, fn fallback ->
+        [
+          "#{indent}  - backend: #{short_backend(fallback.backend)}\n",
+          agent_yaml_tail(%{fallback | fallbacks: []}, indent <> "    ")
+        ]
+      end)
     ]
   end
 
@@ -218,7 +234,7 @@ defmodule Pika.Optimization.ConfigFile do
 
   defp normalize_backend(_value), do: :codex_app_server
 
-  defp short_backend(:cursor_acp), do: "cursor"
+  defp short_backend(:cursor_acp), do: "cursor_acp"
   defp short_backend(:cursor_headless), do: "cursor_headless"
   defp short_backend(_backend), do: "codex"
 end

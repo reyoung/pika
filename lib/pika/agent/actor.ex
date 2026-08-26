@@ -5,6 +5,7 @@ defmodule Pika.Agent.Actor do
 
   alias Pika.Agent.{
     BackendConfig,
+    BackendFailover,
     CommandRouter,
     ContextBundle,
     ConversationJournal,
@@ -19,6 +20,7 @@ defmodule Pika.Agent.Actor do
   }
 
   alias Pika.AgentBackend
+  alias Pika.AgentBackend.{Error, Failure}
   alias Pika.Followup.Lifecycle, as: FollowupLifecycle
   alias Pika.Optimization.{RoleRegistry, RuntimeConfig}
   alias Pika.ProgressSummary.Lifecycle, as: ProgressSummaryLifecycle
@@ -52,6 +54,7 @@ defmodule Pika.Agent.Actor do
       pika_session: nil,
       provider_session: nil,
       agent: nil,
+      backend_selection: nil,
       handle: nil,
       monitor: nil,
       token: nil,
@@ -96,16 +99,30 @@ defmodule Pika.Agent.Actor do
   def handle_call({:kickoff, message}, _from, %{phase: phase} = state)
       when phase in [:awaiting_user_kickoff, :awaiting_user] and is_binary(message) do
     case start_turn(state, message) do
-      {:ok, state} -> {:reply, :ok, state}
-      {:error, reason, state} -> {:reply, {:error, reason}, state}
+      {:ok, state} ->
+        {:reply, :ok, state}
+
+      {:error, reason, %{closed?: true} = state} ->
+        notify(state, {:agent_actor_interrupted, state.work, reason})
+        {:stop, {:shutdown, reason}, {:error, reason}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call({:kickoff, message}, _from, %{phase: :running} = state)
       when is_binary(message) do
     case steer_turn(state, message) do
-      {:ok, state} -> {:reply, :ok, state}
-      {:error, reason, state} -> {:reply, {:error, reason}, state}
+      {:ok, state} ->
+        {:reply, :ok, state}
+
+      {:error, reason, %{closed?: true} = state} ->
+        notify(state, {:agent_actor_interrupted, state.work, reason})
+        {:stop, {:shutdown, reason}, {:error, reason}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -148,7 +165,15 @@ defmodule Pika.Agent.Actor do
          {:ok, state} <- start_turn(state, message) do
       {:reply, :ok, %{state | active_followup_request_id: request_id}}
     else
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:error, reason, %{closed?: true} = failed_state} ->
+        notify(failed_state, {:agent_actor_interrupted, failed_state.work, reason})
+        {:stop, {:shutdown, reason}, {:error, reason}, failed_state}
+
+      {:error, reason, failed_state} ->
+        {:reply, {:error, reason}, failed_state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -231,7 +256,8 @@ defmodule Pika.Agent.Actor do
 
       type when type in [:backend_error, :process_exited] ->
         reason = {type, event.data}
-        state = backend_failed(state, reason)
+        failure = Failure.from_event_data(event.data)
+        state = backend_failed(state, reason, failure)
         notify(state, {:agent_actor_interrupted, state.work, reason})
         {:stop, {:shutdown, reason}, state}
 
@@ -278,7 +304,8 @@ defmodule Pika.Agent.Actor do
            ContextBundle.build(config, session_id, work.role_id, work.kind, work.id),
          {:ok, recoveries} <- recoveries(previous?, config, session_id, work, paths),
          {:ok, prompt} <- PromptBuilder.build(config, work, bundle, recoveries),
-         {:ok, agent} <- BackendConfig.select(config, work),
+         {:ok, backend_selection} <- BackendConfig.select(config, work),
+         agent <- backend_selection.endpoint,
          :ok <- ensure_role_started(work),
          {:ok, pika_session} <-
            ConversationJournal.start_session(
@@ -289,7 +316,9 @@ defmodule Pika.Agent.Actor do
              prompt.system,
              bundle.contents,
              id: session_id,
-             recovery_sequence: recovery_sequence(recoveries)
+             recovery_sequence: recovery_sequence(recoveries),
+             backend_chain_sha256: backend_selection.chain_sha256,
+             backend_chain_index: backend_selection.chain_index
            ),
          {:ok, state} <-
            open_backend(%{
@@ -299,7 +328,8 @@ defmodule Pika.Agent.Actor do
                bundle: bundle,
                prompt: prompt,
                pika_session: pika_session,
-               agent: agent
+               agent: agent,
+               backend_selection: backend_selection
            }) do
       case activate_with_pending_followup(state, prompt.activation) do
         {:ok, state} ->
@@ -313,6 +343,7 @@ defmodule Pika.Agent.Actor do
           {:error, reason, cleanup(state, "failed", inspect(reason))}
       end
     else
+      {:blocked, blocked} -> {:error, {:backend_chain_blocked, blocked}, state}
       {:error, reason} -> {:error, reason, state}
     end
   end
@@ -380,7 +411,15 @@ defmodule Pika.Agent.Actor do
   end
 
   defp fail_open_session(state, reason) do
-    _ = ConversationJournal.interrupt_session(state.pika_session.id, inspect(reason))
+    failure = failure_from_reason(reason)
+
+    if Failure.eligible?(failure) and state.backend_selection do
+      _ =
+        BackendFailover.block(state.work, state.backend_selection, failure, state.pika_session.id)
+    else
+      _ = ConversationJournal.interrupt_session(state.pika_session.id, inspect(reason))
+    end
+
     {:error, reason}
   end
 
@@ -418,37 +457,54 @@ defmodule Pika.Agent.Actor do
   defp activate_with_pending_followup(state, activation), do: activate(state, activation)
 
   defp start_turn(state, prompt) do
-    with {:ok, turn} <-
-           ConversationJournal.start_turn(state.pika_session.id, [
-             %{"role" => "user", "content" => prompt}
-           ]),
-         {:ok, provider_turn_id} <- AgentBackend.start_turn(state.handle, prompt) do
-      new_state =
-        Map.merge(state, %{
-          phase: :running,
-          turn_db_id: turn.id,
-          active_provider_turn_id: provider_turn_id,
-          output_messages: [],
-          terminal_called: false,
-          pending_question_continuation: nil
-        })
+    case ConversationJournal.start_turn(state.pika_session.id, [
+           %{"role" => "user", "content" => prompt}
+         ]) do
+      {:ok, turn} ->
+        turn_state =
+          Map.merge(state, %{
+            phase: :running,
+            turn_db_id: turn.id,
+            active_provider_turn_id: nil,
+            output_messages: [],
+            output_flushed_at_ms: nil,
+            terminal_called: false,
+            pending_question_continuation: nil
+          })
 
-      {:ok, Map.put(new_state, :output_flushed_at_ms, nil)}
-    else
-      {:error, reason} -> {:error, {:turn_start_failed, reason}, state}
+        case AgentBackend.start_turn(state.handle, prompt) do
+          {:ok, provider_turn_id} ->
+            {:ok, %{turn_state | active_provider_turn_id: provider_turn_id}}
+
+          {:error, reason} ->
+            wrapped = {:turn_start_failed, reason}
+            failure = failure_from_reason(reason)
+            {:error, wrapped, backend_failed(turn_state, wrapped, failure)}
+        end
+
+      {:error, reason} ->
+        {:error, {:turn_start_failed, reason}, state}
     end
   end
 
   defp steer_turn(state, message) do
-    with {:ok, _turn} <-
-           ConversationJournal.append_input(state.turn_db_id, %{
-             "role" => "user",
-             "content" => message
-           }),
-         {:ok, provider_turn_id} <- AgentBackend.steer(state.handle, message) do
-      {:ok, %{state | active_provider_turn_id: provider_turn_id}}
-    else
-      {:error, reason} -> {:error, {:turn_steer_failed, reason}, state}
+    case ConversationJournal.append_input(state.turn_db_id, %{
+           "role" => "user",
+           "content" => message
+         }) do
+      {:ok, _turn} ->
+        case AgentBackend.steer(state.handle, message) do
+          {:ok, provider_turn_id} ->
+            {:ok, %{state | active_provider_turn_id: provider_turn_id}}
+
+          {:error, reason} ->
+            wrapped = {:turn_steer_failed, reason}
+            failure = failure_from_reason(reason)
+            {:error, wrapped, backend_failed(state, wrapped, failure)}
+        end
+
+      {:error, reason} ->
+        {:error, {:turn_steer_failed, reason}, state}
     end
   end
 
@@ -552,6 +608,13 @@ defmodule Pika.Agent.Actor do
              {:ok, state} <- start_turn(state, delivered.message) do
           {:noreply, %{state | active_followup_request_id: request.id}}
         else
+          {:error, reason, %{closed?: true} = state} ->
+            {:stop, {:shutdown, reason}, state}
+
+          {:error, reason, state} ->
+            state = backend_failed(state, {:followup_delivery_failed, reason})
+            {:stop, {:shutdown, reason}, state}
+
           {:error, reason} ->
             state = backend_failed(state, {:followup_delivery_failed, reason})
             {:stop, {:shutdown, reason}, state}
@@ -610,7 +673,37 @@ defmodule Pika.Agent.Actor do
 
   defp maybe_deliver_generated_followup(state), do: state
 
-  defp backend_failed(state, reason) do
+  defp backend_failed(state, reason, failure \\ nil)
+
+  defp backend_failed(%{closed?: true} = state, _reason, _failure), do: state
+
+  defp backend_failed(
+         %{pika_session: pika_session, backend_selection: selection} = state,
+         _reason,
+         %Failure{} = failure
+       )
+       when not is_nil(pika_session) and not is_nil(selection) do
+    if Failure.eligible?(failure) do
+      state = maybe_flush_stream_output(state, true)
+      _ = BackendFailover.block(state.work, selection, failure, pika_session.id)
+
+      state
+      |> Map.merge(%{
+        turn_db_id: nil,
+        active_provider_turn_id: nil,
+        output_messages: [],
+        output_flushed_at_ms: nil,
+        closed?: true
+      })
+      |> cleanup_resources()
+    else
+      backend_failed_without_failover(state, failure.message)
+    end
+  end
+
+  defp backend_failed(state, reason, _failure), do: backend_failed_without_failover(state, reason)
+
+  defp backend_failed_without_failover(state, reason) do
     state = finish_journal_turn(state, "interrupted")
 
     case state.work.role_id do
@@ -628,6 +721,10 @@ defmodule Pika.Agent.Actor do
 
     cleanup_resources(%{state | closed?: true})
   end
+
+  defp failure_from_reason(%Error{failure: %Failure{} = failure}), do: failure
+  defp failure_from_reason({_tag, reason}), do: failure_from_reason(reason)
+  defp failure_from_reason(_reason), do: nil
 
   defp interrupt(state, reason) do
     state = finish_journal_turn(state, "interrupted")
@@ -883,27 +980,39 @@ defmodule Pika.Agent.Actor do
   end
 
   defp recover_interrupted_auxiliary(
-         %Work{role_id: role, id: id},
+         %Work{role_id: role, id: id} = work,
          true
        )
        when role in ~w(baseline_verify_followup iteration_followup integration_followup) do
-    with {:ok, request_id} <- integer_id(id),
-         {:ok, request} <- FollowupLifecycle.fetch(request_id) do
-      if request.status == "generator_running" do
-        FollowupLifecycle.generator_failed(request_id, :orphaned_generator_session) |> ok_only()
-      else
-        :ok
+    if BackendFailover.recovering_failover?(work) do
+      :ok
+    else
+      with {:ok, request_id} <- integer_id(id),
+           {:ok, request} <- FollowupLifecycle.fetch(request_id) do
+        if request.status == "generator_running" do
+          FollowupLifecycle.generator_failed(request_id, :orphaned_generator_session) |> ok_only()
+        else
+          :ok
+        end
       end
     end
   end
 
-  defp recover_interrupted_auxiliary(%Work{role_id: "progress_summary", id: id}, true) do
-    with {:ok, request_id} <- integer_id(id),
-         {:ok, request} <- ProgressSummaryLifecycle.fetch(request_id) do
-      if request.status == "running" do
-        ProgressSummaryLifecycle.fail_attempt(request_id, :orphaned_summary_session) |> ok_only()
-      else
-        :ok
+  defp recover_interrupted_auxiliary(
+         %Work{role_id: "progress_summary", id: id} = work,
+         true
+       ) do
+    if BackendFailover.recovering_failover?(work) do
+      :ok
+    else
+      with {:ok, request_id} <- integer_id(id),
+           {:ok, request} <- ProgressSummaryLifecycle.fetch(request_id) do
+        if request.status == "running" do
+          ProgressSummaryLifecycle.fail_attempt(request_id, :orphaned_summary_session)
+          |> ok_only()
+        else
+          :ok
+        end
       end
     end
   end

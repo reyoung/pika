@@ -100,6 +100,8 @@ project_work()
 
 从各 Lifecycle 读取 runnable Agent Work，确保每项 Work 只有一个 Actor，并对每个 Role施加并发：Iteration 等于配置的 agents 数量，其余已配置 Role均为 1。不存在全局 `max_total_actors`。
 
+Symphony 在启动 Actor 前读取该 Work 的 Backend Fallback Chain ledger。已排除的 Endpoint 会被跳过；全链不可用的 Work 保持 runnable-but-blocked，直到 reset 到期、用户重试或配置 digest 变化。
+
 Symphony 不决定：
 
 - Baseline 是否合理；
@@ -110,9 +112,9 @@ Symphony 不决定：
 
 ### Agent Runtime
 
-Role Runtime 冻结一个 Session 的 Role contract、Backend 配置、System Prompt、Context Bundle、MCP tool catalog 和 completion condition。Actor 只根据领域 completion 投影判断是否终态；不得从自然语言尾输出推断成功。
+Role Runtime 冻结一个 Session 的 Role contract、选中 Backend Endpoint、chain index/digest、System Prompt、Context Bundle、MCP tool catalog 和 completion condition。Actor 只根据领域 completion 投影判断是否终态；不得从自然语言尾输出推断成功。
 
-Backend 配置不经过 Profile 引用。每次 Session 从当前 YAML 中读取展开后的完整配置；正在运行的 Session 不热切换。
+Backend 配置不经过 Profile 引用。每次 Session 从当前 YAML 中读取展开后的完整 Backend Fallback Chain；正在运行的 Session 不热切换。eligible failure 原子地结束 Session 并排除当前 Endpoint，下一次 reconcile 用 Recovery Context 创建全新 Session。
 
 ### Context Bundle Builder
 
@@ -164,6 +166,7 @@ lib/pika/
 ├── agent/
 │   ├── symphony.ex
 │   ├── actor.ex
+│   ├── backend_failover.ex
 │   ├── command_router.ex
 │   ├── context_bundle.ex
 │   ├── conversation_journal.ex
@@ -202,6 +205,7 @@ Baseline、Attempt、Integration、Follow-up 与 Progress Summary Lifecycle 是�
 | Target/Development/Candidate/Best 代码与 Git 现场 | Git 与只读 Target Snapshot |
 | Optimization、Baseline、Attempt、Integration、Sampling 状态 | SQLite 当前状态表 |
 | 标准化 Agent Turn | SQLite `conversation_turns` |
+| 每个 Work 的 Backend Endpoint 排除状态 | SQLite `agent_backend_failures` |
 | 最新逐 Case Metrics 与 Baseline Snapshot | SQLite Metrics 表 |
 | Prompt Context、Result、日志、Patch、原始 JSON/JSONL | Artifact Workspace |
 | Session Token 与活动 Actor 绑定 | 进程内 Agent Directory |

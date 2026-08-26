@@ -1,26 +1,38 @@
 defmodule Pika.Test.FakeAgentBackend do
   @behaviour Pika.AgentBackend
 
-  alias Pika.AgentBackend.{Error, Event, Id, Session}
+  alias Pika.AgentBackend.{Error, Event, Failure, Id, Session}
 
   def start_link(_profile, sink),
     do: Agent.start_link(fn -> %{sink: sink, session: nil, turn: nil} end)
 
   def open_session(server, cwd, model, effort, _mcp, _skill_roots, _instructions) do
-    session = %Session{
-      id: Id.new("session"),
-      backend: :fake,
-      backend_protocol: "fake-v1",
-      backend_session_id: Id.new("backend"),
-      cwd: cwd,
-      model: model,
-      reasoning_effort: effort,
-      jsonl_path: "/dev/null"
-    }
+    if model == "authentication-failure" do
+      {:error,
+       %Error{
+         code: :authentication_failed,
+         message: "injected authentication failure",
+         failure:
+           Failure.new(:authentication_failed, "injected authentication failure",
+             code: "Unauthorized"
+           )
+       }}
+    else
+      session = %Session{
+        id: Id.new("session"),
+        backend: :fake,
+        backend_protocol: "fake-v1",
+        backend_session_id: Id.new("backend"),
+        cwd: cwd,
+        model: model,
+        reasoning_effort: effort,
+        jsonl_path: "/dev/null"
+      }
 
-    Agent.update(server, &%{&1 | session: session})
-    emit(server, :session_started)
-    {:ok, session}
+      Agent.update(server, &%{&1 | session: session})
+      emit(server, :session_started)
+      {:ok, session}
+    end
   end
 
   def start_turn(server, input) do

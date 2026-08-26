@@ -1,6 +1,7 @@
 defmodule Pika.ProgressSummary.Snapshot do
   @moduledoc "Builds the frozen, user-facing v2 Optimization status used by Progress Summary."
 
+  alias Pika.Agent.BackendFailover
   alias Pika.Optimization.Persistence
   alias Pika.Repo
 
@@ -19,6 +20,7 @@ defmodule Pika.ProgressSummary.Snapshot do
       attempts: attempts(),
       integrations: integrations(),
       active_agent_sessions: active_sessions(),
+      blocked_agent_works: BackendFailover.blocked_works(),
       active_followups: active_followups()
     }
   end
@@ -201,20 +203,33 @@ defmodule Pika.ProgressSummary.Snapshot do
   defp active_sessions do
     Repo.query!(
       """
-      SELECT id, role, work_kind, work_id, session_sequence, status, started_at
+      SELECT id, role, work_kind, work_id, session_sequence, backend_chain_sha256,
+             backend_chain_index, status, started_at
       FROM agent_sessions
       WHERE optimization_id = ? AND status IN ('running', 'awaiting_report', 'awaiting_followup')
       ORDER BY started_at, id
       """,
       [@optimization_id]
     ).rows
-    |> Enum.map(fn [id, role, work_kind, work_id, sequence, status, started_at] ->
+    |> Enum.map(fn [
+                     id,
+                     role,
+                     work_kind,
+                     work_id,
+                     sequence,
+                     chain_sha256,
+                     chain_index,
+                     status,
+                     started_at
+                   ] ->
       %{
         id: id,
         role: role,
         work_kind: work_kind,
         work_id: work_id,
         session_sequence: sequence,
+        backend_chain_sha256: chain_sha256,
+        backend_chain_index: chain_index,
         status: status,
         started_at: started_at
       }

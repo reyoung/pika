@@ -841,7 +841,8 @@ defmodule Pika.Integration.Lifecycle do
   end
 
   defp require_rejectable(%{status: status})
-       when status in ["ready_for_integration", "integrating"], do: :ok
+       when status in ["ready_for_integration", "integrating"],
+       do: :ok
 
   defp require_rejectable(attempt), do: {:error, {:attempt_not_rejectable, attempt.status}}
 

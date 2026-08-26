@@ -132,6 +132,80 @@ defmodule Pika.Agent.ActorTest do
     assert prompt_session.provider_session_id != nil
   end
 
+  test "an eligible Backend failure opens a fresh Session on the next endpoint", %{
+    directory: directory,
+    opts: opts,
+    work: work,
+    workspace: workspace
+  } do
+    config_path = Path.join(workspace, "pika.yaml")
+
+    config_path
+    |> File.read!()
+    |> String.replace(
+      """
+        baseline_alignment:
+          backend: codex
+          approval_policy: never
+          sandbox: workspace-write
+      """,
+      """
+        baseline_alignment:
+          backend: codex
+          model: authentication-failure
+          approval_policy: never
+          sandbox: workspace-write
+          fallbacks:
+            - backend: cursor_headless
+              model: healthy-fallback
+              reasoning_effort: high
+              approval_policy: force
+              sandbox: disabled
+      """
+    )
+    |> then(&File.write!(config_path, &1))
+
+    opts =
+      Keyword.put(opts, :backend_modules, %{
+        codex_app_server: FakeAgentBackend,
+        cursor_headless: FakeAgentBackend
+      })
+
+    first = start_supervised!({Actor, opts})
+    first_monitor = Process.monitor(first)
+
+    assert_receive {:agent_actor_failed, ^work,
+                    {:backend_session_open_failed,
+                     %Pika.AgentBackend.Error{code: :authentication_failed}}},
+                   2_000
+
+    assert_receive {:DOWN, ^first_monitor, :process, ^first, _reason}, 2_000
+
+    assert eventually(fn ->
+             Directory.lookup_work(work.role_id, work.kind, work.id, directory) ==
+               {:error, :not_found}
+           end)
+
+    [failed_session] = ConversationJournal.work_sessions(work.role_id, work.kind, work.id)
+    assert failed_session.backend_chain_index == 0
+    assert failed_session.status == "interrupted"
+    assert failed_session.ended_reason =~ "backend_failover:authentication_failed"
+
+    replacement = start_supervised!({Actor, opts})
+    assert_receive {:agent_actor_started, ^work, replacement_session_id}, 2_000
+    assert Actor.status(replacement).phase == :awaiting_user_kickoff
+
+    [^failed_session, replacement_session] =
+      ConversationJournal.work_sessions(work.role_id, work.kind, work.id)
+
+    refute replacement_session.id == failed_session.id
+    assert replacement_session.id == replacement_session_id
+    assert replacement_session.backend_chain_index == 1
+    assert replacement_session.backend_chain_sha256 == failed_session.backend_chain_sha256
+    assert replacement_session.recovery_sequence == 1
+    assert replacement_session.backend_config["backend"] == "cursor_headless"
+  end
+
   test "recovery does not invent the first Alignment User Turn", %{
     directory: directory,
     opts: opts,

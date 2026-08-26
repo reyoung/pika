@@ -1,12 +1,34 @@
+defmodule Pika.Agent.BackendSelection do
+  @moduledoc false
+
+  @enforce_keys [:endpoint, :chain_index, :chain_sha256, :chain_length]
+  defstruct @enforce_keys
+
+  @type t :: %__MODULE__{
+          endpoint: Pika.Optimization.Config.Agent.t(),
+          chain_index: non_neg_integer(),
+          chain_sha256: String.t(),
+          chain_length: pos_integer()
+        }
+end
+
 defmodule Pika.Agent.BackendConfig do
   @moduledoc "Selects one fully expanded v2 Backend config and converts it to the shared adapter profile."
 
-  alias Pika.Agent.Work
+  alias Pika.Agent.{BackendFailover, BackendSelection, Work}
   alias Pika.AgentBackend.LaunchConfig
   alias Pika.Optimization.Config
 
-  @spec select(Config.t(), Work.t()) :: {:ok, Config.Agent.t()} | {:error, term()}
-  def select(%Config{} = config, %Work{role_id: "iteration"} = work) do
+  @spec select(Config.t(), Work.t()) ::
+          {:ok, BackendSelection.t()} | {:blocked, map()} | {:error, term()}
+  def select(%Config{} = config, %Work{} = work) do
+    with {:ok, configured} <- configured(config, work) do
+      BackendFailover.select(configured, work)
+    end
+  end
+
+  @spec configured(Config.t(), Work.t()) :: {:ok, Config.Agent.t()} | {:error, term()}
+  def configured(%Config{} = config, %Work{role_id: "iteration"} = work) do
     slot = get_in(work.payload, [:attempt, :slot_index]) || attempt_slot(work.id)
 
     case Enum.at(config.iteration.agents, slot) do
@@ -15,9 +37,8 @@ defmodule Pika.Agent.BackendConfig do
     end
   end
 
-  def select(%Config{} = config, %Work{role_id: role_id}) do
-    Config.role_agent(config, role_id)
-  end
+  def configured(%Config{} = config, %Work{role_id: role_id}),
+    do: Config.role_agent(config, role_id)
 
   @spec module(Config.Agent.t(), map()) :: {:ok, module()} | {:error, term()}
   def module(%Config.Agent{backend: backend}, overrides \\ %{}) do

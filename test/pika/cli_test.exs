@@ -68,6 +68,27 @@ defmodule Pika.CLITest do
              Pika.CLI.parse_reconfiguration(["--help", "--backend", "cursor-headless"])
   end
 
+  test "rejects Cursor ACP for init and reconfiguration" do
+    assert {:error, message} =
+             Pika.CLI.parse_init([
+               "/tmp/pika-acp",
+               "--repo",
+               "/tmp/repo",
+               "--backend",
+               "cursor_acp",
+               "--yes"
+             ])
+
+    assert message =~ "Cursor ACP is deprecated"
+    assert message =~ "cursor_headless"
+
+    assert {:error, message} =
+             Pika.CLI.parse_reconfiguration(["--help", "--backend", "cursor"])
+
+    assert message =~ "Cursor ACP is deprecated"
+    assert message =~ "cursor_headless"
+  end
+
   test "interactive init accepts omitted paths while --yes requires them" do
     assert {:ok, %{workspace: nil, repo: nil, yes: false}} = Pika.CLI.parse_init([])
     assert {:error, message} = Pika.CLI.parse_init(["--yes"])
@@ -100,7 +121,7 @@ defmodule Pika.CLITest do
                "--role",
                "integration",
                "--backend",
-               "cursor",
+               "cursor_headless",
                "--model",
                "cursor-model",
                "--reasoning-effort",
@@ -111,7 +132,7 @@ defmodule Pika.CLITest do
     assert opts.workspace == Path.expand(root)
     assert opts.config == Path.join(Path.expand(root), "pika.yaml")
     assert opts.role == "integration"
-    assert opts.backend == "cursor"
+    assert opts.backend == "cursor_headless"
     assert opts.reasoning_effort == "ultra"
   end
 end

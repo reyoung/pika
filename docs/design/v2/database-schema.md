@@ -71,7 +71,11 @@ Git mutation 前持久化 expected Best、Candidate、validation receipt、预�
 
 ### `agent_sessions`
 
-保存 Role、Work kind/id、Backend 展开配置快照、System Prompt/Context digest、status、started/ended timestamps 和结束原因。provider session ID 只用于审计，不作为恢复身份。
+保存 Role、Work kind/id、选中 Backend Endpoint 的展开配置快照、Backend Fallback Chain SHA-256/index、System Prompt/Context digest、status、started/ended timestamps 和结束原因。provider session ID 只用于审计，不作为恢复身份。
+
+### `agent_backend_failures`
+
+按 `Optimization + Role + Work kind/id + chain SHA-256 + endpoint index` 保存可切换失败、provider code/message、可选 `retry_at`、原始 details、active/cleared 状态和时间戳。chain digest 变化时旧行停用但保留审计；进程重启后 Symphony 从此表恢复 blocked 状态。
 
 ### `conversation_turns`
 
@@ -121,4 +125,4 @@ Request 保存 snapshot cursor、previous summary、status 和目录；Result �
 
 pending 查询覆盖 Attempt status `ready_for_integration|refreshing_iteration|integrating`。`max_pending_attempts=0` 时不施加 gate。
 
-必须建立：Attempt status/id、Integration FIFO/status、Agent Session Work/status、Conversation Work/sequence、Follow-up target/status、Progress active status、Domain Event aggregate/sequence 与 Artifact owner/path 索引。
+必须建立：Attempt status/id、Integration FIFO/status、Agent Session Work/status、Backend failure Work/chain/endpoint、Conversation Work/sequence、Follow-up target/status、Progress active status、Domain Event aggregate/sequence 与 Artifact owner/path 索引。

@@ -108,8 +108,16 @@ _Avoid_: Backend 配置、Agent Work
 一个 Agent Role 对某个已持久化领域对象承担的可恢复工作身份。
 _Avoid_: Backend Session、通用任务记录
 
+**Backend Endpoint**：
+能够启动一次 Backend Session 的完整 provider 配置，包含 Backend、model、reasoning effort、权限、sandbox、环境变量和协议配置。
+_Avoid_: Agent Profile、provider 名称、共享凭据池
+
+**Backend Fallback Chain**：
+一个 Agent 配置拥有的有序 Backend Endpoint 序列，由主 Endpoint 和零个或多个 fallback Endpoint 组成；它只影响同一 Agent Work 的恢复选择，不增加 Role 并发。
+_Avoid_: backup agent、全局 Backend 池、负载均衡
+
 **Backend Session**：
-由某个完整 Backend 配置启动的一次 provider 会话；恢复总是创建新 Session，并允许切换 Backend。
+由选中的 Backend Endpoint 启动的一次 provider 会话；它冻结 Endpoint、chain index 和 chain digest，恢复与 failover 总是创建新 Session。
 _Avoid_: Agent Work、provider resume
 
 **Agent Symphony**：

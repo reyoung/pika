@@ -9,9 +9,14 @@ end
 defmodule Pika.AgentBackend.Error do
   @moduledoc false
   @enforce_keys [:code, :message]
-  defstruct [:code, :message, details: %{}]
+  defstruct [:code, :message, :failure, details: %{}]
 
-  @type t :: %__MODULE__{code: atom(), message: String.t(), details: map()}
+  @type t :: %__MODULE__{
+          code: atom(),
+          message: String.t(),
+          details: map(),
+          failure: Pika.AgentBackend.Failure.t() | nil
+        }
 end
 
 defmodule Pika.AgentBackend do

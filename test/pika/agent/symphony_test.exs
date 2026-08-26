@@ -53,9 +53,11 @@ end
 defmodule Pika.Agent.SymphonyTest do
   use ExUnit.Case, async: false
 
-  alias Pika.Agent.{Directory, Symphony}
+  alias Pika.Agent.{BackendConfig, BackendFailover, ConversationJournal, Directory, Symphony}
+  alias Pika.Agent.WorkProjector
+  alias Pika.AgentBackend.Failure
   alias Pika.Baseline.Lifecycle, as: BaselineLifecycle
-  alias Pika.Optimization.{Config, Persistence}
+  alias Pika.Optimization.{Config, Persistence, RuntimeConfig}
   alias Pika.Test.V2BaselineFixtures
   alias Pika.Repo
 
@@ -171,6 +173,64 @@ defmodule Pika.Agent.SymphonyTest do
     assert message =~ "ask_questions"
 
     assert {:error, :session_not_active} = Symphony.restart_session(session_id, symphony)
+  end
+
+  test "does not recreate blocked Work until Retry backend chain clears its ledger", %{
+    actor_supervisor: actor_supervisor,
+    directory: directory,
+    workspace: workspace
+  } do
+    assert {:ok, config} = RuntimeConfig.load(workspace)
+    assert {:ok, works} = WorkProjector.reconcile(config)
+    [blocked_work | _rest] = Enum.filter(works, &(&1.role_id == "iteration"))
+    assert {:ok, selection} = BackendConfig.select(config, blocked_work)
+
+    assert {:ok, session} =
+             ConversationJournal.start_session(
+               blocked_work.role_id,
+               blocked_work.kind,
+               blocked_work.id,
+               Config.Agent.snapshot(selection.endpoint),
+               "system",
+               "context",
+               backend_chain_sha256: selection.chain_sha256,
+               backend_chain_index: selection.chain_index
+             )
+
+    assert :ok =
+             BackendFailover.block(
+               blocked_work,
+               selection,
+               Failure.new(:authentication_failed, "credential expired"),
+               session.id
+             )
+
+    symphony =
+      start_supervised!(
+        {Symphony,
+         name: nil,
+         workspace: workspace,
+         directory: directory,
+         actor_supervisor: actor_supervisor,
+         actor_module: Pika.Test.ProjectedActor,
+         actor_opts: [test_notify: self()],
+         reconcile_interval_ms: :infinity}
+      )
+
+    assert :ok = Symphony.reconcile(symphony)
+    assert_receive {:projected_actor_started, other_work, _pid}, 1_000
+    refute other_work.id == blocked_work.id
+    refute_receive {:projected_actor_started, ^blocked_work, _pid}, 100
+
+    assert :ok =
+             Symphony.retry_backend_chain(
+               blocked_work.role_id,
+               blocked_work.kind,
+               blocked_work.id,
+               symphony
+             )
+
+    assert_receive {:projected_actor_started, ^blocked_work, _pid}, 1_000
   end
 
   defp yaml(repo, workspace) do
