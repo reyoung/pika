@@ -69,6 +69,26 @@ defmodule Pika.Agent.BackendConfig do
     }
   end
 
+  @doc false
+  @spec inject_attempt_runtime_env(LaunchConfig.t(), Work.t(), map()) :: LaunchConfig.t()
+  def inject_attempt_runtime_env(
+        %LaunchConfig{} = launch_config,
+        %Work{role_id: role_id},
+        %{work_root: work_root}
+      )
+      when role_id in ["iteration", "integration"] do
+    env =
+      Map.merge(launch_config.env, %{
+        "PIKA_ATTEMPT_ROOT" => work_root,
+        "PIKA_CANDIDATE_MANIFEST" => Path.join([work_root, "repo", "candidate", "manifest.json"])
+      })
+
+    %{launch_config | env: env}
+  end
+
+  def inject_attempt_runtime_env(%LaunchConfig{} = launch_config, %Work{}, _paths),
+    do: launch_config
+
   defp command(:cursor_acp, nil), do: {"cursor-agent", []}
   defp command(:cursor_headless, nil), do: {"cursor-agent", []}
   defp command(:codex_app_server, nil), do: {"codex", []}
