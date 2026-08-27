@@ -1,0 +1,3 @@
+[submodule "ref/herdr"]
+	path = ref/herdr
+	url = https://github.com/herdrdev/herdr.git
