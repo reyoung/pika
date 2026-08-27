@@ -1,0 +1,169 @@
+# State Machines
+
+All transitions below are committed in SQLite before runtime effects are dispatched. A runtime effect may be retried or reconciled; a domain transition is replayed only through its idempotency receipt.
+
+## 1. Optimization
+
+```mermaid
+stateDiagram-v2
+    [*] --> Initializing
+    Initializing --> DraftingBaseline: init committed
+    Initializing --> Failed: init failed
+
+    DraftingBaseline --> VerifyingBaseline: submit_baseline_definition
+    VerifyingBaseline --> DraftingBaseline: definition rejected, new revision
+    VerifyingBaseline --> Optimizing: verification accepted
+
+    DraftingBaseline --> Draining: shutdown requested
+    VerifyingBaseline --> Draining: shutdown requested
+    Optimizing --> Draining: shutdown requested
+    Paused --> Draining: shutdown requested
+    Optimizing --> Completed: stop condition satisfied and no active work
+    DraftingBaseline --> Paused: baseline work cancelled
+    VerifyingBaseline --> Paused: verification work cancelled
+    Paused --> DraftingBaseline: explicit restart or back-off
+
+    Draining --> Stopped: all child agents exited normally
+    Failed --> [*]
+    Completed --> [*]
+    Stopped --> [*]
+```
+
+`Optimizing` contains parallel Iteration Work and one serial Integration queue. An Optimization is not failed merely because one Attempt is rejected or cancelled.
+
+## 2. Baseline Revision
+
+```mermaid
+stateDiagram-v2
+    [*] --> Drafting
+    Drafting --> Submitted: submit_baseline_definition
+    Submitted --> Verifying
+    Verifying --> Accepted: finish_baseline_verification(accepted)
+    Verifying --> Rejected: finish_baseline_verification(rejected)
+    Rejected --> [*]: successor revision created
+    Accepted --> [*]: baseline snapshot and Best revision 0 created
+```
+
+Rules:
+
+- A submitted Baseline Revision is immutable.
+- Verification is a fresh Agent Session with a distinct Role and instruction file.
+- Rejection records failure kind, reason, and requested changes, then automatically schedules a new draft revision.
+- Acceptance freezes the case/metric/evidence contract used by Attempts.
+
+## 3. Attempt and Iteration Round
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending
+    Pending --> Iterating: slot claimed
+    Iterating --> AwaitingIntegration: finish_iteration(candidate)
+    Iterating --> Rejected: finish_iteration(rejected)
+    Iterating --> Cancelled: cancel-work
+    AwaitingIntegration --> Integrating: FIFO head claimed
+    Integrating --> Accepted: finish_integration(accepted)
+    Integrating --> Rejected: finish_integration(rejected)
+    Integrating --> Iterating: stale or user back-off, new round
+    Integrating --> Cancelled: cancel-work
+    Accepted --> [*]
+    Rejected --> [*]
+    Cancelled --> [*]
+```
+
+Rules:
+
+- Attempt identity survives stale Integration and Back-off; each new execution is an immutable Iteration Round.
+- Iteration Rounds may run concurrently across Attempts.
+- Integration is FIFO and single-concurrency.
+- A stale Round merges the current Best into its workspace and remeasures; it is not rebased or silently replaced.
+- Rejected history remains context, not a permanent ban on a technique.
+
+## 4. Integration and Best mutation
+
+Integration is a two-step domain protocol:
+
+```text
+get_context
+    ↓
+full correctness/performance evidence
+    ↓
+prepare_best_update
+    ├── rejected: no Git mutation intent
+    └── intent issued
+            ↓
+        apply exact Git mutation
+            ↓
+        finish_integration
+            ├── accepted: verify Git and advance Best atomically
+            └── rejected: preserve evidence, do not advance Best
+```
+
+Only `finish_integration(accepted)` after Git postcondition verification changes Best. Pika never pushes or modifies a user source branch.
+
+## 5. Agent Session
+
+```mermaid
+stateDiagram-v2
+    [*] --> Preparing
+    Preparing --> Running: Herdr Agent ready and activation sent
+    Running --> IdleIncomplete: provider turn stopped, no terminal operation
+    IdleIncomplete --> Running: user prompt or delivered Follow-up
+    Running --> Terminal: terminal MCP committed
+    Running --> Lost: process/pane/provider failure
+    IdleIncomplete --> Lost: process/pane/provider failure
+    Terminal --> Closed: normal pane close
+    Lost --> Replaced: fresh Agent Session scheduled
+    Replaced --> [*]
+    Closed --> [*]
+```
+
+Herdr `working`, `blocked`, `idle`, `done`, and `unknown` are observations attached to these states, not substitutes for them.
+
+## 6. Follow-up Request
+
+```mermaid
+stateDiagram-v2
+    [*] --> WaitingForInactivity: target turn stopped incomplete
+    WaitingForInactivity --> WaitingForInactivity: pane.updated resets deadline
+    WaitingForInactivity --> Generating: deadline reached
+    WaitingForInactivity --> Cancelled: target terminal or user prompt observed
+    Generating --> Ready: submit_followup_message
+    Generating --> Superseded: pane.updated
+    Generating --> Retrying: generator ended without terminal MCP
+    Retrying --> Generating: fresh generator session
+    Ready --> Delivered: agent.prompt accepted
+    Ready --> Superseded: target terminal or pane activity
+    Delivered --> [*]
+    Superseded --> [*]
+    Cancelled --> [*]
+```
+
+Generator retry and target Follow-up counts are separate and durable. Exhaustion effects are Role-specific:
+
+- Baseline Verification exhaustion fails/pauses the Optimization for intervention.
+- Iteration exhaustion rejects the Attempt.
+- Integration exhaustion rejects the Attempt without updating Best.
+
+## 7. Back-off
+
+Back-off never mutates a completed record back into an earlier status.
+
+| Current phase | Allowed result |
+| --- | --- |
+| Baseline Verification | reject/supersede current verification and create a new Baseline Revision |
+| Integration | preserve the Integration result and create a new Iteration Round for the same Attempt |
+| Other phases | rejected unless a transition is explicitly added to this table |
+
+The supplied `-m` message is persisted and included in the successor Context Bundle.
+
+## 8. Cancellation and shutdown
+
+`cancel-work` is a Work transition and may close the selected Work's pane. `shutdown` is an Optimization transition and never cancels or kills active children.
+
+During `Draining`:
+
+- no new Baseline, Verification, Iteration, or Integration Work starts;
+- existing Work remains authorized to call MCP;
+- Follow-up generation remains allowed for active incomplete Work;
+- normal terminal completion closes the associated Agent;
+- the daemon exits after the final child exits and persistence flush succeeds.
