@@ -32,6 +32,28 @@ reasoning_effort = "xhigh"
 	}
 }
 
+func TestLoadAgentReadsCursorConfigurationAndArgs(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := `[agents.iteration]
+kind = "cursor"
+model = "gpt-5.6-sol"
+reasoning_effort = "max"
+args = ["--force", "--approve-mcps", "--trust", "--header", "X-Test: value"]
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := configuration.LoadAgent(path, "iteration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Kind != "cursor" || config.Model != "gpt-5.6-sol" || config.ReasoningEffort != "max" ||
+		len(config.Args) != 5 || config.Args[4] != "X-Test: value" {
+		t.Fatalf("agent config = %+v", config)
+	}
+}
+
 func TestLoadSchedulerReadsConcurrencyAndQueueLimit(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.toml")
@@ -156,9 +178,44 @@ kind = "codex"
 surprise = "unsafe"
 `,
 		"unsupported-kind": `[agents.iteration]
+kind = "unknown"
+model = "model"
+reasoning_effort = "high"
+`,
+		"cursor-ultra": `[agents.iteration]
+kind = "cursor"
+model = "model"
+reasoning_effort = "ultra"
+`,
+		"cursor-resume": `[agents.iteration]
 kind = "cursor"
 model = "model"
 reasoning_effort = "high"
+args = ["--resume", "conversation"]
+`,
+		"cursor-disabled-sandbox": `[agents.iteration]
+kind = "cursor"
+model = "model"
+reasoning_effort = "high"
+args = ["--sandbox=disabled"]
+`,
+		"cursor-positional-prompt": `[agents.iteration]
+kind = "cursor"
+model = "model"
+reasoning_effort = "high"
+args = ["start now"]
+`,
+		"cursor-value-cannot-hide-reserved-option": `[agents.iteration]
+kind = "cursor"
+model = "model"
+reasoning_effort = "high"
+args = ["--api-key", "--resume"]
+`,
+		"codex-args": `[agents.iteration]
+kind = "codex"
+model = "model"
+reasoning_effort = "high"
+args = ["--force"]
 `,
 	} {
 		t.Run(name, func(t *testing.T) {

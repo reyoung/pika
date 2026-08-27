@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/provider"
 	_ "modernc.org/sqlite"
 )
 
@@ -23,6 +24,7 @@ type Options struct {
 	FollowUpInactivity time.Duration
 	FollowUpPolicies   map[WorkRole]FollowUpPolicy
 	ApplyCheckpoint    func(ApplyCheckpoint, string) error
+	Providers          *provider.Registry
 }
 
 type ApplyCheckpoint string
@@ -41,6 +43,7 @@ type Engine struct {
 	followUpInactivity time.Duration
 	followUpPolicies   map[WorkRole]FollowUpPolicy
 	applyCheckpoint    func(ApplyCheckpoint, string) error
+	providers          *provider.Registry
 }
 
 func Open(ctx context.Context, path string, options Options) (*Engine, error) {
@@ -55,6 +58,9 @@ func Open(ctx context.Context, path string, options Options) (*Engine, error) {
 	}
 	if options.FollowUpInactivity <= 0 {
 		options.FollowUpInactivity = 5 * time.Minute
+	}
+	if options.Providers == nil {
+		options.Providers = provider.DefaultRegistry()
 	}
 	if err := prepareDatabasePath(path); err != nil {
 		return nil, err
@@ -99,7 +105,7 @@ func Open(ctx context.Context, path string, options Options) (*Engine, error) {
 		return closeOnError(fmt.Errorf("set database permissions: %w", err))
 	}
 	return &Engine{db: db, databasePath: path, now: options.Now, newID: options.NewID, followUpInactivity: options.FollowUpInactivity,
-		followUpPolicies: normalizeFollowUpPolicies(options.FollowUpPolicies), applyCheckpoint: options.ApplyCheckpoint}, nil
+		followUpPolicies: normalizeFollowUpPolicies(options.FollowUpPolicies), applyCheckpoint: options.ApplyCheckpoint, providers: options.Providers}, nil
 }
 
 func (e *Engine) Close() error { return e.db.Close() }
@@ -252,20 +258,29 @@ func (e *Engine) EnsureAgentSession(ctx context.Context, session AgentSession) e
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	_, err := e.db.ExecContext(ctx, `INSERT INTO agent_sessions
-        (id, work_id, generation, role, agent_kind, agent_name, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO NOTHING`, session.ID, session.WorkID, session.Generation, session.Role, session.AgentKind, session.AgentName, session.Status, e.timestamp())
+		(id, work_id, generation, role, agent_kind, agent_name, provider_version, provider_capabilities_json, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)
+		ON CONFLICT(id) DO NOTHING`, session.ID, session.WorkID, session.Generation, session.Role, session.AgentKind, session.AgentName,
+		session.ProviderVersion, []byte(session.ProviderCapabilities), session.Status, e.timestamp())
 	if err != nil {
 		return fmt.Errorf("ensure agent session: %w", err)
 	}
 	var stored AgentSession
-	if err := e.db.QueryRowContext(ctx, `SELECT id, work_id, generation, role, agent_kind, agent_name, status FROM agent_sessions WHERE id = ?`, session.ID).Scan(
-		&stored.ID, &stored.WorkID, &stored.Generation, &stored.Role, &stored.AgentKind, &stored.AgentName, &stored.Status,
+	var providerVersion sql.NullString
+	if err := e.db.QueryRowContext(ctx, `SELECT id, work_id, generation, role, agent_kind, agent_name,
+		COALESCE(provider_capabilities_json, X''), provider_version, status FROM agent_sessions WHERE id = ?`, session.ID).Scan(
+		&stored.ID, &stored.WorkID, &stored.Generation, &stored.Role, &stored.AgentKind, &stored.AgentName,
+		&stored.ProviderCapabilities, &providerVersion, &stored.Status,
 	); err != nil {
 		return fmt.Errorf("read ensured agent session: %w", err)
 	}
+	stored.ProviderVersion = providerVersion.String
 	if stored.ID != session.ID || stored.WorkID != session.WorkID || stored.Generation != session.Generation || stored.Role != session.Role || stored.AgentKind != session.AgentKind || stored.AgentName != session.AgentName {
 		return domainError(CodeStateCorrupt, "agent session ID is already bound to different identity")
+	}
+	if session.ProviderVersion != "" && stored.ProviderVersion != session.ProviderVersion ||
+		len(session.ProviderCapabilities) != 0 && string(stored.ProviderCapabilities) != string(session.ProviderCapabilities) {
+		return domainError(CodeStateCorrupt, "agent session ID is already bound to different provider capabilities")
 	}
 	if stored.Status != session.Status && !(session.Status == AgentSessionStarting && stored.Status == AgentSessionRunning) {
 		return domainError(CodeStateCorrupt, "agent session ID is already bound to incompatible status")
@@ -334,13 +349,15 @@ func (e *Engine) CurrentAgentSession(ctx context.Context, workID string) (AgentS
 	var session AgentSession
 	var binding PaneBinding
 	var workspaceID, tabID, paneID, terminalID sql.NullString
-	err := e.db.QueryRowContext(ctx, `SELECT s.id, s.work_id, s.generation, s.role, s.agent_kind, s.agent_name, s.status,
+	err := e.db.QueryRowContext(ctx, `SELECT s.id, s.work_id, s.generation, s.role, s.agent_kind, s.agent_name,
+		COALESCE(s.provider_version, ''), COALESCE(s.provider_capabilities_json, X''), s.status,
         b.workspace_id, b.tab_id, b.pane_id, b.terminal_id
         FROM agent_sessions s
         LEFT JOIN pane_bindings b ON b.agent_session_id = s.id AND b.current = 1
         WHERE s.work_id = ? AND s.status IN ('starting', 'running')
         ORDER BY s.created_at DESC LIMIT 1`, workID).Scan(
-		&session.ID, &session.WorkID, &session.Generation, &session.Role, &session.AgentKind, &session.AgentName, &session.Status,
+		&session.ID, &session.WorkID, &session.Generation, &session.Role, &session.AgentKind, &session.AgentName,
+		&session.ProviderVersion, &session.ProviderCapabilities, &session.Status,
 		&workspaceID, &tabID, &paneID, &terminalID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -353,6 +370,26 @@ func (e *Engine) CurrentAgentSession(ctx context.Context, workID string) (AgentS
 	return session, binding, true, nil
 }
 
+func (e *Engine) ReadAgentSession(ctx context.Context, sessionID string) (AgentSession, error) {
+	if sessionID == "" {
+		return AgentSession{}, errors.New("agent session ID is required")
+	}
+	var session AgentSession
+	err := e.db.QueryRowContext(ctx, `SELECT id, work_id, generation, role, agent_kind, agent_name,
+		COALESCE(provider_version, ''), COALESCE(provider_capabilities_json, X''), status
+		FROM agent_sessions WHERE id = ?`, sessionID).Scan(
+		&session.ID, &session.WorkID, &session.Generation, &session.Role, &session.AgentKind, &session.AgentName,
+		&session.ProviderVersion, &session.ProviderCapabilities, &session.Status,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AgentSession{}, domainError(CodeStateCorrupt, "agent session was not found")
+	}
+	if err != nil {
+		return AgentSession{}, fmt.Errorf("read agent session: %w", err)
+	}
+	return session, nil
+}
+
 // AgentSessionHistory returns every Pika Agent Session recorded for one Work.
 // Recovery diagnostics use it instead of inferring history from the
 // currently active pane, which may already have completed by observation time.
@@ -360,7 +397,8 @@ func (e *Engine) AgentSessionHistory(ctx context.Context, workID string) ([]Agen
 	if workID == "" {
 		return nil, errors.New("work ID is required")
 	}
-	rows, err := e.db.QueryContext(ctx, `SELECT id, work_id, generation, role, agent_kind, agent_name, status
+	rows, err := e.db.QueryContext(ctx, `SELECT id, work_id, generation, role, agent_kind, agent_name,
+		COALESCE(provider_version, ''), COALESCE(provider_capabilities_json, X''), status
 		FROM agent_sessions WHERE work_id = ? ORDER BY generation, created_at, id`, workID)
 	if err != nil {
 		return nil, fmt.Errorf("read Agent Session history: %w", err)
@@ -369,7 +407,8 @@ func (e *Engine) AgentSessionHistory(ctx context.Context, workID string) ([]Agen
 	var history []AgentSession
 	for rows.Next() {
 		var session AgentSession
-		if err := rows.Scan(&session.ID, &session.WorkID, &session.Generation, &session.Role, &session.AgentKind, &session.AgentName, &session.Status); err != nil {
+		if err := rows.Scan(&session.ID, &session.WorkID, &session.Generation, &session.Role, &session.AgentKind, &session.AgentName,
+			&session.ProviderVersion, &session.ProviderCapabilities, &session.Status); err != nil {
 			return nil, fmt.Errorf("scan Agent Session history: %w", err)
 		}
 		history = append(history, session)
@@ -512,7 +551,8 @@ func (e *Engine) GitIntent(ctx context.Context, intentID string) (GitIntentView,
 }
 
 func (e *Engine) ActiveAgentSessions(ctx context.Context) ([]ActiveAgentSession, error) {
-	rows, err := e.db.QueryContext(ctx, `SELECT s.id, s.work_id, s.generation, s.role, s.agent_kind, s.agent_name, s.status,
+	rows, err := e.db.QueryContext(ctx, `SELECT s.id, s.work_id, s.generation, s.role, s.agent_kind, s.agent_name,
+		COALESCE(s.provider_version, ''), COALESCE(s.provider_capabilities_json, X''), s.status,
         b.workspace_id, b.tab_id, b.pane_id, b.terminal_id
         FROM agent_sessions s
         LEFT JOIN pane_bindings b ON b.agent_session_id = s.id AND b.current = 1
@@ -527,7 +567,8 @@ func (e *Engine) ActiveAgentSessions(ctx context.Context) ([]ActiveAgentSession,
 		var workspaceID, tabID, paneID, terminalID sql.NullString
 		if err := rows.Scan(
 			&record.Session.ID, &record.Session.WorkID, &record.Session.Generation, &record.Session.Role,
-			&record.Session.AgentKind, &record.Session.AgentName, &record.Session.Status,
+			&record.Session.AgentKind, &record.Session.AgentName, &record.Session.ProviderVersion,
+			&record.Session.ProviderCapabilities, &record.Session.Status,
 			&workspaceID, &tabID, &paneID, &terminalID,
 		); err != nil {
 			return nil, fmt.Errorf("scan active agent session: %w", err)
@@ -1433,6 +1474,25 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return View{}, fmt.Errorf("iterate works: %w", err)
+	}
+	sessionRows, err := e.db.QueryContext(ctx, `SELECT s.id, s.work_id, s.generation, s.role, s.agent_kind, s.agent_name,
+		COALESCE(s.provider_version, ''), COALESCE(s.provider_capabilities_json, X''), s.status
+		FROM agent_sessions s JOIN works w ON w.id = s.work_id
+		WHERE w.optimization_id = ? ORDER BY s.created_at, s.id`, view.Optimization.ID)
+	if err != nil {
+		return View{}, fmt.Errorf("read Agent Sessions: %w", err)
+	}
+	for sessionRows.Next() {
+		var session AgentSession
+		if err := sessionRows.Scan(&session.ID, &session.WorkID, &session.Generation, &session.Role, &session.AgentKind,
+			&session.AgentName, &session.ProviderVersion, &session.ProviderCapabilities, &session.Status); err != nil {
+			_ = sessionRows.Close()
+			return View{}, fmt.Errorf("scan Agent Session: %w", err)
+		}
+		view.AgentSessions = append(view.AgentSessions, session)
+	}
+	if err := sessionRows.Close(); err != nil {
+		return View{}, fmt.Errorf("close Agent Session rows: %w", err)
 	}
 	best := BestView{}
 	var sourceAttempt sql.NullString

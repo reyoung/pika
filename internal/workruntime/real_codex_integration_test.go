@@ -3,7 +3,6 @@ package workruntime_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,20 +18,60 @@ import (
 	"github.com/reyoung/pika-go/internal/symphony"
 )
 
-// TestRealCodexCompletesDisposableOptimization is deliberately opt-in: it
-// starts real Codex sessions and therefore consumes model quota. The fake-Agent
-// suite remains the deterministic acceptance gate for ordinary development.
+type realProviderSpec struct {
+	name       string
+	agents     map[string]configuration.Agent
+	modelEnv   string
+	keepEnv    string
+	requestTag string
+}
+
 func TestRealCodexCompletesDisposableOptimization(t *testing.T) {
 	if os.Getenv("PIKA_GO_REAL_CODEX_INTEGRATION") != "1" {
 		t.Skip("set PIKA_GO_REAL_CODEX_INTEGRATION=1 to run the quota-consuming real Codex smoke")
 	}
+	runRealProviderOptimization(t, realProviderSpec{name: "codex", agents: configuration.DefaultAgents(), modelEnv: "PIKA_GO_REAL_CODEX_MODEL", keepEnv: "PIKA_GO_REAL_CODEX_KEEP", requestTag: "real-codex"})
+}
+
+func TestRealCursorCompletesDisposableOptimization(t *testing.T) {
+	if os.Getenv("PIKA_GO_REAL_CURSOR_INTEGRATION") != "1" {
+		t.Skip("set PIKA_GO_REAL_CURSOR_INTEGRATION=1 to run the quota-consuming real Cursor matrix")
+	}
+	runRealProviderOptimization(t, realProviderSpec{name: "cursor", agents: matrixAgents("cursor", "cursor", "cursor", "cursor", "cursor"), modelEnv: "PIKA_GO_REAL_CURSOR_MODEL", keepEnv: "PIKA_GO_REAL_CURSOR_KEEP", requestTag: "real-cursor"})
+}
+
+func TestRealMixedProviderCompletesBothAlternatingMatrices(t *testing.T) {
+	if os.Getenv("PIKA_GO_REAL_MIXED_PROVIDER_INTEGRATION") != "1" {
+		t.Skip("set PIKA_GO_REAL_MIXED_PROVIDER_INTEGRATION=1 to run the quota-consuming mixed matrices")
+	}
+	for _, spec := range []realProviderSpec{
+		{name: "cursor-codex-cursor-codex-cursor", agents: matrixAgents("cursor", "codex", "cursor", "codex", "cursor"), modelEnv: "PIKA_GO_REAL_MIXED_MODEL", keepEnv: "PIKA_GO_REAL_MIXED_KEEP", requestTag: "real-mixed-forward"},
+		{name: "codex-cursor-codex-cursor-codex", agents: matrixAgents("codex", "cursor", "codex", "cursor", "codex"), modelEnv: "PIKA_GO_REAL_MIXED_MODEL", keepEnv: "PIKA_GO_REAL_MIXED_KEEP", requestTag: "real-mixed-reverse"},
+	} {
+		t.Run(spec.name, func(t *testing.T) { runRealProviderOptimization(t, spec) })
+	}
+}
+
+// runRealProviderOptimization is deliberately opt-in: it starts real model
+// sessions and consumes quota. Fake-Agent matrices remain deterministic CI.
+func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 	herdrBinary, err := exec.LookPath("herdr")
 	if err != nil {
 		t.Fatal(err)
 	}
-	codexBinary, err := exec.LookPath("codex")
-	if err != nil {
-		t.Fatal(err)
+	codexBinary := "/bin/echo"
+	if hasAgentKind(spec.agents, "codex") {
+		codexBinary, err = exec.LookPath("codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	cursorBinary := ""
+	if hasAgentKind(spec.agents, "cursor") {
+		cursorBinary, err = exec.LookPath("cursor-agent")
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	pikaBinary := os.Getenv("PIKA_GO_BIN")
 	if pikaBinary == "" || !filepath.IsAbs(pikaBinary) {
@@ -50,12 +89,12 @@ func TestRealCodexCompletesDisposableOptimization(t *testing.T) {
 		t.Fatalf("CODEX_HOME must be absolute: %s", codexHome)
 	}
 
-	root, err := os.MkdirTemp("/tmp", "pika-go-real-codex-")
+	root, err := os.MkdirTemp("/tmp", "pika-go-real-"+spec.name+"-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if os.Getenv("PIKA_GO_REAL_CODEX_KEEP") == "1" {
-		t.Logf("preserving real-Codex fixture at %s", root)
+	if os.Getenv(spec.keepEnv) == "1" {
+		t.Logf("preserving real-provider fixture at %s", root)
 	} else {
 		t.Cleanup(func() { _ = os.RemoveAll(root) })
 	}
@@ -64,8 +103,10 @@ func TestRealCodexCompletesDisposableOptimization(t *testing.T) {
 	followUpHoldPath := createRealCodexHold(t, root, "verification")
 	iterationHoldPath := createRealCodexHold(t, root, "iteration")
 	integrationHoldPath := createRealCodexHold(t, root, "integration")
-	restoreTrust := trustRealCodexFixture(t, codexHome, repository)
-	t.Cleanup(restoreTrust)
+	if hasAgentKind(spec.agents, "codex") {
+		restoreTrust := trustRealCodexFixture(t, codexHome, repository)
+		t.Cleanup(restoreTrust)
+	}
 
 	herdrConfig, herdrState := configureRealCodexHerdr(t, root)
 	serverCtx, stopServer := context.WithCancel(context.Background())
@@ -94,7 +135,7 @@ func TestRealCodexCompletesDisposableOptimization(t *testing.T) {
 		RootPane  herdr.Pane      `json:"root_pane"`
 	}
 	if err := client.Call(testCtx, "workspace.create", map[string]any{
-		"cwd": repository, "label": "pika-real-codex", "focus": false,
+		"cwd": repository, "label": "pika-real-" + spec.name, "focus": false,
 	}, &created); err != nil {
 		t.Fatalf("create isolated Herdr workspace: %v; output=%s", err, serverOutput.String())
 	}
@@ -109,25 +150,25 @@ func TestRealCodexCompletesDisposableOptimization(t *testing.T) {
 	pikaSocket := filepath.Join(root, "pika.sock")
 	stateRoot := filepath.Join(root, "pika-state")
 	configRoot := filepath.Join(root, "pika-config")
-	model := os.Getenv("PIKA_GO_REAL_CODEX_MODEL")
+	model := os.Getenv(spec.modelEnv)
 	if model == "" {
 		model = "gpt-5.6-luna"
 	}
-	profileRollback := configureRealCodexInstance(t, testCtx, repository, stateRoot, configRoot, codexHome, pikaBinary, codexBinary, model)
+	profileRollback := configureRealProviderInstance(t, testCtx, repository, stateRoot, configRoot, codexHome, pikaBinary, codexBinary, model, spec.agents)
 	t.Cleanup(func() {
 		if err := profileRollback(); err != nil {
 			t.Errorf("restore pre-smoke Codex profile: %v", err)
 		}
 	})
 
-	daemon := startRealCodexDaemon(t, pikaBinary, pikaSocket, stateRoot, configRoot, herdrSocket, created.RootPane.PaneID, codexHome, codexBinary)
+	daemon := startRealCodexDaemon(t, pikaBinary, pikaSocket, stateRoot, configRoot, herdrSocket, created.RootPane.PaneID, codexHome, codexBinary, cursorBinary)
 	t.Cleanup(func() {
 		if daemon != nil {
 			daemon.killAndWait()
 		}
 	})
 	if _, err := control.Init(testCtx, pikaSocket, protocol.InitRequest{
-		Mutation:     protocol.Mutation{RequestID: "real-codex-init"},
+		Mutation:     protocol.Mutation{RequestID: spec.requestTag + "-init"},
 		Repository:   repository,
 		CallerPaneID: initPane.PaneID,
 	}); err != nil {
@@ -136,7 +177,7 @@ func TestRealCodexCompletesDisposableOptimization(t *testing.T) {
 	followUpTarget := exerciseRealCodexFollowUp(t, testCtx, stateRoot, client, pikaSocket, daemon, &serverOutput)
 	crashedOutput := crashRealCodexDaemon(t, daemon)
 	daemon = nil
-	daemon = startRealCodexDaemon(t, pikaBinary, pikaSocket, stateRoot, configRoot, herdrSocket, created.RootPane.PaneID, codexHome, codexBinary)
+	daemon = startRealCodexDaemon(t, pikaBinary, pikaSocket, stateRoot, configRoot, herdrSocket, created.RootPane.PaneID, codexHome, codexBinary, cursorBinary)
 	waitForRealCodexReplacement(t, testCtx, stateRoot, followUpTarget, client, pikaSocket, daemon, &serverOutput)
 	releaseRealCodexHold(t, followUpHoldPath)
 	t.Logf("real Codex Verification recovered through a fresh Session after daemon crash; crashed daemon output bytes=%d", len(crashedOutput))
@@ -167,7 +208,7 @@ func TestRealCodexCompletesDisposableOptimization(t *testing.T) {
 		t.Fatalf("Git/SQLite Best mismatch: git=%q err=%v db=%+v", output, err, view.Best)
 	}
 
-	if _, err := control.Shutdown(testCtx, pikaSocket, protocol.ShutdownRequest{Mutation: protocol.Mutation{RequestID: "real-codex-shutdown"}}); err != nil {
+	if _, err := control.Shutdown(testCtx, pikaSocket, protocol.ShutdownRequest{Mutation: protocol.Mutation{RequestID: spec.requestTag + "-shutdown"}}); err != nil {
 		t.Fatalf("request graceful shutdown: %v", err)
 	}
 	cancelPendingRealCodexWork(t, testCtx, pikaSocket)
@@ -214,42 +255,61 @@ func configureRealCodexHerdr(t *testing.T, root string) (string, string) {
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("[update]\nversion_check = false\nmanifest_check = false\n"), 0o600); err != nil {
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[update]\nversion_check = false\nmanifest_check = false\n\n[session]\nresume_agents_on_restore = false\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("HERDR_CONFIG_PATH", configPath)
 	return configDir, stateHome
 }
 
-func configureRealCodexInstance(t *testing.T, ctx context.Context, repository, stateRoot, configRoot, codexHome, pikaBinary, codexBinary, model string) func() error {
+func hasAgentKind(agents map[string]configuration.Agent, kind string) bool {
+	for _, agent := range agents {
+		if agent.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func configureRealProviderInstance(t *testing.T, ctx context.Context, repository, stateRoot, configRoot, codexHome, pikaBinary, codexBinary, model string, agents map[string]configuration.Agent) func() error {
 	t.Helper()
+	configuredAgents := make(map[string]configuration.Agent, len(agents))
+	for role, agent := range agents {
+		agent.Model = model
+		agent.ReasoningEffort = "medium"
+		if agent.Kind == "cursor" {
+			agent.Args = []string{"--force", "--approve-mcps", "--trust"}
+		}
+		configuredAgents[role] = agent
+	}
+	configured, err := configuration.RenderConfiguration(repository, configuredAgents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured = strings.Replace(configured, "iteration_concurrency = 4", "iteration_concurrency = 2", 1)
+	configured = strings.Replace(configured, "max_pending_attempts = 8", "max_pending_attempts = 2", 1)
+	configured = strings.Replace(configured, "pane_idle_timeout = \"5m\"", "pane_idle_timeout = \"10m\"", 1)
 	initializer := configuration.Initializer{
 		ConfigRoot: configRoot, StateRoot: stateRoot, InstanceID: "real-codex",
-		CodexHome: codexHome, PikaExecutable: pikaBinary, CodexExecutable: codexBinary,
+		CodexHome: codexHome, CursorMCPPath: realCursorMCPPath(t), CursorHooksPath: realCursorHooksPath(t), PikaExecutable: pikaBinary, CodexExecutable: codexBinary, ConfigurationTOML: &configured,
 	}
 	rollback, err := initializer.Prepare(ctx, repository)
 	if err != nil {
-		t.Fatalf("prepare real-Codex instance: %v", err)
-	}
-	configPath := filepath.Join(configRoot, "instances", "real-codex", "config.toml")
-	contents, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configured := strings.Replace(string(contents), "iteration_concurrency = 4", "iteration_concurrency = 2", 1)
-	configured = strings.Replace(configured, "max_pending_attempts = 8", "max_pending_attempts = 2", 1)
-	configured = strings.ReplaceAll(configured, "model = \"gpt-5.6-sol\"", fmt.Sprintf("model = %q", model))
-	configured = strings.ReplaceAll(configured, "reasoning_effort = \"high\"", "reasoning_effort = \"medium\"")
-	configured = strings.Replace(configured, "pane_idle_timeout = \"5m\"", "pane_idle_timeout = \"10m\"", 1)
-	if err := os.WriteFile(configPath, []byte(configured), 0o600); err != nil {
-		t.Fatal(err)
+		t.Fatalf("prepare real-provider instance: %v", err)
 	}
 	fixtureRoot := filepath.Dir(repository)
 	gateScript := "#!/bin/sh\n" +
 		"set -eu\n" +
 		"case \"${1:-}\" in verification|iteration|integration) ;; *) echo 'usage: pika-real-gate <verification|iteration|integration>' >&2; exit 2 ;; esac\n" +
 		"hold=" + shellTestQuote(fixtureRoot) + "-\"$1\"-hold\n" +
+		"ready=" + shellTestQuote(fixtureRoot) + "-\"$1\"-ready\n" +
+		"touch \"$ready\"\n" +
 		"while [ -e \"$hold\" ]; do sleep 0.1; done\n"
 	gatePath := filepath.Join(stateRoot, "instances", "real-codex", "runtime", "bin", "pika-real-gate")
+	if err := os.MkdirAll(filepath.Dir(gatePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(gatePath, []byte(gateScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -267,11 +327,29 @@ func configureRealCodexInstance(t *testing.T, ctx context.Context, repository, s
 	return rollback
 }
 
+func realCursorMCPPath(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(home, ".cursor", "mcp.json")
+}
+
+func realCursorHooksPath(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(home, ".cursor", "hooks.json")
+}
+
 func shellTestQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
-func startRealCodexDaemon(t *testing.T, pikaBinary, socketPath, stateRoot, configRoot, herdrSocket, symphonyPane, codexHome, codexBinary string) *daemonProcess {
+func startRealCodexDaemon(t *testing.T, pikaBinary, socketPath, stateRoot, configRoot, herdrSocket, symphonyPane, codexHome, codexBinary, cursorBinary string) *daemonProcess {
 	t.Helper()
 	process := &daemonProcess{done: make(chan error, 1)}
 	process.command = exec.Command(pikaBinary, "daemon",
@@ -282,10 +360,12 @@ func startRealCodexDaemon(t *testing.T, pikaBinary, socketPath, stateRoot, confi
 	)
 	process.command.Env = replacedEnvironment(map[string]string{
 		"HERDR_SOCKET_PATH":            herdrSocket,
+		"HERDR_CONFIG_PATH":            filepath.Join(filepath.Dir(herdrSocket), "config.toml"),
 		"HERDR_PANE_ID":                symphonyPane,
 		"HERDR_ENV":                    "1",
 		"CODEX_HOME":                   codexHome,
 		"PIKA_GO_CODEX_EXECUTABLE":     codexBinary,
+		"PIKA_GO_CURSOR_EXECUTABLE":    cursorBinary,
 		"PIKA_CODEX_BYPASS_HOOK_TRUST": "1",
 		"PIKA_GO_FOLLOWUP_INACTIVITY":  "500ms",
 	})
@@ -349,11 +429,19 @@ func exerciseRealCodexFollowUp(t *testing.T, ctx context.Context, stateRoot stri
 	if targetSession.ID == "" || providerSessionID == "" {
 		t.Fatalf("real Codex Verification provider Session did not bind before Follow-up smoke: %s", diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
 	}
-	hook, _ := json.Marshal(map[string]any{
-		"session_id": providerSessionID, "turn_id": "pika-real-follow-up-stopped-turn", "hook_event_name": "Stop",
-		"last_assistant_message": "Follow-up smoke: observed an incomplete stopped turn.",
-	})
-	if err := control.IngestProviderEvent(ctx, socketPath, "codex", protocol.ProviderEventRequest{AgentSessionID: targetSession.ID, Event: hook}); err != nil {
+	readyPath := filepath.Dir(stateRoot) + "-verification-ready"
+	readyDeadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(readyDeadline) {
+		if _, statErr := os.Stat(readyPath); statErr == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if _, statErr := os.Stat(readyPath); statErr != nil {
+		t.Fatalf("real Codex Verification did not become quiescent before Follow-up smoke: %s", diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
+	}
+	hook := matrixStopEvent(targetSession.AgentKind, providerSessionID, "pika-real-follow-up-stopped-turn")
+	if err := control.IngestProviderEvent(ctx, socketPath, targetSession.AgentKind, protocol.ProviderEventRequest{AgentSessionID: targetSession.ID, Event: hook}); err != nil {
 		t.Fatalf("inject stopped-turn observation for real Follow-up smoke: %v", err)
 	}
 
@@ -556,7 +644,10 @@ func createRealCodexHold(t *testing.T, root, kind string) string {
 	if err := os.WriteFile(path, []byte("hold "+kind+" for the real release matrix\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Remove(path) })
+	t.Cleanup(func() {
+		_ = os.Remove(path)
+		_ = os.Remove(root + "-" + kind + "-ready")
+	})
 	return path
 }
 

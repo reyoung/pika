@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -26,6 +27,7 @@ import (
 	"github.com/reyoung/pika-go/internal/mcp"
 	"github.com/reyoung/pika-go/internal/outbox"
 	"github.com/reyoung/pika-go/internal/protocol"
+	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/toolapp"
 	"github.com/reyoung/pika-go/internal/workruntime"
@@ -51,7 +53,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "status":
 		return runStatus(ctx, args[1:], stdout, stderr)
 	case "init":
-		return runInit(ctx, args[1:], stdout, stderr)
+		return runInit(ctx, args[1:], stdin, stdout, stderr)
 	case "draft-baseline":
 		return runDraftBaseline(ctx, args[1:], stdout, stderr)
 	case "back-off":
@@ -105,7 +107,8 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	var engine *symphony.Engine
 	var symphonyService symphony.Symphony
-	var prepareInit func(context.Context, string) (daemon.PreparedInit, error)
+	var prepareInit func(context.Context, string, *string) (daemon.PreparedInit, error)
+	var initOptions func(context.Context) (protocol.InitOptionsResponse, error)
 	var recordInitFailure func(context.Context, string) error
 	var afterListen func(context.Context) error
 	var afterCommit func(context.Context)
@@ -113,8 +116,25 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	var applyGitIntent func(context.Context, string, string) (string, error)
 	if paths.StateRoot != "" {
 		worktreeRoot := filepath.Join(paths.StateRoot, "instances", paths.InstanceID, "worktrees")
-		runtimeBin := filepath.Join(paths.StateRoot, "instances", paths.InstanceID, "runtime", "bin")
+		runtimeRoot := filepath.Join(paths.StateRoot, "instances", paths.InstanceID, "runtime")
+		runtimeBin := filepath.Join(runtimeRoot, "bin")
 		instanceConfigPath := filepath.Join(paths.ConfigRoot, "instances", paths.InstanceID, "config.toml")
+		pikaExecutable, _ := os.Executable()
+		codexExecutable := os.Getenv("PIKA_GO_CODEX_EXECUTABLE")
+		if codexExecutable == "" {
+			codexExecutable, _ = exec.LookPath("codex")
+		}
+		cursorExecutable := os.Getenv("PIKA_GO_CURSOR_EXECUTABLE")
+		if cursorExecutable == "" {
+			cursorExecutable, _ = exec.LookPath("cursor-agent")
+		}
+		providerRegistry, registryErr := provider.NewRegistry(provider.NewCodexAdapter(), provider.NewCursorAdapter(provider.CursorOptions{
+			Executable: cursorExecutable, RuntimeRoot: runtimeRoot, InstanceBin: runtimeBin, PikaExecutable: pikaExecutable,
+		}))
+		if registryErr != nil {
+			writeDaemonLog(stderr, "error", "provider.registry_failed", registryErr, nil)
+			return 1
+		}
 		var followUpInactivity time.Duration
 		var followUpPolicies map[symphony.WorkRole]symphony.FollowUpPolicy
 		if _, statErr := os.Stat(instanceConfigPath); statErr == nil {
@@ -125,6 +145,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			}
 			followUpInactivity = followUpConfig.PaneIdleTimeout
 			followUpPolicies = symphonyFollowUpPolicies(followUpConfig)
+			if configErr := configuration.ProbeConfiguredProviders(ctx, instanceConfigPath, providerRegistry, map[string]string{"codex": codexExecutable, "cursor": cursorExecutable}); configErr != nil {
+				writeDaemonLog(stderr, "error", "provider.preflight_failed", configErr, nil)
+				return 1
+			}
 		}
 		if override := os.Getenv("PIKA_GO_FOLLOWUP_INACTIVITY"); override != "" {
 			followUpInactivity, err = time.ParseDuration(override)
@@ -139,30 +163,64 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			return 1
 		}
 		defer lock.Close()
-		engine, err = symphony.Open(ctx, paths.DatabasePath, symphony.Options{FollowUpInactivity: followUpInactivity, FollowUpPolicies: followUpPolicies})
+		engine, err = symphony.Open(ctx, paths.DatabasePath, symphony.Options{FollowUpInactivity: followUpInactivity, FollowUpPolicies: followUpPolicies, Providers: providerRegistry})
 		if err != nil {
 			writeDaemonLog(stderr, "error", "database.open_failed", err, map[string]any{"instance_id": paths.InstanceID})
 			return 1
 		}
 		defer engine.Close()
-		symphonyService = engine
-		pikaExecutable, _ := os.Executable()
-		codexExecutable := os.Getenv("PIKA_GO_CODEX_EXECUTABLE")
-		if codexExecutable == "" {
-			codexExecutable, _ = exec.LookPath("codex")
+		activeSessions, activeErr := engine.ActiveAgentSessions(ctx)
+		if activeErr != nil {
+			writeDaemonLog(stderr, "error", "provider.reconciliation_failed", activeErr, nil)
+			return 1
 		}
+		activeSessionIDs := make(map[string]bool, len(activeSessions))
+		for _, active := range activeSessions {
+			activeSessionIDs[active.Session.ID] = true
+		}
+		if reconcileErr := provider.ReconcileCursorSessions(runtimeRoot, activeSessionIDs); reconcileErr != nil {
+			writeDaemonLog(stderr, "error", "provider.reconciliation_failed", reconcileErr, nil)
+			return 1
+		}
+		symphonyService = engine
 		codexHome := os.Getenv("CODEX_HOME")
 		if codexHome == "" {
 			if userHome, homeErr := os.UserHomeDir(); homeErr == nil {
 				codexHome = filepath.Join(userHome, ".codex")
 			}
 		}
+		cursorMCPPath := os.Getenv("PIKA_GO_CURSOR_MCP_PATH")
+		cursorHooksPath := os.Getenv("PIKA_GO_CURSOR_HOOKS_PATH")
+		if cursorMCPPath == "" {
+			if userHome, homeErr := os.UserHomeDir(); homeErr == nil {
+				cursorMCPPath = filepath.Join(userHome, ".cursor", "mcp.json")
+			}
+		}
+		if cursorHooksPath == "" {
+			if userHome, homeErr := os.UserHomeDir(); homeErr == nil {
+				cursorHooksPath = filepath.Join(userHome, ".cursor", "hooks.json")
+			}
+		}
 		initializer := configuration.Initializer{
 			ConfigRoot: paths.ConfigRoot, StateRoot: paths.StateRoot, InstanceID: paths.InstanceID,
-			CodexHome: codexHome, PikaExecutable: pikaExecutable, CodexExecutable: codexExecutable,
+			CodexHome: codexHome, CursorMCPPath: cursorMCPPath, CursorHooksPath: cursorHooksPath, PikaExecutable: pikaExecutable, CodexExecutable: codexExecutable, Providers: providerRegistry,
+			RequireConfigurationTOML: true, ProbeProviders: true,
+			ProviderExecutables: map[string]string{"codex": codexExecutable, "cursor": cursorExecutable},
 		}
-		prepareInit = func(initCtx context.Context, repository string) (daemon.PreparedInit, error) {
-			rollback, prepareErr := initializer.Prepare(initCtx, repository)
+		herdrSocket := os.Getenv("HERDR_SOCKET_PATH")
+		prepareInit = func(initCtx context.Context, repository string, configurationTOML *string) (daemon.PreparedInit, error) {
+			if herdrSocket != "" {
+				configPath, resolveErr := herdr.ResolveConfigPath()
+				if resolveErr != nil {
+					return daemon.PreparedInit{}, resolveErr
+				}
+				if freshErr := herdr.RequireFreshSessions(initCtx, herdr.NewClient(herdrSocket), configPath); freshErr != nil {
+					return daemon.PreparedInit{}, fmt.Errorf("require fresh Herdr Agent Sessions: %w", freshErr)
+				}
+			}
+			preparedInitializer := initializer
+			preparedInitializer.ConfigurationTOML = configurationTOML
+			rollback, prepareErr := preparedInitializer.Prepare(initCtx, repository)
 			if prepareErr != nil {
 				return daemon.PreparedInit{}, prepareErr
 			}
@@ -175,7 +233,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				if configErr != nil {
 					break
 				}
-				_, configErr = configuration.LoadAgent(instanceConfigPath, role)
+				_, configErr = configuration.LoadAgentWithRegistry(instanceConfigPath, role, providerRegistry)
 			}
 			timeout := followUpConfig.PaneIdleTimeout
 			if override := os.Getenv("PIKA_GO_FOLLOWUP_INACTIVITY"); override != "" {
@@ -195,8 +253,33 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			}
 			return daemon.PreparedInit{Rollback: rollback, IterationConcurrency: schedulerConfig.IterationConcurrency, MaxPendingAttempts: schedulerConfig.MaxPendingAttempts}, nil
 		}
+		initOptions = func(optionsCtx context.Context) (protocol.InitOptionsResponse, error) {
+			_, statErr := os.Stat(instanceConfigPath)
+			response := protocol.InitOptionsResponse{ConfigurationExists: statErr == nil}
+			if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+				return protocol.InitOptionsResponse{}, fmt.Errorf("inspect instance configuration: %w", statErr)
+			}
+			for _, kind := range providerRegistry.Kinds() {
+				option := protocol.ProviderOption{Kind: kind}
+				probeCtx, cancelProbe := context.WithTimeout(optionsCtx, 500*time.Millisecond)
+				capabilities, probeErr := providerRegistry.Probe(probeCtx, kind, provider.ProbeRequest{Executable: map[string]string{"codex": codexExecutable, "cursor": cursorExecutable}[kind]})
+				cancelProbe()
+				if probeErr != nil {
+					option.Error = probeErr.Error()
+					response.Providers = append(response.Providers, option)
+					continue
+				}
+				option.Executable, option.Version = capabilities.Executable, capabilities.Version
+				option.Compatible, option.Authenticated = capabilities.Compatible, capabilities.Authenticated
+				option.Capabilities = map[string]bool{
+					"journal": capabilities.Journal, "turn_stop": capabilities.TurnStop, "follow_up": capabilities.FollowUp,
+					"full_output": capabilities.FullOutput, "fresh_session": capabilities.FreshSession,
+				}
+				response.Providers = append(response.Providers, option)
+			}
+			return response, nil
+		}
 		recordInitFailure = engine.RecordInitFailure
-		herdrSocket := os.Getenv("HERDR_SOCKET_PATH")
 		symphonyPane := os.Getenv("HERDR_PANE_ID")
 		if herdrSocket != "" && symphonyPane != "" {
 			client := herdr.NewClient(herdrSocket)
@@ -236,10 +319,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				// still require the user to review new or changed Codex hooks.
 				activationEnvironment["PIKA_CODEX_BYPASS_HOOK_TRUST"] = "1"
 			}
-			preparer := activation.Preparer{Store: engine, InstructionRoot: filepath.Join(paths.ConfigRoot, "instances", paths.InstanceID, "instructions"), SocketPath: paths.SocketPath, Environment: activationEnvironment, AgentConfigPath: instanceConfigPath}
-			dispatcher := outbox.Dispatcher{Store: engine, Sink: workruntime.Sink{Store: engine, Runtime: runtimeAdapter, AgentKind: "codex", AgentConfigPath: instanceConfigPath, Preparer: preparer, WorkspacePreparer: gitworkspace.RuntimePreparer{Root: worktreeRoot}}}
+			preparer := activation.Preparer{Store: engine, InstructionRoot: filepath.Join(paths.ConfigRoot, "instances", paths.InstanceID, "instructions"), SocketPath: paths.SocketPath, Environment: activationEnvironment, AgentConfigPath: instanceConfigPath, Providers: providerRegistry}
+			dispatcher := outbox.Dispatcher{Store: engine, Sink: workruntime.Sink{Store: engine, Runtime: runtimeAdapter, AgentKind: "codex", AgentConfigPath: instanceConfigPath, Providers: providerRegistry, ProviderRuntimeRoot: runtimeRoot, RequireProviderCapabilities: true, Preparer: preparer, WorkspacePreparer: gitworkspace.RuntimePreparer{Root: worktreeRoot}}}
 			coordinator := workruntime.Coordinator{
-				Reconciler:  workruntime.Reconciler{Store: engine, Runtime: runtimeAdapter},
+				Reconciler:  workruntime.Reconciler{Store: engine, Runtime: runtimeAdapter, ProviderRuntimeRoot: runtimeRoot},
 				Dispatcher:  dispatcher,
 				EffectStore: engine,
 				Runtime:     runtimeAdapter,
@@ -325,8 +408,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		}
 	}
 	var ingestProviderEvent func(context.Context, string, string, json.RawMessage) error
+	var ingestProviderHookEvent func(context.Context, string, string, string, json.RawMessage) error
 	if engine != nil {
 		ingestProviderEvent = engine.IngestProviderEvent
+		ingestProviderHookEvent = engine.IngestProviderHookEvent
 	}
 	var backup func(context.Context, string) error
 	var drainReady func(context.Context) (bool, error)
@@ -335,7 +420,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		drainReady = engine.DrainReady
 	}
 	writeDaemonLog(stderr, "info", "daemon.starting", nil, map[string]any{"instance_id": paths.InstanceID, "protocol_version": protocol.Version, "version": Version})
-	if err := daemon.Serve(ctx, daemon.Config{SocketPath: paths.SocketPath, Version: Version, InstanceID: paths.InstanceID, Symphony: symphonyService, PrepareInit: prepareInit, RecordInitFailure: recordInitFailure, AfterListen: afterListen, AfterCommit: afterCommit, MCPHandler: mcpHandler, ApplyGitIntent: applyGitIntent, IngestProviderEvent: ingestProviderEvent, Backup: backup, DrainReady: drainReady}); err != nil {
+	if err := daemon.Serve(ctx, daemon.Config{SocketPath: paths.SocketPath, Version: Version, InstanceID: paths.InstanceID, Symphony: symphonyService, PrepareInit: prepareInit, InitOptions: initOptions, RecordInitFailure: recordInitFailure, AfterListen: afterListen, AfterCommit: afterCommit, MCPHandler: mcpHandler, ApplyGitIntent: applyGitIntent, IngestProviderEvent: ingestProviderEvent, IngestProviderHookEvent: ingestProviderHookEvent, Backup: backup, DrainReady: drainReady}); err != nil {
 		writeDaemonLog(stderr, "error", "daemon.stopped", err, map[string]any{"instance_id": paths.InstanceID})
 		return 1
 	}
@@ -370,28 +455,70 @@ func symphonyFollowUpPolicies(config configuration.FollowUp) map[symphony.WorkRo
 }
 
 func runHook(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) int {
-	if len(args) != 1 || args[0] != "codex" || stdin == nil {
+	if len(args) < 1 || len(args) > 2 || (args[0] != "codex" && args[0] != "cursor") || stdin == nil {
 		return 0
 	}
-	contents, err := io.ReadAll(io.LimitReader(stdin, 16<<20))
+	providerKind := args[0]
+	configuredEventName := ""
+	if len(args) == 2 {
+		configuredEventName = args[1]
+	}
+	contents, err := io.ReadAll(stdin)
 	if err != nil || !json.Valid(contents) {
 		return 0
 	}
 	var envelope struct {
-		HookEventName string `json:"hook_event_name"`
+		HookEventName      string `json:"hook_event_name"`
+		HookEventNameCamel string `json:"hookEventName"`
 	}
 	if err := json.Unmarshal(contents, &envelope); err != nil {
 		return 0
 	}
-	if envelope.HookEventName == "Stop" {
+	if envelope.HookEventName == "" {
+		envelope.HookEventName = envelope.HookEventNameCamel
+	}
+	if configuredEventName != "" {
+		envelope.HookEventName = configuredEventName
+	}
+	if providerKind == "codex" && envelope.HookEventName == "Stop" {
 		_, _ = io.WriteString(stdout, "{}\n")
+	}
+	if providerKind == "cursor" {
+		response := map[string]any{}
+		switch envelope.HookEventName {
+		case "sessionStart":
+			if path := os.Getenv("PIKA_CURSOR_SYSTEM_PROMPT_PATH"); path != "" {
+				if prompt, readErr := os.ReadFile(path); readErr == nil && len(prompt) != 0 {
+					response["additional_context"] = string(prompt)
+				}
+			}
+		case "beforeSubmitPrompt":
+			response["continue"] = true
+		case "beforeMCPExecution":
+			var policy struct {
+				MCPServerName      string `json:"mcp_server_name"`
+				MCPServerNameCamel string `json:"mcpServerName"`
+			}
+			_ = json.Unmarshal(contents, &policy)
+			if policy.MCPServerName == "" {
+				policy.MCPServerName = policy.MCPServerNameCamel
+			}
+			if policy.MCPServerName == "pika_go" {
+				response["permission"] = "allow"
+			} else {
+				response["permission"] = "deny"
+				response["user_message"] = "Pika blocked a non-Pika MCP server for this Session."
+				response["agent_message"] = "Pika only allows its Session-scoped MCP server."
+			}
+		}
+		_ = json.NewEncoder(stdout).Encode(response)
 	}
 	socketPath, err := instance.ResolveSocketContext(ctx, "")
 	if err != nil {
 		return 0
 	}
-	_ = control.IngestProviderEvent(ctx, socketPath, "codex", protocol.ProviderEventRequest{
-		AgentSessionID: os.Getenv("PIKA_SESSION_ID"), Event: contents,
+	_ = control.IngestProviderEvent(ctx, socketPath, providerKind, protocol.ProviderEventRequest{
+		AgentSessionID: os.Getenv("PIKA_SESSION_ID"), HookEventName: configuredEventName, Event: contents,
 	})
 	return 0
 }
@@ -553,13 +680,15 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	return 0
 }
 
-func runInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+func runInit(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("init", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	socketPath := flags.String("socket", "", "Unix socket path")
 	repository := flags.String("repository", "", "Absolute repository path")
 	requestID := flags.String("request-id", "", "Idempotency request ID")
 	jsonOutput := flags.Bool("json", false, "Print JSON only")
+	defaults := flags.Bool("defaults", false, "Use the all-Codex default configuration")
+	configPath := flags.String("config", "", "Read the complete instance TOML from PATH")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -586,13 +715,54 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if *requestID == "" {
 		*requestID = newRequestID()
 	}
-	if !*jsonOutput {
-		_, _ = fmt.Fprintln(stdout, configuration.DefaultSummary)
+	if *defaults && *configPath != "" {
+		_, _ = fmt.Fprintln(stderr, "init: --defaults and --config are mutually exclusive")
+		return 2
+	}
+	options, err := control.InitOptions(ctx, resolvedSocket)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "init: load options: %v\n", err)
+		return 1
+	}
+	var configurationTOML *string
+	if options.ConfigurationExists {
+		if *defaults || *configPath != "" {
+			_, _ = fmt.Fprintln(stderr, "init: existing configuration is user-owned; --defaults and --config are not allowed")
+			return 2
+		}
+	} else {
+		var candidate string
+		switch {
+		case *defaults:
+			candidate = configuration.RenderDefaults(*repository)
+		case *configPath != "":
+			contents, readErr := os.ReadFile(*configPath)
+			if readErr != nil {
+				_, _ = fmt.Fprintf(stderr, "init: read --config: %v\n", readErr)
+				return 2
+			}
+			candidate = string(contents)
+		case *jsonOutput || !isInteractiveInput(stdin):
+			_, _ = fmt.Fprintln(stderr, "init: a new non-interactive instance requires exactly one of --defaults or --config PATH")
+			return 2
+		default:
+			_, _ = fmt.Fprintln(stdout, configuration.DefaultSummary)
+			candidate, err = promptAgentConfiguration(stdin, stdout, *repository, options)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "init: configure Agents: %v\n", err)
+				return 2
+			}
+		}
+		configurationTOML = &candidate
+	}
+	if !*jsonOutput && options.ConfigurationExists {
+		_, _ = fmt.Fprintln(stdout, "Using existing user-owned instance configuration.")
 	}
 	receipt, err := control.Init(ctx, resolvedSocket, protocol.InitRequest{
-		Mutation:     protocol.Mutation{RequestID: *requestID},
-		Repository:   *repository,
-		CallerPaneID: os.Getenv("HERDR_PANE_ID"),
+		Mutation:          protocol.Mutation{RequestID: *requestID},
+		Repository:        *repository,
+		CallerPaneID:      os.Getenv("HERDR_PANE_ID"),
+		ConfigurationTOML: configurationTOML,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "init: %v\n", err)
@@ -610,6 +780,98 @@ func runInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func isInteractiveInput(input io.Reader) bool {
+	if input == nil {
+		return false
+	}
+	file, isFile := input.(*os.File)
+	if !isFile {
+		return true
+	}
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func promptAgentConfiguration(input io.Reader, output io.Writer, repository string, options protocol.InitOptionsResponse) (string, error) {
+	reader := bufio.NewReader(input)
+	available := make(map[string]bool, len(options.Providers))
+	for _, option := range options.Providers {
+		available[option.Kind] = true
+		state := "available"
+		if option.Error != "" {
+			state = option.Error
+		}
+		_, _ = fmt.Fprintf(output, "Provider %s: %s %s (%s)\n", option.Kind, option.Executable, option.Version, state)
+	}
+	agents := configuration.DefaultAgents()
+	registry := provider.DefaultRegistry()
+	for _, role := range configuration.AgentRoleOrder {
+		defaults := agents[role]
+		_, _ = fmt.Fprintf(output, "\nConfigure agents.%s\n", role)
+		kind, err := promptValue(reader, output, "  kind", defaults.Kind)
+		if err != nil {
+			return "", err
+		}
+		if !available[kind] {
+			return "", fmt.Errorf("provider %q was not returned by the daemon", kind)
+		}
+		model, err := promptValue(reader, output, "  model", defaults.Model)
+		if err != nil {
+			return "", err
+		}
+		effort, err := promptValue(reader, output, "  reasoning effort", defaults.ReasoningEffort)
+		if err != nil {
+			return "", err
+		}
+		agent := configuration.Agent{Kind: kind, Model: model, ReasoningEffort: effort}
+		if kind == "cursor" {
+			defaultArgs := []string{"--force", "--approve-mcps"}
+			encodedDefaults, _ := json.Marshal(defaultArgs)
+			encoded, promptErr := promptValue(reader, output, "  Cursor args JSON", string(encodedDefaults))
+			if promptErr != nil {
+				return "", promptErr
+			}
+			if err := json.Unmarshal([]byte(encoded), &agent.Args); err != nil {
+				return "", fmt.Errorf("agents.%s Cursor args must be a JSON string array: %w", role, err)
+			}
+			trust, promptErr := promptValue(reader, output, "  append --trust (changes Cursor persistent workspace trust) y/N", "n")
+			if promptErr != nil {
+				return "", promptErr
+			}
+			if strings.EqualFold(trust, "y") || strings.EqualFold(trust, "yes") {
+				agent.Args = append(agent.Args, "--trust")
+			} else if !strings.EqualFold(trust, "n") && !strings.EqualFold(trust, "no") {
+				return "", fmt.Errorf("agents.%s trust answer must be yes or no", role)
+			}
+		}
+		adapter, err := registry.Resolve(kind)
+		if err != nil {
+			return "", err
+		}
+		if err := adapter.Validate(agent); err != nil {
+			return "", fmt.Errorf("agents.%s: %w", role, err)
+		}
+		agents[role] = agent
+	}
+	return configuration.RenderConfiguration(repository, agents)
+}
+
+func promptValue(reader *bufio.Reader, output io.Writer, label, defaultValue string) (string, error) {
+	_, _ = fmt.Fprintf(output, "%s [%s]: ", label, defaultValue)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	value := strings.TrimSpace(line)
+	if value == "" {
+		value = defaultValue
+	}
+	if errors.Is(err, io.EOF) && line == "" {
+		return "", io.ErrUnexpectedEOF
+	}
+	return value, nil
 }
 
 func runDraftBaseline(ctx context.Context, args []string, stdout, stderr io.Writer) int {

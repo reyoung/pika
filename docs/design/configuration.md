@@ -32,6 +32,10 @@ $HERDR_PLUGIN_STATE_DIR/
     contexts/
     evidence/
     worktrees/
+    runtime/
+      cursor-sessions/<agent-session>/
+        system-prompt.md
+        cursor.args
 ```
 
 Configuration and instruction overlays are user-owned mutable inputs. Every installed `instructions/*.md` file is empty by default; it exists only so the user can append Role-specific requirements. The canonical Role System Prompts are plugin-owned resources embedded in the `pika-go` binary and are never copied into the config directory. SQLite and generated evidence are runtime state. Reinstalling the plugin must preserve both writable directories.
@@ -59,9 +63,10 @@ model = "gpt-5.6-sol"
 reasoning_effort = "high"
 
 [agents.iteration]
-kind = "codex"
+kind = "cursor"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
+args = ["--force", "--approve-mcps"]
 
 [agents.integration]
 kind = "codex"
@@ -94,7 +99,9 @@ path = "/absolute/path/to/reference"
 description = "Known-correct implementation"
 ```
 
-Exact defaults beyond the accepted five-minute inactivity timeout remain implementation choices and must be printed by `pika-go init` before commit.
+This example deliberately mixes providers; the shipped `--defaults` configuration remains all-Codex. Cursor accepts reasoning effort `low`, `medium`, `high`, `xhigh`, or `max`; `ultra` is Codex-only. Cursor `args` is an argv array, never a shell string. Pika supplies workspace, Plugin, model, and `--sandbox enabled`, so configuration cannot override those values or request `--resume`, `--continue`, `--print`, an initial prompt, or disabled sandboxing.
+
+Exact defaults beyond the accepted five-minute inactivity timeout remain implementation choices and are printed by interactive `pika-go init` before commit.
 
 If `config.toml` already exists, init treats it as user-owned input: it validates version and repository identity, preserves the file byte-for-byte, and rejects invalid scheduler, Follow-up, or Role Agent fields. `iteration_concurrency` and `max_pending_attempts` are copied into the durable Optimization during init; later edits affect only a future Optimization rather than silently changing the running scheduler.
 
@@ -108,7 +115,14 @@ Pika rejects configuration that enables automatic Follow-up for an Agent adapter
 
 ## 4. Initialization
 
-`pika-go init` performs an interactive flow similar to the old Pika initializer but excludes Web concerns.
+`pika-go init` performs an interactive flow similar to the old Pika initializer but excludes Web concerns. For a new interactive instance, it asks independently for provider kind, model, reasoning effort, and Cursor argv for all five static Roles. Cursor defaults to `--force --approve-mcps`; appending `--trust` is a separate question that defaults to no because it changes Cursor's persistent workspace trust.
+
+New non-interactive or `--json` initialization requires exactly one of:
+
+- `--defaults`, which renders the all-Codex default configuration;
+- `--config PATH`, which reads a complete candidate TOML for the same canonical repository.
+
+The CLI first reads `GET /v1/init/options`. It sends the complete candidate to `POST /v1/init`; the daemon validates it and probes exactly the distinct referenced providers before any durable write. Codex-only init does not require Cursor, Cursor-only init does not require Codex, and mixed init rolls back atomically if either provider fails. Existing configuration is never regenerated or overwritten and therefore skips the questions and rejects both flags.
 
 It configures:
 
@@ -159,21 +173,36 @@ Production launch never bypasses first-use project or hook trust. Tests may set 
 
 The update is atomic and preserves the previous Pika-owned file as a recoverable backup until validation succeeds. If another product already owns the reserved profile path, init fails with a precise conflict rather than merging unknown content.
 
-## 7. Cursor plugin staging
+## 7. Cursor integration and Session state
 
-The distribution may include a Pika Cursor plugin directory and pass it with `cursor-agent --plugin-dir`. This is dormant until the pinned CLI passes the provider conformance suite. Pika does not modify global Cursor configuration for the initial release.
+When any Role selects Cursor, init atomically merges Pika-owned entries into the authenticated user's existing `~/.cursor/mcp.json` and `~/.cursor/hooks.json`. Existing servers, Cursor hooks, and Herdr hooks are preserved. The reserved `pika_go` MCP entry is static but parameterized with `${env:PIKA_GO_EXECUTABLE}`, `${env:PIKA_GO_SOCKET}`, `${env:PIKA_MCP_GRANT}`, and `${env:PIKA_SESSION_ID}`; Hook commands are likewise parameterized by the launched Session environment. This permits concurrent Pika Sessions without rewriting shared configuration. A conflicting reserved entry fails; an init rollback restores the exact original bytes or removes a newly created file.
 
-## 8. Validation
+For each Cursor Agent Session, the Provider Adapter creates a private `0700` directory containing a `0600` frozen System Prompt and argv snapshot. `sessionStart` returns the prompt through `additional_context`. Its binary-owned provider bootstrap requires `GetDynamicTools(namespace="pika_go")` before Role MCP calls; it is not an editable instruction overlay. Cursor keeps the real `HOME` and authentication state. Cleanup occurs only after the child exits or Herdr confirms the pane absent; startup removes stale directories not referenced by an active Pika Agent Session. A retry reuses the frozen launch, while recovery always creates new private state for a new Session.
+
+## 8. Herdr fresh-Session configuration
+
+The active Herdr configuration must explicitly contain:
+
+```toml
+[session]
+resume_agents_on_restore = false
+```
+
+Init reads the resolved Herdr configuration and requires `server.reload_config` to return `applied`. It does not edit the file. Codex and Cursor launch wrappers also reject native resume arguments. This keeps provider session IDs as journal correlation only and makes every daemon recovery a fresh Pika Agent Session.
+
+## 9. Validation
 
 Before committing init or configuration edits, validate:
 
 - all paths are absolute and within allowed roots;
-- Agent kinds are supported by the installed Herdr version;
-- required executables exist;
+- Agent kinds resolve through the Provider Adapter registry;
+- referenced executables exist, are authenticated, and report the required exact-compatible capabilities;
 - concurrency and Follow-up counts are bounded positive integers;
 - duration values parse and are not negative;
 - every static embedded Role System Prompt is non-empty and its matching instruction overlay exists and is readable;
-- Codex profile ownership and hook feature are valid;
+- Codex profile ownership and hook feature are valid when Codex is referenced;
+- Cursor model, effort, reserved argv, additive global MCP/Hook ownership, private Session state, strict tool schemas, and hook contracts are valid when Cursor is referenced;
+- Herdr native Agent restore is explicitly disabled and the live server accepts a configuration reload;
 - automatic Follow-up is enabled only for capable provider adapters;
 - repository and Git preconditions are safe.
 

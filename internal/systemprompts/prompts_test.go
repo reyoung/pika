@@ -121,6 +121,32 @@ func TestRenderCombinesImmutablePromptDynamicContextAndOptionalUserInstructions(
 	}
 }
 
+func TestRenderForCursorFreezesDynamicMCPBootstrapOutsideUserInstructions(t *testing.T) {
+	t.Parallel()
+	work := symphony.RuntimeWork{
+		Work:       symphony.WorkView{ID: "work-1", BaselineRevisionID: "baseline-1", Role: symphony.RoleBaselineDraft, Generation: 1},
+		Repository: "/repo", OptimizationRepository: "/repo",
+	}
+	cursorPrompt, err := systemprompts.RenderForProvider("baseline", work, []byte("user overlay"), "cursor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := "`GetDynamicTools`，参数 `namespace` 设为 `pika_go`"
+	if !strings.Contains(cursorPrompt, bootstrap) || !strings.Contains(cursorPrompt, "不要通过 Shell 手工运行 `pika-go mcp-proxy`") {
+		t.Fatalf("Cursor System Prompt omits dynamic MCP bootstrap:\n%s", cursorPrompt)
+	}
+	if strings.Index(cursorPrompt, "## Cursor MCP bootstrap") > strings.Index(cursorPrompt, "## 用户追加 Instructions") {
+		t.Fatalf("Cursor bootstrap was rendered as editable user Instructions:\n%s", cursorPrompt)
+	}
+	codexPrompt, err := systemprompts.RenderForProvider("baseline", work, nil, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(codexPrompt, "Cursor MCP bootstrap") || strings.Contains(codexPrompt, "GetDynamicTools") {
+		t.Fatalf("Codex System Prompt contains Cursor-only bootstrap:\n%s", codexPrompt)
+	}
+}
+
 func TestRenderIncludesRoleSpecificDynamicSystemContext(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

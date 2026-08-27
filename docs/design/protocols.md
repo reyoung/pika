@@ -39,6 +39,7 @@ Initial endpoints:
 | --- | --- |
 | `GET /v1/health` | daemon liveness and protocol version |
 | `GET /v1/status` | Optimization, active Work, queue, pane, session, and drain view |
+| `GET /v1/init/options` | report whether configuration exists and probe each registered provider without writing state |
 | `POST /v1/backups` | create and validate a new online SQLite snapshot at an absolute path |
 | `POST /v1/init` | initialize and bind the caller pane |
 | `POST /v1/baseline-drafts` | explicitly start a fresh Baseline Draft from an allowed paused state |
@@ -49,6 +50,10 @@ Initial endpoints:
 | `POST /mcp` | role-scoped MCP JSON-RPC endpoint used by `mcp-proxy` |
 
 Every control response carries `X-Pika-Protocol-Version`. The CLI rejects a missing or different version before decoding or applying a response; `/v1/health` repeats the same version in its JSON body. Backup destinations must be absolute and absent. Backup is an operational snapshot and does not mutate the Optimization revision.
+
+For a new instance, `POST /v1/init` requires the complete `configuration_toml`; an existing instance rejects a replacement candidate and keeps its file byte-for-byte. Initialization may take longer than ordinary control calls because it validates configuration, probes referenced provider executables and authentication, installs provider-owned integration resources, and prepares Git/SQLite state. The CLI therefore uses a 30-second HTTP ceiling for init while ordinary control calls keep the two-second ceiling. Provider-event ingestion has a separate ten-second ceiling because a single Hook may durably carry more than 16 MiB of complete Shell/MCP output.
+
+`POST /v1/provider-events/{provider}` is the one intentionally unbounded JSON route on the permission-protected local socket so complete provider Shell and MCP results can reach SQLite. The route rejects a provider name that differs from the bound Agent Session. Other control and MCP routes retain their existing body limits.
 
 Response errors have stable codes:
 
@@ -163,6 +168,8 @@ Only a hash of the bearer grant is stored. A terminal Work, cancelled Work, repl
 
 Every recovery creates a new Pika Agent Session ID and new grant. Provider-native session ID is added later by hooks or Herdr integration for correlation only.
 
+Each Agent Session also records the provider kind, probed executable version, and capability snapshot. Provider-native session, turn, and tool identities are scoped by both provider and Pika Agent Session; identical native IDs in another adapter or sibling Session cannot bind or deduplicate across that boundary.
+
 ## 6. MCP transport and application
 
 The coding agent starts `pika-go mcp-proxy` as a stdio MCP server. The proxy:
@@ -234,22 +241,35 @@ The instance wrapper adds the Session-frozen Pika System Prompt as a per-launch 
 
 Codex may require the user to trust the new hook on first launch. Pika never bypasses hook trust automatically.
 
-## 9. Cursor adapter boundary
+## 9. Cursor hook adapter
 
-The normalized provider contract is intentionally compatible with Cursor concepts:
+When Cursor is referenced, init additively installs event-specific commands in `~/.cursor/hooks.json` while preserving existing Cursor and Herdr hooks. The command carries the event name explicitly because some observed CLI payloads omit it:
 
 ```text
-conversation/session started
-user prompt submitted
-assistant response produced
-tool completed
-agent loop stopped
-session ended
+pika-go hook cursor <event>
 ```
 
-Cursor's documented hook and plugin formats can express these events, and `cursor-agent` exposes a local `--plugin-dir` launch option. Pika can therefore ship a provider plugin directory without copying Cursor's global configuration.
+The hook forwards one complete JSON object plus the route event name to `/v1/provider-events/cursor`. Normalization accepts the pinned CLI's snake_case and camelCase payload variants, preserves the raw payload, and emits provider-neutral journal records:
 
-Cursor is not declared fully supported until a real CLI conformance smoke proves session, prompt, assistant response, stop, tool, and end events for the pinned CLI version. Until then it may be used only at the Herdr runtime capability level; automatic Follow-up and complete Conversation Journal are disabled.
+| Cursor event | Pika journal effect |
+| --- | --- |
+| `sessionStart` | bind conversation/session identity and return the frozen prompt as `additional_context` |
+| `beforeSubmitPrompt` | open/update the generation Turn and save the user message |
+| `afterAgentResponse` | save the full assistant message |
+| `postToolUse` | save successful tool input/output and duration |
+| `postToolUseFailure` | save error/failure type, duration, and interruption state |
+| `afterShellExecution` | supplement the logical tool with full shell output |
+| `afterMCPExecution` | supplement the logical tool with the full MCP JSON result |
+| `stop` | close the Turn as completed, aborted, or error and arm Follow-up eligibility |
+| `sessionEnd` | record provider Session end independently of Turn completion |
+
+Duplicate and reordered delivery is safe. A late prompt or response cannot regress a terminal Turn, and an unmatched Shell/MCP supplement is retained. The synchronous Cursor `followup_message` response is not used; Pika generates Follow-up in a separate configured Agent Session and delivers it through Herdr.
+
+Init also installs one static `pika_go` stdio entry in `~/.cursor/mcp.json`. Cursor config interpolation resolves the launched Session's executable, socket, grant, and Session ID from its environment. Every tool input schema emits `required` as an array, including `[]` for zero-argument tools, because the pinned Cursor validator rejects JSON Schema `null` that more permissive clients tolerate. The frozen Cursor dynamic System Context first calls `GetDynamicTools(namespace="pika_go")`, then uses `CallDynamicTool`; direct Shell execution of `mcp-proxy` is not an accepted Role completion path.
+
+The wrapper supplies the kickoff as Cursor's positional initial prompt, avoiding a startup `agent.prompt` race. Pika accepts Herdr's successful `agent.start` response for this provider without waiting for `interactive_ready`: Cursor may already be executing the positional prompt, and synchronously waiting for an idle prompt would block later outbox effects. The Session grant is active in both `starting` and `running`, and the binding promotes it to `running` from the launch observation. Later Follow-up delivery uses Herdr `agent.prompt`; the adapter retries the pinned TUI's dropped synthetic Enter without terminal scraping. The `pane.updated` and provider-reported user message caused by Pika's own prompt are ignored while the request is durably `dispatching`, so delivery cannot supersede itself; user/observed activity during generation still supersedes the request.
+
+The pinned Cursor Adapter probes exact version `2026.08.25-3e8eec8` and authenticated `status`. Any mismatch is a startup/init failure. Runtime never falls back to Codex.
 
 ## 10. Follow-up delivery ordering
 

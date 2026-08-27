@@ -122,6 +122,9 @@ func renderWrapper(codexExecutable string) string {
 	return "#!/bin/sh\n" +
 		"# Managed by pika-go for this instance.\n" +
 		"export HERDR_AGENT=codex\n" +
+		"for pika_arg in \"$@\"; do\n" +
+		"  case \"$pika_arg\" in resume|resume=*|--resume|--resume=*|--continue) echo 'pika-go: native Codex resume is disabled' >&2; exit 64;; esac\n" +
+		"done\n" +
 		"if [ -n \"${PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML:-}\" ]; then\n" +
 		"  set -- -c \"developer_instructions=${PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML}\" \"$@\"\n" +
 		"fi\n" +

@@ -57,6 +57,14 @@ func TestRoleCatalogAndTerminalReplay(t *testing.T) {
 	if err != nil || len(tools) != 3 || tools[1].Name != "commit_changes" || tools[2].Name != "submit_baseline_definition" {
 		t.Fatalf("tools=%+v err=%v", tools, err)
 	}
+	required, ok := tools[0].InputSchema["required"].([]string)
+	if !ok || required == nil || len(required) != 0 {
+		t.Fatalf("zero-argument tool must expose Cursor-compatible required array: %#v", tools[0].InputSchema["required"])
+	}
+	encodedCatalog, err := json.Marshal(tools)
+	if err != nil || !strings.Contains(string(encodedCatalog), `"name":"get_context"`) || !strings.Contains(string(encodedCatalog), `"required":[]`) {
+		t.Fatalf("serialized tool catalog is not strict JSON Schema: %s err=%v", encodedCatalog, err)
+	}
 	if _, err := app.Invoke(ctx, grant.Token, toolapp.Call{Name: "finish_baseline_verification", Arguments: json.RawMessage(`{}`)}); err == nil {
 		t.Fatal("draft grant invoked verification tool")
 	}
@@ -466,9 +474,6 @@ func TestDefinitionPathRecordsStableArtifactInTerminalTransaction(t *testing.T) 
 	if err := engine.EnsureAgentSession(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.BindPane(ctx, session.ID, symphony.PaneBinding{WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p1", TerminalID: "term-1"}); err != nil {
-		t.Fatal(err)
-	}
 	grant, err := engine.MintAgentGrant(ctx, session.ID, toolapp.CatalogForRole(session.Role), time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -477,7 +482,7 @@ func TestDefinitionPathRecordsStableArtifactInTerminalTransaction(t *testing.T) 
 		Name: "submit_baseline_definition", Arguments: json.RawMessage(`{"idempotency_key":"artifact-terminal","definition_path":"baseline.json"}`),
 	})
 	if err != nil {
-		t.Fatalf("submit definition path: %v", err)
+		t.Fatalf("starting Agent Session could not submit definition path: %v", err)
 	}
 	receipt := result.Value.(symphony.Receipt)
 	artifacts, err := engine.EvidenceArtifacts(ctx, session.WorkID)

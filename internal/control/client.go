@@ -33,7 +33,7 @@ func Health(ctx context.Context, socketPath string) (protocol.Health, error) {
 	if err != nil {
 		return protocol.Health{}, fmt.Errorf("create health request: %w", err)
 	}
-	resp, err := unixClient(socketPath).Do(req)
+	resp, err := unixClient(socketPath, 2*time.Second).Do(req)
 	if err != nil {
 		return protocol.Health{}, fmt.Errorf("contact daemon: %w", err)
 	}
@@ -62,10 +62,18 @@ func Status(ctx context.Context, socketPath string) (symphony.View, error) {
 
 func Init(ctx context.Context, socketPath string, request protocol.InitRequest) (symphony.Receipt, error) {
 	var receipt symphony.Receipt
-	if err := doJSON(ctx, socketPath, http.MethodPost, "/v1/init", request, &receipt); err != nil {
+	if err := doJSONWithTimeout(ctx, socketPath, http.MethodPost, "/v1/init", request, &receipt, 30*time.Second); err != nil {
 		return symphony.Receipt{}, err
 	}
 	return receipt, nil
+}
+
+func InitOptions(ctx context.Context, socketPath string) (protocol.InitOptionsResponse, error) {
+	var response protocol.InitOptionsResponse
+	if err := doJSON(ctx, socketPath, http.MethodGet, "/v1/init/options", nil, &response); err != nil {
+		return protocol.InitOptionsResponse{}, err
+	}
+	return response, nil
 }
 
 func DraftBaseline(ctx context.Context, socketPath string, request protocol.DraftBaselineRequest) (symphony.Receipt, error) {
@@ -101,7 +109,9 @@ func ApplyGitIntent(ctx context.Context, socketPath, intentID string, request pr
 }
 
 func IngestProviderEvent(ctx context.Context, socketPath, provider string, request protocol.ProviderEventRequest) error {
-	return doJSON(ctx, socketPath, http.MethodPost, "/v1/provider-events/"+provider, request, nil)
+	// Provider hooks may carry complete Shell/MCP output and are allowed a larger
+	// bounded transfer window than ordinary small control-plane requests.
+	return doJSONWithTimeout(ctx, socketPath, http.MethodPost, "/v1/provider-events/"+provider, request, nil, 10*time.Second)
 }
 
 func mutate(ctx context.Context, socketPath, path string, input any) (symphony.Receipt, error) {
@@ -118,6 +128,10 @@ func IsHTTPStatus(err error, status int) bool {
 }
 
 func doJSON(ctx context.Context, socketPath, method, path string, input, output any) error {
+	return doJSONWithTimeout(ctx, socketPath, method, path, input, output, 2*time.Second)
+}
+
+func doJSONWithTimeout(ctx context.Context, socketPath, method, path string, input, output any, timeout time.Duration) error {
 	var body io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)
@@ -133,7 +147,7 @@ func doJSON(ctx context.Context, socketPath, method, path string, input, output 
 	if input != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := unixClient(socketPath).Do(req)
+	resp, err := unixClient(socketPath, timeout).Do(req)
 	if err != nil {
 		return fmt.Errorf("contact daemon: %w", err)
 	}
@@ -166,10 +180,10 @@ func doJSON(ctx context.Context, socketPath, method, path string, input, output 
 	return nil
 }
 
-func unixClient(socketPath string) *http.Client {
+func unixClient(socketPath string, timeout time.Duration) *http.Client {
 	dialer := net.Dialer{Timeout: 500 * time.Millisecond}
 	return &http.Client{
-		Timeout: 2 * time.Second,
+		Timeout: timeout,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return dialer.DialContext(ctx, "unix", socketPath)

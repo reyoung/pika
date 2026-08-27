@@ -8,7 +8,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 12
+const schemaVersion = 14
 
 const schemaV1 = `
 CREATE TABLE optimizations (
@@ -337,6 +337,169 @@ const schemaV12 = `
 ALTER TABLE baseline_revisions ADD COLUMN repository_sha TEXT;
 `
 
+const schemaV13 = `
+CREATE TABLE provider_events_v13 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    provider TEXT NOT NULL,
+    agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+    provider_session_id TEXT NOT NULL,
+    provider_turn_id TEXT,
+    hook_event_name TEXT NOT NULL,
+    event_digest TEXT NOT NULL,
+    raw_json BLOB NOT NULL,
+    observed_at TEXT NOT NULL,
+    UNIQUE(provider, agent_session_id, event_digest)
+);
+INSERT INTO provider_events_v13(sequence, id, provider, agent_session_id, provider_session_id, provider_turn_id, hook_event_name, event_digest, raw_json, observed_at)
+    SELECT sequence, id, provider, agent_session_id, provider_session_id, provider_turn_id, hook_event_name, event_digest, raw_json, observed_at
+    FROM provider_events;
+
+CREATE TABLE conversation_turns_v13 (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+    work_id TEXT NOT NULL REFERENCES works(id),
+    provider_session_id TEXT NOT NULL,
+    provider_turn_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    user_message TEXT,
+    assistant_message TEXT,
+    started_at TEXT NOT NULL,
+    stopped_at TEXT,
+    UNIQUE(provider, provider_session_id, provider_turn_id)
+);
+INSERT INTO conversation_turns_v13(id, provider, agent_session_id, work_id, provider_session_id, provider_turn_id, status, user_message, assistant_message, started_at, stopped_at)
+    SELECT ct.id, COALESCE(s.provider, s.agent_kind), ct.agent_session_id, ct.work_id, ct.provider_session_id, ct.provider_turn_id,
+           ct.status, ct.user_message, ct.assistant_message, ct.started_at, ct.stopped_at
+    FROM conversation_turns ct JOIN agent_sessions s ON s.id = ct.agent_session_id;
+
+CREATE TABLE tool_events_v13 (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    conversation_turn_id TEXT NOT NULL REFERENCES conversation_turns_v13(id),
+    provider_session_id TEXT NOT NULL,
+    provider_turn_id TEXT NOT NULL,
+    provider_tool_use_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    input_json BLOB NOT NULL,
+    output_json BLOB,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    failure_type TEXT,
+    duration_ms INTEGER,
+    is_interrupt INTEGER NOT NULL DEFAULT 0,
+    observed_at TEXT NOT NULL,
+    UNIQUE(provider, provider_session_id, provider_tool_use_id)
+);
+INSERT INTO tool_events_v13(id, provider, conversation_turn_id, provider_session_id, provider_turn_id, provider_tool_use_id, tool_name,
+    input_json, output_json, status, observed_at)
+    SELECT te.id, ct.provider, te.conversation_turn_id, te.provider_session_id, te.provider_turn_id, te.provider_tool_use_id, te.tool_name,
+           te.input_json, te.output_json, 'completed', te.observed_at
+    FROM tool_events te JOIN conversation_turns_v13 ct ON ct.id = te.conversation_turn_id;
+
+DROP TABLE tool_events;
+DROP TABLE conversation_turns;
+DROP TABLE provider_events;
+ALTER TABLE provider_events_v13 RENAME TO provider_events;
+ALTER TABLE conversation_turns_v13 RENAME TO conversation_turns;
+ALTER TABLE tool_events_v13 RENAME TO tool_events;
+
+CREATE TABLE tool_event_supplements (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    provider TEXT NOT NULL,
+    agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+    conversation_turn_id TEXT NOT NULL REFERENCES conversation_turns(id),
+    provider_session_id TEXT NOT NULL,
+    provider_turn_id TEXT NOT NULL,
+    supplement_kind TEXT NOT NULL,
+    tool_name TEXT,
+    server_name TEXT,
+    input_json BLOB,
+    output_json BLOB NOT NULL,
+    duration_ms INTEGER,
+    observed_at TEXT NOT NULL
+);
+`
+
+const schemaV14 = `
+ALTER TABLE agent_sessions ADD COLUMN provider_version TEXT;
+ALTER TABLE agent_sessions ADD COLUMN provider_capabilities_json BLOB;
+
+DROP INDEX agent_sessions_provider_identity;
+CREATE INDEX agent_sessions_provider_identity ON agent_sessions(provider, provider_session_id);
+
+CREATE TABLE conversation_turns_v14 (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+    work_id TEXT NOT NULL REFERENCES works(id),
+    provider_session_id TEXT NOT NULL,
+    provider_turn_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    user_message TEXT,
+    assistant_message TEXT,
+    started_at TEXT NOT NULL,
+    stopped_at TEXT,
+    UNIQUE(provider, agent_session_id, provider_session_id, provider_turn_id)
+);
+INSERT INTO conversation_turns_v14
+    SELECT * FROM conversation_turns;
+
+CREATE TABLE tool_events_v14 (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+    conversation_turn_id TEXT NOT NULL REFERENCES conversation_turns_v14(id),
+    provider_session_id TEXT NOT NULL,
+    provider_turn_id TEXT NOT NULL,
+    provider_tool_use_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    input_json BLOB NOT NULL,
+    output_json BLOB,
+    status TEXT NOT NULL,
+    error_message TEXT,
+    failure_type TEXT,
+    duration_ms INTEGER,
+    is_interrupt INTEGER NOT NULL DEFAULT 0,
+    observed_at TEXT NOT NULL,
+    UNIQUE(provider, agent_session_id, provider_session_id, provider_tool_use_id)
+);
+INSERT INTO tool_events_v14(id, provider, agent_session_id, conversation_turn_id, provider_session_id, provider_turn_id,
+    provider_tool_use_id, tool_name, input_json, output_json, status, error_message, failure_type, duration_ms, is_interrupt, observed_at)
+    SELECT te.id, te.provider, ct.agent_session_id, te.conversation_turn_id, te.provider_session_id, te.provider_turn_id,
+           te.provider_tool_use_id, te.tool_name, te.input_json, te.output_json, te.status, te.error_message, te.failure_type,
+           te.duration_ms, te.is_interrupt, te.observed_at
+    FROM tool_events te JOIN conversation_turns ct ON ct.id = te.conversation_turn_id;
+
+CREATE TABLE tool_event_supplements_v14 (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    provider TEXT NOT NULL,
+    agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+    conversation_turn_id TEXT NOT NULL REFERENCES conversation_turns_v14(id),
+    provider_session_id TEXT NOT NULL,
+    provider_turn_id TEXT NOT NULL,
+    supplement_kind TEXT NOT NULL,
+    tool_name TEXT,
+    server_name TEXT,
+    input_json BLOB,
+    output_json BLOB NOT NULL,
+    duration_ms INTEGER,
+    observed_at TEXT NOT NULL
+);
+INSERT INTO tool_event_supplements_v14
+    SELECT * FROM tool_event_supplements;
+
+DROP TABLE tool_event_supplements;
+DROP TABLE tool_events;
+DROP TABLE conversation_turns;
+ALTER TABLE conversation_turns_v14 RENAME TO conversation_turns;
+ALTER TABLE tool_events_v14 RENAME TO tool_events;
+ALTER TABLE tool_event_supplements_v14 RENAME TO tool_event_supplements;
+`
+
 var schemaMigrations = []struct {
 	version int
 	sql     string
@@ -353,6 +516,8 @@ var schemaMigrations = []struct {
 	{version: 10, sql: schemaV10},
 	{version: 11, sql: schemaV11},
 	{version: 12, sql: schemaV12},
+	{version: 13, sql: schemaV13},
+	{version: 14, sql: schemaV14},
 }
 
 func migrate(ctx context.Context, db *sql.DB, now string) error {

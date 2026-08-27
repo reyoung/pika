@@ -135,3 +135,73 @@ func TestPrepareInitPreservesExistingUserConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPrepareInitCursorOnlyDoesNotRequireOrInstallCodex(t *testing.T) {
+	t.Parallel()
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.Mkdir(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	resolved, _ := filepath.EvalSymlinks(repository)
+	cursor := filepath.Join(t.TempDir(), "cursor-agent")
+	if err := os.WriteFile(cursor, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.25-3e8eec8; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate := strings.ReplaceAll(configuration.RenderDefaults(resolved), `kind = "codex"`, `kind = "cursor"`)
+	configRoot := filepath.Join(t.TempDir(), "config")
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	initializer := configuration.Initializer{
+		ConfigRoot: configRoot, StateRoot: stateRoot, InstanceID: "cursor-only", PikaExecutable: "/bin/echo",
+		CursorMCPPath: filepath.Join(t.TempDir(), ".cursor", "mcp.json"), CursorHooksPath: filepath.Join(t.TempDir(), ".cursor", "hooks.json"),
+		ConfigurationTOML: &candidate, RequireConfigurationTOML: true, ProbeProviders: true,
+		ProviderExecutables: map[string]string{"cursor": cursor},
+	}
+	if _, err := initializer.Prepare(context.Background(), repository); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configRoot, "instances", "cursor-only", "config.toml")
+	stored, err := os.ReadFile(configPath)
+	if err != nil || string(stored) != candidate {
+		t.Fatalf("stored candidate: err=%v equal=%v", err, string(stored) == candidate)
+	}
+	if _, err := os.Stat(filepath.Join(stateRoot, "instances", "cursor-only", "runtime", "bin", "codex")); !os.IsNotExist(err) {
+		t.Fatalf("Cursor-only init installed Codex: %v", err)
+	}
+}
+
+func TestPrepareInitMixedProviderProbeFailureIsAtomic(t *testing.T) {
+	t.Parallel()
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.Mkdir(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	resolved, _ := filepath.EvalSymlinks(repository)
+	cursor := filepath.Join(t.TempDir(), "cursor-agent")
+	if err := os.WriteFile(cursor, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo wrong-version; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate := strings.Replace(configuration.RenderDefaults(resolved), `kind = "codex"`, `kind = "cursor"`, 1)
+	configRoot := filepath.Join(t.TempDir(), "config")
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	initializer := configuration.Initializer{
+		ConfigRoot: configRoot, StateRoot: stateRoot, InstanceID: "mixed", CodexHome: filepath.Join(t.TempDir(), "codex"),
+		PikaExecutable: "/bin/echo", CodexExecutable: "/bin/echo", ConfigurationTOML: &candidate,
+		RequireConfigurationTOML: true, ProbeProviders: true,
+		ProviderExecutables: map[string]string{"cursor": cursor, "codex": "/bin/echo"},
+	}
+	if _, err := initializer.Prepare(context.Background(), repository); err == nil || !strings.Contains(err.Error(), "unsupported Cursor version") {
+		t.Fatalf("mixed provider failure = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(configRoot, "instances", "mixed", "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("configuration was committed after failed preflight: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateRoot, "instances", "mixed")); !os.IsNotExist(err) {
+		t.Fatalf("state was committed after failed preflight: %v", err)
+	}
+}

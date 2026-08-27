@@ -12,15 +12,23 @@ import (
 
 	"github.com/reyoung/pika-go/internal/codexprofile"
 	"github.com/reyoung/pika-go/internal/instructions"
+	"github.com/reyoung/pika-go/internal/provider"
 )
 
 type Initializer struct {
-	ConfigRoot      string
-	StateRoot       string
-	InstanceID      string
-	CodexHome       string
-	PikaExecutable  string
-	CodexExecutable string
+	ConfigRoot               string
+	StateRoot                string
+	InstanceID               string
+	CodexHome                string
+	CursorMCPPath            string
+	CursorHooksPath          string
+	PikaExecutable           string
+	CodexExecutable          string
+	Providers                *provider.Registry
+	ConfigurationTOML        *string
+	RequireConfigurationTOML bool
+	ProbeProviders           bool
+	ProviderExecutables      map[string]string
 }
 
 const DefaultSummary = `Pika-Go initialization defaults:
@@ -43,8 +51,45 @@ func (i Initializer) Prepare(ctx context.Context, repository string) (func() err
 		return nil, errors.New("config root and state root must be absolute")
 	}
 
+	providers := i.Providers
+	if providers == nil {
+		providers = provider.DefaultRegistry()
+	}
 	configDir := filepath.Join(i.ConfigRoot, "instances", i.InstanceID)
 	stateDir := filepath.Join(i.StateRoot, "instances", i.InstanceID)
+	configPath := filepath.Join(configDir, "config.toml")
+	_, configPathErr := os.Stat(configPath)
+	configurationExists := configPathErr == nil
+	if configPathErr != nil && !errors.Is(configPathErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect instance configuration: %w", configPathErr)
+	}
+	if configurationExists && i.ConfigurationTOML != nil {
+		return nil, errors.New("configuration_toml cannot overwrite existing user configuration")
+	}
+	if !configurationExists && i.RequireConfigurationTOML && i.ConfigurationTOML == nil {
+		return nil, errors.New("configuration_toml is required for a new instance")
+	}
+	contents := renderConfig(resolvedRepository)
+	if i.ConfigurationTOML != nil {
+		contents = *i.ConfigurationTOML
+	}
+	var providerKinds []string
+	if !configurationExists {
+		providerKinds, err = validateCompleteConfiguration(contents, resolvedRepository, providers)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		providerKinds, err = validateConfigurationPath(configPath, resolvedRepository, providers)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if i.ProbeProviders {
+		if err := probeProviders(ctx, providers, providerKinds, i.ProviderExecutables); err != nil {
+			return nil, err
+		}
+	}
 	_, configDirErr := os.Stat(configDir)
 	configDirWasAbsent := errors.Is(configDirErr, os.ErrNotExist)
 	if configDirErr != nil && !configDirWasAbsent {
@@ -69,8 +114,6 @@ func (i Initializer) Prepare(ctx context.Context, repository string) (func() err
 		return nil, err
 	}
 
-	contents := renderConfig(resolvedRepository)
-	configPath := filepath.Join(configDir, "config.toml")
 	configRollback := func() error { return nil }
 	_, err = os.ReadFile(configPath)
 	if err == nil {
@@ -107,6 +150,29 @@ func (i Initializer) Prepare(ctx context.Context, repository string) (func() err
 			return nil
 		}
 	}
+	cursorRollback := func() error { return nil }
+	if containsString(providerKinds, "cursor") {
+		mcpRollback, installErr := provider.InstallCursorMCP(i.CursorMCPPath)
+		if installErr == nil {
+			var hooksRollback func() error
+			hooksRollback, installErr = provider.InstallCursorHooks(i.CursorHooksPath)
+			if installErr == nil {
+				cursorRollback = func() error { return errors.Join(hooksRollback(), mcpRollback()) }
+			} else {
+				_ = mcpRollback()
+			}
+		}
+		err = installErr
+		if err != nil {
+			if rollbackErr := configRollback(); rollbackErr != nil {
+				return nil, fmt.Errorf("install Cursor MCP integration: %v; roll back instance configuration: %w", err, rollbackErr)
+			}
+			return nil, fmt.Errorf("install Cursor MCP integration: %w", err)
+		}
+	}
+	if !containsString(providerKinds, "codex") {
+		return func() error { return errors.Join(cursorRollback(), configRollback()) }, nil
+	}
 	profileRollback, err := codexprofile.Install(codexprofile.Options{
 		CodexHome:       i.CodexHome,
 		InstanceBin:     filepath.Join(stateDir, "runtime", "bin"),
@@ -114,14 +180,105 @@ func (i Initializer) Prepare(ctx context.Context, repository string) (func() err
 		CodexExecutable: i.CodexExecutable,
 	})
 	if err != nil {
-		if rollbackErr := configRollback(); rollbackErr != nil {
+		if rollbackErr := errors.Join(cursorRollback(), configRollback()); rollbackErr != nil {
 			return nil, fmt.Errorf("install Codex integration: %v; roll back instance configuration: %w", err, rollbackErr)
 		}
 		return nil, fmt.Errorf("install Codex integration: %w", err)
 	}
 	return func() error {
-		return errors.Join(profileRollback(), configRollback())
+		return errors.Join(profileRollback(), cursorRollback(), configRollback())
 	}, nil
+}
+
+func probeProviders(ctx context.Context, providers *provider.Registry, kinds []string, executables map[string]string) error {
+	for _, kind := range kinds {
+		capabilities, err := providers.Probe(ctx, kind, provider.ProbeRequest{Executable: executables[kind]})
+		if err != nil {
+			return fmt.Errorf("probe %s provider: %w", kind, err)
+		}
+		if !capabilities.Compatible || !capabilities.Authenticated || !capabilities.Journal || !capabilities.TurnStop ||
+			!capabilities.FollowUp || !capabilities.FullOutput || !capabilities.FreshSession {
+			return fmt.Errorf("probe %s provider: required capabilities are unavailable", kind)
+		}
+	}
+	return nil
+}
+
+// ProbeConfiguredProviders validates one complete persisted configuration and
+// probes exactly the distinct provider kinds referenced by its five Roles.
+func ProbeConfiguredProviders(ctx context.Context, path string, providers *provider.Registry, executables map[string]string) error {
+	identity, err := LoadIdentity(path)
+	if err != nil {
+		return err
+	}
+	repository, err := filepath.EvalSymlinks(identity.Repository)
+	if err != nil {
+		return fmt.Errorf("resolve configured repository: %w", err)
+	}
+	kinds, err := validateConfigurationPath(path, repository, providers)
+	if err != nil {
+		return err
+	}
+	return probeProviders(ctx, providers, kinds, executables)
+}
+
+func validateCompleteConfiguration(contents, repository string, providers *provider.Registry) ([]string, error) {
+	temporary, err := os.CreateTemp("", "pika-go-config-*.toml")
+	if err != nil {
+		return nil, fmt.Errorf("create temporary configuration: %w", err)
+	}
+	path := temporary.Name()
+	defer os.Remove(path)
+	if _, err := temporary.WriteString(contents); err != nil {
+		_ = temporary.Close()
+		return nil, fmt.Errorf("write temporary configuration: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return nil, fmt.Errorf("close temporary configuration: %w", err)
+	}
+	return validateConfigurationPath(path, repository, providers)
+}
+
+func validateConfigurationPath(path, repository string, providers *provider.Registry) ([]string, error) {
+	identity, err := LoadIdentity(path)
+	if err != nil {
+		return nil, err
+	}
+	configuredRepository, err := filepath.EvalSymlinks(identity.Repository)
+	if err != nil {
+		return nil, fmt.Errorf("resolve configured repository: %w", err)
+	}
+	if filepath.Clean(configuredRepository) != filepath.Clean(repository) {
+		return nil, fmt.Errorf("configured repository %s does not match init repository %s", identity.Repository, repository)
+	}
+	if _, err := LoadScheduler(path); err != nil {
+		return nil, err
+	}
+	if _, err := LoadFollowUp(path); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var kinds []string
+	for _, role := range []string{"baseline", "baseline_verify", "iteration", "integration", "follow_up"} {
+		agent, err := LoadAgentWithRegistry(path, role, providers)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[agent.Kind] {
+			seen[agent.Kind] = true
+			kinds = append(kinds, agent.Kind)
+		}
+	}
+	return kinds, nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func validateRepository(ctx context.Context, repository string) (string, error) {
@@ -153,7 +310,45 @@ func validateRepository(ctx context.Context, repository string) (string, error) 
 }
 
 func renderConfig(repository string) string {
-	return `version = 1
+	contents, err := RenderConfiguration(repository, DefaultAgents())
+	if err != nil {
+		panic(err)
+	}
+	return contents
+}
+
+var AgentRoleOrder = []string{"baseline", "baseline_verify", "iteration", "integration", "follow_up"}
+
+func DefaultAgents() map[string]Agent {
+	return map[string]Agent{
+		"baseline":        {Kind: "codex", Model: "gpt-5.6-sol", ReasoningEffort: "high"},
+		"baseline_verify": {Kind: "codex", Model: "gpt-5.6-sol", ReasoningEffort: "high"},
+		"iteration":       {Kind: "codex", Model: "gpt-5.6-sol", ReasoningEffort: "high"},
+		"integration":     {Kind: "codex", Model: "gpt-5.6-sol", ReasoningEffort: "high"},
+		"follow_up":       {Kind: "codex", Model: "gpt-5.6-terra", ReasoningEffort: "medium"},
+	}
+}
+
+func RenderConfiguration(repository string, agents map[string]Agent) (string, error) {
+	if repository == "" || !filepath.IsAbs(repository) {
+		return "", errors.New("optimization.repository must be absolute")
+	}
+	registry := provider.DefaultRegistry()
+	for _, role := range AgentRoleOrder {
+		agent, found := agents[role]
+		if !found {
+			return "", fmt.Errorf("missing Agent configuration for %s", role)
+		}
+		adapter, err := registry.Resolve(agent.Kind)
+		if err != nil {
+			return "", err
+		}
+		if err := adapter.Validate(agent); err != nil {
+			return "", fmt.Errorf("validate agents.%s: %w", role, err)
+		}
+	}
+	var builder strings.Builder
+	builder.WriteString(`version = 1
 
 [optimization]
 repository = ` + strconv.Quote(repository) + `
@@ -162,32 +357,26 @@ repository = ` + strconv.Quote(repository) + `
 iteration_concurrency = 4
 max_pending_attempts = 8
 
-[agents.baseline]
-kind = "codex"
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
-
-[agents.baseline_verify]
-kind = "codex"
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
-
-[agents.iteration]
-kind = "codex"
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
-
-[agents.integration]
-kind = "codex"
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
-
-[agents.follow_up]
-kind = "codex"
-model = "gpt-5.6-terra"
-reasoning_effort = "medium"
-
-[follow_up]
+`)
+	for _, role := range AgentRoleOrder {
+		agent := agents[role]
+		builder.WriteString("[agents." + role + "]\n")
+		builder.WriteString("kind = " + strconv.Quote(agent.Kind) + "\n")
+		builder.WriteString("model = " + strconv.Quote(agent.Model) + "\n")
+		builder.WriteString("reasoning_effort = " + strconv.Quote(agent.ReasoningEffort) + "\n")
+		if len(agent.Args) != 0 {
+			builder.WriteString("args = [")
+			for index, argument := range agent.Args {
+				if index != 0 {
+					builder.WriteString(", ")
+				}
+				builder.WriteString(strconv.Quote(argument))
+			}
+			builder.WriteString("]\n")
+		}
+		builder.WriteByte('\n')
+	}
+	builder.WriteString(`[follow_up]
 pane_idle_timeout = "5m"
 generator_concurrency = 1
 
@@ -202,7 +391,12 @@ generator_max_attempts = 3
 [follow_up.integration]
 max_messages = 8
 generator_max_attempts = 3
-`
+`)
+	return builder.String(), nil
+}
+
+func RenderDefaults(repository string) string {
+	return renderConfig(repository)
 }
 
 func writeFileAtomic(path string, contents []byte, mode os.FileMode) error {

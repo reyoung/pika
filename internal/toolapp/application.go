@@ -152,7 +152,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if (grant.Role != symphony.RoleBaselineDraft && grant.Role != symphony.RoleIteration) || grant.Revoked {
 			return Invocation{}, forbidden("scoped commit requires an active write-capable role")
 		}
-		if grant.SessionStatus != symphony.AgentSessionRunning {
+		if !agentSessionActive(grant.SessionStatus) {
 			return Invocation{}, forbidden("agent session is not active yet")
 		}
 		var input struct {
@@ -188,7 +188,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if grant.Role != symphony.RoleBaselineDraft {
 			return Invocation{}, forbidden("baseline definition requires baseline_draft role")
 		}
-		if !grant.Revoked && grant.SessionStatus != symphony.AgentSessionRunning {
+		if !grant.Revoked && !agentSessionActive(grant.SessionStatus) {
 			return Invocation{}, forbidden("agent session is not active yet")
 		}
 		var input struct {
@@ -244,7 +244,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if grant.Role != symphony.RoleBaselineVerification {
 			return Invocation{}, forbidden("baseline verification result requires baseline_verification role")
 		}
-		if !grant.Revoked && grant.SessionStatus != symphony.AgentSessionRunning {
+		if !grant.Revoked && !agentSessionActive(grant.SessionStatus) {
 			return Invocation{}, forbidden("agent session is not active yet")
 		}
 		var input struct {
@@ -319,7 +319,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if grant.Role != symphony.RoleIteration {
 			return Invocation{}, forbidden("Iteration result requires iteration role")
 		}
-		if !grant.Revoked && grant.SessionStatus != symphony.AgentSessionRunning {
+		if !grant.Revoked && !agentSessionActive(grant.SessionStatus) {
 			return Invocation{}, forbidden("agent session is not active yet")
 		}
 		var input struct {
@@ -360,7 +360,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if grant.Role != symphony.RoleIntegration || grant.Revoked {
 			return Invocation{}, forbidden("Best update preparation requires active integration role")
 		}
-		if grant.SessionStatus != symphony.AgentSessionRunning {
+		if !agentSessionActive(grant.SessionStatus) {
 			return Invocation{}, forbidden("agent session is not active yet")
 		}
 		var input struct {
@@ -399,7 +399,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if grant.Role != symphony.RoleIntegration || grant.Revoked {
 			return Invocation{}, forbidden("Best update application requires active integration role")
 		}
-		if grant.SessionStatus != symphony.AgentSessionRunning {
+		if !agentSessionActive(grant.SessionStatus) {
 			return Invocation{}, forbidden("agent session is not active yet")
 		}
 		var input struct {
@@ -433,7 +433,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if grant.Role != symphony.RoleIntegration {
 			return Invocation{}, forbidden("Integration result requires integration role")
 		}
-		if !grant.Revoked && grant.SessionStatus != symphony.AgentSessionRunning {
+		if !grant.Revoked && !agentSessionActive(grant.SessionStatus) {
 			return Invocation{}, forbidden("agent session is not active yet")
 		}
 		var input struct {
@@ -481,7 +481,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if grant.Role != symphony.RoleFollowUp {
 			return Invocation{}, forbidden("Follow-up message requires follow_up role")
 		}
-		if !grant.Revoked && grant.SessionStatus != symphony.AgentSessionRunning {
+		if !grant.Revoked && !agentSessionActive(grant.SessionStatus) {
 			return Invocation{}, forbidden("Follow-up Agent Session is not active yet")
 		}
 		var input struct {
@@ -560,6 +560,10 @@ func (a Application) applyTerminal(ctx context.Context, grant symphony.AgentGran
 	return receipt, nil
 }
 
+func agentSessionActive(status symphony.AgentSessionStatus) bool {
+	return status == symphony.AgentSessionStarting || status == symphony.AgentSessionRunning
+}
+
 func (a Application) resolve(ctx context.Context, token string) (symphony.AgentGrant, error) {
 	if a.Store == nil {
 		return symphony.AgentGrant{}, errors.New("tool application store is required")
@@ -602,7 +606,11 @@ func terminalOperation(role symphony.WorkRole) string {
 
 func toolByName(name string) (Tool, bool) {
 	object := func(properties map[string]any, required ...string) map[string]any {
-		return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
+		// A variadic argument with no values is a nil slice, which JSON encodes as
+		// null. Cursor validates JSON Schema more strictly than Codex and requires
+		// the keyword, when present, to always be an array.
+		requiredFields := append([]string{}, required...)
+		return map[string]any{"type": "object", "properties": properties, "required": requiredFields, "additionalProperties": false}
 	}
 	tools := map[string]Tool{
 		"get_context": {

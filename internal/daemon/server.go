@@ -16,19 +16,21 @@ import (
 )
 
 type Config struct {
-	SocketPath          string
-	Version             string
-	InstanceID          string
-	Symphony            symphony.Symphony
-	PrepareInit         func(context.Context, string) (PreparedInit, error)
-	RecordInitFailure   func(context.Context, string) error
-	AfterListen         func(context.Context) error
-	AfterCommit         func(context.Context)
-	MCPHandler          http.Handler
-	ApplyGitIntent      func(context.Context, string, string) (string, error)
-	IngestProviderEvent func(context.Context, string, string, json.RawMessage) error
-	Backup              func(context.Context, string) error
-	DrainReady          func(context.Context) (bool, error)
+	SocketPath              string
+	Version                 string
+	InstanceID              string
+	Symphony                symphony.Symphony
+	PrepareInit             func(context.Context, string, *string) (PreparedInit, error)
+	InitOptions             func(context.Context) (protocol.InitOptionsResponse, error)
+	RecordInitFailure       func(context.Context, string) error
+	AfterListen             func(context.Context) error
+	AfterCommit             func(context.Context)
+	MCPHandler              http.Handler
+	ApplyGitIntent          func(context.Context, string, string) (string, error)
+	IngestProviderEvent     func(context.Context, string, string, json.RawMessage) error
+	IngestProviderHookEvent func(context.Context, string, string, string, json.RawMessage) error
+	Backup                  func(context.Context, string) error
+	DrainReady              func(context.Context) (bool, error)
 }
 
 type PreparedInit struct {
@@ -72,6 +74,16 @@ func Serve(ctx context.Context, cfg Config) error {
 		})
 	})
 	if cfg.Symphony != nil {
+		if cfg.InitOptions != nil {
+			mux.HandleFunc("GET /v1/init/options", func(w http.ResponseWriter, request *http.Request) {
+				options, err := cfg.InitOptions(request.Context())
+				if err != nil {
+					writeAPIError(w, http.StatusInternalServerError, "init_options_failed", err.Error())
+					return
+				}
+				writeJSON(w, http.StatusOK, options)
+			})
+		}
 		mux.HandleFunc("GET /v1/status", func(w http.ResponseWriter, request *http.Request) {
 			view, err := cfg.Symphony.Inspect(request.Context(), symphony.Status{})
 			if err != nil {
@@ -91,7 +103,7 @@ func Serve(ctx context.Context, cfg Config) error {
 			prepared := PreparedInit{Rollback: func() error { return nil }}
 			if cfg.PrepareInit != nil {
 				var err error
-				prepared, err = cfg.PrepareInit(request.Context(), input.Repository)
+				prepared, err = cfg.PrepareInit(request.Context(), input.Repository, input.ConfigurationTOML)
 				if err != nil {
 					message := err.Error()
 					if isNotInitialized(request.Context(), cfg.Symphony) {
@@ -192,13 +204,19 @@ func Serve(ctx context.Context, cfg Config) error {
 				writeJSON(w, http.StatusOK, protocol.ApplyGitIntentResponse{IntentID: intentID, AppliedSHA: appliedSHA})
 			})
 		}
-		if cfg.IngestProviderEvent != nil {
+		if cfg.IngestProviderEvent != nil || cfg.IngestProviderHookEvent != nil {
 			mux.HandleFunc("POST /v1/provider-events/{provider}", func(w http.ResponseWriter, request *http.Request) {
 				var input protocol.ProviderEventRequest
-				if !decodeJSON(w, request, &input) {
+				if !decodeProviderEventJSON(w, request, &input) {
 					return
 				}
-				if err := cfg.IngestProviderEvent(request.Context(), request.PathValue("provider"), input.AgentSessionID, input.Event); err != nil {
+				var err error
+				if cfg.IngestProviderHookEvent != nil {
+					err = cfg.IngestProviderHookEvent(request.Context(), request.PathValue("provider"), input.AgentSessionID, input.HookEventName, input.Event)
+				} else {
+					err = cfg.IngestProviderEvent(request.Context(), request.PathValue("provider"), input.AgentSessionID, input.Event)
+				}
+				if err != nil {
 					writeError(w, err)
 					return
 				}
@@ -308,6 +326,16 @@ func isNotInitialized(ctx context.Context, service symphony.Symphony) bool {
 
 func decodeJSON(w http.ResponseWriter, request *http.Request, output any) bool {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, request.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(output); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("decode request: %v", err))
+		return false
+	}
+	return true
+}
+
+func decodeProviderEventJSON(w http.ResponseWriter, request *http.Request, output any) bool {
+	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(output); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("decode request: %v", err))

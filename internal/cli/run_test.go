@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -280,7 +283,7 @@ func TestCLIInitAndStatusPersistThroughDaemon(t *testing.T) {
 	isolateHerdrEnvironment(t)
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
 	t.Setenv("CODEX_HOME", codexHome)
-	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/sh")
+	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/echo")
 	socketDir, err := os.MkdirTemp("/tmp", "pika-go-control-test-")
 	if err != nil {
 		t.Fatalf("create socket directory: %v", err)
@@ -466,6 +469,75 @@ func TestCLIInitAndStatusPersistThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T) {
+	isolateHerdrEnvironment(t)
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex-home")
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/echo")
+	cursorExecutable := filepath.Join(root, "cursor-agent")
+	if err := os.WriteFile(cursorExecutable, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.25-3e8eec8; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PIKA_GO_CURSOR_EXECUTABLE", cursorExecutable)
+	t.Setenv("PIKA_GO_CURSOR_MCP_PATH", filepath.Join(root, "cursor-home", "mcp.json"))
+	t.Setenv("PIKA_GO_CURSOR_HOOKS_PATH", filepath.Join(root, "cursor-home", "hooks.json"))
+	socketDirectory, err := os.MkdirTemp("/tmp", "pika-interactive-init-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	socketPath := filepath.Join(socketDirectory, "pika.sock")
+	stateRoot, configRoot := filepath.Join(root, "state"), filepath.Join(root, "config")
+	repository := filepath.Join(root, "repository")
+	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var daemonStderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"daemon", "--socket", socketPath, "--state-dir", stateRoot, "--config-dir", configRoot, "--instance", "interactive"}, nil, io.Discard, &daemonStderr)
+	}()
+	waitForHealth(t, socketPath, &daemonStderr)
+	input := strings.Join([]string{
+		"cursor", "", "", "", "y",
+		"codex", "", "",
+		"cursor", "", "max", `["--force","--approve-mcps"]`, "n",
+		"codex", "", "",
+		"cursor", "", "", "", "n",
+	}, "\n") + "\n"
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"init", "--socket", socketPath, "--repository", repository}, strings.NewReader(input), &stdout, &stderr); code != 0 {
+		t.Fatalf("init exit=%d stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	configPath := filepath.Join(configRoot, "instances", "interactive", "config.toml")
+	baseline, err := configuration.LoadAgent(configPath, "baseline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	iteration, err := configuration.LoadAgent(configPath, "iteration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	followUp, err := configuration.LoadAgent(configPath, "follow_up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	verification, err := configuration.LoadAgent(configPath, "baseline_verify")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Kind != "cursor" || !slices.Contains(baseline.Args, "--trust") || iteration.Kind != "cursor" || iteration.ReasoningEffort != "max" ||
+		followUp.Kind != "cursor" || verification.Kind != "codex" {
+		t.Fatalf("baseline=%+v verification=%+v iteration=%+v follow_up=%+v", baseline, verification, iteration, followUp)
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("daemon exit=%d stderr=%q", code, daemonStderr.String())
+	}
+}
+
 func TestInitFailureIsRecordedAndStopsDaemonWithoutWork(t *testing.T) {
 	isolateHerdrEnvironment(t)
 	socketDir, err := os.MkdirTemp("/tmp", "pika-go-init-failure-test-")
@@ -496,7 +568,7 @@ func TestInitFailureIsRecordedAndStopsDaemonWithoutWork(t *testing.T) {
 	waitForHealth(t, socketPath, &daemonStderr)
 
 	var initStderr bytes.Buffer
-	if code := cli.Run(context.Background(), []string{"init", "--socket", socketPath, "--repository", repository, "--json"}, nil, &bytes.Buffer{}, &initStderr); code != 1 {
+	if code := cli.Run(context.Background(), []string{"init", "--socket", socketPath, "--repository", repository, "--defaults", "--json"}, nil, &bytes.Buffer{}, &initStderr); code != 1 {
 		t.Fatalf("init exit = %d, stderr = %q", code, initStderr.String())
 	}
 	if !bytes.Contains(initStderr.Bytes(), []byte("invalid_configuration")) {
@@ -801,6 +873,156 @@ func TestCodexHookTraversesDaemonIntoConversationJournal(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("daemon exit: %v", err)
+	}
+}
+
+func TestCursorHookMCPPolicyOnlyAllowsPikaServer(t *testing.T) {
+	t.Setenv("PIKA_GO_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
+	t.Setenv("PIKA_SESSION_ID", "session")
+	for _, test := range []struct {
+		server string
+		want   string
+	}{
+		{server: "pika_go", want: `{"permission":"allow"}` + "\n"},
+		{server: "foreign", want: `{"agent_message":"Pika only allows its Session-scoped MCP server.","permission":"deny","user_message":"Pika blocked a non-Pika MCP server for this Session."}` + "\n"},
+	} {
+		var stdout, stderr bytes.Buffer
+		event := fmt.Sprintf(`{"conversation_id":"conversation","generation_id":"generation","hook_event_name":"beforeMCPExecution","mcp_server_name":%q,"tool_name":"tool","tool_input":"{}"}`, test.server)
+		if code := cli.Run(context.Background(), []string{"hook", "cursor"}, strings.NewReader(event), &stdout, &stderr); code != 0 {
+			t.Fatalf("hook exit = %d", code)
+		}
+		if stdout.String() != test.want || stderr.Len() != 0 {
+			t.Fatalf("server=%s stdout=%q stderr=%q", test.server, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestCursorBeforeSubmitHookContinues(t *testing.T) {
+	t.Setenv("PIKA_GO_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
+	t.Setenv("PIKA_SESSION_ID", "session")
+	var stdout, stderr bytes.Buffer
+	event := `{"conversation_id":"conversation","generation_id":"generation","hook_event_name":"beforeSubmitPrompt","prompt":"measure it"}`
+	if code := cli.Run(context.Background(), []string{"hook", "cursor"}, strings.NewReader(event), &stdout, &stderr); code != 0 {
+		t.Fatalf("hook exit = %d", code)
+	}
+	if stdout.String() != `{"continue":true}`+"\n" || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestCursorSessionStartHookInjectsFrozenSystemPrompt(t *testing.T) {
+	t.Setenv("PIKA_GO_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
+	t.Setenv("PIKA_SESSION_ID", "session")
+	promptPath := filepath.Join(t.TempDir(), "system-prompt.md")
+	if err := os.WriteFile(promptPath, []byte("frozen dynamic system context"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PIKA_CURSOR_SYSTEM_PROMPT_PATH", promptPath)
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"hook", "cursor", "sessionStart"}, strings.NewReader(`{"session_id":"conversation"}`), &stdout, &stderr); code != 0 {
+		t.Fatalf("hook exit = %d", code)
+	}
+	if stdout.String() != `{"additional_context":"frozen dynamic system context"}`+"\n" || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestCursorHookAcceptsCamelCaseEnvelope(t *testing.T) {
+	t.Setenv("PIKA_GO_SOCKET", filepath.Join(t.TempDir(), "missing.sock"))
+	t.Setenv("PIKA_SESSION_ID", "session")
+	var stdout, stderr bytes.Buffer
+	event := `{"conversationId":"conversation","generationId":"generation","hookEventName":"beforeMCPExecution","mcpServerName":"pika_go","toolName":"tool","toolInput":{}}`
+	if code := cli.Run(context.Background(), []string{"hook", "cursor"}, strings.NewReader(event), &stdout, &stderr); code != 0 {
+		t.Fatalf("hook exit = %d", code)
+	}
+	if stdout.String() != `{"permission":"allow"}`+"\n" || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestCursorProviderEventLargerThan16MiBReachesJournalByteForByte(t *testing.T) {
+	ctx := context.Background()
+	engine, err := symphony.Open(ctx, filepath.Join(t.TempDir(), "pika.db"), symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	if _, err := engine.Apply(ctx, symphony.Init{Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: "optimization", Repository: "/repo"}); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := engine.Inspect(ctx, symphony.Status{})
+	session := symphony.AgentSession{ID: "cursor-session", WorkID: view.Works[0].ID, Generation: 1, Role: symphony.RoleBaselineDraft, AgentKind: "cursor", AgentName: "cursor-agent", Status: symphony.AgentSessionStarting}
+	if err := engine.EnsureAgentSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-large-hook-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "pika.sock")
+	serveCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Serve(serveCtx, daemon.Config{SocketPath: socketPath, Version: "test", InstanceID: "optimization", Symphony: engine, IngestProviderEvent: engine.IngestProviderEvent})
+	}()
+	waitForHealth(t, socketPath, &bytes.Buffer{})
+	payload, err := json.Marshal(map[string]any{
+		"conversation_id": "conversation", "generation_id": "generation", "hook_event_name": "afterShellExecution",
+		"command": "benchmark", "output": strings.Repeat("x", 17<<20), "duration": 1, "sandbox": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.IngestProviderEvent(ctx, socketPath, "cursor", protocol.ProviderEventRequest{AgentSessionID: session.ID, Event: payload}); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := engine.ConversationJournal(ctx, view.Works[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(journal.Events) != 1 || !bytes.Equal(journal.Events[0].Raw, payload) || len(journal.ToolSupplements) != 1 || len(journal.ToolSupplements[0].Output) <= 16<<20 {
+		t.Fatalf("large journal payload was truncated: events=%d supplements=%d raw=%d output=%d", len(journal.Events), len(journal.ToolSupplements), len(journal.Events[0].Raw), len(journal.ToolSupplements[0].Output))
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLargeProviderRouteDoesNotRemoveControlPlaneBodyLimit(t *testing.T) {
+	ctx := context.Background()
+	engine, err := symphony.Open(ctx, filepath.Join(t.TempDir(), "pika.db"), symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-control-limit-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "pika.sock")
+	serveCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Serve(serveCtx, daemon.Config{SocketPath: socketPath, Version: "test", InstanceID: "optimization", Symphony: engine})
+	}()
+	waitForHealth(t, socketPath, &bytes.Buffer{})
+	configuration := strings.Repeat("x", (1<<20)+1)
+	_, err = control.Init(ctx, socketPath, protocol.InitRequest{
+		Mutation:          protocol.Mutation{RequestID: "large-init"},
+		Repository:        "/repo",
+		ConfigurationTOML: &configuration,
+	})
+	if !control.IsHTTPStatus(err, 400) {
+		t.Fatalf("large control request error = %v, want HTTP 400", err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

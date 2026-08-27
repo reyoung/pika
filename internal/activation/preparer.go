@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/reyoung/pika-go/internal/configuration"
 	"github.com/reyoung/pika-go/internal/instructions"
+	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/systemprompts"
 	"github.com/reyoung/pika-go/internal/toolapp"
@@ -31,6 +31,7 @@ type Preparer struct {
 	SocketPath      string
 	Environment     map[string]string
 	AgentConfigPath string
+	Providers       *provider.Registry
 }
 
 func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, work symphony.RuntimeWork) (workruntime.Preparation, error) {
@@ -56,8 +57,23 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 	if err != nil {
 		return workruntime.Preparation{}, fmt.Errorf("read instruction %s: %w", logicalName, err)
 	}
+	agentConfiguration := provider.AgentConfiguration{Kind: session.AgentKind}
+	registry := p.Providers
+	if registry == nil {
+		registry = provider.DefaultRegistry()
+	}
+	if p.AgentConfigPath != "" {
+		configured, err := configuration.LoadAgentWithRegistry(p.AgentConfigPath, agentConfigRole(session.Role), registry)
+		if err != nil {
+			return workruntime.Preparation{}, fmt.Errorf("load Agent configuration for %s: %w", session.Role, err)
+		}
+		if configured.Kind != session.AgentKind {
+			return workruntime.Preparation{}, fmt.Errorf("configured Agent kind changed during activation: session=%s configured=%s", session.AgentKind, configured.Kind)
+		}
+		agentConfiguration = configured
+	}
 	contentHash := sha256.Sum256(contents)
-	systemPrompt, err := systemprompts.Render(logicalName, work, contents)
+	systemPrompt, err := systemprompts.RenderForProvider(logicalName, work, contents, agentConfiguration.Kind)
 	if err != nil {
 		return workruntime.Preparation{}, fmt.Errorf("render System Prompt %s: %w", logicalName, err)
 	}
@@ -90,38 +106,44 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 		return workruntime.Preparation{}, err
 	}
 	environment := map[string]string{
-		"PIKA_SESSION_ID":      session.ID,
-		"PIKA_MCP_GRANT":       grant.Token,
-		"PIKA_ROLE":            string(session.Role),
-		"PIKA_GO_SOCKET":       p.SocketPath,
-		"PIKA_BASELINE_NUMBER": fmt.Sprintf("%d", work.BaselineNumber),
-		"PIKA_ATTEMPT_ID":      work.Work.AttemptID,
-		"PIKA_ITERATION_ROUND": fmt.Sprintf("%d", work.Work.IterationRound),
-		"PIKA_ITERATION_KIND":  work.IterationKind,
-		"PIKA_BASE_SHA":        work.BaseSHA,
-		"PIKA_BEST_SHA":        work.BestSHA,
-		// Codex parses this value as a TOML string through a -c override in the
-		// managed wrapper. Keeping it in the process environment lets every
-		// session receive a different frozen developer instruction without
-		// rewriting the shared named profile.
-		"PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML": strconv.Quote(string(stored.SystemPrompt)),
-		"PIKA_SYSTEM_PROMPT_SHA256":              stored.ActivationSHA256,
+		"PIKA_SESSION_ID":           session.ID,
+		"PIKA_MCP_GRANT":            grant.Token,
+		"PIKA_ROLE":                 string(session.Role),
+		"PIKA_GO_SOCKET":            p.SocketPath,
+		"PIKA_BASELINE_NUMBER":      fmt.Sprintf("%d", work.BaselineNumber),
+		"PIKA_ATTEMPT_ID":           work.Work.AttemptID,
+		"PIKA_ITERATION_ROUND":      fmt.Sprintf("%d", work.Work.IterationRound),
+		"PIKA_ITERATION_KIND":       work.IterationKind,
+		"PIKA_BASE_SHA":             work.BaseSHA,
+		"PIKA_BEST_SHA":             work.BestSHA,
+		"PIKA_SYSTEM_PROMPT_SHA256": stored.ActivationSHA256,
 	}
-	if p.AgentConfigPath != "" {
-		configured, err := configuration.LoadAgent(p.AgentConfigPath, agentConfigRole(session.Role))
-		if err != nil {
-			return workruntime.Preparation{}, fmt.Errorf("load Agent configuration for %s: %w", session.Role, err)
-		}
-		if configured.Kind != session.AgentKind {
-			return workruntime.Preparation{}, fmt.Errorf("configured Agent kind changed during activation: session=%s configured=%s", session.AgentKind, configured.Kind)
-		}
-		environment["PIKA_AGENT_MODEL"] = configured.Model
-		environment["PIKA_AGENT_REASONING_EFFORT"] = configured.ReasoningEffort
+	adapter, err := registry.Resolve(session.AgentKind)
+	if err != nil {
+		return workruntime.Preparation{}, err
+	}
+	kickoff := kickoffPrompt(work)
+	launch, err := adapter.PrepareSession(ctx, provider.SessionActivation{
+		AgentSessionID: session.ID,
+		Repository:     work.Repository,
+		Configuration:  agentConfiguration,
+		SystemPrompt:   stored.SystemPrompt,
+		InitialPrompt:  kickoff,
+		Environment:    environment,
+	})
+	if err != nil {
+		return workruntime.Preparation{}, fmt.Errorf("prepare %s provider Session: %w", session.AgentKind, err)
+	}
+	if launch.AgentKind != session.AgentKind {
+		return workruntime.Preparation{}, fmt.Errorf("provider launch kind changed during activation: session=%s launch=%s", session.AgentKind, launch.AgentKind)
 	}
 	for key, value := range p.Environment {
-		environment[key] = value
+		launch.Environment[key] = value
 	}
-	return workruntime.Preparation{Prompt: kickoffPrompt(work), Environment: environment}, nil
+	if launch.HandlesInitialPrompt {
+		kickoff = ""
+	}
+	return workruntime.Preparation{Prompt: kickoff, Environment: launch.Environment, EphemeralPath: launch.EphemeralPath, StartupTimeout: launch.StartupTimeout, ReturnOnLaunch: launch.ReturnOnLaunch, Cleanup: launch.Cleanup}, nil
 }
 
 func agentConfigRole(role symphony.WorkRole) string {

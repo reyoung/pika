@@ -30,6 +30,10 @@ type StartSpec struct {
 	PaneID    string
 	Arguments []string
 	TimeoutMS uint64
+	// ReturnOnLaunch accepts the agent.start result without waiting for an idle
+	// interactive prompt. Providers with a positional initial prompt can already
+	// be executing useful work at that point.
+	ReturnOnLaunch bool
 }
 
 func (r *Runtime) ReportInstance(ctx context.Context, workspaceID, instanceID string) error {
@@ -77,6 +81,9 @@ func (r *Runtime) Start(ctx context.Context, spec StartSpec) (Agent, error) {
 	}
 	if err := r.client.Call(ctx, "agent.start", params, &result); err != nil {
 		return Agent{}, err
+	}
+	if spec.ReturnOnLaunch {
+		return result.Agent, nil
 	}
 	timeout := 30 * time.Second
 	if spec.TimeoutMS != 0 {
@@ -149,4 +156,11 @@ func (r *Runtime) SendInput(ctx context.Context, paneID, text string, keys []str
 		return errors.New("pane ID and input are required")
 	}
 	return r.client.Call(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": text, "keys": keys}, nil)
+}
+
+func (r *Runtime) SendKeys(ctx context.Context, paneID string, keys []string) error {
+	if paneID == "" || len(keys) == 0 {
+		return errors.New("pane ID and keys are required")
+	}
+	return r.client.Call(ctx, "pane.send_keys", map[string]any{"pane_id": paneID, "keys": keys}, nil)
 }

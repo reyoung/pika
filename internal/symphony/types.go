@@ -360,13 +360,15 @@ const (
 )
 
 type AgentSession struct {
-	ID         string             `json:"id"`
-	WorkID     string             `json:"work_id"`
-	Generation int64              `json:"generation"`
-	Role       WorkRole           `json:"role"`
-	AgentKind  string             `json:"agent_kind"`
-	AgentName  string             `json:"agent_name"`
-	Status     AgentSessionStatus `json:"status"`
+	ID                   string             `json:"id"`
+	WorkID               string             `json:"work_id"`
+	Generation           int64              `json:"generation"`
+	Role                 WorkRole           `json:"role"`
+	AgentKind            string             `json:"agent_kind"`
+	AgentName            string             `json:"agent_name"`
+	ProviderVersion      string             `json:"provider_version,omitempty"`
+	ProviderCapabilities json.RawMessage    `json:"provider_capabilities,omitempty"`
+	Status               AgentSessionStatus `json:"status"`
 }
 
 type PaneBinding struct {
@@ -445,6 +447,7 @@ type View struct {
 	Baseline           *BaselineView        `json:"baseline,omitempty"`
 	Baselines          []BaselineView       `json:"baselines"`
 	Works              []WorkView           `json:"works"`
+	AgentSessions      []AgentSession       `json:"agent_sessions,omitempty"`
 	BackOffs           []BackOffView        `json:"back_offs"`
 	Attempts           []AttemptView        `json:"attempts"`
 	Integrations       []IntegrationView    `json:"integrations"`

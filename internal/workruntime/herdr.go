@@ -96,11 +96,16 @@ func (r *HerdrRuntime) Start(ctx context.Context, spec StartSpec) (Observation, 
 		return Observation{}, err
 	}
 	defer cleanup()
-	agent, err := r.Runtime.Start(ctx, herdr.StartSpec{Name: spec.AgentName, Kind: spec.AgentKind, PaneID: paneID})
+	var timeoutMS uint64
+	if spec.StartupTimeout > 0 {
+		timeoutMS = uint64(spec.StartupTimeout.Milliseconds())
+	}
+	agent, err := r.Runtime.Start(ctx, herdr.StartSpec{Name: spec.AgentName, Kind: spec.AgentKind, PaneID: paneID, TimeoutMS: timeoutMS, ReturnOnLaunch: spec.ReturnOnLaunch})
 	if err != nil {
 		return Observation{}, err
 	}
-	return observationFromAgent(agent), nil
+	observation := observationFromAgent(agent)
+	return observation, nil
 }
 
 var environmentName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
@@ -182,6 +187,47 @@ func (r *HerdrRuntime) Prompt(ctx context.Context, target, message string) error
 	}
 	_, err := r.Runtime.Prompt(ctx, target, message)
 	return err
+}
+
+func (r *HerdrRuntime) PromptForProvider(ctx context.Context, target, message, providerKind string) error {
+	if err := r.Prompt(ctx, target, message); err != nil || providerKind != "cursor" {
+		return err
+	}
+	// Cursor can render Herdr's bracketed-paste text while dropping the delayed
+	// synthetic Enter during TUI startup. Retry empty Enter at bounded intervals
+	// until Herdr observes a non-idle Cursor state. Empty Enter is a no-op after
+	// the original prompt has already started.
+	for _, delay := range []time.Duration{500 * time.Millisecond, 1500 * time.Millisecond, 3 * time.Second, 5 * time.Second} {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if err := r.Runtime.SendKeys(ctx, target, []string{"enter"}); err != nil {
+			return err
+		}
+		settle := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !settle.Stop() {
+				<-settle.C
+			}
+			return ctx.Err()
+		case <-settle.C:
+		}
+		agent, err := r.Runtime.GetAgent(ctx, target)
+		if err != nil {
+			return err
+		}
+		if agent.AgentStatus != "idle" {
+			return nil
+		}
+	}
+	return nil
 }
 
 func (r *HerdrRuntime) Close(ctx context.Context, paneID string) error {

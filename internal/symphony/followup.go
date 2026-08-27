@@ -239,6 +239,12 @@ func (e *Engine) ObservePaneActivity(ctx context.Context, paneID string) error {
 		}
 		return tx.Commit()
 	}
+	// Prompting the target through Herdr itself emits pane.updated while the
+	// request is dispatching. That update is delivery output, not intervening
+	// human activity, and must not supersede the message that caused it.
+	if status == "dispatching" {
+		return tx.Commit()
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE followup_requests SET status = 'superseded',
 		last_observed_pane_activity_at = ?, activity_source = 'pane.updated', updated_at = ? WHERE id = ?`, now, now, requestID); err != nil {
 		return fmt.Errorf("supersede Follow-up generation: %w", err)

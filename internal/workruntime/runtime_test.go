@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/toolapp"
 	"github.com/reyoung/pika-go/internal/workruntime"
@@ -59,6 +61,35 @@ func TestStartEffectReattachesAfterUncertainAcknowledgement(t *testing.T) {
 	}
 	if session.ID != effect.ID || session.Status != symphony.AgentSessionRunning || binding.TerminalID != "term-1" {
 		t.Fatalf("session=%+v binding=%+v", session, binding)
+	}
+}
+
+func TestStartPersistsProbedProviderVersionAndCapabilities(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	engine, work, effect := initializedRuntime(t, ctx)
+	registry, err := provider.NewRegistry(provider.NewCodexAdapter())
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := registry.Probe(ctx, "codex", provider.ProbeRequest{Executable: "/bin/echo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := workruntime.Sink{Store: engine, Runtime: &fakeRuntime{}, AgentKind: "codex", Providers: registry, RequireProviderCapabilities: true}
+	if err := sink.Dispatch(ctx, effect); err != nil {
+		t.Fatal(err)
+	}
+	history, err := engine.AgentSessionHistory(ctx, work.ID)
+	if err != nil || len(history) != 1 {
+		t.Fatalf("history=%+v err=%v", history, err)
+	}
+	if history[0].ProviderVersion != capabilities.Version || !strings.Contains(string(history[0].ProviderCapabilities), `"fresh_session":true`) {
+		t.Fatalf("provider metadata = %+v", history[0])
+	}
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil || len(view.AgentSessions) != 1 || view.AgentSessions[0].ProviderVersion != capabilities.Version {
+		t.Fatalf("status Agent Sessions=%+v err=%v", view.AgentSessions, err)
 	}
 }
 

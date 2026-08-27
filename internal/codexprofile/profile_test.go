@@ -86,6 +86,12 @@ func TestInstallCreatesOwnedOverlayAndInstanceWrapper(t *testing.T) {
 			t.Fatalf("wrapper args missing %q: %q", want, output)
 		}
 	}
+	resume := exec.Command(filepath.Join(instanceBin, "codex"), "resume", "session-id")
+	if err := resume.Run(); err == nil {
+		t.Fatal("Codex wrapper accepted native resume")
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 64 {
+		t.Fatalf("native resume exit = %v", err)
+	}
 	if err := rollback(); err != nil {
 		t.Fatalf("rollback: %v", err)
 	}

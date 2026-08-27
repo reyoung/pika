@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/reyoung/pika-go/internal/configuration"
+	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
 
@@ -33,11 +34,17 @@ type StartSpec struct {
 	Repository      string
 	PreferredPaneID string
 	Environment     map[string]string
+	StartupTimeout  time.Duration
+	ReturnOnLaunch  bool
 }
 
 type Preparation struct {
-	Prompt      string
-	Environment map[string]string
+	Prompt         string
+	Environment    map[string]string
+	EphemeralPath  string
+	StartupTimeout time.Duration
+	ReturnOnLaunch bool
+	Cleanup        func() error
 }
 
 type Preparer interface {
@@ -55,6 +62,10 @@ type Runtime interface {
 	Close(context.Context, string) error
 }
 
+type ProviderPrompter interface {
+	PromptForProvider(context.Context, string, string, string) error
+}
+
 type Store interface {
 	RuntimeWork(context.Context, string) (symphony.RuntimeWork, error)
 	EnsureAgentSession(context.Context, symphony.AgentSession) error
@@ -63,17 +74,21 @@ type Store interface {
 	MarkAgentSessionEnded(context.Context, string, symphony.AgentSessionStatus) error
 	ActiveAgentSessions(context.Context) ([]symphony.ActiveAgentSession, error)
 	ReplaceLostAgentSession(context.Context, string) (string, error)
+	ReadAgentSession(context.Context, string) (symphony.AgentSession, error)
 	BeginFollowUpDelivery(context.Context, string, string) (string, string, bool, error)
 	FinishFollowUpDelivery(context.Context, string, bool) error
 }
 
 type Sink struct {
-	Store             Store
-	Runtime           Runtime
-	AgentKind         string
-	AgentConfigPath   string
-	Preparer          Preparer
-	WorkspacePreparer WorkspacePreparer
+	Store                       Store
+	Runtime                     Runtime
+	AgentKind                   string
+	AgentConfigPath             string
+	Providers                   *provider.Registry
+	ProviderRuntimeRoot         string
+	RequireProviderCapabilities bool
+	Preparer                    Preparer
+	WorkspacePreparer           WorkspacePreparer
 }
 
 func (s Sink) Dispatch(ctx context.Context, effect symphony.RuntimeEffect) error {
@@ -109,12 +124,19 @@ func (s Sink) closeSession(ctx context.Context, effect symphony.RuntimeEffect) e
 		return fmt.Errorf("snapshot runtime before Session close: %w", err)
 	}
 	if observation, found := findObservation(snapshot, payload.AgentName, payload.TerminalID); found {
-		return s.Runtime.Close(ctx, observation.PaneID)
+		if err := s.Runtime.Close(ctx, observation.PaneID); err != nil {
+			return err
+		}
+	} else if payload.PaneID != "" {
+		if err := s.Runtime.Close(ctx, payload.PaneID); err != nil {
+			return err
+		}
 	}
-	if payload.PaneID == "" {
-		return nil
+	session, err := s.Store.ReadAgentSession(ctx, payload.AgentSessionID)
+	if err != nil {
+		return err
 	}
-	return s.Runtime.Close(ctx, payload.PaneID)
+	return cleanupSessionResources(s.ProviderRuntimeRoot, session)
 }
 
 func (s Sink) deliverFollowUp(ctx context.Context, effect symphony.RuntimeEffect) error {
@@ -137,7 +159,14 @@ func (s Sink) deliverFollowUp(ctx context.Context, effect symphony.RuntimeEffect
 	if targetWorkID != payload.TargetWorkID {
 		return errors.New("Follow-up delivery target changed")
 	}
-	if err := s.Runtime.Prompt(ctx, paneID, payload.Message); err != nil {
+	targetSession, targetBinding, found, err := s.Store.CurrentAgentSession(ctx, targetWorkID)
+	if err != nil {
+		return err
+	}
+	if !found || targetBinding.PaneID != paneID {
+		return errors.New("Follow-up target Agent Session changed before delivery")
+	}
+	if err := promptProvider(ctx, s.Runtime, paneID, payload.Message, targetSession.AgentKind); err != nil {
 		if markErr := s.Store.FinishFollowUpDelivery(ctx, payload.RequestID, false); markErr != nil {
 			return fmt.Errorf("deliver Follow-up: %v; mark delivery unknown: %w", err, markErr)
 		}
@@ -171,20 +200,41 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		kind = "codex"
 	}
 	if s.AgentConfigPath != "" {
-		configured, err := configuration.LoadAgent(s.AgentConfigPath, agentConfigRole(work.Work.Role))
+		providers := s.Providers
+		if providers == nil {
+			providers = provider.DefaultRegistry()
+		}
+		configured, err := configuration.LoadAgentWithRegistry(s.AgentConfigPath, agentConfigRole(work.Work.Role), providers)
 		if err != nil {
 			return fmt.Errorf("load Agent configuration for %s: %w", work.Work.Role, err)
 		}
 		kind = configured.Kind
 	}
+	registry := s.Providers
+	if registry == nil {
+		registry = provider.DefaultRegistry()
+	}
+	capabilities, probed := registry.Capabilities(kind)
+	if s.RequireProviderCapabilities && !probed {
+		return fmt.Errorf("provider %s was not successfully probed before Session start", kind)
+	}
+	capabilitiesJSON := json.RawMessage(nil)
+	if probed {
+		capabilitiesJSON, err = json.Marshal(capabilities)
+		if err != nil {
+			return fmt.Errorf("encode %s provider capabilities: %w", kind, err)
+		}
+	}
 	session := symphony.AgentSession{
-		ID:         effect.ID,
-		WorkID:     work.Work.ID,
-		Generation: work.Work.Generation,
-		Role:       work.Work.Role,
-		AgentKind:  kind,
-		AgentName:  agentName(effect.ID),
-		Status:     symphony.AgentSessionStarting,
+		ID:                   effect.ID,
+		WorkID:               work.Work.ID,
+		Generation:           work.Work.Generation,
+		Role:                 work.Work.Role,
+		AgentKind:            kind,
+		AgentName:            agentName(effect.ID),
+		ProviderVersion:      capabilities.Version,
+		ProviderCapabilities: capabilitiesJSON,
+		Status:               symphony.AgentSessionStarting,
 	}
 	if err := s.Store.EnsureAgentSession(ctx, session); err != nil {
 		return err
@@ -209,6 +259,8 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		Repository:      work.Repository,
 		PreferredPaneID: payload.PreferredPaneID,
 		Environment:     preparation.Environment,
+		StartupTimeout:  preparation.StartupTimeout,
+		ReturnOnLaunch:  preparation.ReturnOnLaunch,
 	})
 	if err != nil {
 		return fmt.Errorf("start agent session %s: %w", session.ID, err)
@@ -217,11 +269,18 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		return err
 	}
 	if preparation.Prompt != "" {
-		if err := s.Runtime.Prompt(ctx, observation.PaneID, preparation.Prompt); err != nil {
+		if err := promptProvider(ctx, s.Runtime, observation.PaneID, preparation.Prompt, session.AgentKind); err != nil {
 			return fmt.Errorf("send activation prompt: %w", err)
 		}
 	}
 	return nil
+}
+
+func promptProvider(ctx context.Context, runtime Runtime, target, message, providerKind string) error {
+	if prompter, ok := runtime.(ProviderPrompter); ok {
+		return prompter.PromptForProvider(ctx, target, message, providerKind)
+	}
+	return runtime.Prompt(ctx, target, message)
 }
 
 func agentConfigRole(role symphony.WorkRole) string {
@@ -255,6 +314,9 @@ func (s Sink) close(ctx context.Context, effect symphony.RuntimeEffect) error {
 			return fmt.Errorf("close agent pane %s: %w", binding.PaneID, err)
 		}
 	}
+	if err := cleanupSessionResources(s.ProviderRuntimeRoot, session); err != nil {
+		return err
+	}
 	return s.Store.MarkAgentSessionEnded(ctx, session.ID, symphony.AgentSessionExited)
 }
 
@@ -271,9 +333,10 @@ func (s Sink) bind(ctx context.Context, sessionID string, observation Observatio
 }
 
 type Reconciler struct {
-	Store            Store
-	Runtime          Runtime
-	LossConfirmation time.Duration
+	Store               Store
+	Runtime             Runtime
+	LossConfirmation    time.Duration
+	ProviderRuntimeRoot string
 }
 
 func (r Reconciler) Reconcile(ctx context.Context) error {
@@ -341,6 +404,9 @@ func (r Reconciler) ReconcileSnapshot(ctx context.Context, snapshot Snapshot) er
 			return err
 		}
 		if work.Work.Status != symphony.WorkPending {
+			if err := cleanupSessionResources(r.ProviderRuntimeRoot, record.Session); err != nil {
+				return err
+			}
 			if err := r.Store.MarkAgentSessionEnded(ctx, record.Session.ID, symphony.AgentSessionExited); err != nil {
 				return err
 			}
@@ -351,6 +417,13 @@ func (r Reconciler) ReconcileSnapshot(ctx context.Context, snapshot Snapshot) er
 		}
 	}
 	return nil
+}
+
+func cleanupSessionResources(runtimeRoot string, session symphony.AgentSession) error {
+	if runtimeRoot == "" || session.AgentKind != "cursor" {
+		return nil
+	}
+	return provider.CleanupCursorSession(runtimeRoot, session.ID)
 }
 
 func findObservation(snapshot Snapshot, agentName, terminalID string) (Observation, bool) {

@@ -9,8 +9,24 @@ type Mutation struct {
 
 type InitRequest struct {
 	Mutation
-	Repository   string `json:"repository"`
-	CallerPaneID string `json:"caller_pane_id,omitempty"`
+	Repository        string  `json:"repository"`
+	CallerPaneID      string  `json:"caller_pane_id,omitempty"`
+	ConfigurationTOML *string `json:"configuration_toml,omitempty"`
+}
+
+type ProviderOption struct {
+	Kind          string          `json:"kind"`
+	Executable    string          `json:"executable,omitempty"`
+	Version       string          `json:"version,omitempty"`
+	Compatible    bool            `json:"compatible"`
+	Authenticated bool            `json:"authenticated"`
+	Capabilities  map[string]bool `json:"capabilities,omitempty"`
+	Error         string          `json:"error,omitempty"`
+}
+
+type InitOptionsResponse struct {
+	ConfigurationExists bool             `json:"configuration_exists"`
+	Providers           []ProviderOption `json:"providers"`
 }
 
 type DraftBaselineRequest struct {
@@ -51,6 +67,7 @@ type ApplyGitIntentResponse struct {
 
 type ProviderEventRequest struct {
 	AgentSessionID string          `json:"agent_session_id"`
+	HookEventName  string          `json:"hook_event_name,omitempty"`
 	Event          json.RawMessage `json:"event"`
 }
 

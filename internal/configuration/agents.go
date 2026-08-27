@@ -6,17 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/reyoung/pika-go/internal/provider"
 )
 
-type Agent struct {
-	Kind            string `json:"kind"`
-	Model           string `json:"model"`
-	ReasoningEffort string `json:"reasoning_effort"`
-}
+type Agent = provider.AgentConfiguration
 
 type Scheduler struct {
 	IterationConcurrency int64 `json:"iteration_concurrency"`
@@ -306,11 +303,16 @@ func LoadPaneIdleTimeout(path string) (time.Duration, error) {
 	return 0, errors.New("missing follow_up.pane_idle_timeout")
 }
 
-var agentValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
-
 func LoadAgent(path, role string) (Agent, error) {
+	return LoadAgentWithRegistry(path, role, provider.DefaultRegistry())
+}
+
+func LoadAgentWithRegistry(path, role string, providers *provider.Registry) (Agent, error) {
 	if path == "" || role == "" {
 		return Agent{}, errors.New("configuration path and role are required")
+	}
+	if providers == nil {
+		return Agent{}, errors.New("provider registry is required")
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -320,6 +322,7 @@ func LoadAgent(path, role string) (Agent, error) {
 	targetSection := "agents." + role
 	section := ""
 	values := map[string]string{}
+	var args []string
 	scanner := bufio.NewScanner(file)
 	for lineNumber := 1; scanner.Scan(); lineNumber++ {
 		line := strings.TrimSpace(scanner.Text())
@@ -338,13 +341,22 @@ func LoadAgent(path, role string) (Agent, error) {
 			return Agent{}, fmt.Errorf("invalid %s entry on line %d", targetSection, lineNumber)
 		}
 		key = strings.TrimSpace(key)
-		if key != "kind" && key != "model" && key != "reasoning_effort" {
+		if key != "kind" && key != "model" && key != "reasoning_effort" && key != "args" {
 			return Agent{}, fmt.Errorf("unknown %s field %q", targetSection, key)
 		}
 		if _, duplicate := values[key]; duplicate {
 			return Agent{}, fmt.Errorf("duplicate %s field %q", targetSection, key)
 		}
-		value, err := strconv.Unquote(strings.TrimSpace(strings.SplitN(encoded, "#", 2)[0]))
+		encoded = strings.TrimSpace(strings.SplitN(encoded, "#", 2)[0])
+		if key == "args" {
+			args, err = parseQuotedStringArray(encoded)
+			if err != nil {
+				return Agent{}, fmt.Errorf("%s.args must be an array of quoted strings: %w", targetSection, err)
+			}
+			values[key] = encoded
+			continue
+		}
+		value, err := strconv.Unquote(encoded)
 		if err != nil {
 			return Agent{}, fmt.Errorf("%s.%s must be a quoted string", targetSection, key)
 		}
@@ -353,20 +365,69 @@ func LoadAgent(path, role string) (Agent, error) {
 	if err := scanner.Err(); err != nil {
 		return Agent{}, fmt.Errorf("read instance configuration: %w", err)
 	}
-	config := Agent{Kind: values["kind"], Model: values["model"], ReasoningEffort: values["reasoning_effort"]}
+	config := Agent{Kind: values["kind"], Model: values["model"], ReasoningEffort: values["reasoning_effort"], Args: args}
 	if config.Kind == "" && config.Model == "" && config.ReasoningEffort == "" {
 		return Agent{}, fmt.Errorf("missing [%s] configuration", targetSection)
 	}
-	if config.Kind != "codex" {
-		return Agent{}, fmt.Errorf("unsupported Agent kind %q for role %s", config.Kind, role)
+	adapter, err := providers.Resolve(config.Kind)
+	if err != nil {
+		return Agent{}, fmt.Errorf("%w for role %s", err, role)
 	}
-	if !agentValuePattern.MatchString(config.Model) {
-		return Agent{}, fmt.Errorf("invalid model for role %s", role)
-	}
-	switch config.ReasoningEffort {
-	case "low", "medium", "high", "xhigh", "max", "ultra":
-	default:
-		return Agent{}, fmt.Errorf("invalid reasoning_effort %q for role %s", config.ReasoningEffort, role)
+	if err := adapter.Validate(config); err != nil {
+		return Agent{}, fmt.Errorf("invalid Agent configuration for role %s: %w", role, err)
 	}
 	return config, nil
+}
+
+func parseQuotedStringArray(encoded string) ([]string, error) {
+	encoded = strings.TrimSpace(encoded)
+	if len(encoded) < 2 || encoded[0] != '[' || encoded[len(encoded)-1] != ']' {
+		return nil, errors.New("array brackets are required")
+	}
+	remaining := strings.TrimSpace(encoded[1 : len(encoded)-1])
+	if remaining == "" {
+		return []string{}, nil
+	}
+	var values []string
+	for remaining != "" {
+		if remaining[0] != '"' {
+			return nil, errors.New("array values must use basic quoted strings")
+		}
+		end := 1
+		escaped := false
+		for ; end < len(remaining); end++ {
+			character := remaining[end]
+			if escaped {
+				escaped = false
+				continue
+			}
+			if character == '\\' {
+				escaped = true
+				continue
+			}
+			if character == '"' {
+				break
+			}
+		}
+		if end >= len(remaining) {
+			return nil, errors.New("unterminated quoted string")
+		}
+		value, err := strconv.Unquote(remaining[:end+1])
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+		remaining = strings.TrimSpace(remaining[end+1:])
+		if remaining == "" {
+			break
+		}
+		if remaining[0] != ',' {
+			return nil, errors.New("array values must be comma separated")
+		}
+		remaining = strings.TrimSpace(remaining[1:])
+		if remaining == "" {
+			return nil, errors.New("trailing comma is not supported")
+		}
+	}
+	return values, nil
 }

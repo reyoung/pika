@@ -168,6 +168,16 @@ func TestTargetFollowUpBudgetExhaustionPausesBaselineVerification(t *testing.T) 
 	if _, _, deliver, err := engine.BeginFollowUpDelivery(ctx, request.ID, request.DeliveryID); err != nil || !deliver {
 		t.Fatalf("begin delivery: deliver=%v err=%v", deliver, err)
 	}
+	if err := engine.ObservePaneActivity(ctx, "target-pane"); err != nil {
+		t.Fatalf("observe delivery-caused pane update: %v", err)
+	}
+	if err := engine.IngestProviderEvent(ctx, "codex", targetSession.ID, json.RawMessage(`{"session_id":"codex-target","turn_id":"follow-up-delivery","hook_event_name":"UserPromptSubmit","prompt":"continue"}`)); err != nil {
+		t.Fatalf("record provider echo of delivered prompt: %v", err)
+	}
+	dispatching, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil || dispatching.FollowUps[0].Status != "dispatching" {
+		t.Fatalf("delivery-caused activity superseded dispatch: %+v err=%v", dispatching.FollowUps, err)
+	}
 	if err := engine.FinishFollowUpDelivery(ctx, request.ID, true); err != nil {
 		t.Fatal(err)
 	}

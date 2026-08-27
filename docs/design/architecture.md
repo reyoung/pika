@@ -26,7 +26,7 @@ Herdr Workspace = one Optimization
 │       └── Work reconciler                               │
 │                                                         │
 │ Agent pane(s)                                           │
-│   Codex / OpenCode / Cursor                             │
+│   Codex / Cursor                                        │
 │       ├── direct user interaction                       │
 │       ├── provider hook ───────────────► daemon         │
 │       └── pika-go mcp-proxy ───────────► daemon         │
@@ -102,8 +102,11 @@ type WorkRuntime interface {
     Events(ctx context.Context) (RuntimeEventStream, error)
 }
 
-type ProviderTelemetry interface {
-    Normalize(ctx context.Context, binding PaneBinding, raw HookEvent) ([]JournalEvent, error)
+type ProviderAdapter interface {
+    Validate(configuration AgentConfiguration) error
+    Probe(ctx context.Context, request ProbeRequest) (ProviderCapabilities, error)
+    PrepareSession(ctx context.Context, activation SessionActivation) (ProviderLaunch, error)
+    Normalize(ctx context.Context, binding SessionBinding, raw HookEvent) ([]JournalEvent, error)
 }
 
 type ToolApplication interface {
@@ -152,7 +155,7 @@ The daemon:
 
 Initialization is atomic from the user's point of view. If any required step fails, Pika records diagnostics, removes partial instance bindings where safe, and exits the instance instead of leaving a half-configured Optimization.
 
-The caller receives a non-zero exit, the daemon performs its failure cleanup and exits, and no Agent is left running.
+The caller receives a non-zero exit, the daemon performs its failure cleanup and exits, and no Agent is left running. Before durable init, Pika also requires Herdr's active configuration to set `session.resume_agents_on_restore = false`, reloads that configuration through the socket API, and probes exactly the providers referenced by the five static Role configurations.
 
 ## 6. Normal scheduling
 
@@ -190,7 +193,7 @@ Pika does not proxy steering. The user types directly into the Codex/OpenCode/Cu
 
 ### Agent activation
 
-Before starting a Session, the daemon renders and freezes three layers: the binary-owned Role System Prompt, dynamic System Context from committed Symphony state, and the non-empty user instruction overlay. Codex receives that value as `developer_instructions` through the instance wrapper. Herdr prompt injection is reserved for the short kickoff User Turn and subsequent human/Follow-up messages; it is not used to emulate a System Prompt.
+Before starting a Session, the daemon renders and freezes three layers: the binary-owned Role System Prompt, dynamic System Context from committed Symphony state, and the non-empty user instruction overlay. Codex receives that value as `developer_instructions` through the instance wrapper. Cursor stores it in private per-Session state and returns it as `sessionStart.additional_context`; Cursor's dynamic layer also bootstraps the environment-scoped `pika_go` MCP namespace. The Cursor kickoff is a positional initial prompt; later Herdr prompt injection is reserved for human/Follow-up messages and is not used to emulate a System Prompt.
 
 ### Back-off
 
@@ -223,7 +226,7 @@ After an eligible Agent turn stops without a terminal operation:
 3. At the deadline, reserve one Follow-up Request unless the Work became terminal or exhausted its policy.
 4. Start a fresh Follow-up Agent Session using the shared Follow-up Agent Configuration, target-specific System Prompt, dynamic target context, and matching user overlay.
 5. The Follow-up Agent calls `submit_followup_message`.
-6. If still current, the daemon sends the message to the target Agent with Herdr `agent.prompt`.
+6. If still current, the daemon marks the request `dispatching` and sends the message to the target Agent with Herdr `agent.prompt`; the resulting self-caused `pane.updated` and provider user-message echo do not supersede that dispatch.
 
 If observed pane activity occurs while the generator is running, the request becomes `superseded_by_observed_activity`. Pika does not kill the generator; its eventual message is accepted for audit but discarded, and the inactivity deadline starts again.
 
@@ -245,7 +248,7 @@ On daemon restart or runtime loss:
 4. The durable outbox orders that old-Session close before replacement start. A missing old pane makes close idempotently successful; a close failure blocks the fresh start rather than allowing two live owners of one Work.
 5. Pika creates a fresh Agent Session with a newly frozen Recovery Context Bundle. Within one continuously running daemon, ordinary `pane.updated` snapshots may still update a moved pane's binding without replacing the Session.
 
-Provider session IDs are retained in the journal but never used to resume. Switching from Codex to another configured coding agent during recovery is allowed if the target Role's required capability level is satisfied.
+Provider session IDs are retained in the journal but never used to resume. Recovery resolves the current Work's static Role configuration again and starts that configured provider; it never falls back to another provider. A Back-off may cross providers only because its destination Role has a different static configuration.
 
 ## 10. Graceful shutdown
 

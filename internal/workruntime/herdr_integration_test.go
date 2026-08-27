@@ -216,7 +216,7 @@ func TestGracefulShutdownWaitsForRealHerdrAgentTerminalMCP(t *testing.T) {
 	t.Setenv("HERDR_PANE_ID", created.RootPane.PaneID)
 	t.Setenv("PIKA_GO_AGENT_PATH_PREFIX", binDir)
 	t.Setenv("CODEX_HOME", filepath.Join(configRoot, "codex-home"))
-	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/sh")
+	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/echo")
 	daemonCtx, stopDaemon := context.WithCancel(context.Background())
 	t.Cleanup(stopDaemon)
 	daemonDone := make(chan int, 1)
@@ -1239,9 +1239,11 @@ func configureFakeHerdr(t *testing.T, root, fakeAgent string) (string, string, s
 	if err := os.MkdirAll(filepath.Join(configDir, "agent-detection"), 0o700); err != nil {
 		t.Fatalf("create Herdr config: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("[update]\nversion_check = false\nmanifest_check = false\n"), 0o600); err != nil {
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[update]\nversion_check = false\nmanifest_check = false\n\n[session]\nresume_agents_on_restore = false\n"), 0o600); err != nil {
 		t.Fatalf("write Herdr config: %v", err)
 	}
+	t.Setenv("HERDR_CONFIG_PATH", configPath)
 	_, sourceFile, _, _ := runtime.Caller(0)
 	manifest, err := os.ReadFile(filepath.Join(filepath.Dir(sourceFile), "..", "..", "testdata", "herdr", "codex.toml"))
 	if err != nil {
@@ -1321,7 +1323,7 @@ func configureTestScheduler(t *testing.T, ctx context.Context, repository, state
 func startTestDaemon(t *testing.T, socketPath, stateRoot, configRoot string) func() {
 	t.Helper()
 	t.Setenv("CODEX_HOME", filepath.Join(configRoot, "codex-home"))
-	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/sh")
+	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/echo")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	var stopOnce sync.Once
@@ -1381,7 +1383,7 @@ func startDaemonProcess(t *testing.T, pikaBinary, socketPath, stateRoot, configR
 		"HERDR_ENV":                 "1",
 		"PIKA_GO_AGENT_PATH_PREFIX": binDir,
 		"CODEX_HOME":                filepath.Join(configRoot, "codex-home"),
-		"PIKA_GO_CODEX_EXECUTABLE":  "/bin/sh",
+		"PIKA_GO_CODEX_EXECUTABLE":  "/bin/echo",
 		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	})
 	process.command.Stdout = &process.output
