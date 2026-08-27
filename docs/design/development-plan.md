@@ -11,7 +11,7 @@ The ordering follows four rules:
 3. Complete the Baseline Draft/Verification loop before implementing concurrent Attempts.
 4. Add automatic Follow-up only after conversation and turn telemetry is trustworthy.
 
-The first release formally supports Codex telemetry. OpenCode and Cursor may run through Herdr for direct user interaction, but their complete journal and automatic Follow-up remain disabled until their provider adapters pass conformance.
+The first release formally supports Codex. Later providers cross the same Provider Adapter seam one at a time and become supported only after their complete journal, automatic Follow-up, fresh-Session recovery, and real workflow matrix pass conformance. Phase 9 makes Cursor the next fully supported provider; OpenCode remains a separate later phase.
 
 ### Implementation checkpoint — 2026-08-27
 
@@ -22,6 +22,7 @@ The first release formally supports Codex telemetry. OpenCode and Cursor may run
 | 6 | Implemented; real-model core path passes | Immutable embedded Role System Prompts, runtime-rendered dynamic System Context, empty user overlays, per-Session prompt freezing, Codex managed profile/hooks, and full observable journal payload storage pass local tests. A disposable real-Codex Optimization completed Draft, Verification, Iteration, Integration, scoped Git commits and Best application, and graceful drain. |
 | 7 | Implemented; real-model smoke passes | Fake-clock budget/race/exhaustion tests pass. Real Herdr with deterministic Agents passes Follow-up generation and delivery. A production-equivalent real-Codex short-timeout smoke generated and delivered a target-specific Follow-up to a still-running Verification Work, then completed the Optimization. |
 | 8 | Release gate accepted | Online validated backup, storage growth view, migration/integrity rejection, permissions, structured daemon logs, protocol compatibility, cross-build archives/checksums, isolated archive-link smoke, real-Herdr graceful drain, and process crash recovery pass. Running Session, dispatching outbox, committed terminal receipt, and post-Git/pre-Domain Integration crash scenarios pass two consecutive real-process rounds. The real-Codex matrix passes Follow-up, fresh-Session daemon recovery, parallel sibling-isolated cancellation, Integration Back-off, Best advancement, and graceful drain. GitHub Actions run `33087182005` passed all five Linux/macOS verify, cross-build, and clean-install jobs, including compilation of pinned Herdr and native archive `plugin link`/`plugin list`. |
+| 9 | Design accepted; implementation not started | Cursor CLI and Hook/Plugin contracts have been inspected, and the supported configuration, per-Session Plugin, Provider Adapter, init flow, native-resume guard, journaling map, all-Cursor matrix, and mixed Codex/Cursor matrices are specified below. Cursor remains unsupported until the pinned real CLI passes every Phase 9 exit gate. |
 
 The checkpoint distinguishes code present in the tree from release acceptance. It must be updated with command output or a concrete blocker; starting a test or compiling one package is not completion evidence.
 
@@ -34,6 +35,8 @@ Local verification recorded on 2026-08-27:
 - `make dist VERSION=0.1.0-dev` built Darwin/Linux archives for `amd64` and `arm64`; `shasum -a 256 -c SHA256SUMS` verified all four archives.
 - The extracted native Darwin/arm64 archive reported version `0.1.0-dev` and passed isolated `herdr plugin link`/`plugin list` with disposable XDG directories.
 - GitHub Actions run `33087182005` passed `make verify` on Ubuntu and macOS, supported cross-builds, and clean-machine install/link smoke on both platforms. The clean-install jobs provisioned Zig 0.15, compiled the pinned Herdr source, extracted the native Pika archive, and passed isolated `plugin link`/`plugin list`. Together with the real-Codex and crash matrices above, all first-release exit gates are satisfied.
+- Cursor planning inspected CLI candidate `2026.08.11-e8db854` and the official Hook and Plugin contracts. Hooks expose stable conversation and generation identities plus prompt, response, Tool, Shell, MCP, stop, and Session-end events; the version is only a conformance candidate and is not yet supported.
+- Herdr native Agent restore is enabled by default and can run `cursor-agent --resume <id>` or `codex resume <id>`. Phase 9 therefore includes a provider-neutral init gate and wrapper defense for the already accepted fresh-Session invariant.
 
 ```mermaid
 flowchart LR
@@ -45,7 +48,8 @@ flowchart LR
     P5 --> P6[6 Codex and Journal]
     P6 --> P7[7 Follow-up]
     P7 --> P8[8 Release hardening]
-    P8 -. post-release .-> P9[9 Cursor and OpenCode]
+    P8 -. post-release .-> P9[9 Cursor parity]
+    P9 -. later .-> P10[10 OpenCode]
 ```
 
 ## 2. Module seams
@@ -60,12 +64,12 @@ The implementation should keep the external interfaces from [Architecture](archi
 | Tool Application | `Catalog(Grant)`, `Invoke(Grant, Call)` | MCP authorization, schema validation, file contracts, terminal transactions | Phase 4 |
 | Context Builder | `Build(RoleActivation) -> ContextBundle` | domain projection, dynamic System Context, user-instruction freezing, journal selection, evidence paths | Phase 4, extended Phase 6 |
 | Git Workspace | `CommitChanges`, `CreateAttempt`, `RefreshFromBest`, `PrepareBestUpdate`, `ApplyAuthorizedBestUpdate`, `VerifyBestUpdate` | scoped commits, worktrees, merge policy, idempotent Git intent/postconditions, digests | Phase 5 |
-| Provider Telemetry | `Normalize(Binding, HookEvent) -> JournalEvents` | Codex wire fields, deduplication, session/Turn correlation, tool payloads | Phase 6 |
+| Provider Adapter | `Validate`, `Probe`, `PrepareSession`, `Normalize` | Provider configuration and capabilities, version checks, launch materialization, ephemeral resources, wire fields, deduplication, Session/Turn correlation, tool payloads | Phase 6, deepened Phase 9 |
 | Follow-up Coordinator | internal state transition interface | clocks, eligibility, budget, supersession, generator sessions, delivery uncertainty | Phase 7 |
 
 Do not introduce a generic repository interface over SQLite in the first release. SQLite is the only domain-state adapter. The useful seam is the Domain Engine interface, not one CRUD method per table.
 
-`WorkRuntime` and `ProviderTelemetry` are real seams because they have multiple adapters: scripted/in-memory versus Herdr, and Codex versus future Cursor/OpenCode. Time should be injected into Follow-up logic because a fake clock materially changes testability.
+`WorkRuntime` and the Provider Adapter are real seams because they have multiple adapters: scripted/in-memory versus Herdr, and Codex versus Cursor. The Provider Adapter must remain a deep Module: callers select a provider and receive a validated launch plus normalized journal events without learning its CLI, profile, Plugin, Hook, version, or cleanup rules. Time should be injected into Follow-up logic because a fake clock materially changes testability.
 
 ## 3. Test fixtures built first
 
@@ -324,18 +328,130 @@ The macOS/Linux artifact survives realistic crashes, installs cleanly, and compl
 
 Release only after this gate. Earlier phases are implementation milestones, not a production-ready product.
 
-## 13. Phase 9 — optional provider expansion
+## 13. Phase 9 — Cursor parity
 
-Cursor and OpenCode adapters are post-first-release work:
+### Outcome
 
-1. Pin a CLI version and write a provider conformance fixture.
-2. Prove session start/end, user prompt, assistant stop/message, tool input/output, and prompt delivery.
-3. Implement the Provider Telemetry adapter without changing domain interfaces.
-4. Enable complete journaling and Follow-up only for capabilities that actually pass.
+Any static Role may select Codex or Cursor while preserving the same Pika lifecycle: immutable frozen System Prompt, provider-scoped MCP, complete Conversation Journal, direct Herdr steering, automatic Follow-up, Work cancellation, Back-off, fresh recovery Sessions, and graceful drain. One Optimization may assign different providers to different Roles; every Session for one Role still uses that Role's single static Agent Configuration. Phase 9 does not introduce per-Session provider selection or mixed providers among sibling Iteration Sessions. Merely launching `cursor-agent` is not Cursor support.
 
-A provider that fails conformance may still run as a directly steerable Herdr Agent. Pika must show the missing capabilities in status rather than silently degrading automation.
+Cursor remains `unsupported` until the exact CLI version has passed the real conformance and Optimization matrices. A mismatch is a hard preflight failure, not a warning or silent capability downgrade. The first conformance candidate is `2026.08.11-e8db854`; it enters the allowlist only after the exit gate passes.
 
-## 14. Commit and review cadence
+### Provider Adapter seam
+
+Replace the Codex-only telemetry path with a deep Provider Adapter Module. Its Interface has four operations:
+
+- `Validate(AgentConfiguration)`: validate provider-specific model, reasoning effort, and launch arguments.
+- `Probe(Context) -> ProviderCapabilities`: resolve the executable, authenticate, check the exact allowlisted version, and report journaling, turn-stop, Follow-up, full-output, and fresh-Session capabilities.
+- `PrepareSession(SessionActivation) -> ProviderLaunch`: materialize provider-owned ephemeral resources and return executable, argv, environment, and cleanup ownership.
+- `Normalize(SessionBinding, RawProviderEvent) -> JournalEvents`: preserve the raw event and produce provider-neutral Session, Turn, Message, Tool, and lifecycle events.
+
+Move Codex behind this Interface without changing its behavior before adding the Cursor Adapter. Initialization, Work activation, Hook ingestion, status, and recovery select an Adapter from one registry; the Domain Engine never switches on Cursor event names or launch flags. Record the actual provider kind, version, and capabilities with each Agent Session. Codex and Cursor wrappers, Hooks, profiles/Plugins, provider session identities, and MCP grants must coexist within one instance without shared mutable launch state. Reject a raw provider event when its route provider does not match the bound Agent Session; provider session IDs are namespaced by provider and may not bind or deduplicate across adapters.
+
+### Configuration and init
+
+Cursor retains the existing `model + reasoning_effort` configuration shape:
+
+```toml
+[agents.baseline]
+kind = "cursor"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+args = ["--force", "--approve-mcps", "--trust"]
+```
+
+The Cursor Adapter passes a parameterized model such as `gpt-5.6-sol[effort=high]`. It accepts `low`, `medium`, `high`, `xhigh`, and `max`; `ultra` remains Codex-only. `args` is an optional Cursor-only argv array, not a shell string; configuration version remains `1` because the field is additive and an older binary already rejects the unknown provider. It may configure any non-reserved option supported by the pinned Cursor version, including `--force`, `--auto-review`, `--approve-mcps`, and `--trust`. Pika parses option arity before launch and rejects `--`, a top-level command or initial prompt, `--resume`, `--continue`, `--print`, workspace/plugin/model/worktree overrides, and `--sandbox disabled`; Pika always supplies `--sandbox enabled`. The interactive Cursor default is `["--force", "--approve-mcps"]`; init separately offers to append `--trust`, defaulting to no, and explains that it changes Cursor's persistent workspace-trust state.
+
+For a new instance, an interactive `pika-go init` asks separately for the Agent kind, model, reasoning effort, and Cursor args of Baseline, Baseline Verification, Iteration, Integration, and Follow-up. It shows the existing Codex choices as defaults. An existing `config.toml` remains byte-for-byte user-owned input and skips these questions.
+
+Add `GET /v1/init/options`, returning `configuration_exists` and the available Provider kinds, executables, versions, compatibility, authentication state, and capabilities without writing state. When configuration is absent, `POST /v1/init` requires `configuration_toml`, containing the complete candidate rendered by the interactive CLI, read from `--config PATH`, or generated by `--defaults`. When configuration exists, sending candidate TOML is an error rather than an overwrite. Non-TTY and `--json` init must use exactly one of `--config PATH` or `--defaults`; there is no implicit provider choice. `--config` must describe the same canonical repository supplied to init, while `--defaults` generates the current all-Codex configuration.
+
+Init probes exactly the distinct providers referenced by the five static Agent Configurations. Codex-only configuration neither resolves nor authenticates Cursor, and Cursor-only configuration does not require Codex. A mixed configuration probes both adapters before creating durable Optimization state; if either adapter is absent, unauthenticated, incompatible, or missing a required capability, the entire init fails and rolls back. Runtime launch and recovery never fall back from the configured provider to the other adapter.
+
+Before committing init, require the active Herdr configuration to contain:
+
+```toml
+[session]
+resume_agents_on_restore = false
+```
+
+Herdr can otherwise restore official Cursor and Codex sessions natively, contradicting Pika's rule that recovery always creates a new Agent Session. Pika resolves and read-validates the active Herdr config file; if the setting is absent, enabled, or invalid, init fails with the exact configuration instructions. When it is false, Pika invokes Herdr's `server.reload_config` socket method and requires an `applied` result before committing init. Both provider wrappers also reject native resume argv as defense in depth. Pika neither edits Herdr configuration nor modifies the user's global Cursor configuration. See [Herdr integrations](https://herdr.dev/docs/integrations/) and [Herdr socket API](https://herdr.dev/docs/socket-api/).
+
+### Per-Session Cursor Plugin
+
+`PrepareSession` creates a private, Session-specific Cursor Plugin beneath instance runtime state. The directory is `0700`; generated files are `0600`. It contains:
+
+- `.cursor-plugin/plugin.json`.
+- `rules/pika-system.mdc`, an `alwaysApply` Rule containing the already frozen immutable Role System Prompt, runtime Dynamic System Context, and that Session's user Instructions overlay.
+- `hooks/hooks.json`, invoking `pika-go hook cursor` for lifecycle, prompt, response, Tool, Shell, MCP, and stop events.
+- `mcp.json`, starting `pika-go mcp-proxy` with the Session's socket and grant environment.
+
+The generated Rule is a transport for the frozen System Prompt, not an editable instructions file. Herdr `agent.prompt` still carries only the kickoff User Turn and later steering or Follow-up messages. Cursor Rules and Plugin loading are specified by the official [Rules](https://cursor.com/docs/rules) and [Plugin reference](https://cursor.com/docs/reference/plugins); `sessionStart.additional_context` is not a fallback unless a later ADR changes the accepted transport.
+
+The wrapper launches the interactive TUI with `cursor-agent --workspace <repository> --plugin-dir <session-plugin> --model <parameterized-model> --sandbox enabled` plus validated user args. It never uses `--print`, `--resume`, or `--continue`. Cleanup removes the Plugin only after the child process exits; startup removes stale Plugin directories that are not referenced by an active Session.
+
+`beforeMCPExecution` is fail-closed and allows only Pika's MCP server. The existing Role grant remains the authority for individual tool names. Telemetry Hooks remain fail-open, short-running, and silent except for the valid JSON response required by Cursor.
+
+### Cursor journal and Follow-up
+
+`pika-go hook cursor` accepts the official event set documented in [Cursor Hooks](https://cursor.com/docs/hooks):
+
+- `sessionStart`: bind `session_id`/`conversation_id` to the Pika Agent Session.
+- `beforeSubmitPrompt`: open the Turn identified by `generation_id` and store the user message.
+- `afterAgentResponse`: store the complete assistant message.
+- `postToolUse` and `postToolUseFailure`: store tool input, output or failure, duration, and interrupt state.
+- `afterShellExecution` and `afterMCPExecution`: retain full terminal output and full MCP JSON result as supplemental evidence for the logical Tool call, not a second Tool call.
+- `stop`: close the current Turn with `completed`, `aborted`, or `error` and arm Pika Follow-up eligibility.
+- `sessionEnd`: record provider-conversation termination independently of Turn completion.
+
+Store every raw Cursor payload in SQLite before normalization. Deduplicate by provider, Pika Session, event identity/digest, conversation, generation, and tool-use identity where available. Specialized Shell/MCP events enrich or supplement the matching logical Tool event; an unmatched supplemental event is retained rather than discarded.
+
+Remove the current mismatched one-MiB daemon and 16-MiB Hook limits for the provider-event route. The local permission-protected Unix-socket endpoint reads and persists the complete provider-emitted JSON payload; unrelated control-plane and MCP limits remain unchanged. Existing storage-growth status remains the warning surface for large SQLite journals.
+
+Cursor's synchronous stop-Hook `followup_message` is never used. `stop` only begins Pika's configurable inactivity deadline; pane activity or a user prompt resets/supersedes it exactly as for Codex. A dedicated Follow-up Session generates guidance asynchronously, and Herdr `agent.prompt` delivers it to the still-active target Session. Pika continues to cancel Work rather than individual Turns.
+
+### Build slices
+
+1. Introduce the Provider Adapter registry and migrate Codex with no observable behavior change.
+2. Add configuration/init contracts, reserved-argv validation, Herdr native-resume preflight, provider version recording, and Cursor event fixtures.
+3. Add Cursor launch materialization, the per-Session Plugin, MCP policy, wrapper defenses, cleanup, and normalized journaling.
+4. Prove cross-Role Codex/Cursor workflows through the same Provider Adapter registry: atomic dual-provider preflight, wrapper/Hook/grant isolation, both Follow-up directions, Back-off across providers, configured-provider recovery, and no fallback.
+5. Add the opt-in all-Cursor and mixed-provider real matrices; update Architecture, Protocols, Configuration, and the fresh-Session ADR before declaring the phase complete.
+
+### Exit gate
+
+Normal CI must pass:
+
+- Existing Codex Adapter, real-Herdr, crash, packaging, and configuration tests without semantic regression.
+- Cursor unit and fixture tests for every Hook event, duplicate and reordered delivery, failed/interrupted Tools, separate `stop`/`sessionEnd`, model/effort validation, reserved argv, version rejection, and authentication failure.
+- A payload larger than 16 MiB reaches SQLite byte-for-byte, while other endpoint limits remain enforced.
+- Generated Plugin snapshots prove the complete frozen System Prompt, MCP grant, file permissions, shell-safe argv, and cleanup/reconciliation behavior.
+- Two mirror-image fake-Herdr configurations alternate Codex and Cursor across Roles: Cursor/Codex/Cursor/Codex/Cursor and Codex/Cursor/Codex/Cursor/Codex for Baseline/Baseline Verification/Iteration/Integration/Follow-up respectively. They prove direct steering, both cross-provider Follow-up directions, wrapper/Hook/MCP-grant and Journal isolation, provider-route mismatch rejection, sibling-isolated cancellation, Back-off across providers, configured-provider fresh recovery without fallback, and graceful drain.
+- Codex-only init succeeds without Cursor, Cursor-only init succeeds without Codex, and mixed init rolls back atomically when either referenced adapter fails preflight.
+- Interactive init, existing-config preservation, `--config`, `--defaults`, non-TTY, `--json`, and Herdr native-resume failures are deterministic.
+
+`make real-cursor-integration` is explicit and credentialed rather than part of ordinary CI. Against the exact candidate CLI it must prove:
+
+- The per-Session `alwaysApply` Rule reaches the initial system context exactly once, including immutable Role Prompt, dynamic context, and frozen user Instructions.
+- Session, Turn, user, assistant, successful/failed Tool, full Shell/MCP output, stop, and end Hooks are all observed and correlated.
+- Pika MCP starts without a hidden approval, non-Pika MCP execution is denied, user steering remains interactive, and Pika asynchronous Follow-up reaches the intended stopped Turn.
+- A disposable Draft -> Verification -> parallel Iteration -> Integration Back-off -> Best workflow passes with sibling-isolated cancellation and graceful drain.
+- Daemon recovery replaces every running child with a fresh Pika Session and distinct Cursor conversation; native resume argv is rejected.
+- Final SQLite, Git, process, pane, socket, and ephemeral-Plugin invariants match the real-Codex release matrix.
+
+`make real-mixed-provider-integration` is a separate explicit, credentialed gate. It uses an independent disposable instance for each scenario:
+
+1. A complete alternating Optimization configures Baseline=`cursor`, Baseline Verification=`codex`, Iteration=`cursor`, Integration=`codex`, and Follow-up=`cursor`. The first Codex Verification Turn stops incomplete and receives a Cursor-generated Follow-up before accepting the Baseline. Two Cursor Iteration Sessions then run concurrently; the test cancels one sibling, crashes the daemon while the other is running, and verifies a fresh Cursor recovery Session. The first Codex Integration backs off to a new Cursor Iteration Round, and a later Codex Integration advances Best before graceful drain.
+2. A shorter reverse-direction scenario configures Baseline=`codex`, Baseline Verification=`cursor`, and Follow-up=`codex`. It waits for the Cursor Verification Turn to stop, delivers a Codex-generated Follow-up, completes Verification, and drains normally.
+
+Both mixed scenarios assert the configured provider kind and version, distinct fresh conversation and Turn identities, the correct provider-specific frozen-prompt transport, and one provider-neutral Journal ordered by Work and Session. Provider events or MCP grants from one Session must not bind to the other adapter even if provider-native IDs collide. Back-off and daemon recovery must select the destination Role's configured provider with no fallback. Final SQLite, Git, pane, process, socket, profile/Plugin, and grant invariants must match the single-provider matrices.
+
+Only after both `make real-cursor-integration` and `make real-mixed-provider-integration` pass does the exact CLI version enter the allowlist, status report full Cursor capabilities, and the implementation checkpoint record concrete evidence for the all-Cursor and mixed matrices. Until then Cursor configuration is rejected rather than started in a partially automated mode.
+
+## 14. Phase 10 — OpenCode evaluation
+
+OpenCode remains independent post-Cursor work. Reuse the Provider Adapter Interface and the Phase 9 conformance shape, but make no compatibility claim or implementation commitment until its real CLI lifecycle, prompt transport, Tool output, and fresh-Session behavior have been researched and accepted separately.
+
+## 15. Commit and review cadence
 
 Each phase should be reviewable and revertible on its own:
 
@@ -345,4 +461,4 @@ Each phase should be reviewable and revertible on its own:
 - Do not mix refactoring for the next phase into the current phase's acceptance diff.
 - At every phase end, update the design status with delivered behavior, remaining gaps, and exact verification evidence.
 
-The preferred first implementation target is Phase 0 followed by Phase 1. Phase 0 proves packaging and process mechanics cheaply; Phase 1 then creates the authoritative domain seam on which every later adapter depends.
+The next implementation target is Phase 9 slice 1: introduce the Provider Adapter registry and migrate Codex without behavior change. Cursor-specific launch or Hook behavior should not land until that regression gate is green.
