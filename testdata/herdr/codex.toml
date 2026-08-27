@@ -1,0 +1,20 @@
+id = "codex"
+version = "2026.08.27.1"
+min_engine_version = 3
+updated_at = "2026-08-27T00:00:00Z"
+
+[[rules]]
+id = "fake_agent_working"
+state = "working"
+priority = 1000
+region = "osc_title"
+visible_working = true
+contains = ["FAKE_AGENT_WORKING"]
+
+[[rules]]
+id = "fake_agent_idle"
+state = "idle"
+priority = 900
+region = "osc_title"
+visible_idle = true
+contains = ["FAKE_AGENT_READY"]

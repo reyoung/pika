@@ -19,7 +19,7 @@ Herdr persists terminal layout; Pika persists desired workflow and correlations.
 | Table | Purpose |
 | --- | --- |
 | `optimizations` | singleton identity, lifecycle status, domain revision, repository |
-| `baseline_revisions` | immutable definitions and accepted/rejected verification result |
+| `baseline_revisions` | immutable Definition bytes/digest, frozen Repository Snapshot SHA, predecessor identity, and accepted/rejected verification projection |
 | `best_revisions` | accepted Best history and Git/evidence identity |
 | `attempts` | candidate identity, hypothesis, terminal status |
 | `iteration_rounds` | immutable per-Attempt execution rounds and stale/back-off ancestry |
@@ -37,6 +37,7 @@ Herdr persists terminal layout; Pika persists desired workflow and correlations.
 | `tool_events` | complete observable tool input and output, identifiers, ordering, status, timing |
 | `provider_events` | deduplicated raw hook envelope for audit and forward-compatible reprocessing |
 | `followup_requests` | target, inactivity deadline, generation attempts, message, delivery, supersession |
+| `instruction_snapshots` | user overlay plus the byte-exact frozen rendered System Prompt and digest for one Agent Session |
 
 ### Reliability
 
@@ -110,6 +111,10 @@ Context generation is bounded and deterministic:
 4. Materialize a complete `messages.jsonl` or evidence view under the instance context directory when the Role needs a file.
 5. Record the query inputs and generated digest on the new Agent Session.
 
+When Baseline Verification rejects or supersedes a revision, the historical view retains its failure kind, reason, requested changes, and evidence. The successor Baseline Draft projection copies none of that into a mutable Definition automatically; it exposes the predecessor facts to the new Session so the Agent can make an explicit revision. Baseline Revision ID is durable identity, while Work and Agent Session IDs remain execution-only.
+
+Definition identity and repository identity are not conflated. Submission stores the exact Definition bytes and digest plus the clean HEAD observed as `repository_sha`. The tracked Definition never needs to embed the commit that contains itself. Verification receives both identities and acceptance rechecks that repository HEAD and worktree cleanliness still match before seeding Best revision 0.
+
 ## 6. Follow-up activity data
 
 For each eligible stopped Turn, persist:
@@ -132,6 +137,8 @@ Because `pane.updated` is approximate, the database stores the observed source r
 - Tool output may contain secrets. It is never printed by default in `status` and is supplied to later Agents only through explicit Context Builder selection.
 - Journal and tool data are retained for the lifetime of the Optimization. Deleting an Optimization is a separate explicit destructive command and is not implied by shutdown.
 - Backups copy the SQLite database using a SQLite-safe online backup/checkpoint procedure, not a blind copy of a live WAL set.
+- `pika-go backup --output <absolute-path>` refuses overwrite and live SQLite paths, performs a passive WAL checkpoint plus `VACUUM INTO`, applies mode `0600`, and validates `quick_check` and the exact supported schema before success.
+- `status --json` reports database/WAL bytes, SQLite page count/size, raw provider-event bytes, and Tool payload bytes. It reports sizes only and never emits retained payloads or grant tokens.
 
 ## 8. Recovery invariants
 

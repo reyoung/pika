@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make verify
+
+  cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make dist VERSION=ci
+
+  clean-install:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - run: make dist VERSION=ci
+      - name: Build pinned Herdr and link extracted native archive
+        shell: bash
+        run: |
+          cargo build --release --manifest-path ref/herdr/Cargo.toml
+          case "$(uname -s)" in
+            Darwin) os=darwin ;;
+            Linux) os=linux ;;
+          esac
+          case "$(uname -m)" in
+            arm64|aarch64) arch=arm64 ;;
+            x86_64) arch=amd64 ;;
+          esac
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          tar -C "$smoke_root" -xzf "dist/pika-go_${os}_${arch}.tar.gz"
+          export XDG_CONFIG_HOME="$smoke_root/xdg-config"
+          export XDG_STATE_HOME="$smoke_root/xdg-state"
+          mkdir -p "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
+          herdr_bin="$PWD/ref/herdr/target/release/herdr"
+          plugin_dir="$smoke_root/pika-go_${os}_${arch}"
+          "$plugin_dir/pika-go" version | grep '^ci$'
+          "$herdr_bin" plugin link "$plugin_dir" --enabled
+          "$herdr_bin" plugin list | grep 'pika-go'

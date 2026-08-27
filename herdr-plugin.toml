@@ -1,0 +1,13 @@
+id = "pika-go"
+name = "Pika-Go"
+version = "0.1.0-dev"
+min_herdr_version = "0.8.2"
+description = "Long-running automatic optimization orchestrator"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "symphony"
+title = "Pika-Go Symphony"
+description = "Run the Pika-Go orchestration daemon"
+placement = "split"
+command = ["./pika-go", "daemon"]

@@ -20,6 +20,10 @@ _Avoid_: Target copy, original
 An immutable definition of cases, metrics, measurement procedure, correctness requirements, and stopping conditions proposed for the Optimization.
 _Avoid_: Baseline draft, config version
 
+**Repository Snapshot**:
+The immutable Git commit containing the complete repository state submitted with a Baseline Revision. It is distinct from both Definition identity and the earlier Development Baseline.
+_Avoid_: Baseline commit, Definition SHA, Development Baseline
+
 **Baseline Verification**:
 The independent evaluation of one Baseline Revision that either accepts it or requests a new revision.
 _Avoid_: Review, smoke test
@@ -57,15 +61,23 @@ _Avoid_: Cancel turn, shutdown
 ## Agent Contracts
 
 **Role**:
-A static contract defining one kind of Work, its allowed operations, completion rule, and instruction selection.
+A static contract defining one kind of Work, its allowed operations, completion rule, Role System Prompt, and User Instructions selection.
 _Avoid_: Agent configuration, provider
 
-**Instruction Profile**:
-A user-editable Markdown instruction variant selected by a Role for a particular kind of Work.
-_Avoid_: Dynamic role, guidance record
+**Role System Prompt**:
+Pika-owned immutable policy for one Role or Follow-up target kind. It is product behavior and is not user-editable.
+_Avoid_: Instructions, Instruction Profile, guidance
+
+**Dynamic System Context**:
+A Session-frozen projection of committed Work identities appended to a Role System Prompt by Pika.
+_Avoid_: User Instructions, live status, guidance
+
+**User Instructions**:
+An empty-by-default, user-editable Markdown overlay that can add requirements for future Agent Sessions without replacing Role policy.
+_Avoid_: System Prompt, Instruction Profile, guidance record
 
 **Agent Configuration**:
-The provider, executable kind, model, and launch settings used to create an Agent Session. Multiple Instruction Profiles may share one Agent Configuration.
+The provider, executable kind, model, and launch settings used to create an Agent Session. Multiple Role System Prompts and User Instructions selections may share one Agent Configuration.
 _Avoid_: Role, instructions
 
 **Agent Session**:

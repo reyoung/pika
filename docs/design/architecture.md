@@ -80,7 +80,7 @@ The daemon reconciles these authorities; it never collapses them. For example, `
 ### User
 
 - Steer the live coding agent directly in its Herdr pane.
-- Edit durable Role instructions with `$EDITOR`.
+- Edit durable per-Role user instruction overlays with `$EDITOR`.
 - Request an allowed Back-off, cancel one Work, inspect status, or request graceful shutdown from the control shell.
 
 ## 4. Deep module interfaces
@@ -134,18 +134,18 @@ The daemon:
 
 1. Requires Herdr's plugin config/state paths and current Workspace context.
 2. Opens or creates the instance SQLite database in the plugin state directory.
-3. Reuses a valid `pika_instance` already bound to the Workspace, or chooses a new instance ID for an unbound Workspace, then listens at `/tmp/pika-go-$UID/<instance>.sock` with user-only permissions.
-4. Publishes or refreshes `pika_instance=<instance>` in Herdr Workspace metadata.
-5. Subscribes to Herdr runtime events, then reads a snapshot to close the bootstrap gap.
-6. Reconciles persisted desired Work with live panes.
-7. Accepts CLI, hook, and MCP proxy traffic.
+3. Reuses a valid `pika_instance` already bound to the Workspace, or chooses a new instance ID for an unbound Workspace.
+4. Publishes or refreshes `pika_instance=<instance>` in Herdr Workspace metadata and constructs the runtime adapters.
+5. Binds and starts serving `/tmp/pika-go-$UID/<instance>.sock` with user-only permissions. Health and MCP transport are reachable before startup reconciliation may prompt an Agent.
+6. Reads a Herdr snapshot, retires every prior active Session that still owns non-terminal Work, and dispatches the ordered close/fresh-start recovery effects. A Session whose terminal Work already committed remains available to its committed close effect.
+7. Subscribes to Herdr runtime events with a snapshot bootstrap to close the subscription gap, then accepts the steady-state scheduling loop.
 
 ### `pika-go init`
 
 `init` runs in the shell pane that will become the Baseline Agent pane:
 
 1. Discover the Workspace and daemon socket through Herdr metadata.
-2. Validate the repository and initialize Pika configuration, SQLite domain state, Git workspaces, instructions, and provider overlays.
+2. Validate the repository and initialize Pika configuration, SQLite domain state, Git workspaces, empty user-instruction overlays, and provider overlays.
 3. Send the caller Pane ID to the daemon.
 4. Exit, returning that pane to its shell prompt.
 5. The daemon waits until Herdr reports an available shell and starts a fresh Baseline Agent in the same pane.
@@ -160,7 +160,7 @@ The Work projector is pure: it derives runnable Work from committed domain state
 
 ```text
 Baseline Draft --terminal MCP--> Baseline Verification
-Baseline Verification --accepted--> Iteration scheduling
+Baseline Verification --accepted clean Repository Snapshot--> Iteration scheduling
 Baseline Verification --rejected--> new Baseline Revision
 Iteration Round --terminal MCP--> Integration FIFO
 Integration --terminal MCP--> Best decision, then more Iteration
@@ -186,7 +186,11 @@ Pika does not proxy steering. The user types directly into the Codex/OpenCode/Cu
 
 ### Editing instructions
 
-`pika-go edit-instruction <name>` opens the selected Markdown file with `$EDITOR`. Changes affect newly created Agent Sessions; they do not rewrite a frozen activation already running.
+`pika-go edit-instruction <name>` opens the selected empty-by-default user overlay with `$EDITOR`. It cannot edit the binary-owned System Prompt. Changes affect newly created Agent Sessions; they do not rewrite a frozen activation already running.
+
+### Agent activation
+
+Before starting a Session, the daemon renders and freezes three layers: the binary-owned Role System Prompt, dynamic System Context from committed Symphony state, and the non-empty user instruction overlay. Codex receives that value as `developer_instructions` through the instance wrapper. Herdr prompt injection is reserved for the short kickoff User Turn and subsequent human/Follow-up messages; it is not used to emulate a System Prompt.
 
 ### Back-off
 
@@ -217,7 +221,7 @@ After an eligible Agent turn stops without a terminal operation:
 1. Persist the incomplete Turn and arm a configurable pane inactivity deadline; default `5m`.
 2. Reset the deadline when a subscribed `pane.updated` event is associated with the target pane.
 3. At the deadline, reserve one Follow-up Request unless the Work became terminal or exhausted its policy.
-4. Start a fresh Follow-up Agent Session using the shared Follow-up Agent Configuration and the target-specific Instruction Profile.
+4. Start a fresh Follow-up Agent Session using the shared Follow-up Agent Configuration, target-specific System Prompt, dynamic target context, and matching user overlay.
 5. The Follow-up Agent calls `submit_followup_message`.
 6. If still current, the daemon sends the message to the target Agent with Herdr `agent.prompt`.
 
@@ -237,9 +241,9 @@ On daemon restart or runtime loss:
 
 1. SQLite supplies desired non-terminal Work and immutable history.
 2. Herdr snapshot supplies live panes, processes, statuses, and session references.
-3. Pika matches only explicit persisted Pane Bindings; a reused name or Pane ID is insufficient.
-4. An incompatible, missing, or abandoned binding is closed or marked lost according to ownership.
-5. Pika creates a fresh Agent Session with a Recovery Context Bundle.
+3. Every Agent Session left active by the previous daemon is retired; its grant is revoked and its explicit persisted Pane Binding is used only to close the Pika-owned old pane, never to resume the provider session.
+4. The durable outbox orders that old-Session close before replacement start. A missing old pane makes close idempotently successful; a close failure blocks the fresh start rather than allowing two live owners of one Work.
+5. Pika creates a fresh Agent Session with a newly frozen Recovery Context Bundle. Within one continuously running daemon, ordinary `pane.updated` snapshots may still update a moved pane's binding without replacing the Session.
 
 Provider session IDs are retained in the journal but never used to resume. Switching from Codex to another configured coding agent during recovery is allowed if the target Role's required capability level is satisfied.
 
@@ -251,7 +255,8 @@ Provider session IDs are retained in the journal but never used to resume. Switc
 2. Keep existing Agent Sessions and MCP endpoints alive.
 3. Permit Follow-up needed to help an active Agent reach its terminal operation.
 4. As each Agent calls its terminal MCP, perform the normal transition and normal pane close, but do not start another primary stage.
-5. Exit only after all child Agents have exited through their normal lifecycle and state is flushed.
+5. Remain reachable while any pending Work, undispatched runtime effect, or active Agent Session exists.
+6. After all three sets are empty, flush state, remove the Unix socket, and exit automatically.
 
 Shutdown does not send interrupt keys, cancel turns, or forcibly close child Agent panes. Consequently it may wait indefinitely for an Agent or user. Closing the daemon pane directly is a crash, not graceful shutdown; the next daemon start reconciles the remaining runtime.
 

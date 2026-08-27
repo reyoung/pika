@@ -24,11 +24,13 @@ Pika-Go is a Herdr plugin for long-running automatic optimization. A visible `pi
 ## Documents
 
 - [Architecture](architecture.md): ownership, process topology, interfaces, lifecycle, and recovery.
+- [Incremental development plan](development-plan.md): executable vertical slices, module seams, and phase exit gates.
 - [State machines](state-machine.md): Baseline, Attempt, Integration, Follow-up, cancellation, and shutdown transitions.
 - [Protocols](protocols.md): CLI/daemon, MCP, Herdr socket, hooks, identity, and idempotency contracts.
-- [Role contracts](role-contracts.md): static Roles, instruction files, MCP catalogs, and completion rules.
+- [Role contracts](role-contracts.md): static immutable System Prompts, dynamic activation context, user instruction overlays, MCP catalogs, and completion rules.
 - [Configuration](configuration.md): initialization, Agent settings, instruction editing, provider overlays, and paths.
 - [Storage](storage.md): SQLite ownership, conceptual schema, journaling, and retention.
+- [Release operations](../release.md): archive verification, Herdr linking, online backup, and upgrade procedure.
 - [Runtime capability research](research/runtime-capabilities.md): versioned primary-source evidence.
 - [Domain language](../../CONTEXT.md): canonical project terminology.
 
@@ -38,9 +40,9 @@ Pika-Go is a Herdr plugin for long-running automatic optimization. A visible `pi
 2. The daemon listens only on a Unix socket and publishes a short instance identifier in Herdr Workspace metadata.
 3. Herdr owns runtime observation; Pika and terminal MCP own domain state.
 4. Every recovery starts a fresh Agent Session, even if Herdr or a provider exposes a native session ID.
-5. Roles and scheduling are static. Users change Markdown instructions with `$EDITOR` and use declared `back-off` transitions when the workflow must move earlier.
+5. Roles, System Prompts, and scheduling are static. Users append optional Markdown instructions with `$EDITOR` and use declared `back-off` transitions when the workflow must move earlier.
 6. Baseline, Baseline Verification, and Integration are single-concurrency; Iteration concurrency is configurable; Integration is FIFO.
-7. Follow-up is a dedicated Role with one Agent Configuration and multiple Instruction Profiles.
+7. Follow-up is a dedicated Role with one Agent Configuration, multiple target-specific System Prompts, and matching user instruction overlays.
 8. Codex hooks capture session/turn/message/tool data. All observable shell and tool output is kept in SQLite.
 9. Follow-up inactivity defaults to five minutes and is reset from best-effort Herdr pane activity. `pane.updated` is deliberately accepted despite not being a strict human-input signal.
 10. Graceful daemon shutdown drains existing Agents and never kills them merely to make shutdown finish.

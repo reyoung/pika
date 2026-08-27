@@ -1,0 +1,152 @@
+package herdr
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+type Runtime struct {
+	client *Client
+}
+
+func NewRuntime(client *Client) *Runtime { return &Runtime{client: client} }
+
+type Agent struct {
+	Name             *string `json:"name,omitempty"`
+	Agent            *string `json:"agent,omitempty"`
+	AgentStatus      string  `json:"agent_status"`
+	InteractiveReady bool    `json:"interactive_ready"`
+	PaneID           string  `json:"pane_id"`
+	TerminalID       string  `json:"terminal_id"`
+	WorkspaceID      string  `json:"workspace_id"`
+	TabID            string  `json:"tab_id"`
+}
+
+type StartSpec struct {
+	Name      string
+	Kind      string
+	PaneID    string
+	Arguments []string
+	TimeoutMS uint64
+}
+
+func (r *Runtime) ReportInstance(ctx context.Context, workspaceID, instanceID string) error {
+	if workspaceID == "" || instanceID == "" {
+		return errors.New("workspace and instance IDs are required")
+	}
+	return r.client.Call(ctx, "workspace.report_metadata", map[string]any{
+		"workspace_id": workspaceID,
+		"source":       "pika-go",
+		"tokens":       map[string]string{"pika_instance": instanceID},
+	}, nil)
+}
+
+func (r *Runtime) SplitPane(ctx context.Context, targetPaneID, direction, cwd string) (Pane, error) {
+	if direction != "right" && direction != "down" {
+		return Pane{}, fmt.Errorf("unsupported split direction %q", direction)
+	}
+	params := map[string]any{"target_pane_id": targetPaneID, "direction": direction, "focus": false}
+	if cwd != "" {
+		params["cwd"] = cwd
+	}
+	var result struct {
+		Pane Pane `json:"pane"`
+	}
+	if err := r.client.Call(ctx, "pane.split", params, &result); err != nil {
+		return Pane{}, err
+	}
+	return result.Pane, nil
+}
+
+func (r *Runtime) Start(ctx context.Context, spec StartSpec) (Agent, error) {
+	if spec.Name == "" || spec.Kind == "" || spec.PaneID == "" {
+		return Agent{}, errors.New("agent name, kind, and pane ID are required")
+	}
+	arguments := spec.Arguments
+	if arguments == nil {
+		arguments = []string{}
+	}
+	params := map[string]any{"name": spec.Name, "kind": spec.Kind, "pane_id": spec.PaneID, "args": arguments}
+	if spec.TimeoutMS != 0 {
+		params["timeout_ms"] = spec.TimeoutMS
+	}
+	var result struct {
+		Agent Agent `json:"agent"`
+	}
+	if err := r.client.Call(ctx, "agent.start", params, &result); err != nil {
+		return Agent{}, err
+	}
+	timeout := 30 * time.Second
+	if spec.TimeoutMS != 0 {
+		timeout = time.Duration(spec.TimeoutMS) * time.Millisecond
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		agent, err := r.GetAgent(waitCtx, spec.PaneID)
+		if err == nil {
+			if agent.AgentStatus == "blocked" {
+				return Agent{}, fmt.Errorf("agent %s is blocked during startup", spec.Name)
+			}
+			if agent.InteractiveReady {
+				return agent, nil
+			}
+		}
+		select {
+		case <-waitCtx.Done():
+			return Agent{}, fmt.Errorf("wait for agent %s readiness: %w", spec.Name, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r *Runtime) GetAgent(ctx context.Context, target string) (Agent, error) {
+	var result struct {
+		Agent Agent `json:"agent"`
+	}
+	if err := r.client.Call(ctx, "agent.get", map[string]string{"target": target}, &result); err != nil {
+		return Agent{}, err
+	}
+	return result.Agent, nil
+}
+
+func (r *Runtime) Prompt(ctx context.Context, target, message string) (Agent, error) {
+	if target == "" || message == "" {
+		return Agent{}, errors.New("agent target and message are required")
+	}
+	var result struct {
+		Agent Agent `json:"agent"`
+	}
+	if err := r.client.Call(ctx, "agent.prompt", map[string]any{"target": target, "text": message}, &result); err != nil {
+		return Agent{}, err
+	}
+	return result.Agent, nil
+}
+
+func (r *Runtime) GetPane(ctx context.Context, paneID string) (Pane, error) {
+	var result struct {
+		Pane Pane `json:"pane"`
+	}
+	if err := r.client.Call(ctx, "pane.get", map[string]string{"pane_id": paneID}, &result); err != nil {
+		return Pane{}, err
+	}
+	return result.Pane, nil
+}
+
+func (r *Runtime) ClosePane(ctx context.Context, paneID string) error {
+	if paneID == "" {
+		return errors.New("pane ID is required")
+	}
+	return r.client.Call(ctx, "pane.close", map[string]string{"pane_id": paneID}, nil)
+}
+
+func (r *Runtime) SendInput(ctx context.Context, paneID, text string, keys []string) error {
+	if paneID == "" || (text == "" && len(keys) == 0) {
+		return errors.New("pane ID and input are required")
+	}
+	return r.client.Call(ctx, "pane.send_input", map[string]any{"pane_id": paneID, "text": text, "keys": keys}, nil)
+}

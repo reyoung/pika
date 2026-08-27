@@ -34,7 +34,7 @@ $HERDR_PLUGIN_STATE_DIR/
     worktrees/
 ```
 
-Configuration and instructions are user-owned mutable inputs. SQLite and generated evidence are runtime state. Reinstalling the plugin must preserve both directories.
+Configuration and instruction overlays are user-owned mutable inputs. Every installed `instructions/*.md` file is empty by default; it exists only so the user can append Role-specific requirements. The canonical Role System Prompts are plugin-owned resources embedded in the `pika-go` binary and are never copied into the config directory. SQLite and generated evidence are runtime state. Reinstalling the plugin must preserve both writable directories.
 
 ## 2. Example configuration
 
@@ -96,9 +96,11 @@ description = "Known-correct implementation"
 
 Exact defaults beyond the accepted five-minute inactivity timeout remain implementation choices and must be printed by `pika-go init` before commit.
 
+If `config.toml` already exists, init treats it as user-owned input: it validates version and repository identity, preserves the file byte-for-byte, and rejects invalid scheduler, Follow-up, or Role Agent fields. `iteration_concurrency` and `max_pending_attempts` are copied into the durable Optimization during init; later edits affect only a future Optimization rather than silently changing the running scheduler.
+
 ## 3. Static Agent selection
 
-Each core Role has one default Agent Configuration. Follow-up has one shared Agent Configuration even though it has three Instruction Profiles.
+Each core Role has one default Agent Configuration. Follow-up has one shared Agent Configuration even though it has three target-specific System Prompts and three matching user-instruction overlays.
 
 Commands that create a fresh Session may accept `--agent <configured-name>` as an explicit one-shot override, including Back-off. There is no automatic provider fallback chain. If launch fails, the Work remains recoverable and the error is surfaced.
 
@@ -116,7 +118,7 @@ It configures:
 - Iteration concurrency and queue limits;
 - reference projects;
 - stop conditions and measurement defaults;
-- initial instruction files;
+- empty per-Role instruction overlay files;
 - provider hook/profile installation;
 - SQLite and Git workspace initialization.
 
@@ -126,16 +128,22 @@ Successful init commits configuration, binds the caller pane, exits the CLI, and
 
 ## 5. Instruction editing and freezing
 
-Instruction files are copied from plugin defaults only when absent. Upgrades never overwrite user edits silently.
+Instruction overlay files are created empty only when absent. Upgrades never overwrite user edits silently. `pika-go edit-instruction <name>` edits only this overlay; it cannot display or modify the embedded Role System Prompt.
 
 At Agent Session creation, Pika records:
 
 - instruction logical name;
 - absolute source path;
-- content digest;
-- frozen rendered activation digest.
+- user-instruction content and digest, including the valid empty value;
+- the complete rendered System Prompt and digest.
 
-Editing a file affects only later Sessions. A recovery Session always reads the latest instruction file while also receiving immutable prior Work facts; this is an intentional opportunity for the operator to improve instructions between Sessions.
+The rendered System Prompt has three ordered layers:
+
+1. immutable Role policy embedded in the binary;
+2. daemon-rendered dynamic System Context from committed Work state;
+3. the current user instruction overlay, appended only when non-empty.
+
+The dynamic layer includes the exact Work/generation, Baseline Revision, Definition digest, submitted Repository Snapshot SHA, assigned repository, terminal MCP, and Role-specific Attempt/Best/Integration/Follow-up identities. A successor Baseline Draft also receives the predecessor Revision's failure kind, reason, and requested changes; full verification evidence remains behind `get_context`. Larger and more volatile facts remain behind `get_context`. The complete three-layer prompt is frozen with the Agent Session. Editing a file affects only later Sessions; retrying the same Session reuses its stored prompt byte-for-byte, while a fresh recovery Session reads the latest overlay and current committed Work facts.
 
 ## 6. Codex managed profile
 
@@ -145,7 +153,9 @@ Initialization creates or updates only:
 $CODEX_HOME/pika-go-managed.config.toml
 ```
 
-It never clones `CODEX_HOME` and does not rewrite the user's base config or Herdr `hooks.json` entry. The managed profile supplies Pika MCP definitions and inline `[hooks]` tables, and is selected with `--profile pika-go-managed` for Pika-launched Codex Agents. Codex loads these hooks additively with hooks from other active configuration layers.
+It never clones `CODEX_HOME` and does not rewrite the user's base config or Herdr `hooks.json` entry. The managed profile supplies Pika MCP definitions, explicit `PIKA_GO_SOCKET`/`PIKA_MCP_GRANT` forwarding, Role-catalog MCP auto-approval, and inline `[hooks]` tables. It is selected with `--profile pika-go-managed` for Pika-launched Codex Agents. The instance wrapper also passes the frozen per-Session prompt through Codex `developer_instructions` and sets `--ask-for-approval never` so an autonomous Work cannot block on a shell approval; the Codex `workspace-write` sandbox remains active and is not widened to `danger-full-access`. Role-required Git metadata writes use `commit_changes` or `apply_best_update` in Pika's grant-scoped control plane. Herdr `agent.prompt` carries only the short kickoff User Turn and later Follow-up/User steering. Codex loads these hooks additively with hooks from other active configuration layers.
+
+Production launch never bypasses first-use project or hook trust. Tests may set a test-only bypass while using a disposable trusted repository; that setting is not persisted in managed configuration.
 
 The update is atomic and preserves the previous Pika-owned file as a recoverable backup until validation succeeds. If another product already owns the reserved profile path, init fails with a precise conflict rather than merging unknown content.
 
@@ -162,7 +172,7 @@ Before committing init or configuration edits, validate:
 - required executables exist;
 - concurrency and Follow-up counts are bounded positive integers;
 - duration values parse and are not negative;
-- every static Instruction Profile exists and is readable;
+- every static embedded Role System Prompt is non-empty and its matching instruction overlay exists and is readable;
 - Codex profile ownership and hook feature are valid;
 - automatic Follow-up is enabled only for capable provider adapters;
 - repository and Git preconditions are safe.

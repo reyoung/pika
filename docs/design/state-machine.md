@@ -47,9 +47,12 @@ stateDiagram-v2
 Rules:
 
 - A submitted Baseline Revision is immutable.
-- Verification is a fresh Agent Session with a distinct Role and instruction file.
-- Rejection records failure kind, reason, and requested changes, then automatically schedules a new draft revision.
-- Acceptance freezes the case/metric/evidence contract used by Attempts.
+- Verification is a fresh Agent Session with a distinct immutable Role System Prompt and a separate user-instruction overlay.
+- Rejection records failure kind, reason, requested changes, and evidence, then automatically schedules a new draft revision whose runtime projection exposes those predecessor facts.
+- Baseline Revision is the durable Definition identity. Draft and Verification Work/Session IDs are deliberately distinct execution identities and are not compared for Definition validity.
+- Submission freezes the Definition bytes/digest and a separate clean Repository Snapshot SHA; a Definition is never required to contain the commit that contains itself.
+- Verification establishes Development Baseline measurements; improvement gates and stop conditions apply to later Candidates, not to the Development Baseline relative to itself.
+- Acceptance requires unchanged HEAD plus a clean worktree, creates Best revision 0 from the frozen Repository Snapshot, and freezes the case/metric/evidence contract used by Attempts.
 
 ## 3. Attempt and Iteration Round
 
@@ -80,7 +83,7 @@ Rules:
 
 ## 4. Integration and Best mutation
 
-Integration is a two-step domain protocol:
+Integration is a three-step protocol with two durable domain mutations around one idempotent Git application:
 
 ```text
 get_context
@@ -91,7 +94,7 @@ prepare_best_update
     ├── rejected: no Git mutation intent
     └── intent issued
             ↓
-        apply exact Git mutation
+        apply_best_update
             ↓
         finish_integration
             ├── accepted: verify Git and advance Best atomically
@@ -118,6 +121,8 @@ stateDiagram-v2
 ```
 
 Herdr `working`, `blocked`, `idle`, `done`, and `unknown` are observations attached to these states, not substitutes for them.
+
+A daemon process restart treats every persisted `Preparing`, `Running`, or `IdleIncomplete` Session as `Lost`, even if Herdr still reports its process. The old Pika-owned pane is closed through an ordered runtime effect before the replacement start effect. Provider-native session identity is journal evidence only and is never a resume key.
 
 ## 6. Follow-up Request
 
@@ -159,6 +164,8 @@ The supplied `-m` message is persisted and included in the successor Context Bun
 ## 8. Cancellation and shutdown
 
 `cancel-work` is a Work transition and may close the selected Work's pane. `shutdown` is an Optimization transition and never cancels or kills active children.
+
+The daemon's drain barrier is stricter than “no visible child pane”: it requires no pending Work, no pending or dispatching runtime effect, and no starting or running Agent Session. A recorder-only or damaged runtime may therefore remain draining indefinitely. When the barrier becomes true, the daemon stops accepting control requests, removes its Unix socket, and exits normally.
 
 During `Draining`:
 

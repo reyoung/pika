@@ -39,6 +39,7 @@ Initial endpoints:
 | --- | --- |
 | `GET /v1/health` | daemon liveness and protocol version |
 | `GET /v1/status` | Optimization, active Work, queue, pane, session, and drain view |
+| `POST /v1/backups` | create and validate a new online SQLite snapshot at an absolute path |
 | `POST /v1/init` | initialize and bind the caller pane |
 | `POST /v1/baseline-drafts` | explicitly start a fresh Baseline Draft from an allowed paused state |
 | `POST /v1/back-offs` | apply the allowed earlier-phase transition with a message |
@@ -46,6 +47,8 @@ Initial endpoints:
 | `POST /v1/shutdown` | enter graceful draining |
 | `POST /v1/provider-events/{provider}` | ingest one provider hook event |
 | `POST /mcp` | role-scoped MCP JSON-RPC endpoint used by `mcp-proxy` |
+
+Every control response carries `X-Pika-Protocol-Version`. The CLI rejects a missing or different version before decoding or applying a response; `/v1/health` repeats the same version in its JSON body. Backup destinations must be absolute and absent. Backup is an operational snapshot and does not mutate the Optimization revision.
 
 Response errors have stable codes:
 
@@ -61,6 +64,8 @@ Response errors have stable codes:
 
 Core codes include `daemon_not_initialized`, `revision_conflict`, `invalid_transition`, `work_not_found`, `work_terminal`, `work_conflict`, `forbidden`, `idempotency_conflict`, `runtime_unavailable`, `agent_lost`, `draining`, and `state_corrupt`.
 
+`POST /v1/shutdown` acknowledges the durable transition; it does not mean the process has already exited. Clients may continue reading status while Pika waits for pending Work, runtime effects, and Agent Sessions. Socket disappearance is the observable successful completion of graceful shutdown.
+
 ## 3. CLI
 
 The public CLI is a thin client of the control API except for commands that intentionally edit a local file.
@@ -73,6 +78,7 @@ pika-go draft-baseline [--agent NAME]
 pika-go back-off -m MESSAGE [--agent NAME]
 pika-go cancel-work WORK_ID
 pika-go shutdown
+pika-go backup --output /absolute/path/to/snapshot.db
 pika-go edit-instruction NAME
 ```
 
@@ -83,6 +89,8 @@ pika-go mcp-proxy
 pika-go hook codex
 pika-go hook cursor
 ```
+
+`pika-go apply-best-update` remains an operational recovery/diagnostic entrypoint for an already-issued bounded Git Intent. Normal Integration Agents call the grant-scoped `apply_best_update` MCP instead, because their ordinary shell sandbox is not a control-plane transport.
 
 `edit-instruction` resolves the instance through Herdr, validates `NAME` against the static catalog, then invokes `$EDITOR` directly. It does not send the file through the daemon and does not create a dynamic guidance record.
 
@@ -166,11 +174,17 @@ The coding agent starts `pika-go mcp-proxy` as a stdio MCP server. The proxy:
 
 The proxy contains no domain logic. The daemon owns tool discovery, input validation, Role authorization, file contracts, idempotency, and domain transactions.
 
-Mutating tools require `idempotency_key`. Pika hashes the canonical request:
+Domain-mutating tools require `idempotency_key`. Pika hashes the canonical request:
 
 - same key and same request returns the original receipt;
 - same key and different request returns `idempotency_conflict`;
 - transport loss after commit is recovered by retrying the same key.
+
+Integration uses three explicit MCP steps: `prepare_best_update` commits a bounded Intent, `apply_best_update` idempotently applies only that Intent inside the daemon control plane, and terminal `finish_integration` verifies the Git postcondition before advancing SQLite Best. `apply_best_update` uses the unique Intent ID as its idempotency identity and rejects an Intent not owned by the active Integration grant. This avoids depending on a coding Agent's ordinary shell sandbox for Unix-socket access.
+
+Baseline Draft and Iteration use non-terminal `commit_changes` for the same sandbox reason. The tool is available only to those active Role grants, accepts a non-empty explicit list of repository-relative literal paths, rejects `.git`, path escapes, and any pre-existing staged change outside the authorized path set, and writes a Work-scoped idempotency/request digest into Git trailers. It never silently absorbs unrelated user index state. A lost response returns the same HEAD on retry; the same key with a different message/path set fails. The returned `commit_sha`, `clean`, and status are Git evidence for the terminal Role operation.
+
+`submit_baseline_definition` accepts only a clean repository. The Tool Application observes its HEAD and includes that Repository Snapshot SHA in the same idempotent domain command that stores the Definition bytes and digest. The two identities are deliberately separate: a tracked Definition cannot contain the SHA of the commit that contains itself. Before `finish_baseline_verification(accepted)` creates Best revision 0, Pika re-reads the source snapshot and requires both the same HEAD and an empty worktree status. A committed or uncommitted change therefore forces rejection or a successor Baseline Revision rather than silently changing the accepted snapshot.
 
 Large domain evidence may be submitted by relative file path. The daemon resolves it beneath the Work root, rejects symlink/path escapes, reads a stable snapshot, and records path, size, and digest with the result.
 
@@ -214,7 +228,9 @@ Pika launches:
 codex --profile pika-go-managed ...
 ```
 
-The base user configuration, authentication, Herdr hook, and other user hooks still load. The Pika profile supplies only Pika MCP integration, required feature flags, and inline `[hooks]` tables that invoke `pika-go hook codex`. Matching hooks from the base config and profile are additive. The profile name is reserved; Role Agent configuration cannot supply a second `--profile` argument.
+The base user configuration, authentication, Herdr hook, and other user hooks still load. The Pika profile supplies only Pika MCP integration, required feature flags, and inline `[hooks]` tables that invoke `pika-go hook codex`. Its MCP entry explicitly forwards `PIKA_GO_SOCKET` and `PIKA_MCP_GRANT`; without that allowlist the stdio child cannot reach or authenticate to the daemon. Pika auto-approves only the tools present in the Role-scoped grant catalog.
+
+The instance wrapper adds the Session-frozen Pika System Prompt as a per-launch `developer_instructions` override and launches Codex with `--ask-for-approval never`. That prevents an unattended autonomous Work from waiting forever on a shell approval; it does not disable or widen the configured `workspace-write` sandbox, so denied shell operations still fail. Git metadata commits and Best application use scoped MCP control-plane tools rather than attempting to escape that sandbox. Matching hooks from the base config and profile are additive. The profile name is reserved; Role Agent configuration cannot supply a second `--profile` argument.
 
 Codex may require the user to trust the new hook on first launch. Pika never bypasses hook trust automatically.
 

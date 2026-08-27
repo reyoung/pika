@@ -1,8 +1,12 @@
 # Role Contracts
 
-Roles are static. Each Role freezes its instruction content, Context Bundle, MCP catalog, Work identity, and completion rule when an Agent Session is created.
+Roles are static. Each Agent Session freezes a complete developer-level System Prompt, MCP catalog, Work identity, and completion rule when it is created.
 
-## 1. Instruction files
+## 1. System Prompt and instruction layers
+
+The canonical System Prompt for each Role is compiled into the `pika-go` binary. It is product behavior, not user configuration, and cannot be changed with `$EDITOR`. At activation the daemon appends a dynamic System Context containing committed identities such as Work/generation, repository, Baseline, Attempt/Round/Base/Best, Integration Candidate, or Follow-up target/sequence/deadline.
+
+The user customization surface is a separate set of empty-by-default Markdown overlays:
 
 ```text
 instructions/
@@ -16,9 +20,9 @@ instructions/
     integration.md
 ```
 
-Core Roles each have their own default Agent Configuration. Follow-up is one Role with one shared Agent Configuration and three target-specific Instruction Profiles.
+Core Roles each have their own default Agent Configuration. Follow-up is one Role with one shared Agent Configuration, three target-specific immutable System Prompts, and three matching instruction overlays.
 
-Instruction files are ordinary Markdown and are the durable user customization surface. They are edited with:
+Instruction files contain only user additions. They are ordinary Markdown and are edited with:
 
 ```bash
 pika-go edit-instruction baseline
@@ -30,9 +34,23 @@ pika-go edit-instruction follow-up/iteration
 pika-go edit-instruction follow-up/integration
 ```
 
+For a new Session the ordering is: immutable Role System Prompt, frozen dynamic System Context, then non-empty user additions. A user edit affects only later Sessions. The same Session always receives the byte-identical stored prompt on dispatch retry.
+
+The dynamic layer is rendered from a single committed `RuntimeWork` projection. It is not an instruction file and is not user-editable:
+
+| Session | Frozen dynamic fields before the first tool call |
+| --- | --- |
+| All Roles | Optimization ID/status/revision, Work ID/generation/Role, Baseline ID/number/status/Definition digest, frozen Repository Snapshot SHA when submitted, assigned repository, terminal MCP |
+| Successor Baseline Draft | predecessor Baseline Revision ID plus rejected/superseded verification failure kind, reason, and requested changes; complete evidence remains available through `get_context` |
+| Iteration | Attempt ID, Round, kind, Base SHA, current Best SHA/revision, Back-off message when present |
+| Integration | Integration ID/FIFO/status, Attempt ID, Candidate/Base SHA, expected Best, current Best/revision, existing Git Intent ID/state when present |
+| Follow-up | Request and target Work/Role, sequence, inactivity deadline, target-message budget, generator attempt/max; target Role identities are available through `get_context` |
+
+This preserves the useful runtime-rendered part of the legacy prompts without turning it into mutable `instructions.md`. Large Baseline JSON, current global queues, conversation history, and Tool/Shell payloads are intentionally not duplicated into every prompt; `get_context` returns their current bounded projection. A replacement Session is always new and therefore receives a newly frozen dynamic projection, while a dispatch retry of the same Session reuses the stored bytes.
+
 ## 2. Shared contract
 
-Every Role instruction must state:
+Every complete rendered System Prompt must state:
 
 - exact Work identity and Git root;
 - domain facts that are frozen and facts that may change;
@@ -43,7 +61,7 @@ Every Role instruction must state:
 - that the user may intervene directly in the terminal;
 - that another session may continue from the journal if this session is lost.
 
-`get_context` returns bounded structured facts and absolute paths to larger context files. It does not return secrets or unrelated Work.
+The immutable Role policy defines these rules and identity types; the dynamic System Context supplies the exact per-Session values needed before the first tool call. `get_context` returns bounded structured facts, journal excerpts, and absolute paths to larger context files. It does not return secrets or unrelated Work.
 
 ## 3. Baseline Role
 
@@ -53,6 +71,7 @@ MCP catalog:
 
 ```text
 get_context
+commit_changes                     # non-terminal, scoped/idempotent Git commit
 submit_baseline_definition          # terminal
 ```
 
@@ -66,6 +85,10 @@ The submitted definition covers at least:
 - measurement environment and repeat policy;
 - stop conditions;
 - evidence paths and digests.
+
+The Definition is durably owned by its Baseline Revision. Its stored-byte digest identifies its content. Work and Agent Session IDs identify one execution only and must not be embedded as cross-Role validity requirements: the independent Verification necessarily has a different Work and Session. A successor Draft receives the prior verification failure fields and evidence rather than guessing why the predecessor was rejected. Repository commits use `commit_changes`; the Agent's ordinary shell does not need permission to write Git metadata.
+
+`submit_baseline_definition` freezes the clean repository HEAD as a separate Repository Snapshot SHA. The Definition may identify an earlier Development Baseline, but it must not attempt to contain the SHA of the commit that contains that same tracked Definition: that is self-referential. Verification receives both the Definition digest and Repository Snapshot SHA from committed dynamic context.
 
 The user may discuss and steer this Role directly. There is no automatic Baseline Follow-up and no separate Web review gate. Successful submission closes the draft Agent and starts Baseline Verification.
 
@@ -82,7 +105,11 @@ get_context
 finish_baseline_verification        # terminal: accepted | rejected
 ```
 
-The Role must not silently repair the submitted definition. A rejected result records concrete failure kind, evidence, reason, and requested changes. Acceptance creates the frozen Baseline Snapshot and initial Best.
+The Role must not silently repair the submitted definition. A rejected result records concrete failure kind, evidence, reason, and requested changes. Acceptance creates the initial Best from the already frozen Repository Snapshot SHA. The verifier rejects if repository HEAD drifted after submission.
+
+Verification treats the daemon's Definition digest as the identity of the stored JSON bytes. It does not materialize an inline Definition into the repository or compare that digest with an independently formatted file unless the Definition/artifact receipt explicitly declares the file as the submission source. The verifier must not reject a Baseline for repository dirtiness that its own temporary files created.
+
+Baseline Verification establishes Development Baseline measurements and proves that the frozen protocol can judge future Candidates. Candidate improvement thresholds and stop conditions do not apply to the Development Baseline itself; a zero improvement relative to itself is expected. They apply in Iteration and Integration. The Baseline is rejected only when the Development Baseline is incorrect, unmeasurable, incomplete, unstable or implausible, or when the declared gate cannot be computed from the evidence.
 
 This Role is Follow-up eligible.
 
@@ -96,12 +123,13 @@ MCP catalog:
 
 ```text
 get_context
+commit_changes                     # non-terminal, scoped/idempotent Git commit
 finish_iteration                    # terminal: candidate | rejected
 ```
 
 The Role may modify only its assigned workspace. It cannot update Best. It reads current Baseline, Best, relevant accepted/rejected history, Attempt hypothesis, Back-off message, and any stale-round recovery facts.
 
-Candidate submission includes correctness and performance evidence for the required case set plus the exact Git state. Rejection preserves what was tried and why. This Role is Follow-up eligible.
+Candidate submission includes correctness and performance evidence for the required case set plus the exact Git state. The Candidate SHA comes from `commit_changes`, which stages only explicit relative paths in the assigned Attempt worktree and reports whether it is clean. Rejection preserves what was tried and why. This Role is Follow-up eligible.
 
 Migration source in the sibling legacy checkout: `../pika/priv/v2/roles/iteration.ex`.
 
@@ -114,6 +142,7 @@ MCP catalog:
 ```text
 get_context
 prepare_best_update                 # non-terminal, returns a bounded Git intent
+apply_best_update                   # non-terminal, idempotently applies that intent in Pika
 finish_integration                  # terminal: accepted | rejected
 ```
 
@@ -122,7 +151,7 @@ The Role:
 - processes FIFO;
 - verifies the full required case set, regression guards, noise, and Git preconditions;
 - must not modify Best before a valid intent;
-- applies only the authorized Git mutation;
+- applies only the authorized Git mutation through the grant-scoped Pika MCP control plane, never by connecting to the daemon from an ordinary Agent shell;
 - supplies post-mutation Git evidence to `finish_integration`;
 - never pushes or changes a user source branch.
 
@@ -137,14 +166,15 @@ Purpose: read the target Work's current facts and Conversation Journal and produ
 MCP catalog:
 
 ```text
+get_context
 submit_followup_message              # terminal
 ```
 
-The activation provides read-only context paths and identifies the target kind, required terminal operation, Follow-up sequence, remaining budget, and generator attempt. The generator must not make the target Role's domain decision itself.
+The dynamic System Context identifies the target Work/Role, required generator operation, Follow-up sequence and inactivity deadline. `get_context` supplies the target's current domain state and bounded Conversation Journal. The generator must not make the target Role's domain decision itself.
 
 Instruction selection:
 
-| Target Role | Instruction Profile | Required target operation |
+| Target Role | System Prompt / instruction overlay | Required target operation |
 | --- | --- | --- |
 | Baseline Verification | `follow-up/baseline-verify.md` | `finish_baseline_verification` |
 | Iteration | `follow-up/iteration.md` | `finish_iteration` |
