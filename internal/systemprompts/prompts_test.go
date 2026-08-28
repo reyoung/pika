@@ -46,6 +46,9 @@ func TestRoleSystemPromptsAreEmbeddedAndMatchCurrentContracts(t *testing.T) {
 			if (test.logicalName == "baseline" || test.logicalName == "iteration") && !strings.Contains(prompt, "commit_changes") {
 				t.Fatalf("write-capable Role prompt omits scoped commit MCP: %q", prompt)
 			}
+			if test.logicalName == "iteration" && (!strings.Contains(prompt, "MERGE_HEAD") || !strings.Contains(prompt, "staged/unmerged")) {
+				t.Fatalf("Iteration prompt omits stale merge conflict recovery: %q", prompt)
+			}
 			if test.logicalName == "baseline" && (!strings.Contains(prompt, "Repository Snapshot SHA") || !strings.Contains(prompt, "自引用")) {
 				t.Fatalf("Baseline Draft prompt does not separate the frozen repository snapshot from Definition identity: %q", prompt)
 			}

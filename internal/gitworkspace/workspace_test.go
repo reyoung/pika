@@ -163,6 +163,70 @@ func TestRefreshCreatesNewRoundAndMergesBestWithoutRebase(t *testing.T) {
 	}
 }
 
+func TestRefreshLeavesMergeConflictsForIterationAgentAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	repository, baselineSHA := fixtureRepository(t)
+	workspace := gitworkspace.Workspace{Repository: repository, Root: filepath.Join(t.TempDir(), "worktrees")}
+	if _, err := workspace.EnsureBest(ctx, baselineSHA); err != nil {
+		t.Fatalf("ensure Best: %v", err)
+	}
+	old, err := workspace.CreateAttempt(ctx, "conflicting-stale-attempt", 1, baselineSHA)
+	if err != nil {
+		t.Fatalf("create stale attempt: %v", err)
+	}
+	writeFile(t, filepath.Join(old.Repository, "kernel.txt"), "candidate\n")
+	git(t, old.Repository, "add", "kernel.txt")
+	git(t, old.Repository, "commit", "-m", "stale candidate")
+	oldCandidate := strings.TrimSpace(git(t, old.Repository, "rev-parse", "HEAD"))
+
+	winner, err := workspace.CreateAttempt(ctx, "conflicting-winner", 1, baselineSHA)
+	if err != nil {
+		t.Fatalf("create winner: %v", err)
+	}
+	writeFile(t, filepath.Join(winner.Repository, "kernel.txt"), "winner\n")
+	git(t, winner.Repository, "add", "kernel.txt")
+	git(t, winner.Repository, "commit", "-m", "winner")
+	winnerSHA := strings.TrimSpace(git(t, winner.Repository, "rev-parse", "HEAD"))
+	intent, err := workspace.PrepareBestUpdate(ctx, "conflicting-winner-intent", baselineSHA, winnerSHA)
+	if err != nil {
+		t.Fatalf("prepare winner: %v", err)
+	}
+	bestSHA, err := workspace.ApplyBestUpdate(ctx, intent, "accept winner")
+	if err != nil {
+		t.Fatalf("apply winner: %v", err)
+	}
+
+	refreshed, err := workspace.RefreshFromBest(ctx, "conflicting-stale-attempt", 2, oldCandidate, bestSHA)
+	if err != nil {
+		t.Fatalf("refresh should hand merge conflicts to Iteration Agent: %v", err)
+	}
+	if got := strings.TrimSpace(git(t, refreshed.Repository, "rev-parse", "MERGE_HEAD")); got != bestSHA {
+		t.Fatalf("MERGE_HEAD = %s, want Best %s", got, bestSHA)
+	}
+	if got := strings.TrimSpace(git(t, refreshed.Repository, "diff", "--name-only", "--diff-filter=U")); got != "kernel.txt" {
+		t.Fatalf("unmerged paths = %q, want kernel.txt", got)
+	}
+	if replayed, err := workspace.RefreshFromBest(ctx, "conflicting-stale-attempt", 2, oldCandidate, bestSHA); err != nil || replayed.Repository != refreshed.Repository {
+		t.Fatalf("replay conflict preparation = %+v, %v", replayed, err)
+	}
+
+	writeFile(t, filepath.Join(refreshed.Repository, "kernel.txt"), "candidate plus winner\n")
+	committed, err := (gitworkspace.Workspace{Repository: refreshed.Repository, Root: workspace.Root}).CommitChanges(
+		ctx, "iteration-work", "resolve-stale-merge", "resolve stale Best merge", []string{"kernel.txt"})
+	if err != nil {
+		t.Fatalf("commit resolved merge through scoped operation: %v", err)
+	}
+	if !committed.Clean {
+		t.Fatalf("resolved merge is not clean: %+v", committed)
+	}
+	parents := strings.Fields(strings.TrimSpace(git(t, refreshed.Repository, "show", "-s", "--format=%P", committed.CommitSHA)))
+	if len(parents) != 2 || parents[0] != oldCandidate || parents[1] != bestSHA {
+		t.Fatalf("resolved merge parents = %v, want candidate %s and Best %s", parents, oldCandidate, bestSHA)
+	}
+}
+
 func TestAttemptIdentityCannotBecomeGitArgumentsOrPaths(t *testing.T) {
 	t.Parallel()
 

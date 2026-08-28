@@ -359,7 +359,28 @@ func (w Workspace) RefreshFromBest(ctx context.Context, attemptID string, round 
 	if err := validateSHA(bestSHA); err != nil {
 		return Round{}, fmt.Errorf("refresh Best: %w", err)
 	}
+	mergeHead, merging, err := w.currentMergeHead(ctx, created.Repository)
+	if err != nil {
+		return Round{}, fmt.Errorf("inspect stale Attempt merge state: %w", err)
+	}
+	if merging {
+		if mergeHead != bestSHA {
+			return Round{}, fmt.Errorf("stale Attempt is already merging %s, not current Best %s", mergeHead, bestSHA)
+		}
+		// A conflicting merge is the Iteration Agent's recoverable starting
+		// state. Returning it also makes a retried work.start_requested effect
+		// idempotent while MERGE_HEAD is present, including after the Agent has
+		// resolved every path but before it creates the merge commit.
+		return created, nil
+	}
 	if _, err := w.git(ctx, created.Repository, "merge", "--no-edit", "--no-ff", bestSHA); err != nil {
+		mergeHead, merging, stateErr := w.currentMergeHead(ctx, created.Repository)
+		if stateErr == nil && merging && mergeHead == bestSHA {
+			return created, nil
+		}
+		if stateErr != nil {
+			return Round{}, fmt.Errorf("merge Best into stale Attempt: %v; inspect preserved merge state: %w", err, stateErr)
+		}
 		return Round{}, fmt.Errorf("merge Best into stale Attempt; worktree preserved for recovery: %w", err)
 	}
 	head, err := w.git(ctx, created.Repository, "rev-parse", "HEAD")
@@ -368,6 +389,29 @@ func (w Workspace) RefreshFromBest(ctx context.Context, attemptID string, round 
 	}
 	created.HeadSHA = strings.TrimSpace(head)
 	return created, nil
+}
+
+func (w Workspace) currentMergeHead(ctx context.Context, repository string) (string, bool, error) {
+	path, err := w.git(ctx, repository, "rev-parse", "--git-path", "MERGE_HEAD")
+	if err != nil {
+		return "", false, err
+	}
+	path = strings.TrimSpace(path)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(repository, path)
+	}
+	contents, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	sha := strings.TrimSpace(string(contents))
+	if err := validateSHA(sha); err != nil {
+		return "", false, fmt.Errorf("invalid MERGE_HEAD: %w", err)
+	}
+	return sha, true, nil
 }
 
 func (w Workspace) PrepareBestUpdate(ctx context.Context, intentID, expectedBestSHA, candidateSHA string) (Intent, error) {
