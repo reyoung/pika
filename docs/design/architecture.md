@@ -11,12 +11,17 @@ Pika therefore remains an executable plugin using the public CLI/socket surface.
 
 ## 1. System boundary
 
-Pika-Go is a local workflow daemon embedded in a Herdr Workspace. It does not wrap the coding agent's terminal interaction: the user works directly in Herdr, while Pika observes, supplies MCP, persists facts, and schedules the next static Role.
+Pika-Go is a local workflow daemon bound to a durable Optimization Workspace and displayed through a replaceable Herdr Workspace. It does not wrap the coding agent's terminal interaction: the user works directly in Herdr, while Pika observes, supplies MCP, persists facts, and schedules the next static Role.
 
 ```text
-Herdr Workspace = one Optimization
+Optimization Workspace = one durable Optimization
 
 ┌─────────────────────────────────────────────────────────┐
+│ workspace.json / pika.toml / pika.db                    │
+│ repo/ / best/repo/ / attempts/.../repo                  │
+│ contexts/ / evidence/ / logs/ / runtime/                │
+│                                                         │
+│ Replaceable Herdr Workspace                             │
 │ daemon pane                                             │
 │   pika-go daemon                                        │
 │       │                                                 │
@@ -36,7 +41,7 @@ Herdr Workspace = one Optimization
 └─────────────────────────────────────────────────────────┘
 ```
 
-The common interactive layout may show the current Agent above a control shell, but layout is presentation. Domain identity never depends on a particular split or Pane ID.
+The common interactive layout may show the current Agent above a control shell, but layout is presentation. Domain identity comes from `workspace.json` and SQLite, never a Herdr workspace, split, tab, or Pane ID.
 
 ## 2. Two authorities
 
@@ -131,7 +136,9 @@ There is no dynamic `register_role`, `enqueue_work`, `steer_work`, or `append_gu
 
 ### `pika-go kick-off`
 
-The normal user entrypoint runs from an existing Herdr shell pane. It validates the repository and Herdr protocol, then verifies the active Herdr configuration before creating any layout. If native Agent restore is not explicitly disabled, `kick-off` shows the exact file and setting and asks for consent. Yes atomically changes only `session.resume_agents_on_restore`, preserves the file mode and other bytes, requires `server.reload_config` to return `applied`, and restores the original file if reload fails. No or unavailable input leaves the file untouched and creates no Workspace. Once preflight passes, `kick-off` creates a background Workspace rooted at that repository and opens the installed `symphony` plugin entrypoint as a split beside the new Workspace's root pane. The plugin host injects the stable config/state directories into the daemon pane. `kick-off` derives the new Workspace's bootstrap socket, waits for daemon health, sends a visible `pika-go init` command using its own absolute executable path to the root Pane, and focuses that Workspace, Tab, and Pane unless `--no-focus` was requested. Pinning the executable avoids a stale PATH installation. The init process receives the new Pane ID from Herdr and that pane becomes the preferred Baseline Agent pane. The original caller pane is never bound to the new Optimization.
+The normal user entrypoint runs from an existing Herdr shell pane. It validates Herdr and its fresh-Session configuration before creating anything. It then discovers an existing `workspace.json` or creates a sibling `<repository>-pika-workspace` with a stable random ID and `repo/` base linked worktree. The Source Repository must be clean for normal creation and is never assigned to an Agent. The plugin pane is opened with the durable Workspace as cwd plus `PIKA_GO_WORKSPACE`; its PATH is prefixed with the directory of the invoking executable, so the manifest's `pika-go daemon` entrypoint cannot accidentally resolve relative to the optimized repository.
+
+`kick-off` records the new replaceable Herdr workspace/tab/control-pane/daemon-pane IDs in `herdr/binding.json`, waits for daemon health, and sends a visible init command only when `pika.toml` is absent. Otherwise it resumes SQLite/outbox state. `pika-go resume [WORKSPACE]` is the explicit equivalent; running `kick-off` inside a Workspace auto-resumes it.
 
 If daemon startup or initialization fails, the command reports the Workspace and daemon Pane IDs and leaves the visible Workspace open for diagnostics. It does not silently fall back to a non-persistent daemon or initialize the original Workspace.
 
@@ -141,20 +148,19 @@ The Herdr plugin opens `pika-go daemon` in a normal pane. A plugin startup hook 
 
 The daemon:
 
-1. Requires Herdr's plugin config/state paths and current Workspace context.
-2. Opens or creates the instance SQLite database in the plugin state directory.
-3. Reuses a valid `pika_instance` already bound to the Workspace, or chooses a new instance ID for an unbound Workspace.
-4. Publishes or refreshes `pika_instance=<instance>` in Herdr Workspace metadata and constructs the runtime adapters.
-5. Binds and starts serving `/tmp/pika-go-$UID/<instance>.sock` with user-only permissions. Health and MCP transport are reachable before startup reconciliation may prompt an Agent.
-6. Reads a Herdr snapshot, retires every prior active Session that still owns non-terminal Work, and dispatches the ordered close/fresh-start recovery effects. A Session whose terminal Work already committed remains available to its committed close effect.
-7. Subscribes to Herdr runtime events with a snapshot bootstrap to close the subscription gap, then accepts the steady-state scheduling loop.
+1. Opens `PIKA_GO_WORKSPACE/workspace.json`, rejects relocation or source Git common-directory identity drift, and acquires `.pika.lock`.
+2. Opens `pika.db`, validates `workspace_identity`, registers the base/Best/Attempt worktrees, and loads `pika.toml` plus `instructions/`.
+3. Publishes `pika_instance=<workspace-id>` in the current Herdr Workspace metadata and constructs provider/runtime adapters rooted at `runtime/`.
+4. Binds `/tmp/pika-go-$UID/<herdr-derived-instance>.sock` with user-only permissions. The socket is transport, not durable identity.
+5. Retires every prior active Session that still owns non-terminal Work and dispatches ordered close/fresh-start recovery effects without resetting, cleaning, rebasing, or checking out an active worktree.
+6. Subscribes to Herdr runtime events with a snapshot bootstrap and enters the steady-state scheduling loop.
 
 ### `pika-go init`
 
 `init` runs in the shell pane that will become the Baseline Agent pane:
 
-1. Discover the Workspace and daemon socket through Herdr metadata.
-2. Validate the repository and initialize Pika configuration, SQLite domain state, Git workspaces, empty user-instruction overlays, and provider overlays.
+1. Discover the daemon socket through Herdr metadata; the daemon already owns the Optimization Workspace.
+2. Validate the Source Repository identity and initialize `pika.toml`, SQLite domain state, empty instruction overlays, and provider overlays inside the Workspace.
 3. Send the caller Pane ID to the daemon.
 4. Exit, returning that pane to its shell prompt.
 5. The daemon waits until Herdr reports an available shell and starts a fresh Baseline Agent in the same pane.

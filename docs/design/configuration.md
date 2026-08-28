@@ -2,43 +2,36 @@
 
 ## 1. Ownership and paths
 
-Herdr supplies two writable plugin locations:
+Normal operation uses one first-class Optimization Workspace, independent of Herdr's global plugin config/state roots:
 
 ```text
-$HERDR_PLUGIN_CONFIG_DIR
-$HERDR_PLUGIN_STATE_DIR
-```
-
-Pika uses them as follows:
-
-```text
-$HERDR_PLUGIN_CONFIG_DIR/
-  instances/<instance>/
-    config.toml
-    instructions/
-      baseline.md
+<repository>-pika-workspace/
+  workspace.json
+  pika.toml
+  pika.db
+  .pika.lock
+  repo/
+  best/repo/
+  attempts/<attempt>/rounds/<round>/repo/
+  instructions/
+    baseline.md
+    baseline-verify.md
+    iteration.md
+    integration.md
+    follow-up/
       baseline-verify.md
       iteration.md
       integration.md
-      follow-up/
-        baseline-verify.md
-        iteration.md
-        integration.md
-
-$HERDR_PLUGIN_STATE_DIR/
-  instances/<instance>/
-    pika.db
-    logs/
-    contexts/
-    evidence/
-    worktrees/
-    runtime/
-      cursor-sessions/<agent-session>/
-        system-prompt.md
-        cursor.args
+  contexts/
+  evidence/
+  logs/
+  runtime/cursor-sessions/<agent-session>/
+  herdr/binding.json
 ```
 
-Configuration and instruction overlays are user-owned mutable inputs. Every installed `instructions/*.md` file is empty by default; it exists only so the user can append Role-specific requirements. The canonical Role System Prompts are plugin-owned resources embedded in the `pika-go` binary and are never copied into the config directory. SQLite and generated evidence are runtime state. Reinstalling the plugin must preserve both writable directories.
+`workspace.json` is the immutable bootstrap identity. It records the absolute Workspace root, Source Repository, Git common-directory device/inode, initial SHA, and random 128-bit Workspace ID. The Source Repository remains user-owned; Pika assigns Agents only to linked worktrees beneath the Workspace. Branches are namespaced as `pika/<workspace-id>/base`, `/best`, and `/attempt/<attempt>/<round>`, allowing multiple Workspaces for one source Git repository.
+
+`pika.toml` and instruction overlays are user-owned mutable inputs. Canonical Role System Prompts remain embedded in the binary. Herdr's plugin paths contain only global plugin registration/integration material and legacy pre-Workspace instances; changing Herdr workspace/tab IDs never changes Optimization identity. `herdr/binding.json` records the current replaceable terminal layout.
 
 ## 2. Example configuration
 
@@ -103,7 +96,7 @@ This example deliberately mixes providers; the shipped `--defaults` configuratio
 
 Exact defaults beyond the accepted five-minute inactivity timeout remain implementation choices and are printed by interactive `pika-go init` before commit.
 
-If `config.toml` already exists, init treats it as user-owned input: it validates version and repository identity, preserves the file byte-for-byte, and rejects invalid scheduler, Follow-up, or Role Agent fields. `iteration_concurrency` and `max_pending_attempts` are copied into the durable Optimization during init; later edits affect only a future Optimization rather than silently changing the running scheduler.
+If `pika.toml` already exists, init treats it as user-owned input: it validates version and repository identity, preserves the file byte-for-byte, and rejects invalid scheduler, Follow-up, or Role Agent fields. `iteration_concurrency` and `max_pending_attempts` are copied into the durable Optimization during init; later edits affect only a future Optimization rather than silently changing the running scheduler.
 
 ## 3. Static Agent selection
 

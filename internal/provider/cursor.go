@@ -15,8 +15,8 @@ import (
 const CursorCandidateVersion = "2026.08.25-3e8eec8"
 
 const (
-	cursorVersionProbeTimeout        = 5 * time.Second
-	cursorAuthenticationProbeTimeout = 30 * time.Second
+	cursorVersionProbeTimeout        = 15 * time.Second
+	cursorAuthenticationProbeTimeout = 45 * time.Second
 )
 
 type CursorOptions struct {

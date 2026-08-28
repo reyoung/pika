@@ -12,10 +12,12 @@ import (
 
 	"github.com/reyoung/pika-go/internal/codexprofile"
 	"github.com/reyoung/pika-go/internal/instructions"
+	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 	"github.com/reyoung/pika-go/internal/provider"
 )
 
 type Initializer struct {
+	Workspace                *optimizationworkspace.Workspace
 	ConfigRoot               string
 	StateRoot                string
 	InstanceID               string
@@ -44,20 +46,30 @@ func (i Initializer) Prepare(ctx context.Context, repository string) (func() err
 	if err != nil {
 		return nil, err
 	}
-	if i.ConfigRoot == "" || i.StateRoot == "" || i.InstanceID == "" {
-		return nil, errors.New("config root, state root, and instance ID are required")
-	}
-	if !filepath.IsAbs(i.ConfigRoot) || !filepath.IsAbs(i.StateRoot) {
-		return nil, errors.New("config root and state root must be absolute")
-	}
-
 	providers := i.Providers
 	if providers == nil {
 		providers = provider.DefaultRegistry()
 	}
-	configDir := filepath.Join(i.ConfigRoot, "instances", i.InstanceID)
-	stateDir := filepath.Join(i.StateRoot, "instances", i.InstanceID)
-	configPath := filepath.Join(configDir, "config.toml")
+	var configDir, stateDir, configPath, instructionsRoot string
+	workspaceMode := i.Workspace != nil
+	if workspaceMode {
+		if i.Workspace.Identity.SourceRepository != resolvedRepository {
+			return nil, fmt.Errorf("Workspace source repository %s does not match init repository %s", i.Workspace.Identity.SourceRepository, resolvedRepository)
+		}
+		configDir, stateDir = i.Workspace.Root, i.Workspace.Root
+		configPath, instructionsRoot = i.Workspace.ConfigPath, i.Workspace.InstructionsRoot
+	} else {
+		if i.ConfigRoot == "" || i.StateRoot == "" || i.InstanceID == "" {
+			return nil, errors.New("config root, state root, and instance ID are required")
+		}
+		if !filepath.IsAbs(i.ConfigRoot) || !filepath.IsAbs(i.StateRoot) {
+			return nil, errors.New("config root and state root must be absolute")
+		}
+		configDir = filepath.Join(i.ConfigRoot, "instances", i.InstanceID)
+		stateDir = filepath.Join(i.StateRoot, "instances", i.InstanceID)
+		configPath = filepath.Join(configDir, "config.toml")
+		instructionsRoot = filepath.Join(configDir, "instructions")
+	}
 	_, configPathErr := os.Stat(configPath)
 	configurationExists := configPathErr == nil
 	if configPathErr != nil && !errors.Is(configPathErr, os.ErrNotExist) {
@@ -91,7 +103,7 @@ func (i Initializer) Prepare(ctx context.Context, repository string) (func() err
 		}
 	}
 	_, configDirErr := os.Stat(configDir)
-	configDirWasAbsent := errors.Is(configDirErr, os.ErrNotExist)
+	configDirWasAbsent := !workspaceMode && errors.Is(configDirErr, os.ErrNotExist)
 	if configDirErr != nil && !configDirWasAbsent {
 		return nil, fmt.Errorf("inspect instance config directory: %w", configDirErr)
 	}
@@ -101,7 +113,11 @@ func (i Initializer) Prepare(ctx context.Context, repository string) (func() err
 	if err := os.Chmod(configDir, 0o700); err != nil {
 		return nil, fmt.Errorf("protect instance config directory: %w", err)
 	}
-	for _, name := range []string{"logs", "contexts", "evidence", "worktrees"} {
+	stateDirectories := []string{"logs", "contexts", "evidence", "worktrees"}
+	if workspaceMode {
+		stateDirectories = []string{"logs", "contexts", "evidence", "runtime"}
+	}
+	for _, name := range stateDirectories {
 		path := filepath.Join(stateDir, name)
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return nil, fmt.Errorf("create instance state directory %q: %w", name, err)
@@ -110,7 +126,7 @@ func (i Initializer) Prepare(ctx context.Context, repository string) (func() err
 			return nil, fmt.Errorf("protect instance state directory %q: %w", name, err)
 		}
 	}
-	if err := instructions.Install(filepath.Join(configDir, "instructions")); err != nil {
+	if err := instructions.Install(instructionsRoot); err != nil {
 		return nil, err
 	}
 

@@ -9,8 +9,7 @@ DESTDIR ?=
 build:
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o pika-go ./cmd/pika-go
 
-# Place the native binary at ./pika-go so Herdr's pane command works after
-# `herdr plugin install`, and copy the CLI to $(PREFIX)/bin by default.
+# Keep a local build artifact and install the user-facing command to PATH.
 # Set PREFIX= to only build the binary in the plugin root.
 install: build
 	@if [ -n "$(PREFIX)" ]; then \

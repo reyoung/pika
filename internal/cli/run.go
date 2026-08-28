@@ -26,6 +26,7 @@ import (
 	"github.com/reyoung/pika-go/internal/instance"
 	"github.com/reyoung/pika-go/internal/instructions"
 	"github.com/reyoung/pika-go/internal/mcp"
+	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 	"github.com/reyoung/pika-go/internal/outbox"
 	"github.com/reyoung/pika-go/internal/plugininstall"
 	"github.com/reyoung/pika-go/internal/protocol"
@@ -52,6 +53,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	switch args[0] {
 	case "kick-off":
 		return runKickOff(ctx, args[1:], stdin, stdout, stderr)
+	case "resume":
+		return runResume(ctx, args[1:], stdin, stdout, stderr)
+	case "workspace":
+		return runWorkspace(ctx, args[1:], stdout, stderr)
 	case "install":
 		return runInstall(ctx, args[1:], stdin, stdout, stderr)
 	case "daemon":
@@ -94,8 +99,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			_, _ = fmt.Fprintf(stderr, "help: unknown command %q\n", args[1])
 			return 2
 		}
-		if args[1] == "version" {
-			printCommandUsage(stdout, "version", nil)
+		if args[1] == "version" || args[1] == "workspace" {
+			printCommandUsage(stdout, args[1], nil)
 			return 0
 		}
 		return Run(ctx, []string{args[1], "--help"}, stdin, stdout, stdout)
@@ -163,6 +168,7 @@ func runInstall(ctx context.Context, args []string, stdin io.Reader, stdout, std
 func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	flags := newCommandFlagSet("daemon", stderr)
 	socketPath := flags.String("socket", "", "Unix socket `PATH`")
+	workspaceRoot := flags.String("workspace", "", "Optimization Workspace `PATH`")
 	stateDir := flags.String("state-dir", "", "Plugin state directory `PATH`")
 	configDir := flags.String("config-dir", "", "Plugin configuration directory `PATH`")
 	instanceID := flags.String("instance", "", "Pika instance `ID`")
@@ -170,10 +176,8 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		return code
 	}
 	paths, err := instance.ResolveRuntime(instance.RuntimeOptions{
-		SocketPath: *socketPath,
-		ConfigRoot: *configDir,
-		StateRoot:  *stateDir,
-		InstanceID: *instanceID,
+		SocketPath: *socketPath, WorkspaceRoot: *workspaceRoot,
+		ConfigRoot: *configDir, StateRoot: *stateDir, InstanceID: *instanceID,
 	})
 	if err != nil {
 		writeDaemonLog(stderr, "error", "runtime.resolve_failed", err, nil)
@@ -188,11 +192,20 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	var afterCommit func(context.Context)
 	var mcpHandler http.Handler
 	var applyGitIntent func(context.Context, string, string) (string, error)
-	if paths.StateRoot != "" {
-		worktreeRoot := filepath.Join(paths.StateRoot, "instances", paths.InstanceID, "worktrees")
-		runtimeRoot := filepath.Join(paths.StateRoot, "instances", paths.InstanceID, "runtime")
+	if paths.DatabasePath != "" {
+		worktreeRoot := paths.WorktreeRoot
+		runtimeRoot := paths.RuntimeRoot
 		runtimeBin := filepath.Join(runtimeRoot, "bin")
-		instanceConfigPath := filepath.Join(paths.ConfigRoot, "instances", paths.InstanceID, "config.toml")
+		instanceConfigPath := paths.ConfigPath
+		assignedRepository, branchNamespace := "", ""
+		if paths.Workspace != nil {
+			if validateErr := paths.Workspace.ValidateSource(ctx); validateErr != nil {
+				writeDaemonLog(stderr, "error", "workspace.identity_failed", validateErr, map[string]any{"workspace": paths.Workspace.Root})
+				return 1
+			}
+			assignedRepository = paths.Workspace.BaseRepository
+			branchNamespace = paths.Workspace.BranchNamespace()
+		}
 		pikaExecutable, _ := os.Executable()
 		codexExecutable := os.Getenv("PIKA_GO_CODEX_EXECUTABLE")
 		if codexExecutable == "" {
@@ -243,6 +256,28 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			return 1
 		}
 		defer engine.Close()
+		if paths.Workspace != nil {
+			identity := paths.Workspace.Identity
+			if err := engine.EnsureWorkspaceIdentity(ctx, symphony.WorkspaceIdentity{
+				ID: identity.ID, Root: identity.Root, SourceRepository: identity.SourceRepository, GitCommonDir: identity.GitCommonDir,
+				GitCommonDirDevice: identity.GitCommonDirDevice, GitCommonDirInode: identity.GitCommonDirInode, InitialSHA: identity.InitialSHA,
+			}); err != nil {
+				writeDaemonLog(stderr, "error", "workspace.database_identity_failed", err, map[string]any{"workspace": paths.Workspace.Root})
+				return 1
+			}
+			baseWorkspace := gitworkspace.Workspace{Repository: assignedRepository, Root: worktreeRoot, Namespace: branchNamespace}
+			baseSHA, headErr := baseWorkspace.SourceHEAD(ctx)
+			if headErr != nil {
+				writeDaemonLog(stderr, "error", "workspace.base_failed", headErr, nil)
+				return 1
+			}
+			if err := engine.UpsertGitWorktree(ctx, symphony.GitWorktreeRecord{
+				Role: "base", Branch: paths.Workspace.BaseBranch(), Repository: assignedRepository, HeadSHA: baseSHA, State: "active",
+			}); err != nil {
+				writeDaemonLog(stderr, "error", "workspace.registry_failed", err, nil)
+				return 1
+			}
+		}
 		activeSessions, activeErr := engine.ActiveAgentSessions(ctx)
 		if activeErr != nil {
 			writeDaemonLog(stderr, "error", "provider.reconciliation_failed", activeErr, nil)
@@ -276,7 +311,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			}
 		}
 		initializer := configuration.Initializer{
-			ConfigRoot: paths.ConfigRoot, StateRoot: paths.StateRoot, InstanceID: paths.InstanceID,
+			Workspace: paths.Workspace, ConfigRoot: paths.ConfigRoot, StateRoot: paths.StateRoot, InstanceID: paths.InstanceID,
 			CodexHome: codexHome, CursorMCPPath: cursorMCPPath, CursorHooksPath: cursorHooksPath, PikaExecutable: pikaExecutable, CodexExecutable: codexExecutable, Providers: providerRegistry,
 			RequireConfigurationTOML: true, ProbeProviders: true,
 			ProviderExecutables: map[string]string{"codex": codexExecutable, "cursor": cursorExecutable},
@@ -389,7 +424,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				}
 				return engine.ObservePaneActivity(eventCtx, payload.Pane.PaneID)
 			}
-			runtimeAdapter.LaunchDir = filepath.Join(paths.StateRoot, "instances", paths.InstanceID, "runtime")
+			runtimeAdapter.LaunchDir = runtimeRoot
 			pane, err := herdr.NewRuntime(client).GetPane(ctx, symphonyPane)
 			if err != nil {
 				writeDaemonLog(stderr, "error", "herdr.symphony_pane_failed", err, map[string]any{"pane_id": symphonyPane})
@@ -409,8 +444,8 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				// still require the user to review new or changed Codex hooks.
 				activationEnvironment["PIKA_CODEX_BYPASS_HOOK_TRUST"] = "1"
 			}
-			preparer := activation.Preparer{Store: engine, InstructionRoot: filepath.Join(paths.ConfigRoot, "instances", paths.InstanceID, "instructions"), SocketPath: paths.SocketPath, Environment: activationEnvironment, AgentConfigPath: instanceConfigPath, Providers: providerRegistry}
-			dispatcher := outbox.Dispatcher{Store: engine, Sink: workruntime.Sink{Store: engine, Runtime: runtimeAdapter, AgentKind: "codex", AgentConfigPath: instanceConfigPath, Providers: providerRegistry, ProviderRuntimeRoot: runtimeRoot, RequireProviderCapabilities: true, Preparer: preparer, WorkspacePreparer: gitworkspace.RuntimePreparer{Root: worktreeRoot}}}
+			preparer := activation.Preparer{Store: engine, InstructionRoot: paths.InstructionsRoot, SocketPath: paths.SocketPath, Environment: activationEnvironment, AgentConfigPath: instanceConfigPath, Providers: providerRegistry}
+			dispatcher := outbox.Dispatcher{Store: engine, Sink: workruntime.Sink{Store: engine, Runtime: runtimeAdapter, AgentKind: "codex", AgentConfigPath: instanceConfigPath, Providers: providerRegistry, ProviderRuntimeRoot: runtimeRoot, RequireProviderCapabilities: true, Preparer: preparer, WorkspacePreparer: gitworkspace.RuntimePreparer{Repository: assignedRepository, Root: worktreeRoot, Namespace: branchNamespace, Recorder: engine}}}
 			coordinator := workruntime.Coordinator{
 				Reconciler:  workruntime.Reconciler{Store: engine, Runtime: runtimeAdapter, ProviderRuntimeRoot: runtimeRoot},
 				Dispatcher:  dispatcher,
@@ -476,7 +511,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			afterCommit = func(ctx context.Context) { _ = dispatcher.DispatchPending(ctx) }
 			afterCommit(ctx)
 		}
-		mcpHandler = mcp.Handler{Application: toolapp.Application{Store: engine, WorktreeRoot: worktreeRoot}, AfterMutation: func() {
+		mcpHandler = mcp.Handler{Application: toolapp.Application{Store: engine, WorktreeRoot: worktreeRoot, Repository: assignedRepository, BranchNamespace: branchNamespace, WorktreeRecorder: engine}, AfterMutation: func() {
 			if afterCommit != nil {
 				afterCommit(ctx)
 			}
@@ -493,8 +528,21 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			if err != nil {
 				return "", err
 			}
-			workspace := gitworkspace.Workspace{Repository: view.Optimization.Repository, Root: worktreeRoot}
-			return workspace.ApplyAuthorizedBestUpdate(ctx, intent.ID, intent.ExpectedBestSHA, intent.CandidateSHA, message)
+			repository := assignedRepository
+			if repository == "" {
+				repository = view.Optimization.Repository
+			}
+			workspace := gitworkspace.Workspace{Repository: repository, Root: worktreeRoot, Namespace: branchNamespace}
+			appliedSHA, applyErr := workspace.ApplyAuthorizedBestUpdate(ctx, intent.ID, intent.ExpectedBestSHA, intent.CandidateSHA, message)
+			if applyErr != nil {
+				return "", applyErr
+			}
+			if err := engine.UpsertGitWorktree(ctx, symphony.GitWorktreeRecord{
+				Role: "best", Branch: workspace.BestBranch(), Repository: filepath.Join(worktreeRoot, "best", "repo"), HeadSHA: appliedSHA, State: "active",
+			}); err != nil {
+				return "", err
+			}
+			return appliedSHA, nil
 		}
 	}
 	var ingestProviderEvent func(context.Context, string, string, json.RawMessage) error
@@ -520,10 +568,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 
 func providerProbeTimeout(kind string) time.Duration {
 	if kind == "cursor" {
-		// Cursor independently bounds its version command at five seconds and
-		// its authenticated status command at thirty seconds. Leave headroom
+		// Cursor independently bounds its version command at fifteen seconds and
+		// its authenticated status command at forty-five seconds. Leave headroom
 		// around both stages for process startup and cancellation propagation.
-		return 40 * time.Second
+		return 65 * time.Second
 	}
 	return 2 * time.Second
 }
@@ -671,6 +719,7 @@ func runMCPProxy(ctx context.Context, args []string, stdin io.Reader, stdout, st
 
 func runEditInstruction(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := newCommandFlagSet("edit-instruction", stderr)
+	workspaceRoot := flags.String("workspace", "", "Optimization Workspace `PATH`")
 	configRoot := flags.String("config-dir", "", "Plugin configuration directory `PATH`")
 	instanceID := flags.String("instance", "", "Pika instance `ID`")
 	socketPath := flags.String("socket", "", "Unix socket `PATH` used to derive the instance")
@@ -681,16 +730,31 @@ func runEditInstruction(ctx context.Context, args []string, stdin io.Reader, std
 		_, _ = fmt.Fprintln(stderr, "edit-instruction: exactly one instruction name is required")
 		return 2
 	}
+	instructionRoot := ""
+	workspaceCandidate := *workspaceRoot
+	if workspaceCandidate == "" {
+		workspaceCandidate = os.Getenv("PIKA_GO_WORKSPACE")
+	}
+	if workspaceCandidate != "" {
+		workspace, err := optimizationworkspace.Open(workspaceCandidate)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "edit-instruction: %v\n", err)
+			return 2
+		}
+		instructionRoot = workspace.InstructionsRoot
+	} else if workspace, err := optimizationworkspace.Discover(""); err == nil {
+		instructionRoot = workspace.InstructionsRoot
+	}
 	root := *configRoot
 	if root == "" {
 		root = os.Getenv("HERDR_PLUGIN_CONFIG_DIR")
 	}
-	if root == "" || !filepath.IsAbs(root) {
+	if instructionRoot == "" && (root == "" || !filepath.IsAbs(root)) {
 		_, _ = fmt.Fprintln(stderr, "edit-instruction: an absolute plugin config directory is required")
 		return 2
 	}
 	id := *instanceID
-	if id == "" {
+	if instructionRoot == "" && id == "" {
 		id = os.Getenv("PIKA_GO_INSTANCE")
 	}
 	if id == "" {
@@ -701,11 +765,14 @@ func runEditInstruction(ctx context.Context, args []string, stdin io.Reader, std
 		}
 		id = strings.TrimSuffix(filepath.Base(resolved), filepath.Ext(resolved))
 	}
-	if err := instance.ValidateID(id); err != nil {
-		_, _ = fmt.Fprintf(stderr, "edit-instruction: %v\n", err)
-		return 2
+	if instructionRoot == "" {
+		if err := instance.ValidateID(id); err != nil {
+			_, _ = fmt.Fprintf(stderr, "edit-instruction: %v\n", err)
+			return 2
+		}
+		instructionRoot = filepath.Join(root, "instances", id, "instructions")
 	}
-	path, err := instructions.Path(filepath.Join(root, "instances", id, "instructions"), flags.Arg(0))
+	path, err := instructions.Path(instructionRoot, flags.Arg(0))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "edit-instruction: %v\n", err)
 		return 2

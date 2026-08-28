@@ -16,7 +16,35 @@ cd /path/to/repository
 pika-go kick-off
 ```
 
-`kick-off` first verifies that Herdr native Agent restore is disabled. If the required setting is missing, it asks before atomically updating the Herdr configuration and reloading the server; declining leaves the file untouched and creates no workspace. It then creates a dedicated Herdr workspace, opens its daemon pane, waits for daemon health, starts a visible `pika-go init` command in the new workspace's root pane using the same binary that launched `kick-off`, and focuses that workspace, tab, and pane. Complete interactive setup there. Backend, model, reasoning effort, and Cursor launch permissions are numbered choices rather than free-form IDs or raw argv. Cursor permissions separately cover command approval, MCP approval, and persistent workspace trust. Each provider exposes an explicit default model choice: Cursor shows `auto-routing (default)` and invokes its real `auto` model ID without a reasoning-effort override; Codex `default` preserves the Codex CLI's configured model and effort. Use `--defaults` for a non-interactive all-Codex configuration or `--config PATH` for a complete instance TOML; those commands also run visibly in the new workspace.
+`kick-off` first verifies that Herdr native Agent restore is disabled. If the required setting is missing, it asks before atomically updating the Herdr configuration and reloading the server; declining leaves the file untouched and creates no workspace. It then creates a durable sibling directory named `<repository>-pika-workspace`, creates a Pika-owned base linked worktree at `repo/`, and launches a replaceable Herdr workspace with the durable Workspace as its cwd. The daemon, `pika-go init`, and every Agent therefore run outside the user's source checkout.
+
+The Workspace is the resume point for the complete autotune process:
+
+```text
+kernel-pika-workspace/
+  workspace.json        immutable Workspace and source-Git identity
+  pika.toml             user-owned provider and scheduler configuration
+  pika.db               SQLite history, journal, receipts, and recovery state
+  repo/                 Pika base linked worktree
+  best/repo/            accepted Best linked worktree
+  attempts/.../repo/    isolated Attempt linked worktrees
+  instructions/ contexts/ evidence/ logs/ runtime/
+  herdr/binding.json    current replaceable Herdr layout binding
+```
+
+Run `pika-go resume /path/to/kernel-pika-workspace`, or run `pika-go kick-off` anywhere inside it, to continue. Existing configuration is reused and init is not repeated. A Workspace is intentionally not relocatable because it records the absolute source repository and Git common-directory filesystem identity.
+
+During first init, backend, model, reasoning effort, and Cursor launch permissions are numbered choices rather than free-form IDs or raw argv. Cursor permissions separately cover command approval, MCP approval, and persistent workspace trust. Each provider exposes an explicit default model choice: Cursor shows `auto-routing (default)` and invokes its real `auto` model ID without a reasoning-effort override; Codex `default` preserves the Codex CLI's configured model and effort. Use `--defaults` for a non-interactive all-Codex configuration or `--config PATH` for a complete Workspace TOML.
+
+Pre-Workspace instances are never migrated automatically. Discover and import a stopped instance explicitly:
+
+```bash
+pika-go workspace legacy-list
+pika-go workspace import --instance INSTANCE_ID --workspace /absolute/path/to/workspace
+pika-go resume /absolute/path/to/workspace
+```
+
+Import preserves the legacy SQLite history, configuration, instructions, artifacts, linked worktrees, and source/Attempt HEAD, index, staged, unstaged, and untracked state. The legacy checkout is left in place.
 
 ## Build and verify
 
@@ -56,6 +84,6 @@ herdr plugin pane open --plugin pika-go --entrypoint symphony
 ./pika-go status --json
 ```
 
-When run inside Herdr, daemon and status derive the same temporary bootstrap socket from the Herdr session socket and Workspace identity. An explicit path can be supplied with `--socket` or `PIKA_GO_SOCKET` for diagnostics and tests.
+When run inside Herdr, daemon and status derive the same temporary transport socket from the Herdr server socket and Herdr workspace ID. Durable identity comes from `workspace.json`, not that temporary Herdr ID. An explicit path can be supplied with `--socket` or `PIKA_GO_SOCKET` for diagnostics and tests.
 
 The daemon publishes durable `pika_instance` Workspace metadata and uses it to resolve the instance socket for later CLI and MCP traffic.

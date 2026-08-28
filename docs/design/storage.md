@@ -5,10 +5,10 @@
 Each Optimization owns one SQLite database at:
 
 ```text
-$HERDR_PLUGIN_STATE_DIR/instances/<instance>/pika.db
+<optimization-workspace>/pika.db
 ```
 
-SQLite runs with WAL, foreign keys, a busy timeout, explicit migrations, and one logical writer. Domain state, operation receipts, domain events, and runtime outbox effects that arise from one command are committed in one transaction.
+SQLite runs with WAL, `synchronous=FULL`, foreign keys, a busy timeout, explicit migrations, and one logical writer. Domain state, operation receipts, domain events, and runtime outbox effects that arise from one command are committed in one transaction. `workspace_identity` mirrors the immutable JSON identity and rejects a database opened under a different Workspace; `git_worktrees` records the base, Best, and Attempt branch/path/HEAD registry.
 
 Herdr persists terminal layout; Pika persists desired workflow and correlations. Neither database is copied into the other.
 
@@ -47,6 +47,8 @@ Herdr persists terminal layout; Pika persists desired workflow and correlations.
 | `domain_events` | ordered audit of committed domain transitions |
 | `runtime_outbox` | Herdr/provider effects that must be dispatched or reconciled |
 | `migrations` | applied schema version and checksum |
+| `workspace_identity` | immutable Workspace/source Git identity mirrored from `workspace.json` |
+| `git_worktrees` | durable role/Attempt to branch, repository path, HEAD, and lifecycle mapping |
 
 ## 3. Full shell and tool output in SQLite
 
@@ -132,7 +134,7 @@ Because `pane.updated` is approximate, the database stores the observed source r
 
 ## 7. Security and retention
 
-- Database and state directories are mode `0700`; the database and socket are user-only.
+- Workspace state directories are mode `0700`; the manifest, configuration, database, and lock are user-only.
 - Raw bearer grants and provider credentials are never persisted; store hashes or references.
 - Tool output may contain secrets. It is never printed by default in `status` and is supplied to later Agents only through explicit Context Builder selection.
 - Journal and tool data are retained for the lifetime of the Optimization. Deleting an Optimization is a separate explicit destructive command and is not implied by shutdown.
@@ -148,3 +150,4 @@ Because `pane.updated` is approximate, the database stores the observed source r
 - A terminal operation transaction includes its receipt, result, domain event, and successor outbox effect.
 - Runtime effect uncertainty never causes a second domain transition.
 - Schema migration failure prevents scheduling and leaves the prior database recoverable.
+- Workspace relocation or source Git common-directory identity drift prevents daemon startup; recovery never resets, cleans, rebases, or checks out an active worktree.

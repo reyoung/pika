@@ -26,6 +26,13 @@ func TestOpenConfiguresAndMigratesSQLite(t *testing.T) {
 	if journalMode != "wal" {
 		t.Fatalf("journal mode = %q, want wal", journalMode)
 	}
+	var synchronous int
+	if err := engine.db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&synchronous); err != nil {
+		t.Fatalf("read synchronous mode: %v", err)
+	}
+	if synchronous != 2 {
+		t.Fatalf("synchronous = %d, want FULL (2)", synchronous)
+	}
 	var foreignKeys int
 	if err := engine.db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
 		t.Fatalf("read foreign_keys: %v", err)
@@ -54,6 +61,7 @@ func TestOpenConfiguresAndMigratesSQLite(t *testing.T) {
 		"migrations": false, "operation_receipts": false, "optimizations": false, "pane_bindings": false,
 		"runtime_outbox": false, "session_grants": false, "works": false, "attempts": false,
 		"best_revisions": false, "iteration_rounds": false, "integrations": false, "git_intents": false,
+		"workspace_identity": false, "git_worktrees": false,
 	}
 	rows, err := engine.db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table'`)
 	if err != nil {

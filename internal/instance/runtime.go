@@ -6,29 +6,51 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 )
 
 type RuntimeOptions struct {
-	SocketPath string
-	ConfigRoot string
-	StateRoot  string
-	InstanceID string
+	SocketPath    string
+	WorkspaceRoot string
+	ConfigRoot    string
+	StateRoot     string
+	InstanceID    string
 }
 
 type RuntimePaths struct {
-	SocketPath   string
-	ConfigRoot   string
-	StateRoot    string
-	InstanceID   string
-	InstanceDir  string
-	DatabasePath string
-	LockPath     string
+	SocketPath       string
+	Workspace        *optimizationworkspace.Workspace
+	WorkspaceRoot    string
+	ConfigRoot       string
+	StateRoot        string
+	InstanceID       string
+	InstanceDir      string
+	ConfigPath       string
+	DatabasePath     string
+	LockPath         string
+	InstructionsRoot string
+	WorktreeRoot     string
+	RuntimeRoot      string
 }
 
 func ResolveRuntime(options RuntimeOptions) (RuntimePaths, error) {
 	socketPath, err := ResolveSocket(options.SocketPath)
 	if err != nil {
 		return RuntimePaths{}, err
+	}
+	workspaceRoot := firstNonempty(options.WorkspaceRoot, os.Getenv("PIKA_GO_WORKSPACE"))
+	if workspaceRoot != "" {
+		workspace, err := optimizationworkspace.Open(workspaceRoot)
+		if err != nil {
+			return RuntimePaths{}, err
+		}
+		return RuntimePaths{
+			SocketPath: socketPath, Workspace: &workspace, WorkspaceRoot: workspace.Root,
+			InstanceID: workspace.Identity.ID, InstanceDir: workspace.Root, ConfigPath: workspace.ConfigPath,
+			DatabasePath: workspace.DatabasePath, LockPath: workspace.LockPath, InstructionsRoot: workspace.InstructionsRoot,
+			WorktreeRoot: workspace.Root, RuntimeRoot: workspace.RuntimeRoot,
+		}, nil
 	}
 	paths := RuntimePaths{
 		SocketPath: socketPath,
@@ -54,8 +76,12 @@ func ResolveRuntime(options RuntimeOptions) (RuntimePaths, error) {
 		return RuntimePaths{}, err
 	}
 	paths.InstanceDir = filepath.Join(paths.StateRoot, "instances", paths.InstanceID)
+	paths.ConfigPath = filepath.Join(paths.ConfigRoot, "instances", paths.InstanceID, "config.toml")
 	paths.DatabasePath = filepath.Join(paths.InstanceDir, "pika.db")
 	paths.LockPath = filepath.Join(paths.InstanceDir, "daemon.lock")
+	paths.InstructionsRoot = filepath.Join(paths.ConfigRoot, "instances", paths.InstanceID, "instructions")
+	paths.WorktreeRoot = filepath.Join(paths.InstanceDir, "worktrees")
+	paths.RuntimeRoot = filepath.Join(paths.InstanceDir, "runtime")
 	return paths, nil
 }
 

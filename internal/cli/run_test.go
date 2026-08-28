@@ -22,6 +22,7 @@ import (
 	"github.com/reyoung/pika-go/internal/control"
 	"github.com/reyoung/pika-go/internal/daemon"
 	"github.com/reyoung/pika-go/internal/instance"
+	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
@@ -34,6 +35,39 @@ func TestInstallRejectsRelativeDirectory(t *testing.T) {
 	if !strings.Contains(stderr.String(), "--dir must be an absolute path") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
+}
+
+func newCommittedRepository(t *testing.T) string {
+	t.Helper()
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.MkdirAll(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	commands := [][]string{
+		{"init", "--quiet", "--initial-branch=main"},
+		{"config", "user.name", "Pika Test"},
+		{"config", "user.email", "pika@example.invalid"},
+	}
+	for _, arguments := range commands {
+		command := exec.Command("git", append([]string{"-C", repository}, arguments...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("# fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{{"add", "README.md"}, {"commit", "--quiet", "-m", "initial"}} {
+		command := exec.Command("git", append([]string{"-C", repository}, arguments...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 func TestHelpExplainsThePrimaryWorkflow(t *testing.T) {
@@ -65,7 +99,7 @@ func TestCommandHelpShowsSynopsisOptionsAndExamples(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Usage:\n  pika-go kick-off [options]",
-		"Create a Herdr workspace and start an optimization",
+		"Create or resume an Optimization Workspace in Herdr",
 		"--repository",
 		"--timeout",
 		"Examples:",
@@ -194,7 +228,7 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 			var result any
 			switch request.Method {
 			case "session.snapshot":
-				result = map[string]any{"snapshot": map[string]any{"version": "0.8.2", "protocol": 20}}
+				result = map[string]any{"snapshot": map[string]any{"version": "0.8.2", "protocol": 20, "workspaces": []map[string]any{{"workspace_id": "w-new"}}}}
 			case "server.reload_config":
 				result = map[string]any{"status": "applied", "diagnostics": []string{}}
 			case "workspace.create":
@@ -270,7 +304,7 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 	go func() { pikaDone <- pikaServer.Serve(pikaListener) }()
 	t.Cleanup(func() { _ = pikaServer.Close() })
 
-	repository := t.TempDir()
+	repository := newCommittedRepository(t)
 	resolvedRepository, err := filepath.EvalSymlinks(repository)
 	if err != nil {
 		t.Fatal(err)
@@ -313,13 +347,21 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 	if err != nil || !strings.Contains(string(configured), "[session]\n# resume_agents_on_restore = true\nresume_agents_on_restore = false\n\n[remote]") {
 		t.Fatalf("configured Herdr file=%q err=%v", configured, err)
 	}
-	if requests["workspace.create"]["cwd"] != resolvedRepository || requests["workspace.create"]["focus"] != false {
+	workspaceRoot, err := optimizationworkspace.DefaultRoot(resolvedRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot, err = filepath.EvalSymlinks(workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests["workspace.create"]["cwd"] != workspaceRoot || requests["workspace.create"]["focus"] != false {
 		t.Fatalf("workspace.create params = %+v", requests["workspace.create"])
 	}
-	if requests["tab.rename"]["tab_id"] != "w-new:t1" || requests["tab.rename"]["label"] != "Optimization" {
+	if requests["tab.rename"]["tab_id"] != "w-new:t1" || requests["tab.rename"]["label"] != "Pika" {
 		t.Fatalf("tab.rename params = %+v", requests["tab.rename"])
 	}
-	if len(paneRenames) != 2 || paneRenames[0]["pane_id"] != "w-new:p1" || paneRenames[0]["label"] != "Setup" ||
+	if len(paneRenames) != 2 || paneRenames[0]["pane_id"] != "w-new:p1" || paneRenames[0]["label"] != "Control" ||
 		paneRenames[1]["pane_id"] != "w-new:p2" || paneRenames[1]["label"] != "Daemon" {
 		t.Fatalf("pane.rename params = %+v", paneRenames)
 	}
@@ -327,8 +369,12 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 	if pluginParams["plugin_id"] != "pika-go" || pluginParams["entrypoint"] != "symphony" || pluginParams["target_pane_id"] != "w-new:p1" || pluginParams["focus"] != false {
 		t.Fatalf("plugin.pane.open params = %+v", pluginParams)
 	}
-	if cwd, present := pluginParams["cwd"]; present {
-		t.Fatalf("plugin.pane.open cwd = %v; daemon pane must inherit the plugin root", cwd)
+	if pluginParams["cwd"] != workspaceRoot {
+		t.Fatalf("plugin.pane.open cwd = %v, want %s", pluginParams["cwd"], workspaceRoot)
+	}
+	environment, ok := pluginParams["env"].(map[string]any)
+	if !ok || environment["PIKA_GO_WORKSPACE"] != workspaceRoot {
+		t.Fatalf("plugin.pane.open env = %#v", pluginParams["env"])
 	}
 	if requests["workspace.focus"]["workspace_id"] != "w-new" {
 		t.Fatalf("workspace.focus params = %+v", requests["workspace.focus"])
@@ -352,6 +398,34 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 	case initialized := <-initRequests:
 		t.Fatalf("kick-off initialized from its calling process instead of the new pane: %+v", initialized)
 	default:
+	}
+	workspace, err := optimizationworkspace.Open(workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := workspace.ReadHerdrBinding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.WorkspaceID != "w-new" || binding.ControlPane != "w-new:p1" || binding.DaemonPane != "w-new:p2" || binding.DaemonSocket != pikaSocket {
+		t.Fatalf("Herdr binding = %+v", binding)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := cli.Run(context.Background(), []string{"resume", workspace.Root}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("resume exit = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "already running in Herdr workspace w-new") {
+		t.Fatalf("resume stdout = %q", stdout.String())
+	}
+	var resumedMethods []string
+	for range 5 {
+		request := <-herdrRequests
+		resumedMethods = append(resumedMethods, request.Method)
+	}
+	wantResumedMethods := []string{"session.snapshot", "server.reload_config", "workspace.focus", "tab.focus", "pane.focus"}
+	if !slices.Equal(resumedMethods, wantResumedMethods) {
+		t.Fatalf("resume methods = %v, want %v", resumedMethods, wantResumedMethods)
 	}
 }
 
@@ -422,6 +496,110 @@ func TestDaemonErrorsAreStructuredJSON(t *testing.T) {
 	}
 	if record["level"] != "error" || record["event"] != "runtime.resolve_failed" || record["error"] == "" || record["time"] == "" {
 		t.Fatalf("daemon log = %+v", record)
+	}
+}
+
+func TestDaemonUsesOptimizationWorkspaceAsDurableRoot(t *testing.T) {
+	isolateHerdrEnvironment(t)
+	repository := newCommittedRepository(t)
+	workspaceRoot := filepath.Join(t.TempDir(), "optimization-workspace")
+	workspace, err := optimizationworkspace.Create(context.Background(), workspaceRoot, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-workspace-daemon-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "pika.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	var daemonStderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"daemon", "--socket", socketPath, "--workspace", workspace.Root}, nil, io.Discard, &daemonStderr)
+	}()
+	waitForHealth(t, socketPath, &daemonStderr)
+	if _, err := os.Stat(workspace.DatabasePath); err != nil {
+		t.Fatalf("Workspace database: %v", err)
+	}
+	if _, err := os.Stat(workspace.LockPath); err != nil {
+		t.Fatalf("Workspace lock: %v", err)
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("daemon exit = %d, stderr = %s", code, daemonStderr.String())
+	}
+	engine, err := symphony.Open(context.Background(), workspace.DatabasePath, symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	records, err := engine.GitWorktrees(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Role != "base" || records[0].Repository != workspace.BaseRepository || records[0].Branch != workspace.BaseBranch() {
+		t.Fatalf("Git worktree registry = %+v", records)
+	}
+}
+
+func TestWorkspaceDaemonInitPersistsConfigurationAndOptimization(t *testing.T) {
+	isolateHerdrEnvironment(t)
+	repository := newCommittedRepository(t)
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeCodex := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo codex-test; exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then echo 'Logged in'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", fakeCodex)
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-workspace-init-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "pika.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	var daemonStderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"daemon", "--socket", socketPath, "--workspace", workspace.Root}, nil, io.Discard, &daemonStderr)
+	}()
+	waitForHealth(t, socketPath, &daemonStderr)
+	var initStdout, initStderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"init", "--socket", socketPath, "--repository", repository, "--defaults", "--json"}, nil, &initStdout, &initStderr); code != 0 {
+		cancel()
+		t.Fatalf("Workspace init exit = %d, stdout=%q stderr=%q daemon=%s", code, initStdout.String(), initStderr.String(), daemonStderr.String())
+	}
+	view, err := control.Status(context.Background(), socketPath)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if view.Optimization.Repository != repository || view.Optimization.Status != symphony.OptimizationDraftingBaseline || len(view.Works) != 1 {
+		cancel()
+		t.Fatalf("Workspace optimization = %+v works=%+v", view.Optimization, view.Works)
+	}
+	if _, err := os.Stat(workspace.ConfigPath); err != nil {
+		cancel()
+		t.Fatalf("Workspace pika.toml: %v", err)
+	}
+	statusOutput, statusErr := exec.Command("git", "-C", repository, "status", "--porcelain=v1", "--untracked-files=all").CombinedOutput()
+	if statusErr != nil {
+		cancel()
+		t.Fatalf("source status: %v: %s", statusErr, statusOutput)
+	}
+	if got := strings.TrimSpace(string(statusOutput)); got != "" {
+		cancel()
+		t.Fatalf("source checkout was modified: %q", got)
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("daemon exit = %d, stderr=%s", code, daemonStderr.String())
 	}
 }
 

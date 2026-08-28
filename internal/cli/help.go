@@ -18,9 +18,21 @@ type commandHelp struct {
 var publicCommandHelp = map[string]commandHelp{
 	"kick-off": {
 		synopsis: "kick-off [options]",
-		summary:  "Create a Herdr workspace and start an optimization",
-		details:  "Checks Herdr's fresh-session setting and, with confirmation, updates and reloads the Herdr configuration. Then creates a workspace for the repository, opens the Pika-Go daemon pane, waits for it to become healthy, starts `pika-go init` in the new workspace's root pane, and focuses that workspace and tab.",
-		examples: []string{"pika-go kick-off", "pika-go kick-off --repository /path/to/repo --defaults"},
+		summary:  "Create or resume an Optimization Workspace in Herdr",
+		details:  "Creates a durable sibling Workspace by default, opens Herdr with that directory as its cwd, and starts the daemon there. A Workspace already found at or above the current directory is resumed automatically.",
+		examples: []string{"pika-go kick-off", "pika-go kick-off --repository /path/to/repo --defaults", "pika-go kick-off --workspace /path/to/workspace"},
+	},
+	"resume": {
+		synopsis: "resume [WORKSPACE] [options]",
+		summary:  "Resume a durable Optimization Workspace in Herdr",
+		details:  "When WORKSPACE is omitted, searches the current directory and its parents for workspace.json.",
+		examples: []string{"pika-go resume", "pika-go resume ../kernel-pika-workspace"},
+	},
+	"workspace": {
+		synopsis: "workspace legacy-list [options]\n  pika-go workspace import --instance ID --workspace PATH [options]",
+		summary:  "Discover or explicitly import pre-Workspace Pika-Go instances",
+		details:  "Import requires the legacy daemon to be stopped. It copies configuration, SQLite state, artifacts, and linked worktrees without modifying the legacy checkout.",
+		examples: []string{"pika-go workspace legacy-list", "pika-go workspace import --instance 8d76435fbf94 --workspace ../kernel-pika-workspace"},
 	},
 	"status": {
 		synopsis: "status [options]",
@@ -146,6 +158,7 @@ func printUsage(output io.Writer) {
 
 Usage:
   pika-go kick-off [options]
+  pika-go resume [WORKSPACE] [options]
   pika-go COMMAND [options]
 
 Get started:
@@ -154,7 +167,8 @@ Get started:
   pika-go kick-off
 
 Workflow commands:
-  kick-off         Create a Herdr workspace and start an optimization
+  kick-off         Create or resume an Optimization Workspace in Herdr
+  resume           Resume a durable Optimization Workspace in Herdr
   status           Show the current optimization and daemon status
   draft-baseline   Start another baseline draft
   back-off         Reject the current verification or integration work
@@ -164,6 +178,7 @@ Operations:
   shutdown         Gracefully drain and stop the daemon
   backup           Create a validated SQLite backup
   edit-instruction Edit a role's user-owned instruction overlay
+  workspace        List or import legacy pre-Workspace instances
 
 Setup and advanced commands:
   install          Install and register the Herdr plugin

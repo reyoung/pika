@@ -94,6 +94,22 @@ _Avoid_: Final answer, idle state
 
 ## Runtime and History
 
+**Optimization Workspace**:
+The durable filesystem root that contains one Optimization's configuration, SQLite history, evidence, and Pika-owned Git Worktrees.
+_Avoid_: Herdr Workspace, plugin state directory, repository
+
+**Source Repository**:
+The user-owned Git worktree whose common Git directory and starting commit anchor an Optimization; Pika does not assign Agent Work to this checkout.
+_Avoid_: Base Worktree, Optimization Workspace
+
+**Base Worktree**:
+The Pika-owned linked Git worktree in which Baseline Work develops the initial accepted implementation.
+_Avoid_: Source Repository, Best, target repo
+
+**Herdr Workspace**:
+The replaceable terminal workspace that hosts Pika panes and processes for an Optimization Workspace; its runtime ID is never Optimization identity.
+_Avoid_: Optimization Workspace, instance
+
 **Pane Binding**:
 The current association between a Work, an Agent Session, and a Herdr pane. It is runtime location, not domain identity.
 _Avoid_: Work identity

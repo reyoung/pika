@@ -17,8 +17,6 @@ import (
 	"github.com/reyoung/pika-go/internal/symphony"
 )
 
-const bestBranch = "pika/best"
-
 var (
 	identityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	shaPattern      = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
@@ -27,6 +25,7 @@ var (
 type Workspace struct {
 	Repository string
 	Root       string
+	Namespace  string
 }
 
 type Best struct {
@@ -58,14 +57,28 @@ type CommitResult struct {
 }
 
 type RuntimePreparer struct {
-	Root string
+	Repository string
+	Root       string
+	Namespace  string
+	Recorder   WorktreeRecorder
+}
+
+type WorktreeRecorder interface {
+	UpsertGitWorktree(context.Context, symphony.GitWorktreeRecord) error
 }
 
 func (p RuntimePreparer) PrepareWork(ctx context.Context, work symphony.RuntimeWork) (symphony.RuntimeWork, error) {
 	if work.Work.Role != symphony.RoleIteration && work.Work.Role != symphony.RoleIntegration {
+		if p.Repository != "" {
+			work.Repository = p.Repository
+		}
 		return work, nil
 	}
-	workspace := Workspace{Repository: work.OptimizationRepository, Root: p.Root}
+	repository := p.Repository
+	if repository == "" {
+		repository = work.OptimizationRepository
+	}
+	workspace := Workspace{Repository: repository, Root: p.Root, Namespace: p.Namespace}
 	if work.Work.Role == symphony.RoleIteration {
 		var round Round
 		var err error
@@ -77,14 +90,22 @@ func (p RuntimePreparer) PrepareWork(ctx context.Context, work symphony.RuntimeW
 		if err != nil {
 			return symphony.RuntimeWork{}, err
 		}
+		if p.Recorder != nil {
+			if err := p.Recorder.UpsertGitWorktree(ctx, symphony.GitWorktreeRecord{
+				Role: "attempt", AttemptID: round.AttemptID, IterationRound: round.Round, Branch: round.Branch,
+				Repository: round.Repository, HeadSHA: round.HeadSHA, State: "active",
+			}); err != nil {
+				return symphony.RuntimeWork{}, err
+			}
+		}
 		work.Repository = round.Repository
 		return work, nil
 	}
-	repository := workspace.roundRepository(work.Work.AttemptID, work.Work.IterationRound)
-	if _, err := os.Stat(filepath.Join(repository, ".git")); err != nil {
+	roundRepository := workspace.roundRepository(work.Work.AttemptID, work.Work.IterationRound)
+	if _, err := os.Stat(filepath.Join(roundRepository, ".git")); err != nil {
 		return symphony.RuntimeWork{}, fmt.Errorf("Integration worktree is unavailable: %w", err)
 	}
-	work.Repository = repository
+	work.Repository = roundRepository
 	return work, nil
 }
 
@@ -231,7 +252,7 @@ func (w Workspace) CurrentBest(ctx context.Context) (string, error) {
 	if err := w.validate(); err != nil {
 		return "", err
 	}
-	return w.ref(ctx, bestBranch)
+	return w.ref(ctx, w.bestBranch())
 }
 
 func (w Workspace) AttemptRepository(attemptID string, round int64) (string, error) {
@@ -282,30 +303,31 @@ func (w Workspace) EnsureBest(ctx context.Context, initialSHA string) (Best, err
 	if _, err := w.git(ctx, w.Repository, "rev-parse", "--verify", initialSHA+"^{commit}"); err != nil {
 		return Best{}, fmt.Errorf("resolve initial Best: %w", err)
 	}
-	current, err := w.ref(ctx, bestBranch)
+	branch := w.bestBranch()
+	current, err := w.ref(ctx, branch)
 	if err != nil && !errors.Is(err, errRefMissing) {
 		return Best{}, err
 	}
 	if errors.Is(err, errRefMissing) {
-		if _, err := w.git(ctx, w.Repository, "update-ref", "refs/heads/"+bestBranch, initialSHA, strings.Repeat("0", 40)); err != nil {
-			return Best{}, fmt.Errorf("create %s: %w", bestBranch, err)
+		if _, err := w.git(ctx, w.Repository, "update-ref", "refs/heads/"+branch, initialSHA, strings.Repeat("0", 40)); err != nil {
+			return Best{}, fmt.Errorf("create %s: %w", branch, err)
 		}
 		current = initialSHA
 	} else if current != initialSHA {
-		return Best{}, fmt.Errorf("%s already exists at %s, not requested initial SHA %s", bestBranch, current, initialSHA)
+		return Best{}, fmt.Errorf("%s already exists at %s, not requested initial SHA %s", branch, current, initialSHA)
 	}
 	repository, err := w.ensureBestWorktree(ctx)
 	if err != nil {
 		return Best{}, err
 	}
-	return Best{Branch: bestBranch, Repository: repository, SHA: current}, nil
+	return Best{Branch: branch, Repository: repository, SHA: current}, nil
 }
 
 func (w Workspace) CreateAttempt(ctx context.Context, attemptID string, round int64, baseSHA string) (Round, error) {
 	if err := w.validateRound(attemptID, round, baseSHA); err != nil {
 		return Round{}, err
 	}
-	branch := attemptBranch(attemptID, round)
+	branch := w.attemptBranch(attemptID, round)
 	repository := w.roundRepository(attemptID, round)
 	if err := os.MkdirAll(filepath.Dir(repository), 0o700); err != nil {
 		return Round{}, fmt.Errorf("create Attempt directory: %w", err)
@@ -361,7 +383,7 @@ func (w Workspace) PrepareBestUpdate(ctx context.Context, intentID, expectedBest
 	if err := validateSHA(candidateSHA); err != nil {
 		return Intent{}, fmt.Errorf("candidate: %w", err)
 	}
-	current, err := w.ref(ctx, bestBranch)
+	current, err := w.ref(ctx, w.bestBranch())
 	if err != nil {
 		return Intent{}, err
 	}
@@ -382,7 +404,7 @@ func (w Workspace) ApplyBestUpdate(ctx context.Context, intent Intent, message s
 	if err := w.validateIntent(intent); err != nil {
 		return "", err
 	}
-	current, err := w.ref(ctx, bestBranch)
+	current, err := w.ref(ctx, w.bestBranch())
 	if err != nil {
 		return "", err
 	}
@@ -465,12 +487,12 @@ func (w Workspace) VerifyBestUpdate(ctx context.Context, intent Intent, appliedS
 	if err := validateSHA(appliedSHA); err != nil {
 		return fmt.Errorf("applied Best: %w", err)
 	}
-	current, err := w.ref(ctx, bestBranch)
+	current, err := w.ref(ctx, w.bestBranch())
 	if err != nil {
 		return err
 	}
 	if current != appliedSHA {
-		return fmt.Errorf("pika/best is %s, not applied SHA %s", current, appliedSHA)
+		return fmt.Errorf("%s is %s, not applied SHA %s", w.bestBranch(), current, appliedSHA)
 	}
 	parents, err := w.git(ctx, w.Repository, "show", "-s", "--format=%P", appliedSHA)
 	if err != nil {
@@ -550,8 +572,32 @@ func pathWithin(root, candidate string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
 }
 
-func attemptBranch(attemptID string, round int64) string {
-	return "pika/attempt/" + attemptID + "/" + strconv.FormatInt(round, 10)
+func (w Workspace) namespace() string {
+	namespace := strings.TrimSuffix(strings.TrimSpace(w.Namespace), "/")
+	if namespace == "" {
+		return "pika"
+	}
+	return namespace
+}
+
+func (w Workspace) bestBranch() string {
+	return w.namespace() + "/best"
+}
+
+func (w Workspace) BestBranch() string {
+	return w.bestBranch()
+}
+
+func (w Workspace) BaseBranch() string {
+	return w.namespace() + "/base"
+}
+
+func (w Workspace) attemptBranch(attemptID string, round int64) string {
+	return w.namespace() + "/attempt/" + attemptID + "/" + strconv.FormatInt(round, 10)
+}
+
+func (w Workspace) AttemptBranch(attemptID string, round int64) string {
+	return w.attemptBranch(attemptID, round)
 }
 
 func (w Workspace) roundRepository(attemptID string, round int64) string {
@@ -565,14 +611,14 @@ func (w Workspace) ensureBestWorktree(ctx context.Context) (string, error) {
 	}
 	if _, err := os.Stat(repository); err == nil {
 		branch, branchErr := w.git(ctx, repository, "branch", "--show-current")
-		if branchErr == nil && strings.TrimSpace(branch) == bestBranch {
+		if branchErr == nil && strings.TrimSpace(branch) == w.bestBranch() {
 			return repository, nil
 		}
 		return "", fmt.Errorf("Best worktree path already exists with different identity: %s", repository)
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("inspect Best worktree: %w", err)
 	}
-	if _, err := w.git(ctx, w.Repository, "worktree", "add", repository, bestBranch); err != nil {
+	if _, err := w.git(ctx, w.Repository, "worktree", "add", repository, w.bestBranch()); err != nil {
 		return "", fmt.Errorf("create Best worktree: %w", err)
 	}
 	return repository, nil

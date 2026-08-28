@@ -55,7 +55,7 @@ func TestInstallCopiesBinaryManifestAndRegistersDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{`id = "pika-go"`, `version = "1.2.3-test"`, `command = ["./pika-go", "daemon"]`} {
+	for _, expected := range []string{`id = "pika-go"`, `version = "1.2.3-test"`, `command = ["pika-go", "daemon"]`} {
 		if !strings.Contains(string(manifest), expected) {
 			t.Errorf("manifest does not contain %q:\n%s", expected, manifest)
 		}

@@ -45,6 +45,9 @@ type Application struct {
 	Store            Store
 	MaxEvidenceBytes int64
 	WorktreeRoot     string
+	Repository       string
+	BranchNamespace  string
+	WorktreeRecorder gitworkspace.WorktreeRecorder
 }
 
 func (a Application) Catalog(ctx context.Context, token string) ([]Tool, error) {
@@ -111,6 +114,10 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if err != nil {
 			return Invocation{}, err
 		}
+		assignedRepository, err := a.repositoryFor(targetWork)
+		if err != nil {
+			return Invocation{}, err
+		}
 		return Invocation{Value: map[string]any{
 			"optimization":                      view.Optimization,
 			"baseline":                          view.Baseline,
@@ -121,7 +128,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			"back_offs":                         view.BackOffs,
 			"work":                              targetWork.Work,
 			"generator_work":                    work.Work,
-			"repository":                        targetWork.Repository,
+			"repository":                        assignedRepository,
 			"attempt_id":                        targetWork.Work.AttemptID,
 			"iteration_round":                   targetWork.Work.IterationRound,
 			"iteration_kind":                    targetWork.IterationKind,
@@ -170,18 +177,28 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if err != nil {
 			return Invocation{}, err
 		}
-		repository := work.OptimizationRepository
-		if grant.Role == symphony.RoleIteration {
-			workspace := gitworkspace.Workspace{Repository: work.OptimizationRepository, Root: a.WorktreeRoot}
-			repository, err = workspace.AttemptRepository(work.Work.AttemptID, work.Work.IterationRound)
-			if err != nil {
-				return Invocation{}, err
-			}
+		repository, err := a.repositoryFor(work)
+		if err != nil {
+			return Invocation{}, err
 		}
-		workspace := gitworkspace.Workspace{Repository: repository, Root: a.WorktreeRoot}
+		workspace := gitworkspace.Workspace{Repository: repository, Root: a.WorktreeRoot, Namespace: a.BranchNamespace}
 		result, err := workspace.CommitChanges(ctx, grant.WorkID, input.IdempotencyKey, input.Message, input.Paths)
 		if err != nil {
 			return Invocation{}, err
+		}
+		if a.WorktreeRecorder != nil {
+			record := symphony.GitWorktreeRecord{Repository: repository, HeadSHA: result.CommitSHA, State: "active"}
+			if grant.Role == symphony.RoleIteration {
+				record.Role, record.AttemptID, record.IterationRound = "attempt", work.Work.AttemptID, work.Work.IterationRound
+				record.Branch = a.gitWorkspace(work).AttemptBranch(work.Work.AttemptID, work.Work.IterationRound)
+			} else if a.Repository != "" {
+				record.Role, record.Branch = "base", a.gitWorkspace(work).BaseBranch()
+			}
+			if record.Role != "" {
+				if err := a.WorktreeRecorder.UpsertGitWorktree(ctx, record); err != nil {
+					return Invocation{}, err
+				}
+			}
 		}
 		return Invocation{Value: result, Mutated: true}, nil
 	case "submit_baseline_definition":
@@ -208,7 +225,11 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			if err != nil {
 				return Invocation{}, err
 			}
-			contents, metadata, err := evidence.ReadStable(work.Repository, input.DefinitionPath, a.MaxEvidenceBytes)
+			repository, resolveErr := a.repositoryFor(work)
+			if resolveErr != nil {
+				return Invocation{}, resolveErr
+			}
+			contents, metadata, err := evidence.ReadStable(repository, input.DefinitionPath, a.MaxEvidenceBytes)
 			if err != nil {
 				return Invocation{}, err
 			}
@@ -223,7 +244,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if err != nil {
 			return Invocation{}, err
 		}
-		workspace := gitworkspace.Workspace{Repository: work.OptimizationRepository, Root: a.WorktreeRoot}
+		workspace := a.gitWorkspace(work)
 		snapshot, err := workspace.SourceSnapshot(ctx)
 		if err != nil {
 			return Invocation{}, err
@@ -268,7 +289,11 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			if err != nil {
 				return Invocation{}, err
 			}
-			contents, metadata, err := evidence.ReadStable(work.Repository, input.EvidencePath, a.MaxEvidenceBytes)
+			repository, resolveErr := a.repositoryFor(work)
+			if resolveErr != nil {
+				return Invocation{}, resolveErr
+			}
+			contents, metadata, err := evidence.ReadStable(repository, input.EvidencePath, a.MaxEvidenceBytes)
 			if err != nil {
 				return Invocation{}, err
 			}
@@ -293,7 +318,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			if err != nil {
 				return Invocation{}, err
 			}
-			workspace := gitworkspace.Workspace{Repository: work.OptimizationRepository, Root: a.WorktreeRoot}
+			workspace := a.gitWorkspace(work)
 			snapshot, err := workspace.SourceSnapshot(ctx)
 			if err != nil {
 				return Invocation{}, err
@@ -307,6 +332,13 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			best, err := workspace.EnsureBest(ctx, work.BaselineRepositorySHA)
 			if err != nil {
 				return Invocation{}, err
+			}
+			if a.WorktreeRecorder != nil {
+				if err := a.WorktreeRecorder.UpsertGitWorktree(ctx, symphony.GitWorktreeRecord{
+					Role: "best", Branch: best.Branch, Repository: best.Repository, HeadSHA: best.SHA, State: "active",
+				}); err != nil {
+					return Invocation{}, err
+				}
 			}
 			command.InitialBestSHA = best.SHA
 		}
@@ -340,7 +372,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			if err != nil {
 				return Invocation{}, err
 			}
-			workspace := gitworkspace.Workspace{Repository: work.OptimizationRepository, Root: a.WorktreeRoot}
+			workspace := a.gitWorkspace(work)
 			repository, err := workspace.AttemptRepository(work.Work.AttemptID, work.Work.IterationRound)
 			if err != nil {
 				return Invocation{}, err
@@ -389,7 +421,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if err != nil {
 			return Invocation{}, err
 		}
-		workspace := gitworkspace.Workspace{Repository: work.OptimizationRepository, Root: a.WorktreeRoot}
+		workspace := a.gitWorkspace(work)
 		intent, err := workspace.PrepareBestUpdate(ctx, result.IntentID, result.ExpectedBestSHA, result.CandidateSHA)
 		if err != nil {
 			return Invocation{}, err
@@ -423,10 +455,17 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if stored.IntegrationID != work.Work.IntegrationID || stored.State != "pending" {
 			return Invocation{}, forbidden("Git intent does not belong to this active Integration")
 		}
-		workspace := gitworkspace.Workspace{Repository: work.OptimizationRepository, Root: a.WorktreeRoot}
+		workspace := a.gitWorkspace(work)
 		appliedSHA, err := workspace.ApplyAuthorizedBestUpdate(ctx, stored.ID, stored.ExpectedBestSHA, stored.CandidateSHA, input.Message)
 		if err != nil {
 			return Invocation{}, err
+		}
+		if a.WorktreeRecorder != nil {
+			if err := a.WorktreeRecorder.UpsertGitWorktree(ctx, symphony.GitWorktreeRecord{
+				Role: "best", Branch: workspace.BestBranch(), Repository: filepath.Join(a.WorktreeRoot, "best", "repo"), HeadSHA: appliedSHA, State: "active",
+			}); err != nil {
+				return Invocation{}, err
+			}
 		}
 		return Invocation{Value: map[string]any{"intent_id": stored.ID, "applied_sha": appliedSHA}, Mutated: true}, nil
 	case "finish_integration":
@@ -462,7 +501,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			if stored.IntegrationID != work.Work.IntegrationID || stored.State != "pending" {
 				return Invocation{}, forbidden("Git intent does not belong to this active Integration")
 			}
-			workspace := gitworkspace.Workspace{Repository: work.OptimizationRepository, Root: a.WorktreeRoot}
+			workspace := a.gitWorkspace(work)
 			intent := gitworkspace.Intent{ID: stored.ID, ExpectedBestSHA: stored.ExpectedBestSHA, CandidateSHA: stored.CandidateSHA,
 				BestRepository: filepath.Join(a.WorktreeRoot, "best", "repo")}
 			if err := workspace.VerifyBestUpdate(ctx, intent, input.AppliedSHA); err != nil {
@@ -581,6 +620,24 @@ func decodeArguments(raw json.RawMessage, target any) error {
 		return fmt.Errorf("invalid tool arguments: %w", err)
 	}
 	return nil
+}
+
+func (a Application) gitWorkspace(work symphony.RuntimeWork) gitworkspace.Workspace {
+	repository := a.Repository
+	if repository == "" {
+		repository = work.OptimizationRepository
+	}
+	return gitworkspace.Workspace{Repository: repository, Root: a.WorktreeRoot, Namespace: a.BranchNamespace}
+}
+
+func (a Application) repositoryFor(work symphony.RuntimeWork) (string, error) {
+	workspace := a.gitWorkspace(work)
+	switch work.Work.Role {
+	case symphony.RoleIteration, symphony.RoleIntegration:
+		return workspace.AttemptRepository(work.Work.AttemptID, work.Work.IterationRound)
+	default:
+		return workspace.Repository, nil
+	}
 }
 
 func forbidden(message string) error {

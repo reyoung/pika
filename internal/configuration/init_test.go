@@ -9,7 +9,58 @@ import (
 	"testing"
 
 	"github.com/reyoung/pika-go/internal/configuration"
+	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 )
+
+func TestPrepareInitWritesAndRollsBackOnlyWorkspaceOwnedConfiguration(t *testing.T) {
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.Mkdir(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{{"init", "--quiet", "--initial-branch=main"}, {"config", "user.name", "Pika Test"}, {"config", "user.email", "pika@example.invalid"}} {
+		if output, err := exec.Command("git", append([]string{"-C", repository}, arguments...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{{"add", "README.md"}, {"commit", "--quiet", "-m", "initial"}} {
+		if output, err := exec.Command("git", append([]string{"-C", repository}, arguments...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initializer := configuration.Initializer{
+		Workspace: &workspace, CodexHome: filepath.Join(t.TempDir(), "codex"),
+		PikaExecutable: "/bin/echo", CodexExecutable: "/bin/sh",
+	}
+	rollback, err := initializer.Prepare(context.Background(), workspace.Identity.SourceRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(workspace.ConfigPath); err != nil {
+		t.Fatalf("Workspace pika.toml: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.RuntimeRoot, "bin", "codex")); err != nil {
+		t.Fatalf("Workspace Codex wrapper: %v", err)
+	}
+	if err := rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(workspace.ConfigPath); !os.IsNotExist(err) {
+		t.Fatalf("Workspace configuration remains after rollback: %v", err)
+	}
+	if _, err := os.Stat(workspace.ManifestPath); err != nil {
+		t.Fatalf("rollback removed Workspace identity: %v", err)
+	}
+	if _, err := os.Stat(workspace.BaseRepository); err != nil {
+		t.Fatalf("rollback removed base worktree: %v", err)
+	}
+}
 
 func TestPrepareInitCommitsOwnedConfigurationAndCanRollback(t *testing.T) {
 	t.Parallel()

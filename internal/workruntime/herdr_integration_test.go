@@ -90,9 +90,10 @@ func TestDaemonRestartCreatesFreshSessionMoveAndLostPaneReplacement(t *testing.T
 
 	stopDaemon := startTestDaemon(t, pikaSocket, stateRoot, configRoot)
 	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{
-		Mutation:     protocol.Mutation{RequestID: "init"},
-		Repository:   repository,
-		CallerPaneID: initPane.PaneID,
+		Mutation:          protocol.Mutation{RequestID: "init"},
+		Repository:        repository,
+		CallerPaneID:      initPane.PaneID,
+		ConfigurationTOML: fixtureConfiguration(repository),
 	}); err != nil {
 		t.Fatalf("initialize daemon: %v", err)
 	}
@@ -224,7 +225,7 @@ func TestGracefulShutdownWaitsForRealHerdrAgentTerminalMCP(t *testing.T) {
 		daemonDone <- cli.Run(daemonCtx, []string{"daemon", "--socket", pikaSocket, "--state-dir", stateRoot, "--config-dir", configRoot, "--instance", "integration-instance"}, nil, io.Discard, io.Discard)
 	}()
 	waitForPikaHealth(t, pikaSocket, daemonDone)
-	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID}); err != nil {
+	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository)}); err != nil {
 		t.Fatal(err)
 	}
 	agent := waitForNamedAgent(t, ctx, client, "")
@@ -328,7 +329,7 @@ func TestDaemonProcessCrashReplacesRunningHerdrAgentAndRecoversWork(t *testing.T
 	})
 	daemon = startDaemonProcess(t, pikaBinary, pikaSocket, stateRoot, configRoot, herdrSocket, created.RootPane.PaneID, binDir)
 	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{
-		Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID,
+		Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +463,7 @@ func TestDaemonProcessCrashAtDispatchingOutboxReconcilesWithoutDuplicateAgent(t 
 		}, &crashStdout, &crashStderr)
 	}()
 	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{
-		Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID,
+		Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -598,7 +599,7 @@ func TestDaemonProcessCrashAfterTerminalCommitRecoversSingleSuccessor(t *testing
 	})
 	daemon = startDaemonProcess(t, pikaBinary, pikaSocket, stateRoot, configRoot, herdrSocket, created.RootPane.PaneID, binDir)
 	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{
-		Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID,
+		Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -890,7 +891,7 @@ func TestBaselineAcceptedEndToEndThroughMCP(t *testing.T) {
 	t.Setenv("PIKA_GO_AGENT_PATH_PREFIX", binDir)
 	stopDaemon := startTestDaemon(t, pikaSocket, stateRoot, configRoot)
 	defer stopDaemon()
-	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID}); err != nil {
+	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository)}); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	deadline := time.Now().Add(15 * time.Second)
@@ -981,7 +982,7 @@ func TestFollowUpThroughRealHerdr(t *testing.T) {
 	t.Setenv("PIKA_GO_FOLLOWUP_INACTIVITY", "500ms")
 	stopDaemon := startTestDaemon(t, pikaSocket, stateRoot, configRoot)
 	defer stopDaemon()
-	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID}); err != nil {
+	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository)}); err != nil {
 		t.Fatal(err)
 	}
 	var target symphony.WorkView
@@ -1103,7 +1104,7 @@ func TestRejectedBaselineCreatesFreshDraftSession(t *testing.T) {
 	t.Setenv("PIKA_GO_AGENT_PATH_PREFIX", binDir)
 	stopDaemon := startTestDaemon(t, pikaSocket, stateRoot, configRoot)
 	defer stopDaemon()
-	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID}); err != nil {
+	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository)}); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	deadline := time.Now().Add(15 * time.Second)
@@ -1178,7 +1179,7 @@ func TestOptimizationFIFOThroughRealHerdr(t *testing.T) {
 	t.Setenv("PIKA_GO_AGENT_PATH_PREFIX", binDir)
 	stopDaemon := startTestDaemon(t, pikaSocket, stateRoot, configRoot)
 	defer stopDaemon()
-	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID}); err != nil {
+	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository)}); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	deadline := time.Now().Add(100 * time.Second)
@@ -1297,6 +1298,11 @@ func initializeFixtureRepository(t *testing.T, repository string) {
 			t.Fatalf("git %v: %v: %s", args, err, output)
 		}
 	}
+}
+
+func fixtureConfiguration(repository string) *string {
+	contents := configuration.RenderDefaults(repository)
+	return &contents
 }
 
 func configureTestScheduler(t *testing.T, ctx context.Context, repository, stateRoot, configRoot, pikaBinary string, concurrency, maxPending int) {

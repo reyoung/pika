@@ -23,7 +23,7 @@ id = "symphony"
 title = "Daemon"
 description = "Run the Pika-Go orchestration daemon"
 placement = "split"
-command = ["./pika-go", "daemon"]
+command = ["pika-go", "daemon"]
 `
 
 type Options struct {

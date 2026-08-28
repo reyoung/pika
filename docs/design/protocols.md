@@ -97,13 +97,13 @@ pika-go hook cursor
 
 `pika-go apply-best-update` remains an operational recovery/diagnostic entrypoint for an already-issued bounded Git Intent. Normal Integration Agents call the grant-scoped `apply_best_update` MCP instead, because their ordinary shell sandbox is not a control-plane transport.
 
-`edit-instruction` resolves the instance through Herdr, validates `NAME` against the static catalog, then invokes `$EDITOR` directly. It does not send the file through the daemon and does not create a dynamic guidance record.
+`edit-instruction` discovers the Optimization Workspace from `--workspace`, `PIKA_GO_WORKSPACE`, or the current directory, validates `NAME` against the static catalog, then invokes `$EDITOR` directly on its `instructions/` overlay. The legacy Herdr instance lookup remains only for explicitly non-migrated instances.
 
 `back-off` does not accept an arbitrary destination. The current phase selects the one declared transition; unsupported phases fail without mutation.
 
 `init` automatically creates and starts the first Baseline Draft. `draft-baseline` is therefore a recovery/control command, not a normal extra stage: it is accepted only when Baseline Draft is the declared paused successor and always creates a fresh Agent Session. It returns `invalid_transition` if a draft is already active or the Optimization has advanced beyond the Baseline phase.
 
-Herdr metadata tokens are not durable across a cold Herdr restart. A same-server daemon restart reuses the existing token. For cold recovery, `daemon --instance ID` opens the persisted instance and republishes the token; it fails if that instance is already owned by a live daemon or its recorded Workspace binding is incompatible. Pika never guesses between multiple persisted instances or silently initializes over one.
+Herdr metadata tokens and workspace/tab/pane IDs are not durable Optimization identity. `pika-go resume [WORKSPACE]` opens the immutable `workspace.json`, validates the source Git common-directory identity, creates a fresh Herdr layout, republishes metadata, and recovers SQLite/outbox state through fresh Agent Sessions. `kick-off` auto-discovers the same marker. Pika never guesses between multiple Workspaces, relocates one, or silently initializes over existing `pika.toml`/`pika.db`.
 
 ## 4. Herdr socket adapter
 
