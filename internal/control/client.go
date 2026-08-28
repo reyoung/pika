@@ -62,7 +62,7 @@ func Status(ctx context.Context, socketPath string) (symphony.View, error) {
 
 func Init(ctx context.Context, socketPath string, request protocol.InitRequest) (symphony.Receipt, error) {
 	var receipt symphony.Receipt
-	if err := doJSONWithTimeout(ctx, socketPath, http.MethodPost, "/v1/init", request, &receipt, 30*time.Second); err != nil {
+	if err := doJSONWithTimeout(ctx, socketPath, http.MethodPost, "/v1/init", request, &receipt, 60*time.Second); err != nil {
 		return symphony.Receipt{}, err
 	}
 	return receipt, nil
@@ -70,7 +70,9 @@ func Init(ctx context.Context, socketPath string, request protocol.InitRequest) 
 
 func InitOptions(ctx context.Context, socketPath string) (protocol.InitOptionsResponse, error) {
 	var response protocol.InitOptionsResponse
-	if err := doJSONWithTimeout(ctx, socketPath, http.MethodGet, "/v1/init/options", nil, &response, 8*time.Second); err != nil {
+	// Provider discovery is sequential and Cursor performs separate version,
+	// authentication, and model-catalog commands under bounded server budgets.
+	if err := doJSONWithTimeout(ctx, socketPath, http.MethodGet, "/v1/init/options", nil, &response, 50*time.Second); err != nil {
 		return protocol.InitOptionsResponse{}, err
 	}
 	return response, nil

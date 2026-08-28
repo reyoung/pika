@@ -817,7 +817,8 @@ func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T)
 	}
 	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/echo")
 	cursorExecutable := filepath.Join(root, "cursor-agent")
-	if err := os.WriteFile(cursorExecutable, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.25-3e8eec8; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nif [ \"$1\" = --list-models ]; then printf 'Available models\\n\\nauto - Auto (default)\\ngpt-5.6-sol-low - GPT-5.6 Sol Low\\ngpt-5.6-sol-medium - GPT-5.6 Sol Medium\\ngpt-5.6-sol-high - GPT-5.6 Sol High\\ngpt-5.6-sol-xhigh - GPT-5.6 Sol Extra High\\ngpt-5.6-sol-max - GPT-5.6 Sol Max\\ngpt-5.6-terra-low - GPT-5.6 Terra Low\\ngpt-5.6-terra-medium - GPT-5.6 Terra Medium\\ngpt-5.6-terra-high - GPT-5.6 Terra High\\n'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+	t.Setenv("PIKA_GO_CURSOR_TEST_STATUS_SEEN", filepath.Join(root, "cursor-status-seen"))
+	if err := os.WriteFile(cursorExecutable, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.25-3e8eec8; exit 0; fi\nif [ \"$1\" = status ]; then if [ ! -e \"$PIKA_GO_CURSOR_TEST_STATUS_SEEN\" ]; then : > \"$PIKA_GO_CURSOR_TEST_STATUS_SEEN\"; sleep 10.1; fi; echo 'Logged in as test@example.com'; exit 0; fi\nif [ \"$1\" = --list-models ]; then printf 'Available models\\n\\nauto - Auto (default)\\ngpt-5.6-sol-low - GPT-5.6 Sol Low\\ngpt-5.6-sol-medium - GPT-5.6 Sol Medium\\ngpt-5.6-sol-high - GPT-5.6 Sol High\\ngpt-5.6-sol-xhigh - GPT-5.6 Sol Extra High\\ngpt-5.6-sol-max - GPT-5.6 Sol Max\\ngpt-5.6-terra-low - GPT-5.6 Terra Low\\ngpt-5.6-terra-medium - GPT-5.6 Terra Medium\\ngpt-5.6-terra-high - GPT-5.6 Terra High\\n'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PIKA_GO_CURSOR_EXECUTABLE", cursorExecutable)
@@ -842,11 +843,11 @@ func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T)
 	}()
 	waitForHealth(t, socketPath, &daemonStderr)
 	input := strings.Join([]string{
-		"99", "2", "", "", "y",
+		"99", "2", "", "9", "", "", "2",
 		"1", "", "",
-		"2", "2", "5", `["--force","--approve-mcps"]`, "n",
+		"2", "2", "5", "2", "2", "1",
 		"1", "", "",
-		"2", "", "", "n",
+		"2", "", "3", "1", "1",
 	}, "\n") + "\n"
 	var stdout, stderr bytes.Buffer
 	if code := cli.Run(context.Background(), []string{"init", "--socket", socketPath, "--repository", repository}, strings.NewReader(input), &stdout, &stderr); code != 0 {
@@ -869,15 +870,18 @@ func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if baseline.Kind != "cursor" || baseline.Model != "auto" || baseline.ReasoningEffort != "" || !slices.Contains(baseline.Args, "--trust") ||
-		iteration.Kind != "cursor" || iteration.Model != "gpt-5.6-sol" || iteration.ReasoningEffort != "max" ||
-		followUp.Kind != "cursor" || followUp.Model != "auto" || followUp.ReasoningEffort != "" || verification.Kind != "codex" {
+	if baseline.Kind != "cursor" || baseline.Model != "auto" || baseline.ReasoningEffort != "" || !slices.Equal(baseline.Args, []string{"--force", "--approve-mcps", "--trust"}) ||
+		iteration.Kind != "cursor" || iteration.Model != "gpt-5.6-sol" || iteration.ReasoningEffort != "max" || !slices.Equal(iteration.Args, []string{"--auto-review"}) ||
+		followUp.Kind != "cursor" || followUp.Model != "auto" || followUp.ReasoningEffort != "" || !slices.Equal(followUp.Args, []string{"--approve-mcps"}) || verification.Kind != "codex" {
 		t.Fatalf("baseline=%+v verification=%+v iteration=%+v follow_up=%+v", baseline, verification, iteration, followUp)
 	}
-	for _, want := range []string{"  backend:\n    1) codex\n    2) cursor", "  Select backend [1]:", "  model:\n    1) auto-routing (default)\n    2) gpt-5.6-sol", "  model:\n    1) default\n    2) GPT-5.6-Sol (gpt-5.6-sol)", "  reasoning effort: provider default", "  reasoning effort:\n    1) low", "  Select model [1]:", "  Select model [2]:", "  Select reasoning effort [3]:", "Enter a number from 1 to 2."} {
+	for _, want := range []string{"  backend:\n    1) codex\n    2) cursor", "  Select backend [1]:", "  model:\n    1) auto-routing (default)\n    2) gpt-5.6-sol", "  model:\n    1) default\n    2) GPT-5.6-Sol (gpt-5.6-sol)", "  reasoning effort: provider default", "  reasoning effort:\n    1) low", "  Cursor command approval:\n    1) Allow commands automatically", "  Cursor MCP approval:\n    1) Approve configured MCP servers automatically", "  Cursor workspace trust:\n    1) Keep the current workspace trust setting", "  Select model [1]:", "  Select model [2]:", "  Select reasoning effort [3]:", "Enter a number from 1 to 2.", "Enter a number from 1 to 3."} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("interactive init output is missing %q:\n%s", want, stdout.String())
 		}
+	}
+	if strings.Contains(stdout.String(), "Cursor args JSON") {
+		t.Fatalf("interactive init still exposes raw Cursor argv:\n%s", stdout.String())
 	}
 	cancel()
 	if code := <-done; code != 0 {

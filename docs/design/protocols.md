@@ -239,7 +239,7 @@ The base user configuration, authentication, Herdr hook, and other user hooks st
 
 The instance wrapper adds the Session-frozen Pika System Prompt as a per-launch `developer_instructions` override and launches Codex with `--ask-for-approval never`. That prevents an unattended autonomous Work from waiting forever on a shell approval; it does not disable or widen the configured `workspace-write` sandbox, so denied shell operations still fail. Git metadata commits and Best application use scoped MCP control-plane tools rather than attempting to escape that sandbox. Matching hooks from the base config and profile are additive. The profile name is reserved; Role Agent configuration cannot supply a second `--profile` argument.
 
-Codex may require the user to trust the new hook on first launch. Pika never bypasses hook trust automatically.
+Codex may require the user to trust the five Pika-managed hooks on first launch. Pika never bypasses hook trust automatically. Once Codex records its per-hook SHA-256 trust state, subsequent Pika profile refreshes preserve only valid entries keyed to those exact managed hooks and profile path. Other hook trust is not copied, and changed Pika hooks require review again.
 
 ## 9. Cursor hook adapter
 

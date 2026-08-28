@@ -4,11 +4,49 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/reyoung/pika-go/internal/codexprofile"
 )
+
+func TestInstallPreservesOnlyMatchingCodexHookTrustState(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex")
+	instanceBin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	profilePath := filepath.Join(codexHome, codexprofile.ProfileName+".config.toml")
+	trustedHash := "sha256:" + strings.Repeat("a", 64)
+	foreignHash := "sha256:" + strings.Repeat("b", 64)
+	prior := codexprofile.OwnershipMarker + "\n\n[hooks.state]\n\n" +
+		"[hooks.state." + strconv.Quote(profilePath+":stop:0:0") + "]\ntrusted_hash = " + strconv.Quote(trustedHash) + "\n\n" +
+		"[hooks.state." + strconv.Quote("foreign:stop:0:0") + "]\ntrusted_hash = " + strconv.Quote(foreignHash) + "\n"
+	if err := os.WriteFile(profilePath, []byte(prior), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codexprofile.Install(codexprofile.Options{
+		CodexHome:       codexHome,
+		InstanceBin:     instanceBin,
+		PikaExecutable:  "/bin/echo",
+		CodexExecutable: "/bin/sh",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(profile), profilePath+":stop:0:0") || !strings.Contains(string(profile), trustedHash) {
+		t.Fatalf("matching Codex hook trust state was lost:\n%s", profile)
+	}
+	if strings.Contains(string(profile), "foreign:stop:0:0") || strings.Contains(string(profile), foreignHash) {
+		t.Fatalf("foreign hook trust state was preserved:\n%s", profile)
+	}
+}
 
 func TestInstallCreatesOwnedOverlayAndInstanceWrapper(t *testing.T) {
 	t.Parallel()

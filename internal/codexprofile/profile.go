@@ -1,6 +1,7 @@
 package codexprofile
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -26,6 +27,19 @@ type snapshot struct {
 	existed bool
 	content []byte
 	mode    os.FileMode
+}
+
+type managedHook struct {
+	configEvent string
+	stateEvent  string
+}
+
+var managedHooks = []managedHook{
+	{configEvent: "SessionStart", stateEvent: "session_start"},
+	{configEvent: "SessionEnd", stateEvent: "session_end"},
+	{configEvent: "UserPromptSubmit", stateEvent: "user_prompt_submit"},
+	{configEvent: "PostToolUse", stateEvent: "post_tool_use"},
+	{configEvent: "Stop", stateEvent: "stop"},
 }
 
 // Install writes the single global Pika-owned Codex overlay and an instance-local
@@ -54,7 +68,8 @@ func Install(options Options) (func() error, error) {
 		return nil, err
 	}
 
-	if err := writeAtomic(profilePath, []byte(renderProfile(options.PikaExecutable)), 0o600); err != nil {
+	trustedHookState := readManagedHookTrustState(profileBefore.content, profilePath)
+	if err := writeAtomic(profilePath, []byte(renderProfile(options.PikaExecutable, profilePath, trustedHookState)), 0o600); err != nil {
 		return nil, err
 	}
 	if err := writeAtomic(wrapperPath, []byte(renderWrapper(options.CodexExecutable)), 0o700); err != nil {
@@ -95,7 +110,7 @@ func validateOptions(options Options) error {
 	return nil
 }
 
-func renderProfile(pikaExecutable string) string {
+func renderProfile(pikaExecutable, profilePath string, trustedHookState map[string]string) string {
 	hookCommand := shellQuote(pikaExecutable) + " hook codex"
 	var builder strings.Builder
 	builder.WriteString(OwnershipMarker + "\n")
@@ -108,14 +123,74 @@ func renderProfile(pikaExecutable string) string {
 	builder.WriteString("default_tools_approval_mode = \"approve\"\n")
 	builder.WriteString("startup_timeout_sec = 5\n")
 	builder.WriteString("tool_timeout_sec = 3600\n")
-	for _, event := range []string{"SessionStart", "SessionEnd", "UserPromptSubmit", "PostToolUse", "Stop"} {
-		builder.WriteString("\n[[hooks." + event + "]]\n")
-		builder.WriteString("\n[[hooks." + event + ".hooks]]\n")
+	for _, hook := range managedHooks {
+		builder.WriteString("\n[[hooks." + hook.configEvent + "]]\n")
+		builder.WriteString("\n[[hooks." + hook.configEvent + ".hooks]]\n")
 		builder.WriteString("type = \"command\"\n")
 		builder.WriteString("command = " + strconv.Quote(hookCommand) + "\n")
 		builder.WriteString("timeout = 3\n")
 	}
+	if len(trustedHookState) != 0 {
+		builder.WriteString("\n[hooks.state]\n")
+		for _, hook := range managedHooks {
+			key := managedHookTrustKey(profilePath, hook.stateEvent)
+			hash := trustedHookState[key]
+			if hash == "" {
+				continue
+			}
+			builder.WriteString("\n[hooks.state." + strconv.Quote(key) + "]\n")
+			builder.WriteString("trusted_hash = " + strconv.Quote(hash) + "\n")
+		}
+	}
 	return builder.String()
+}
+
+func readManagedHookTrustState(contents []byte, profilePath string) map[string]string {
+	expected := make(map[string]bool, len(managedHooks))
+	for _, hook := range managedHooks {
+		expected[managedHookTrustKey(profilePath, hook.stateEvent)] = true
+	}
+	trusted := make(map[string]string, len(managedHooks))
+	section := ""
+	for _, line := range strings.Split(string(contents), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			section = ""
+			const prefix = "[hooks.state."
+			if strings.HasPrefix(trimmed, prefix) && strings.HasSuffix(trimmed, "]") {
+				encoded := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefix), "]")
+				if key, err := strconv.Unquote(encoded); err == nil && expected[key] {
+					section = key
+				}
+			}
+			continue
+		}
+		if section == "" {
+			continue
+		}
+		key, value, found := strings.Cut(trimmed, "=")
+		if !found || strings.TrimSpace(key) != "trusted_hash" {
+			continue
+		}
+		decoded, err := strconv.Unquote(strings.TrimSpace(value))
+		if err == nil && validTrustedHookHash(decoded) {
+			trusted[section] = decoded
+		}
+	}
+	return trusted
+}
+
+func managedHookTrustKey(profilePath, event string) string {
+	return profilePath + ":" + event + ":0:0"
+}
+
+func validTrustedHookHash(value string) bool {
+	const prefix = "sha256:"
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	digest, err := hex.DecodeString(strings.TrimPrefix(value, prefix))
+	return err == nil && len(digest) == 32
 }
 
 func renderWrapper(codexExecutable string) string {

@@ -14,6 +14,11 @@ import (
 
 const CursorCandidateVersion = "2026.08.25-3e8eec8"
 
+const (
+	cursorVersionProbeTimeout        = 5 * time.Second
+	cursorAuthenticationProbeTimeout = 30 * time.Second
+)
+
 type CursorOptions struct {
 	Executable     string
 	RuntimeRoot    string
@@ -68,16 +73,34 @@ func (adapter CursorAdapter) Probe(ctx context.Context, request ProbeRequest) (C
 			return Capabilities{}, fmt.Errorf("resolve Cursor executable: %w", err)
 		}
 	}
-	output, err := exec.CommandContext(ctx, executable, "--version").CombinedOutput()
+	versionCtx, cancelVersion := context.WithTimeout(ctx, cursorVersionProbeTimeout)
+	output, err := exec.CommandContext(versionCtx, executable, "--version").CombinedOutput()
+	versionCtxErr := versionCtx.Err()
+	cancelVersion()
 	if err != nil {
+		if versionCtxErr != nil {
+			err = versionCtxErr
+		}
 		return Capabilities{}, fmt.Errorf("probe Cursor version: %w", err)
 	}
 	version := strings.TrimSpace(string(output))
 	if version != CursorCandidateVersion {
 		return Capabilities{}, fmt.Errorf("unsupported Cursor version %q; require %s", version, CursorCandidateVersion)
 	}
-	if output, err = exec.CommandContext(ctx, executable, "status").CombinedOutput(); err != nil {
-		return Capabilities{}, fmt.Errorf("probe Cursor authentication: %s", strings.TrimSpace(string(output)))
+	authenticationCtx, cancelAuthentication := context.WithTimeout(ctx, cursorAuthenticationProbeTimeout)
+	output, err = exec.CommandContext(authenticationCtx, executable, "status").CombinedOutput()
+	authenticationCtxErr := authenticationCtx.Err()
+	cancelAuthentication()
+	if err != nil {
+		status := strings.TrimSpace(string(output))
+		cause := err
+		if authenticationCtxErr != nil {
+			cause = authenticationCtxErr
+		}
+		if status == "" {
+			return Capabilities{}, fmt.Errorf("probe Cursor authentication: %w", cause)
+		}
+		return Capabilities{}, fmt.Errorf("probe Cursor authentication: %s: %w", status, cause)
 	}
 	status := strings.TrimSpace(string(output))
 	if !strings.Contains(status, "Logged in") || strings.Contains(status, "Not logged in") {

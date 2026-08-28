@@ -335,7 +335,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			}
 			for _, kind := range providerRegistry.Kinds() {
 				option := protocol.ProviderOption{Kind: kind}
-				probeCtx, cancelProbe := context.WithTimeout(optionsCtx, 2*time.Second)
+				probeCtx, cancelProbe := context.WithTimeout(optionsCtx, providerProbeTimeout(kind))
 				capabilities, probeErr := providerRegistry.Probe(probeCtx, kind, provider.ProbeRequest{Executable: map[string]string{"codex": codexExecutable, "cursor": cursorExecutable}[kind]})
 				cancelProbe()
 				if probeErr != nil {
@@ -516,6 +516,16 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	writeDaemonLog(stderr, "info", "daemon.stopped", nil, map[string]any{"instance_id": paths.InstanceID})
 	return 0
+}
+
+func providerProbeTimeout(kind string) time.Duration {
+	if kind == "cursor" {
+		// Cursor independently bounds its version command at five seconds and
+		// its authenticated status command at thirty seconds. Leave headroom
+		// around both stages for process startup and cancellation propagation.
+		return 40 * time.Second
+	}
+	return 2 * time.Second
 }
 
 func writeDaemonLog(output io.Writer, level, event string, err error, fields map[string]any) {
@@ -957,23 +967,9 @@ func promptAgentConfiguration(input io.Reader, output io.Writer, repository stri
 		}
 		agent := configuration.Agent{Kind: kind, Model: model, ReasoningEffort: effort}
 		if kind == "cursor" {
-			defaultArgs := []string{"--force", "--approve-mcps"}
-			encodedDefaults, _ := json.Marshal(defaultArgs)
-			encoded, promptErr := promptValue(reader, output, "  Cursor args JSON", string(encodedDefaults))
-			if promptErr != nil {
-				return "", promptErr
-			}
-			if err := json.Unmarshal([]byte(encoded), &agent.Args); err != nil {
-				return "", fmt.Errorf("agents.%s Cursor args must be a JSON string array: %w", role, err)
-			}
-			trust, promptErr := promptValue(reader, output, "  append --trust (changes Cursor persistent workspace trust) y/N", "n")
-			if promptErr != nil {
-				return "", promptErr
-			}
-			if strings.EqualFold(trust, "y") || strings.EqualFold(trust, "yes") {
-				agent.Args = append(agent.Args, "--trust")
-			} else if !strings.EqualFold(trust, "n") && !strings.EqualFold(trust, "no") {
-				return "", fmt.Errorf("agents.%s trust answer must be yes or no", role)
+			agent.Args, err = promptCursorArgs(reader, output)
+			if err != nil {
+				return "", err
 			}
 		}
 		adapter, err := registry.Resolve(kind)
@@ -986,6 +982,45 @@ func promptAgentConfiguration(input io.Reader, output io.Writer, repository stri
 		agents[role] = agent
 	}
 	return configuration.RenderConfiguration(repository, agents)
+}
+
+func promptCursorArgs(reader *bufio.Reader, output io.Writer) ([]string, error) {
+	commandApproval, err := promptList(reader, output, "  Cursor command approval", "force", []promptChoice{
+		{Value: "force", Label: "Allow commands automatically (recommended for unattended optimization; --force)"},
+		{Value: "auto-review", Label: "Let Cursor auto-review commands (--auto-review)"},
+		{Value: "ask", Label: "Ask before commands (may pause the optimization)"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	mcpApproval, err := promptList(reader, output, "  Cursor MCP approval", "approve", []promptChoice{
+		{Value: "approve", Label: "Approve configured MCP servers automatically (recommended; --approve-mcps)"},
+		{Value: "ask", Label: "Ask before approving MCP servers (may pause the optimization)"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	workspaceTrust, err := promptList(reader, output, "  Cursor workspace trust", "keep", []promptChoice{
+		{Value: "keep", Label: "Keep the current workspace trust setting (recommended)"},
+		{Value: "trust", Label: "Trust this workspace persistently (--trust)"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var args []string
+	switch commandApproval {
+	case "force":
+		args = append(args, "--force")
+	case "auto-review":
+		args = append(args, "--auto-review")
+	}
+	if mcpApproval == "approve" {
+		args = append(args, "--approve-mcps")
+	}
+	if workspaceTrust == "trust" {
+		args = append(args, "--trust")
+	}
+	return args, nil
 }
 
 func modelOptionExists(models []protocol.ModelOption, id string) bool {

@@ -152,6 +152,7 @@ func TestCursorProbeRejectsVersionAndAuthenticationFailures(t *testing.T) {
 		{name: "authentication-status", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.25-3e8eec8; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Not logged in'; exit 0; fi\nexit 1\n", wantErr: "authentication"},
 		{name: "version", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo other; exit 0; fi\nexit 1\n", wantErr: "unsupported Cursor version"},
 		{name: "authentication", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.25-3e8eec8; exit 0; fi\necho logged-out; exit 1\n", wantErr: "authentication"},
+		{name: "empty-authentication-error", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.25-3e8eec8; exit 0; fi\nexit 1\n", wantErr: "exit status 1"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			executable := filepath.Join(t.TempDir(), "cursor-agent")
