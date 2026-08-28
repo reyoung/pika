@@ -9,18 +9,23 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/reyoung/pika-go/internal/activation"
 	"github.com/reyoung/pika-go/internal/configuration"
 	"github.com/reyoung/pika-go/internal/control"
 	"github.com/reyoung/pika-go/internal/daemon"
+	"github.com/reyoung/pika-go/internal/daemonupdate"
 	"github.com/reyoung/pika-go/internal/gitworkspace"
 	"github.com/reyoung/pika-go/internal/herdr"
 	"github.com/reyoung/pika-go/internal/instance"
@@ -38,6 +43,11 @@ import (
 )
 
 var Version = "dev"
+
+// UpdateFailBeforeReadyVersion is an integration-test linker hook. Release
+// builds leave it empty.
+var UpdateFailBeforeReadyVersion string
+var UpdateFailAfterCommitVersion string
 
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if stdout == nil {
@@ -64,6 +74,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runWorkspace(ctx, args[1:], stdout, stderr)
 	case "install":
 		return runInstall(ctx, args[1:], stdin, stdout, stderr)
+	case "update":
+		return runUpdate(ctx, args[1:], stdout, stderr)
 	case "daemon":
 		return runDaemon(ctx, args[1:], stderr)
 	case "status":
@@ -90,6 +102,15 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runHook(ctx, args[1:], stdin, stdout)
 	case "version", "--version", "-version":
 		_, _ = fmt.Fprintln(stdout, Version)
+		return 0
+	case "update-probe":
+		if len(args) != 1 {
+			_, _ = fmt.Fprintln(stderr, "update-probe: arguments are not supported")
+			return 2
+		}
+		if err := json.NewEncoder(stdout).Encode(daemonupdate.CurrentProbe(Version)); err != nil {
+			return 1
+		}
 		return 0
 	case "help":
 		if len(args) == 1 {
@@ -170,6 +191,123 @@ func runInstall(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	return 0
 }
 
+func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	statusOnly := len(args) > 0 && args[0] == "status"
+	if statusOnly {
+		args = args[1:]
+	}
+	flags := newCommandFlagSet("update", stderr)
+	workspaceRoot := flags.String("workspace", "", "Optimization Workspace `PATH`")
+	jsonOutput := flags.Bool("json", false, "Print JSON only")
+	binary := flags.String("binary", "", "Local candidate binary `PATH`")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
+	}
+	if flags.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "update: positional arguments are not supported")
+		return 2
+	}
+	var workspace optimizationworkspace.Workspace
+	var err error
+	if *workspaceRoot != "" {
+		workspace, err = optimizationworkspace.Open(*workspaceRoot)
+	} else {
+		workspace, err = optimizationworkspace.Discover("")
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "update: resolve Optimization Workspace: %v\n", err)
+		return 2
+	}
+	if statusOnly {
+		if *binary != "" {
+			_, _ = fmt.Fprintln(stderr, "update status: --binary is not supported")
+			return 2
+		}
+		status, err := daemonupdate.ReadStatus(workspace.Root)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "update status: %v\n", err)
+			return 1
+		}
+		return writeUpdateStatus(status, *jsonOutput, stdout, stderr)
+	}
+	if *binary == "" {
+		_, _ = fmt.Fprintln(stderr, "update: --binary is required")
+		return 2
+	}
+	candidate, err := daemonupdate.Stage(ctx, workspace.Root, *binary)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "update: stage candidate: %v\n", err)
+		return 1
+	}
+	if current, currentErr := daemonupdate.ReadCurrent(workspace.Root); currentErr != nil {
+		_, _ = fmt.Fprintln(stderr, "update: this Workspace has not bootstrapped hot update; open it once with an update-capable daemon")
+		return 1
+	} else if current.Digest == candidate.Digest {
+		_, _ = fmt.Fprintf(stdout, "pika-go daemon already runs generation %s (%s)\n", candidate.Probe.Version, candidate.Digest[:12])
+		return 0
+	}
+	binding, err := workspace.ReadHerdrBinding()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "update: read running daemon binding: %v\n", err)
+		return 1
+	}
+	accepted, err := control.Update(ctx, binding.DaemonSocket, candidate)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "update: request handoff: %v\n", err)
+		return 1
+	}
+	deadline := time.NewTimer(2 * time.Minute)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	status := accepted
+	for {
+		switch status.State {
+		case daemonupdate.StateCommitted:
+			return writeUpdateStatus(status, *jsonOutput, stdout, stderr)
+		case daemonupdate.StateRolledBack, daemonupdate.StateFailed:
+			_ = writeUpdateStatus(status, *jsonOutput, stdout, stderr)
+			return 1
+		}
+		select {
+		case <-ctx.Done():
+			_, _ = fmt.Fprintf(stderr, "update: wait for handoff: %v; use `pika-go update status` to inspect the continuing operation\n", ctx.Err())
+			return 1
+		case <-deadline.C:
+			_, _ = fmt.Fprintln(stderr, "update: handoff is still running; use `pika-go update status`")
+			return 1
+		case <-ticker.C:
+			if next, readErr := daemonupdate.ReadStatus(workspace.Root); readErr == nil && next.ID == accepted.ID {
+				status = next
+			}
+		}
+	}
+}
+
+func writeUpdateStatus(status daemonupdate.Status, jsonOutput bool, stdout, stderr io.Writer) int {
+	if jsonOutput {
+		if err := json.NewEncoder(stdout).Encode(status); err != nil {
+			_, _ = fmt.Fprintf(stderr, "update: encode status: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	_, _ = fmt.Fprintf(stdout, "daemon update %s: %s\n", status.ID, status.State)
+	_, _ = fmt.Fprintf(stdout, "  from: %s (%s)\n", status.From.Version, shortDigest(status.From.Digest))
+	_, _ = fmt.Fprintf(stdout, "  to:   %s (%s)\n", status.To.Version, shortDigest(status.To.Digest))
+	if status.Failure != "" {
+		_, _ = fmt.Fprintf(stdout, "  error: %s\n", status.Failure)
+	}
+	return 0
+}
+
+func shortDigest(value string) string {
+	if len(value) > 12 {
+		return value[:12]
+	}
+	return value
+}
+
 func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	flags := newCommandFlagSet("daemon", stderr)
 	socketPath := flags.String("socket", "", "Unix socket `PATH`")
@@ -177,6 +315,9 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	stateDir := flags.String("state-dir", "", "Plugin state directory `PATH`")
 	configDir := flags.String("config-dir", "", "Plugin configuration directory `PATH`")
 	instanceID := flags.String("instance", "", "Pika instance `ID`")
+	handoffListenerFD := flags.Int("handoff-listener-fd", -1, "inherited listener file descriptor")
+	handoffLockFD := flags.Int("handoff-lock-fd", -1, "inherited lock file descriptor")
+	handoffControlFD := flags.Int("handoff-control-fd", -1, "inherited update control file descriptor")
 	if ok, code := parseCommandFlags(flags, args); !ok {
 		return code
 	}
@@ -188,12 +329,36 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		writeDaemonLog(stderr, "error", "runtime.resolve_failed", err, nil)
 		return 2
 	}
+	handoffCandidate := *handoffListenerFD >= 0 || *handoffLockFD >= 0 || *handoffControlFD >= 0
+	var handoffCommitted atomic.Bool
+	handoffCommitted.Store(!handoffCandidate)
+	var generationReady atomic.Bool
+	generationReady.Store(!handoffCandidate)
+	if handoffCandidate && (*handoffListenerFD < 0 || *handoffLockFD < 0 || *handoffControlFD < 0) {
+		writeDaemonLog(stderr, "error", "update.handoff_invalid", errors.New("listener, lock, and control file descriptors must be inherited together"), nil)
+		return 2
+	}
+	var handoffControl *daemonupdate.Control
+	if handoffCandidate {
+		handoffControl, err = daemonupdate.NewInheritedControl(os.NewFile(uintptr(*handoffControlFD), "pika-update-control"))
+		if err != nil {
+			writeDaemonLog(stderr, "error", "update.control_failed", err, nil)
+			return 1
+		}
+		defer handoffControl.Close()
+	}
+	runtimeCtx, cancelRuntime := context.WithCancel(ctx)
+	defer cancelRuntime()
+	var runtimeWG sync.WaitGroup
 	var engine *symphony.Engine
+	var handoffSessions []symphony.ActiveAgentSession
+	var daemonLock *instance.Lock
 	var symphonyService symphony.Symphony
 	var prepareInit func(context.Context, string, *string) (daemon.PreparedInit, error)
 	var initOptions func(context.Context) (protocol.InitOptionsResponse, error)
 	var recordInitFailure func(context.Context, string) error
 	var afterListen func(context.Context) error
+	var afterHandoffCommit func(context.Context) error
 	var afterCommit func(context.Context)
 	var mcpHandler http.Handler
 	var applyGitIntent func(context.Context, string, string) (string, error)
@@ -250,18 +415,34 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				return 2
 			}
 		}
-		lock, err := instance.AcquireLock(paths.LockPath)
+		if handoffCandidate {
+			if err := handoffControl.Send(daemonupdate.MessagePrepared, nil); err != nil {
+				writeDaemonLog(stderr, "error", "update.prepare_failed", err, nil)
+				return 1
+			}
+			if err := handoffControl.Expect(daemonupdate.MessageActivate, 90*time.Second); err != nil {
+				writeDaemonLog(stderr, "error", "update.activation_failed", err, nil)
+				return 1
+			}
+			daemonLock, err = instance.AdoptLock(os.NewFile(uintptr(*handoffLockFD), paths.LockPath))
+		} else {
+			daemonLock, err = instance.AcquireLock(paths.LockPath)
+		}
 		if err != nil {
 			writeDaemonLog(stderr, "error", "instance.lock_failed", err, map[string]any{"instance_id": paths.InstanceID})
 			return 1
 		}
-		defer lock.Close()
+		defer daemonLock.Close()
 		engine, err = symphony.Open(ctx, paths.DatabasePath, symphony.Options{FollowUpInactivity: followUpInactivity, FollowUpPolicies: followUpPolicies, Providers: providerRegistry})
 		if err != nil {
 			writeDaemonLog(stderr, "error", "database.open_failed", err, map[string]any{"instance_id": paths.InstanceID})
 			return 1
 		}
-		defer engine.Close()
+		defer func() {
+			if engine != nil {
+				_ = engine.Close()
+			}
+		}()
 		if paths.Workspace != nil {
 			identity := paths.Workspace.Identity
 			if err := engine.EnsureWorkspaceIdentity(ctx, symphony.WorkspaceIdentity{
@@ -288,6 +469,9 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		if activeErr != nil {
 			writeDaemonLog(stderr, "error", "provider.reconciliation_failed", activeErr, nil)
 			return 1
+		}
+		if handoffCandidate {
+			handoffSessions = append([]symphony.ActiveAgentSession(nil), activeSessions...)
 		}
 		activeSessionIDs := make(map[string]bool, len(activeSessions))
 		for _, active := range activeSessions {
@@ -465,9 +649,11 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 					writeDaemonLog(stderr, "warn", "herdr.watch_reconnecting", watchErr, nil)
 				},
 			}
-			if err := engine.RetireActiveSessionsForRecovery(ctx); err != nil {
-				writeDaemonLog(stderr, "error", "runtime.session_retirement_failed", err, nil)
-				return 1
+			if !handoffCandidate {
+				if err := engine.RetireActiveSessionsForRecovery(ctx); err != nil {
+					writeDaemonLog(stderr, "error", "runtime.session_retirement_failed", err, nil)
+					return 1
+				}
 			}
 			dispatchRequested := make(chan struct{}, 1)
 			afterCommit = func(context.Context) {
@@ -481,41 +667,54 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				After: func() { afterCommit(ctx) },
 			}
 			schedulerControl = schedulerController.Apply
-			afterListen = func(listenCtx context.Context) error {
+			startRuntime := func(listenCtx context.Context) error {
 				if err := coordinator.RecoverAndDispatch(listenCtx); err != nil {
 					return fmt.Errorf("recover runtime after daemon listen: %w", err)
 				}
+				runtimeWG.Add(1)
 				go func() {
+					defer runtimeWG.Done()
 					for {
 						select {
-						case <-ctx.Done():
+						case <-runtimeCtx.Done():
 							return
 						case <-dispatchRequested:
-							if err := coordinator.RecoverAndDispatch(ctx); err != nil {
+							if err := coordinator.RecoverAndDispatch(runtimeCtx); err != nil {
 								writeDaemonLog(stderr, "error", "runtime.dispatch_failed", err, nil)
 							}
 						}
 					}
 				}()
+				runtimeWG.Add(1)
 				go func() {
+					defer runtimeWG.Done()
 					ticker := time.NewTicker(time.Second)
 					defer ticker.Stop()
 					for {
 						select {
-						case <-ctx.Done():
+						case <-runtimeCtx.Done():
 							return
 						case <-ticker.C:
-							promoted, err := engine.PromoteDueFollowUps(ctx)
+							promoted, err := engine.PromoteDueFollowUps(runtimeCtx)
 							if err != nil {
 								writeDaemonLog(stderr, "error", "follow_up.promotion_failed", err, nil)
 							} else if promoted {
-								afterCommit(ctx)
+								afterCommit(runtimeCtx)
 							}
 						}
 					}
 				}()
-				go func() { _ = coordinator.Run(ctx) }()
+				runtimeWG.Add(1)
+				go func() {
+					defer runtimeWG.Done()
+					_ = coordinator.Run(runtimeCtx)
+				}()
 				return nil
+			}
+			if handoffCandidate {
+				afterHandoffCommit = startRuntime
+			} else {
+				afterListen = startRuntime
 			}
 		} else {
 			dispatcher := outbox.Dispatcher{Store: engine, Sink: &outbox.Recorder{}}
@@ -572,10 +771,227 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		backup = engine.Backup
 		drainReady = engine.DrainReady
 	}
+	var listener net.Listener
+	if handoffCandidate {
+		listenerFile := os.NewFile(uintptr(*handoffListenerFD), paths.SocketPath)
+		listener, err = net.FileListener(listenerFile)
+		_ = listenerFile.Close()
+		if err != nil {
+			writeDaemonLog(stderr, "error", "update.listener_failed", err, nil)
+			return 1
+		}
+	} else {
+		listener, err = daemon.Listen(paths.SocketPath)
+		if err != nil {
+			writeDaemonLog(stderr, "error", "daemon.listen_failed", err, nil)
+			return 1
+		}
+	}
+	removeSocket := !handoffCandidate
+	defer func() {
+		if removeSocket {
+			_ = os.Remove(paths.SocketPath)
+		}
+	}()
+
+	binaryDigest := ""
+	if paths.Workspace != nil {
+		if handoffCandidate {
+			_, err = daemonupdate.ReadCurrent(paths.Workspace.Root)
+			if err == nil {
+				executable, executableErr := os.Executable()
+				if executableErr == nil {
+					binaryDigest, err = daemonupdate.FileDigest(executable)
+				}
+			}
+		} else {
+			executable, executableErr := os.Executable()
+			if executableErr != nil {
+				err = executableErr
+			} else {
+				var current daemonupdate.Generation
+				current, err = daemonupdate.EnsureCurrent(ctx, paths.Workspace.Root, executable, Version)
+				binaryDigest = current.Digest
+			}
+		}
+		if err != nil {
+			writeDaemonLog(stderr, "error", "update.bootstrap_failed", err, nil)
+			return 1
+		}
+	}
+
+	var updateMu sync.Mutex
+	var pending *daemonupdate.Handoff
+	updateAccepted := make(chan struct{}, 1)
+	successorArgs := []string{"--socket", paths.SocketPath}
+	if paths.Workspace != nil {
+		successorArgs = append(successorArgs, "--workspace", paths.Workspace.Root)
+	}
+	if paths.ConfigRoot != "" {
+		successorArgs = append(successorArgs, "--config-dir", paths.ConfigRoot)
+	}
+	if paths.StateRoot != "" {
+		successorArgs = append(successorArgs, "--state-dir", paths.StateRoot)
+	}
+	if paths.InstanceID != "" {
+		successorArgs = append(successorArgs, "--instance", paths.InstanceID)
+	}
+	spawnSuccessor := func(path string, listenerKeep, lockKeep *os.File) (*daemonupdate.Child, error) {
+		listenerChild, duplicateErr := daemonupdate.DuplicateFile(listenerKeep)
+		if duplicateErr != nil {
+			return nil, duplicateErr
+		}
+		defer listenerChild.Close()
+		lockChild, duplicateErr := daemonupdate.DuplicateFile(lockKeep)
+		if duplicateErr != nil {
+			return nil, duplicateErr
+		}
+		defer lockChild.Close()
+		return daemonupdate.Spawn(path, successorArgs, listenerChild, lockChild, stderr)
+	}
+	var prepareUpdate func(context.Context, daemonupdate.Candidate) (daemonupdate.Status, error)
+	if paths.Workspace != nil && daemonLock != nil {
+		prepareUpdate = func(_ context.Context, candidate daemonupdate.Candidate) (daemonupdate.Status, error) {
+			updateMu.Lock()
+			defer updateMu.Unlock()
+			if !handoffCommitted.Load() {
+				return daemonupdate.Status{}, errors.New("this daemon generation is still activating")
+			}
+			if pending != nil {
+				return daemonupdate.Status{}, fmt.Errorf("update %s is already %s", pending.Status.ID, pending.Status.State)
+			}
+			if err := daemonupdate.ValidateCandidate(paths.Workspace.Root, candidate, daemonupdate.CurrentProbe(Version)); err != nil {
+				return daemonupdate.Status{}, err
+			}
+			from, err := daemonupdate.ReadCurrent(paths.Workspace.Root)
+			if err != nil {
+				return daemonupdate.Status{}, err
+			}
+			status := daemonupdate.NewStatus(newRequestID(), from, candidate)
+			if err := daemonupdate.WriteStatus(paths.Workspace.Root, status); err != nil {
+				return daemonupdate.Status{}, err
+			}
+			unixListener, ok := listener.(interface{ File() (*os.File, error) })
+			if !ok {
+				return daemonupdate.Status{}, errors.New("daemon listener does not support descriptor handoff")
+			}
+			listenerKeep, err := unixListener.File()
+			if err != nil {
+				return daemonupdate.Status{}, fmt.Errorf("duplicate daemon listener: %w", err)
+			}
+			lockKeep, err := daemonLock.Share()
+			if err != nil {
+				_ = listenerKeep.Close()
+				return daemonupdate.Status{}, err
+			}
+			child, err := spawnSuccessor(candidate.Path, listenerKeep, lockKeep)
+			if err != nil {
+				_ = listenerKeep.Close()
+				_ = lockKeep.Close()
+				return daemonupdate.Status{}, err
+			}
+			if err := child.Control.Expect(daemonupdate.MessagePrepared, 75*time.Second); err != nil {
+				_ = child.Command.Process.Kill()
+				_, _ = child.Command.Process.Wait()
+				_ = child.Control.Close()
+				_ = listenerKeep.Close()
+				_ = lockKeep.Close()
+				status.State, status.Failure = daemonupdate.StateFailed, err.Error()
+				_ = daemonupdate.WriteStatus(paths.Workspace.Root, status)
+				return daemonupdate.Status{}, err
+			}
+			status.State = daemonupdate.StateQuiescing
+			if err := daemonupdate.WriteStatus(paths.Workspace.Root, status); err != nil {
+				_ = child.Command.Process.Kill()
+				_, _ = child.Command.Process.Wait()
+				_ = child.Control.Close()
+				_ = listenerKeep.Close()
+				_ = lockKeep.Close()
+				return daemonupdate.Status{}, err
+			}
+			pending = &daemonupdate.Handoff{Child: child, Status: status, ListenerKeep: listenerKeep, LockKeep: lockKeep}
+			return status, nil
+		}
+	}
+	if handoffCandidate {
+		startupAfterCommit := afterHandoffCommit
+		afterListen = func(listenCtx context.Context) error {
+			if UpdateFailBeforeReadyVersion != "" && UpdateFailBeforeReadyVersion == Version {
+				return errors.New("injected update failure before readiness")
+			}
+			if engine != nil {
+				currentSessions, err := engine.ActiveAgentSessions(listenCtx)
+				if err != nil {
+					return fmt.Errorf("verify active Agent Sessions before handoff: %w", err)
+				}
+				if !reflect.DeepEqual(currentSessions, handoffSessions) {
+					return errors.New("active Agent Session or pane binding changed during daemon handoff")
+				}
+			}
+			if err := handoffControl.Send(daemonupdate.MessageReady, nil); err != nil {
+				return err
+			}
+			if err := handoffControl.Expect(daemonupdate.MessageCommit, 30*time.Second); err != nil {
+				return err
+			}
+			handoffCommitted.Store(true)
+			if UpdateFailAfterCommitVersion != "" && UpdateFailAfterCommitVersion == Version {
+				return errors.New("injected update failure after commit")
+			}
+			if startupAfterCommit != nil {
+				if err := startupAfterCommit(listenCtx); err != nil {
+					return err
+				}
+			}
+			generationReady.Store(true)
+			return nil
+		}
+	}
 	writeDaemonLog(stderr, "info", "daemon.starting", nil, map[string]any{"instance_id": paths.InstanceID, "protocol_version": protocol.Version, "version": Version})
-	if err := daemon.Serve(ctx, daemon.Config{SocketPath: paths.SocketPath, Version: Version, InstanceID: paths.InstanceID, Symphony: symphonyService, PrepareInit: prepareInit, InitOptions: initOptions, RecordInitFailure: recordInitFailure, AfterListen: afterListen, AfterCommit: afterCommit, MCPHandler: mcpHandler, ApplyGitIntent: applyGitIntent, IngestProviderEvent: ingestProviderEvent, IngestProviderHookEvent: ingestProviderHookEvent, Backup: backup, DrainReady: drainReady, SchedulerControl: schedulerControl}); err != nil {
-		writeDaemonLog(stderr, "error", "daemon.stopped", err, map[string]any{"instance_id": paths.InstanceID})
+	serveErr := daemon.Serve(ctx, daemon.Config{SocketPath: paths.SocketPath, Listener: listener, Version: Version, InstanceID: paths.InstanceID, Symphony: symphonyService, PrepareInit: prepareInit, InitOptions: initOptions, RecordInitFailure: recordInitFailure, AfterListen: afterListen, AfterCommit: afterCommit, MCPHandler: mcpHandler, ApplyGitIntent: applyGitIntent, IngestProviderEvent: ingestProviderEvent, IngestProviderHookEvent: ingestProviderHookEvent, Backup: backup, DrainReady: drainReady, SchedulerControl: schedulerControl, PrepareUpdate: prepareUpdate, UpdateAccepted: updateAccepted, BinaryDigest: binaryDigest, Ready: generationReady.Load})
+	if errors.Is(serveErr, daemon.ErrHandoff) {
+		removeSocket = false
+		cancelRuntime()
+		runtimeWG.Wait()
+		if engine != nil {
+			_ = engine.Close()
+			engine = nil
+		}
+		updateMu.Lock()
+		handoff := pending
+		updateMu.Unlock()
+		if handoff == nil {
+			writeDaemonLog(stderr, "error", "update.handoff_missing", errors.New("update accepted without a prepared successor"), nil)
+			return 1
+		}
+		outcome, activationErr := daemonupdate.Activate(paths.Workspace.Root, handoff, spawnSuccessor, func(healthCtx context.Context) (string, error) {
+			health, healthErr := control.Health(healthCtx, paths.SocketPath)
+			return health.BinaryDigest, healthErr
+		})
+		handoff.Close()
+		if activationErr != nil {
+			writeDaemonLog(stderr, "error", "update.handoff_failed", activationErr, map[string]any{"update_id": handoff.Status.ID})
+			return 1
+		}
+		if outcome == daemonupdate.OutcomeCommitted {
+			writeDaemonLog(stderr, "info", "update.handoff_committed", nil, map[string]any{"update_id": handoff.Status.ID, "version": handoff.Status.To.Version})
+		} else {
+			rolledBack, _ := daemonupdate.ReadStatus(paths.Workspace.Root)
+			writeDaemonLog(stderr, "warn", "update.handoff_rolled_back", errors.New(rolledBack.Failure), map[string]any{"update_id": handoff.Status.ID})
+		}
+		return 0
+	}
+	if serveErr != nil {
+		cancelRuntime()
+		runtimeWG.Wait()
+		writeDaemonLog(stderr, "error", "daemon.stopped", serveErr, map[string]any{"instance_id": paths.InstanceID})
 		return 1
+	}
+	cancelRuntime()
+	runtimeWG.Wait()
+	if engine != nil {
+		_ = engine.Close()
+		engine = nil
 	}
 	writeDaemonLog(stderr, "info", "daemon.stopped", nil, map[string]any{"instance_id": paths.InstanceID})
 	return 0

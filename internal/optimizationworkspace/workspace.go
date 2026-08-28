@@ -20,6 +20,7 @@ const (
 	ManifestName  = "workspace.json"
 	ConfigName    = "pika.toml"
 	formatVersion = 1
+	FormatVersion = formatVersion
 )
 
 var (

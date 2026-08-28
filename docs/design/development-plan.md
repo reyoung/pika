@@ -265,7 +265,7 @@ The complete workflow can run with real Codex sessions while Pika records sessio
 - Install separate per-Role `instructions.md` user overlays that are empty by default and never overwrite user edits.
 - Complete Context Builder projections for Baseline, Verification, Iteration, and Integration.
 - Pika-owned Codex profile overlay with inline hooks and MCP configuration; inject each frozen complete prompt through Codex `developer_instructions` while preserving base config and Herdr hooks.
-- Explicit MCP environment forwarding and automatic approval for only the Role grant's catalog; launch with non-interactive shell approval policy while retaining the configured Codex sandbox.
+- Explicit MCP environment forwarding and automatic approval for only the Role grant's catalog; launch unattended Codex Sessions with the default `--yolo` policy.
 - Git metadata writes required by Baseline Draft and Iteration run through `commit_changes` in Pika's control plane; the coding Agent remains in `workspace-write` rather than using `danger-full-access`.
 - Codex event normalization for session start/end, user prompt, tool completion, and stop.
 - Provider-event deduplication, Turn correlation, full observable tool payload storage, and bounded journal selection for later sessions.

@@ -1397,14 +1397,15 @@ func startTestDaemon(t *testing.T, socketPath, stateRoot, configRoot string) fun
 }
 
 type daemonProcess struct {
-	command *exec.Cmd
-	done    chan error
-	output  bytes.Buffer
+	command    *exec.Cmd
+	done       chan error
+	output     bytes.Buffer
+	socketPath string
 }
 
 func startDaemonProcess(t *testing.T, pikaBinary, socketPath, stateRoot, configRoot, herdrSocket, symphonyPane, binDir string) *daemonProcess {
 	t.Helper()
-	process := &daemonProcess{done: make(chan error, 1)}
+	process := &daemonProcess{done: make(chan error, 1), socketPath: socketPath}
 	process.command = exec.Command(
 		pikaBinary,
 		"daemon",
@@ -1438,7 +1439,13 @@ func (process *daemonProcess) killAndWait() {
 	if process == nil {
 		return
 	}
-	if process.command.ProcessState == nil {
+	if process.socketPath != "" {
+		if health, err := control.Health(context.Background(), process.socketPath); err == nil && health.PID > 0 {
+			if owner, findErr := os.FindProcess(health.PID); findErr == nil {
+				_ = owner.Kill()
+			}
+		}
+	} else if process.command.ProcessState == nil {
 		_ = process.command.Process.Kill()
 	}
 	select {

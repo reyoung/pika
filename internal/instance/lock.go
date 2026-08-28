@@ -10,7 +10,33 @@ import (
 )
 
 type Lock struct {
-	file *os.File
+	file   *os.File
+	shared bool
+}
+
+// AdoptLock takes ownership of an inherited lock file. The inherited file and
+// its parent refer to the same flock open-file description, so neither process
+// may explicitly unlock it during a handoff.
+func AdoptLock(file *os.File) (*Lock, error) {
+	if file == nil {
+		return nil, errors.New("inherited daemon lock is required")
+	}
+	return &Lock{file: file, shared: true}, nil
+}
+
+// Share duplicates the lock for a successor process and changes Close to only
+// close this process' descriptor. The kernel releases the lock after the last
+// generation closes its inherited descriptor.
+func (l *Lock) Share() (*os.File, error) {
+	if l == nil || l.file == nil {
+		return nil, errors.New("daemon lock is closed")
+	}
+	fd, err := unix.Dup(int(l.file.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("duplicate daemon lock: %w", err)
+	}
+	l.shared = true
+	return os.NewFile(uintptr(fd), l.file.Name()), nil
 }
 
 func AcquireLock(path string) (*Lock, error) {
@@ -48,7 +74,10 @@ func (l *Lock) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	unlockErr := unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
+	var unlockErr error
+	if !l.shared {
+		unlockErr = unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
+	}
 	closeErr := l.file.Close()
 	l.file = nil
 	if unlockErr != nil {

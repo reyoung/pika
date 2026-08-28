@@ -29,6 +29,8 @@ The extracted release directory may be removed after installation. `pika-go inst
 
 `kick-off` must run from a shell pane inside Herdr. Before creating layout it verifies `session.resume_agents_on_restore = false`; when necessary it asks permission to update the active Herdr configuration and reload the server. It then creates `<repository>-pika-workspace` beside the source repository, creates its Pika-owned base linked worktree, and opens Herdr with the durable Workspace as cwd. The daemon receives `PIKA_GO_WORKSPACE`, owns `pika.toml`, `pika.db`, `.pika.lock`, artifacts, and all Pika worktrees there, and writes the replaceable Herdr IDs to `herdr/binding.json`. Interactive backend, model, reasoning-effort, and Cursor launch-permission inputs are numbered choices rather than free-form IDs or raw argv. For non-interactive startup, preconfigure Herdr and choose one of:
 
+The first start with an update-capable build also copies that executable to `runtime/daemon/generations/<sha256>/pika-go` and records it in `runtime/daemon/current.json`. Herdr starts the managed generation from then on, so replacing a developer checkout binary cannot invalidate a running pane.
+
 ```bash
 pika-go kick-off --repository /absolute/path/to/repository --defaults
 pika-go kick-off --repository /absolute/path/to/repository --config /absolute/path/to/config.toml
@@ -60,6 +62,21 @@ pika-go backup --output /absolute/path/to/backups/pika-YYYYMMDD.db
 ```
 
 The destination must not already exist. The daemon checkpoints pending WAL frames, creates a self-contained SQLite snapshot, applies user-only permissions, and validates both `quick_check` and the schema version before reporting success. `pika-go status --json` exposes database, WAL, provider-event, and tool-payload byte counts for capacity monitoring.
+
+## Hot-update a running Workspace daemon
+
+Build or obtain a local candidate, then run:
+
+```sh
+pika-go update --binary ./pika-go
+pika-go update status
+```
+
+The command copies the candidate into the current Optimization Workspace and rejects a different control protocol, handoff protocol, Workspace format, SQLite schema, operating system, or architecture. Those changes require the cold backup/shutdown/resume procedure below.
+
+For a compatible candidate, the old daemon starts it in a quiescent state with inherited listener and lock descriptors. Active Herdr panes and Codex/Cursor Agent Sessions are not retired or relaunched. After the candidate reports ready, the old daemon commits `current.json`; the candidate then resumes reconciliation and scheduling. The public Unix socket path and inode stay unchanged. If readiness or stabilization fails within 15 seconds, the old generation is started from the Workspace store and `update.json` ends in `rolled_back`. Run the real process acceptance matrix with `make hot-update-integration`.
+
+The two real-provider hot-reload targets use a 20-minute process watchdog, but they do not treat elapsed wall time as provider progress. They fail immediately when a Pika-owned active Agent is `blocked`, and fail after two continuous minutes without any domain event, Session transition, provider/tool journal growth, or Herdr pane revision. The clock resets only on such observable progress. Their Follow-up check uses a real provider Stop hook from an actually idle first turn; tests must not inject a synthetic Stop while Herdr still reports the target as `working`.
 
 ## Upgrade
 

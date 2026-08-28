@@ -11,12 +11,14 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/daemonupdate"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
 
 type Config struct {
 	SocketPath              string
+	Listener                net.Listener
 	Version                 string
 	InstanceID              string
 	Symphony                symphony.Symphony
@@ -32,6 +34,33 @@ type Config struct {
 	Backup                  func(context.Context, string) error
 	DrainReady              func(context.Context) (bool, error)
 	SchedulerControl        func(context.Context, symphony.Command) (protocol.SchedulerControlResponse, error)
+	PrepareUpdate           func(context.Context, daemonupdate.Candidate) (daemonupdate.Status, error)
+	UpdateAccepted          chan struct{}
+	BinaryDigest            string
+	Ready                   func() bool
+}
+
+var ErrHandoff = errors.New("daemon update handoff requested")
+
+func Listen(socketPath string) (net.Listener, error) {
+	if err := prepareSocket(socketPath); err != nil {
+		return nil, err
+	}
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("listen on unix socket: %w", err)
+	}
+	if err := os.Chmod(socketPath, 0o600); err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("set socket permissions: %w", err)
+	}
+	if unixListener, ok := listener.(*net.UnixListener); ok {
+		// The process lifecycle owns unlinking. Disabling the net package's
+		// close-time unlink keeps the public socket inode alive while the
+		// listener descriptor is handed to a successor generation.
+		unixListener.SetUnlinkOnClose(false)
+	}
+	return listener, nil
 }
 
 type PreparedInit struct {
@@ -49,17 +78,18 @@ func Serve(ctx context.Context, cfg Config) error {
 		return errors.New("version is required")
 	}
 
-	if err := prepareSocket(cfg.SocketPath); err != nil {
-		return err
-	}
-	listener, err := net.Listen("unix", cfg.SocketPath)
-	if err != nil {
-		return fmt.Errorf("listen on unix socket: %w", err)
+	listener := cfg.Listener
+	ownedListener := listener == nil
+	var err error
+	if ownedListener {
+		listener, err = Listen(cfg.SocketPath)
+		if err != nil {
+			return err
+		}
 	}
 	defer listener.Close()
-	defer os.Remove(cfg.SocketPath)
-	if err := os.Chmod(cfg.SocketPath, 0o600); err != nil {
-		return fmt.Errorf("set socket permissions: %w", err)
+	if ownedListener {
+		defer os.Remove(cfg.SocketPath)
 	}
 
 	mux := http.NewServeMux()
@@ -68,13 +98,40 @@ func Serve(ctx context.Context, cfg Config) error {
 	}
 	initFailures := make(chan error, 1)
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, _ *http.Request) {
+		if cfg.Ready != nil && !cfg.Ready() {
+			writeAPIError(w, http.StatusServiceUnavailable, "daemon_activating", "daemon generation is still activating")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(protocol.Health{
 			Status:          "ok",
 			Version:         cfg.Version,
 			ProtocolVersion: protocol.Version,
+			BinaryDigest:    cfg.BinaryDigest,
+			PID:             os.Getpid(),
+			HandoffProtocol: daemonupdate.HandoffProtocol,
 		})
 	})
+	if cfg.PrepareUpdate != nil {
+		mux.HandleFunc("POST /v1/update", func(w http.ResponseWriter, request *http.Request) {
+			var candidate daemonupdate.Candidate
+			if !decodeJSON(w, request, &candidate) {
+				return
+			}
+			status, err := cfg.PrepareUpdate(request.Context(), candidate)
+			if err != nil {
+				writeAPIError(w, http.StatusConflict, "update_rejected", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusAccepted, status)
+			if cfg.UpdateAccepted != nil {
+				select {
+				case cfg.UpdateAccepted <- struct{}{}:
+				default:
+				}
+			}
+		})
+	}
 	if cfg.Symphony != nil {
 		if cfg.InitOptions != nil {
 			mux.HandleFunc("GET /v1/init/options", func(w http.ResponseWriter, request *http.Request) {
@@ -308,6 +365,28 @@ func Serve(ctx context.Context, cfg Config) error {
 	}
 
 	select {
+	case <-func() <-chan struct{} {
+		if cfg.UpdateAccepted == nil {
+			return make(chan struct{})
+		}
+		return cfg.UpdateAccepted
+	}():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			// A provider can have a long-lived MCP request in flight while an
+			// update is accepted. Once the graceful window expires, close only
+			// this generation's connections so the inherited listener can move
+			// on to the already-prepared successor.
+			if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+				return fmt.Errorf("quiesce daemon for update: %v; force close old generation: %w", err, closeErr)
+			}
+		}
+		serveResult := <-serveErr
+		if serveResult != nil && !errors.Is(serveResult, http.ErrServerClosed) {
+			return fmt.Errorf("quiesce daemon for update: %w", serveResult)
+		}
+		return ErrHandoff
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()

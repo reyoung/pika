@@ -72,6 +72,12 @@ var publicCommandHelp = map[string]commandHelp{
 		synopsis: "install [options]",
 		summary:  "Install and register Pika-Go as a Herdr plugin",
 	},
+	"update": {
+		synopsis: "update --binary PATH [options]\n  pika-go update status [options]",
+		summary:  "Hot-update the current Workspace daemon or inspect its update status",
+		details:  "Stages a local compatible binary inside the Optimization Workspace. Schema, protocol, platform, and Workspace-format changes require the documented cold-upgrade path.",
+		examples: []string{"pika-go update --binary ./pika-go", "pika-go update status --json"},
+	},
 	"init": {
 		synopsis: "init --repository ABSOLUTE_PATH [options]",
 		summary:  "Initialize a daemon that is already running",
@@ -139,6 +145,9 @@ func printCommandUsage(output io.Writer, name string, flags *flag.FlagSet) {
 
 func printFlagDefaults(output io.Writer, flags *flag.FlagSet) {
 	flags.VisitAll(func(option *flag.Flag) {
+		if strings.HasPrefix(option.Name, "handoff-") {
+			return
+		}
 		prefix := "--"
 		if len(option.Name) == 1 {
 			prefix = "-"
@@ -185,6 +194,7 @@ Workflow commands:
   cancel-work      Cancel one pending or running work item
 
 Operations:
+  update           Hot-update the current Workspace daemon
   shutdown         Gracefully drain and stop the daemon
   backup           Create a validated SQLite backup
   edit-instruction Edit a role's user-owned instruction overlay

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/daemonupdate"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
@@ -108,6 +109,14 @@ func controlScheduler(ctx context.Context, socketPath, path string, request prot
 		return protocol.SchedulerControlResponse{}, err
 	}
 	return response, nil
+}
+
+func Update(ctx context.Context, socketPath string, candidate daemonupdate.Candidate) (daemonupdate.Status, error) {
+	var status daemonupdate.Status
+	if err := doJSONWithTimeout(ctx, socketPath, http.MethodPost, "/v1/update", candidate, &status, 90*time.Second); err != nil {
+		return daemonupdate.Status{}, err
+	}
+	return status, nil
 }
 
 func Backup(ctx context.Context, socketPath string, request protocol.BackupRequest) (protocol.BackupResponse, error) {
