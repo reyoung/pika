@@ -85,7 +85,17 @@ func (r *HerdrRuntime) Start(ctx context.Context, spec StartSpec) (Observation, 
 		if r.SymphonyPane == "" {
 			return Observation{}, errors.New("Symphony pane is required when no preferred pane is supplied")
 		}
-		pane, err := r.Runtime.SplitPane(ctx, r.SymphonyPane, "down", spec.Repository)
+		var pane herdr.Pane
+		var err error
+		if spec.DedicatedTab {
+			controlPane, getErr := r.Runtime.GetPane(ctx, r.SymphonyPane)
+			if getErr != nil {
+				return Observation{}, fmt.Errorf("resolve Symphony workspace: %w", getErr)
+			}
+			pane, err = r.Runtime.CreateTab(ctx, controlPane.WorkspaceID, spec.Repository, spec.TabLabel)
+		} else {
+			pane, err = r.Runtime.SplitPane(ctx, r.SymphonyPane, "down", spec.Repository)
+		}
 		if err != nil {
 			return Observation{}, err
 		}

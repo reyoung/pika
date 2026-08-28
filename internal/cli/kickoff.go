@@ -213,6 +213,7 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 		_, _ = fmt.Fprintf(stderr, "kick-off: resolve current pika-go executable path: %v\n", err)
 		return 1
 	}
+	integrationExecutable := pikaExecutable
 	currentGeneration, err := daemonupdate.EnsureCurrent(ctx, workspace.Root, pikaExecutable, Version)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "kick-off: bootstrap managed daemon generation: %v\n", err)
@@ -233,7 +234,11 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 		"direction":      "right",
 		"focus":          false,
 		"cwd":            workspace.Root,
-		"env":            map[string]string{"PIKA_GO_WORKSPACE": workspace.Root, "PATH": panePath},
+		"env": map[string]string{
+			"PIKA_GO_WORKSPACE":              workspace.Root,
+			"PIKA_GO_INTEGRATION_EXECUTABLE": integrationExecutable,
+			"PATH":                           panePath,
+		},
 	}, &opened); err != nil {
 		_, _ = fmt.Fprintf(stderr, "kick-off: start the Pika-Go daemon pane: %v\n", err)
 		_, _ = fmt.Fprintln(stderr, "Install or refresh the Herdr plugin with `pika-go install`, then retry.")

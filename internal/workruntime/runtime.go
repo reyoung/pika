@@ -34,6 +34,8 @@ type StartSpec struct {
 	AgentKind        string
 	Repository       string
 	PreferredPaneID  string
+	DedicatedTab     bool
+	TabLabel         string
 	PaneLabel        string
 	PaneLabelNeedsID bool
 	Environment      map[string]string
@@ -446,8 +448,10 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		AgentKind:        session.AgentKind,
 		Repository:       work.Repository,
 		PreferredPaneID:  payload.PreferredPaneID,
-		PaneLabel:        workPaneLabel(work),
-		PaneLabelNeedsID: work.Work.Role == symphony.RoleIteration,
+		DedicatedTab:     work.Work.Role == symphony.RoleIteration,
+		TabLabel:         workTabLabel(work),
+		PaneLabel:        workTabLabel(work),
+		PaneLabelNeedsID: false,
 		Environment:      preparation.Environment,
 		StartupTimeout:   preparation.StartupTimeout,
 		ReturnOnLaunch:   preparation.ReturnOnLaunch,
@@ -464,6 +468,18 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		}
 	}
 	return nil
+}
+
+func workTabLabel(work symphony.RuntimeWork) string {
+	label := workPaneLabel(work)
+	if work.Work.Role != symphony.RoleIteration || work.Work.AttemptID == "" {
+		return label
+	}
+	attemptID := work.Work.AttemptID
+	if len(attemptID) > 8 {
+		attemptID = attemptID[:8]
+	}
+	return label + " · " + attemptID
 }
 
 func workPaneLabel(work symphony.RuntimeWork) string {

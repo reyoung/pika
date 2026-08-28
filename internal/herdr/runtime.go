@@ -64,6 +64,29 @@ func (r *Runtime) SplitPane(ctx context.Context, targetPaneID, direction, cwd st
 	return result.Pane, nil
 }
 
+func (r *Runtime) CreateTab(ctx context.Context, workspaceID, cwd, label string) (Pane, error) {
+	if workspaceID == "" {
+		return Pane{}, errors.New("workspace ID is required")
+	}
+	params := map[string]any{"workspace_id": workspaceID, "focus": false}
+	if cwd != "" {
+		params["cwd"] = cwd
+	}
+	if label != "" {
+		params["label"] = label
+	}
+	var result struct {
+		RootPane Pane `json:"root_pane"`
+	}
+	if err := r.client.Call(ctx, "tab.create", params, &result); err != nil {
+		return Pane{}, err
+	}
+	if result.RootPane.PaneID == "" {
+		return Pane{}, errors.New("tab.create returned no root pane")
+	}
+	return result.RootPane, nil
+}
+
 func (r *Runtime) Start(ctx context.Context, spec StartSpec) (Agent, error) {
 	if spec.Name == "" || spec.Kind == "" || spec.PaneID == "" {
 		return Agent{}, errors.New("agent name, kind, and pane ID are required")

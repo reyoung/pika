@@ -215,6 +215,9 @@ func renderWrapper(codexExecutable string) string {
 		"# Pika Agents are unattended optimization workers; --yolo is the default sandbox policy.\n" +
 		"set -- --yolo \"$@\"\n" +
 		"set -- --profile " + ProfileName + " \"$@\"\n" +
+		"if [ -n \"${PIKA_CODEX_INITIAL_PROMPT:-}\" ]; then\n" +
+		"  set -- \"$@\" \"$PIKA_CODEX_INITIAL_PROMPT\"\n" +
+		"fi\n" +
 		"exec " + shellQuote(codexExecutable) + " \"$@\"\n"
 }
 

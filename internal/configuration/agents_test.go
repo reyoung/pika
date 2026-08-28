@@ -114,13 +114,35 @@ func TestLoadContextReadsIterationHistoryLimit(t *testing.T) {
 	}
 }
 
-func TestLoadContextRejectsMissingUnknownNegativeOrDuplicateHistoryLimit(t *testing.T) {
+func TestLoadContextDefaultsMissingIterationHistoryLimit(t *testing.T) {
 	t.Parallel()
 	for name, contents := range map[string]string{
-		"missing":   "[context.iteration]\n",
+		"missing-section": "[scheduler]\niteration_concurrency = 2\nmax_pending_attempts = 6\n",
+		"empty-section":   "[context.iteration]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			config, err := configuration.LoadContext(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if config.IterationHistoryLimit != configuration.DefaultIterationHistoryLimit {
+				t.Fatalf("context config = %+v", config)
+			}
+		})
+	}
+}
+
+func TestLoadContextRejectsUnknownNegativeEmptyOrDuplicateHistoryLimit(t *testing.T) {
+	t.Parallel()
+	for name, contents := range map[string]string{
 		"unknown":   "[context.iteration]\nother = 1\n",
 		"negative":  "[context.iteration]\nhistory_limit = -1\n",
 		"not-int":   "[context.iteration]\nhistory_limit = twenty\n",
+		"empty":     "[context.iteration]\nhistory_limit =\n",
 		"duplicate": "[context.iteration]\nhistory_limit = 1\nhistory_limit = 2\n",
 	} {
 		t.Run(name, func(t *testing.T) {

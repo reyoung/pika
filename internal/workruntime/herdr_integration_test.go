@@ -943,13 +943,31 @@ func TestBaselineAcceptedEndToEndThroughMCP(t *testing.T) {
 		}
 		t.Fatalf("baseline E2E view=%+v err=%v; panes=%+v reads=%s; Herdr=%s", view, err, snapshot.Panes, reads, serverOutput.String())
 	}
+	iterationTabs := map[string]string{}
 	for _, work := range view.Works {
 		if work.Role == symphony.RoleIteration && work.Status == symphony.WorkPending {
 			work := work
 			waitForBinding(t, ctx, stateRoot, work.ID, func(session symphony.AgentSession, binding symphony.PaneBinding) bool {
-				return session.Role == symphony.RoleIteration && binding.TerminalID != ""
+				if session.Role != symphony.RoleIteration || binding.TerminalID == "" {
+					return false
+				}
+				iterationTabs[work.ID] = binding.TabID
+				return true
 			})
 		}
+	}
+	if len(iterationTabs) != 4 {
+		t.Fatalf("Iteration tab bindings = %d, want 4", len(iterationTabs))
+	}
+	seenTabs := map[string]string{}
+	for workID, tabID := range iterationTabs {
+		if tabID == "" || tabID == created.RootPane.TabID {
+			t.Fatalf("Iteration Work %s was placed in the control tab %q", workID, tabID)
+		}
+		if otherWorkID, found := seenTabs[tabID]; found {
+			t.Fatalf("Iteration Works %s and %s share tab %s", otherWorkID, workID, tabID)
+		}
+		seenTabs[tabID] = workID
 	}
 	leftovers, _ := filepath.Glob(filepath.Join(stateRoot, "instances", "integration-instance", "runtime", ".agent-env-*"))
 	if len(leftovers) != 0 {

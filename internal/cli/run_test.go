@@ -376,6 +376,17 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 	if !ok || environment["PIKA_GO_WORKSPACE"] != workspaceRoot {
 		t.Fatalf("plugin.pane.open env = %#v", pluginParams["env"])
 	}
+	integrationExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	integrationExecutable, err = filepath.Abs(integrationExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if environment["PIKA_GO_INTEGRATION_EXECUTABLE"] != integrationExecutable {
+		t.Fatalf("plugin.pane.open integration executable = %v, want %s", environment["PIKA_GO_INTEGRATION_EXECUTABLE"], integrationExecutable)
+	}
 	if requests["workspace.focus"]["workspace_id"] != "w-new" {
 		t.Fatalf("workspace.focus params = %+v", requests["workspace.focus"])
 	}
@@ -597,6 +608,59 @@ func TestWorkspaceDaemonInitPersistsConfigurationAndOptimization(t *testing.T) {
 		cancel()
 		t.Fatalf("source checkout was modified: %q", got)
 	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("daemon exit = %d, stderr=%s", code, daemonStderr.String())
+	}
+}
+
+func TestColdWorkspaceDaemonRefreshesManagedCodexIntegrationWithStableExecutable(t *testing.T) {
+	isolateHerdrEnvironment(t)
+	repository := newCommittedRepository(t)
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeCodex := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo codex-test; exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then echo 'Logged in'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	initializer := configuration.Initializer{
+		Workspace: &workspace, CodexHome: codexHome,
+		PikaExecutable: "/usr/bin/false", CodexExecutable: fakeCodex,
+	}
+	if _, err := initializer.Prepare(context.Background(), repository); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", fakeCodex)
+	t.Setenv("PIKA_GO_INTEGRATION_EXECUTABLE", "/bin/echo")
+	t.Setenv("CODEX_HOME", codexHome)
+
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-workspace-refresh-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "pika.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	var daemonStderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"daemon", "--socket", socketPath, "--workspace", workspace.Root}, nil, io.Discard, &daemonStderr)
+	}()
+	waitForHealth(t, socketPath, &daemonStderr)
+
+	profile, err := os.ReadFile(filepath.Join(codexHome, "pika-go-managed.config.toml"))
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(profile), `command = "/bin/echo"`) || strings.Contains(string(profile), `command = "/usr/bin/false"`) {
+		cancel()
+		t.Fatalf("managed profile was not refreshed for stable integration executable: %s", profile)
+	}
+
 	cancel()
 	if code := <-done; code != 0 {
 		t.Fatalf("daemon exit = %d, stderr=%s", code, daemonStderr.String())

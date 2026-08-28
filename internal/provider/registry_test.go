@@ -25,6 +25,7 @@ func TestCodexAdapterIsSelectedThroughRegistry(t *testing.T) {
 	launch, err := adapter.PrepareSession(context.Background(), provider.SessionActivation{
 		Configuration: configuration,
 		SystemPrompt:  []byte("frozen system prompt"),
+		InitialPrompt: "start the Pika Work",
 		Environment:   map[string]string{"PIKA_SESSION_ID": "pika-session"},
 	})
 	if err != nil {
@@ -32,7 +33,8 @@ func TestCodexAdapterIsSelectedThroughRegistry(t *testing.T) {
 	}
 	if launch.AgentKind != "codex" || launch.Environment["PIKA_SESSION_ID"] != "pika-session" ||
 		launch.Environment["PIKA_AGENT_MODEL"] != "gpt-test" || launch.Environment["PIKA_AGENT_REASONING_EFFORT"] != "xhigh" ||
-		launch.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"] != `"frozen system prompt"` {
+		launch.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"] != `"frozen system prompt"` ||
+		launch.Environment["PIKA_CODEX_INITIAL_PROMPT"] != "start the Pika Work" || !launch.HandlesInitialPrompt || !launch.ReturnOnLaunch {
 		t.Fatalf("launch = %+v", launch)
 	}
 	raw := json.RawMessage(`{

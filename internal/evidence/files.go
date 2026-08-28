@@ -15,19 +15,22 @@ import (
 
 const DefaultMaxBytes int64 = 16 << 20
 
-func ReadStable(root, relativePath string, maxBytes int64) ([]byte, symphony.ArtifactInput, error) {
-	if root == "" || !filepath.IsAbs(root) || relativePath == "" || filepath.IsAbs(relativePath) {
-		return nil, symphony.ArtifactInput{}, errors.New("absolute root and relative evidence path are required")
-	}
-	clean := filepath.Clean(filepath.FromSlash(relativePath))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return nil, symphony.ArtifactInput{}, errors.New("evidence path escapes the Work root")
+func ReadStable(root, evidencePath string, maxBytes int64) ([]byte, symphony.ArtifactInput, error) {
+	if root == "" || !filepath.IsAbs(root) || evidencePath == "" {
+		return nil, symphony.ArtifactInput{}, errors.New("absolute root and non-empty evidence path are required")
 	}
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, symphony.ArtifactInput{}, fmt.Errorf("resolve Work root: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(filepath.Join(resolvedRoot, clean))
+	candidate := filepath.Clean(filepath.FromSlash(evidencePath))
+	if !filepath.IsAbs(candidate) {
+		if candidate == "." || candidate == ".." || strings.HasPrefix(candidate, ".."+string(filepath.Separator)) {
+			return nil, symphony.ArtifactInput{}, errors.New("evidence path escapes the Work root")
+		}
+		candidate = filepath.Join(resolvedRoot, candidate)
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
 	if err != nil {
 		return nil, symphony.ArtifactInput{}, fmt.Errorf("resolve evidence path: %w", err)
 	}
@@ -63,6 +66,6 @@ func ReadStable(root, relativePath string, maxBytes int64) ([]byte, symphony.Art
 	}
 	digest := sha256.Sum256(contents)
 	return contents, symphony.ArtifactInput{
-		RelativePath: filepath.ToSlash(clean), ByteSize: int64(len(contents)), ContentSHA256: hex.EncodeToString(digest[:]), ContractVersion: 1,
+		RelativePath: filepath.ToSlash(rel), ByteSize: int64(len(contents)), ContentSHA256: hex.EncodeToString(digest[:]), ContractVersion: 1,
 	}, nil
 }

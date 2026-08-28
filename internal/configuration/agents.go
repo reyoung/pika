@@ -34,6 +34,7 @@ func LoadContext(path string) (Context, error) {
 	defer file.Close()
 	section := ""
 	var value string
+	foundHistoryLimit := false
 	scanner := bufio.NewScanner(file)
 	for lineNumber := 1; scanner.Scan(); lineNumber++ {
 		line := strings.TrimSpace(scanner.Text())
@@ -55,16 +56,17 @@ func LoadContext(path string) (Context, error) {
 		if key != "history_limit" {
 			return Context{}, fmt.Errorf("unknown context.iteration field %q", key)
 		}
-		if value != "" {
+		if foundHistoryLimit {
 			return Context{}, errors.New("duplicate context.iteration field \"history_limit\"")
 		}
+		foundHistoryLimit = true
 		value = encoded
 	}
 	if err := scanner.Err(); err != nil {
 		return Context{}, fmt.Errorf("read instance configuration: %w", err)
 	}
-	if value == "" {
-		return Context{}, errors.New("context.iteration requires history_limit")
+	if !foundHistoryLimit {
+		return Context{IterationHistoryLimit: DefaultIterationHistoryLimit}, nil
 	}
 	limit, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || limit < 0 {

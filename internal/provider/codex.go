@@ -83,7 +83,7 @@ func (adapter CodexAdapter) PrepareSession(_ context.Context, activation Session
 	if len(activation.SystemPrompt) == 0 {
 		return Launch{}, errors.New("frozen System Prompt is required")
 	}
-	environment := make(map[string]string, len(activation.Environment)+3)
+	environment := make(map[string]string, len(activation.Environment)+4)
 	for key, value := range activation.Environment {
 		environment[key] = value
 	}
@@ -94,7 +94,17 @@ func (adapter CodexAdapter) PrepareSession(_ context.Context, activation Session
 	if activation.Configuration.ReasoningEffort != "" {
 		environment["PIKA_AGENT_REASONING_EFFORT"] = activation.Configuration.ReasoningEffort
 	}
-	return Launch{AgentKind: "codex", Environment: environment, Cleanup: func() error { return nil }}, nil
+	handlesInitialPrompt := activation.InitialPrompt != ""
+	if handlesInitialPrompt {
+		environment["PIKA_CODEX_INITIAL_PROMPT"] = activation.InitialPrompt
+	}
+	return Launch{
+		AgentKind:            "codex",
+		Environment:          environment,
+		HandlesInitialPrompt: handlesInitialPrompt,
+		ReturnOnLaunch:       handlesInitialPrompt,
+		Cleanup:              func() error { return nil },
+	}, nil
 }
 
 type codexHookEnvelope struct {

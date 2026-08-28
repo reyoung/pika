@@ -45,6 +45,9 @@ func TestPreparationFreezesInstructionForOneSession(t *testing.T) {
 	if !strings.Contains(first.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], "你是 Pika 的 Baseline Draft Agent") {
 		t.Fatalf("immutable Role System Prompt was not delivered through Codex developer instructions: %+v", first.Environment)
 	}
+	if first.Prompt != "" || !strings.Contains(first.Environment["PIKA_CODEX_INITIAL_PROMPT"], "开始 Pika Work") || !first.ReturnOnLaunch {
+		t.Fatalf("Codex initial prompt was not made launch-durable: %+v", first)
+	}
 	if strings.Contains(first.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], "用户追加 Instructions") {
 		t.Fatalf("empty default instruction created an overlay: %s", first.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"])
 	}

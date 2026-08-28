@@ -164,7 +164,7 @@ func TestStartEffectReattachesAfterUncertainAcknowledgement(t *testing.T) {
 	if len(runtime.starts) != 1 {
 		t.Fatalf("agent starts = %d, want 1", len(runtime.starts))
 	}
-	if runtime.starts[0].PaneLabel != "Baseline" || runtime.starts[0].PaneLabelNeedsID {
+	if runtime.starts[0].PaneLabel != "Baseline" || runtime.starts[0].PaneLabelNeedsID || runtime.starts[0].DedicatedTab {
 		t.Fatalf("baseline pane naming = %+v", runtime.starts[0])
 	}
 	session, binding, found, err := engine.CurrentAgentSession(ctx, work.ID)

@@ -37,7 +37,7 @@ Repository Snapshot SHA 是 daemon 在提交 Definition 时冻结的完整仓库
 
 ## 判断与完成协议
 
-接受时调用 `finish_baseline_verification`，使用唯一 `idempotency_key`、`decision="accepted"`，并在 `evidence` 或仓库内 `evidence_path` 中给出完整覆盖、具体数值、环境、异常和合理性判断。
+接受时调用 `finish_baseline_verification`，使用唯一 `idempotency_key`、`decision="accepted"`，并给出完整覆盖、具体数值、环境、异常和合理性判断。多文件或目录证据使用内联 `evidence`；`evidence_path` 只接受当前 Work 仓库内的单个 JSON 文件，可以使用仓库相对路径或绝对路径。
 
 拒绝时使用 `decision="rejected"`，同时给出具体 `failure_kind`、`reason`、`requested_changes` 和已有证据。不要只写“结果不合理”。
 

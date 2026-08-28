@@ -206,6 +206,11 @@ func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent)
 		if err != nil || !found || session.AgentKind != agents["iteration"].Kind {
 			t.Fatalf("Iteration Session=%+v found=%v err=%v", session, found, err)
 		}
+		start := startForSession(t, runtime.starts, session.ID)
+		wantTabLabel := fmt.Sprintf("Iteration R%d · %.8s", iteration.IterationRound, iteration.AttemptID)
+		if !start.DedicatedTab || start.TabLabel != wantTabLabel {
+			t.Fatalf("Iteration launch does not request a dedicated tab: %+v", start)
+		}
 	}
 	siblingSession, _, _, _ := engine.CurrentAgentSession(ctx, iterations[1].ID)
 	if _, err := engine.Apply(ctx, symphony.FinishIteration{

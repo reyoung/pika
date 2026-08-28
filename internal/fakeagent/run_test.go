@@ -24,6 +24,18 @@ func TestRunBecomesReadyAndAcceptsPrompts(t *testing.T) {
 	}
 }
 
+func TestRunConsumesCodexInitialPrompt(t *testing.T) {
+	t.Setenv("PIKA_CODEX_INITIAL_PROMPT", "start the assigned work")
+	var output bytes.Buffer
+
+	if code := fakeagent.Run(context.Background(), strings.NewReader("/exit\n"), &output); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(output.String(), `FAKE_AGENT_PROMPT "start the assigned work"`) {
+		t.Fatalf("initial prompt was not consumed: %q", output.String())
+	}
+}
+
 func TestRunInterruptKeepsSessionAliveForResumePrompt(t *testing.T) {
 	interrupts := make(chan os.Signal, 1)
 	interrupts <- os.Interrupt

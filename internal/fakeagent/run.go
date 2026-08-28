@@ -47,6 +47,16 @@ func RunWithInterrupts(ctx context.Context, input io.Reader, output io.Writer, i
 		autorun = runOptimizationScenario
 	}
 	var autorunOnce sync.Once
+	if initialPrompt := os.Getenv("PIKA_CODEX_INITIAL_PROMPT"); initialPrompt != "" {
+		setTitle(output, "⠋ FAKE_AGENT_WORKING")
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_PROMPT %s\n", strconv.Quote(initialPrompt))
+		if os.Getenv("PIKA_GO_FAKE_AGENT_HANG_ON_PROMPT") != "1" {
+			setTitle(output, "FAKE_AGENT_READY")
+		}
+		if autorun != nil {
+			autorunOnce.Do(func() { go autorun(ctx, output) })
+		}
+	}
 	lines := make(chan string)
 	scanErrors := make(chan error, 1)
 	go func() {

@@ -42,3 +42,23 @@ func TestReadStableReturnsNormalizedDigestMetadata(t *testing.T) {
 		t.Fatalf("contents=%q artifact=%+v", contents, artifact)
 	}
 }
+
+func TestReadStableAcceptsAbsolutePathWithinWorkRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	evidencePath := filepath.Join(root, "evidence", "baseline.json")
+	if err := os.Mkdir(filepath.Dir(evidencePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidencePath, []byte(`{"metric":"latency"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	contents, artifact, err := evidence.ReadStable(root, evidencePath, 1024)
+	if err != nil {
+		t.Fatalf("read stable absolute evidence: %v", err)
+	}
+	if string(contents) != `{"metric":"latency"}` || artifact.RelativePath != "evidence/baseline.json" {
+		t.Fatalf("contents=%q artifact=%+v", contents, artifact)
+	}
+}

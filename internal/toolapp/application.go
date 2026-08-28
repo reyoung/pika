@@ -561,7 +561,7 @@ func toolByName(name string) (Tool, bool) {
 			}, "idempotency_key", "message", "paths"),
 		},
 		"finish_baseline_verification": {
-			Name: "finish_baseline_verification", Description: "Accept or reject one immutable Baseline revision and complete this Work.",
+			Name: "finish_baseline_verification", Description: "Accept or reject one immutable Baseline revision and complete this Work. evidence_path may be repository-relative or absolute, but must identify one JSON file inside the assigned Work repository; use inline evidence for multiple files or directories.",
 			InputSchema: object(map[string]any{
 				"idempotency_key":   map[string]any{"type": "string", "minLength": 1},
 				"decision":          map[string]any{"type": "string", "enum": []string{"accepted", "rejected"}},
@@ -569,7 +569,7 @@ func toolByName(name string) (Tool, bool) {
 				"reason":            map[string]any{"type": "string"},
 				"requested_changes": map[string]any{"type": "string"},
 				"evidence":          map[string]any{},
-				"evidence_path":     map[string]any{"type": "string", "minLength": 1},
+				"evidence_path":     map[string]any{"type": "string", "minLength": 1, "description": "One JSON file inside the assigned Work repository, as a repository-relative or absolute path."},
 			}, "idempotency_key", "decision"),
 		},
 		"finish_iteration": {

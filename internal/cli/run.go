@@ -378,6 +378,13 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			branchNamespace = paths.Workspace.BranchNamespace()
 		}
 		pikaExecutable, _ := os.Executable()
+		if integrationExecutable := os.Getenv("PIKA_GO_INTEGRATION_EXECUTABLE"); integrationExecutable != "" {
+			if !filepath.IsAbs(integrationExecutable) {
+				writeDaemonLog(stderr, "error", "provider.integration_executable_invalid", errors.New("PIKA_GO_INTEGRATION_EXECUTABLE must be absolute"), nil)
+				return 2
+			}
+			pikaExecutable = filepath.Clean(integrationExecutable)
+		}
 		codexExecutable := os.Getenv("PIKA_GO_CODEX_EXECUTABLE")
 		if codexExecutable == "" {
 			codexExecutable, _ = exec.LookPath("codex")
@@ -505,6 +512,17 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			CodexHome: codexHome, CursorMCPPath: cursorMCPPath, CursorHooksPath: cursorHooksPath, PikaExecutable: pikaExecutable, CodexExecutable: codexExecutable, Providers: providerRegistry,
 			RequireConfigurationTOML: true, ProbeProviders: true,
 			ProviderExecutables: map[string]string{"codex": codexExecutable, "cursor": cursorExecutable},
+		}
+		if paths.Workspace != nil && !handoffCandidate {
+			if _, statErr := os.Stat(instanceConfigPath); statErr == nil {
+				if _, refreshErr := initializer.Prepare(ctx, paths.Workspace.Identity.SourceRepository); refreshErr != nil {
+					writeDaemonLog(stderr, "error", "provider.integration_refresh_failed", refreshErr, nil)
+					return 1
+				}
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				writeDaemonLog(stderr, "error", "provider.integration_refresh_failed", statErr, nil)
+				return 1
+			}
 		}
 		herdrSocket := os.Getenv("HERDR_SOCKET_PATH")
 		prepareInit = func(initCtx context.Context, repository string, configurationTOML *string) (daemon.PreparedInit, error) {
@@ -975,6 +993,16 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		}
 		if outcome == daemonupdate.OutcomeCommitted {
 			writeDaemonLog(stderr, "info", "update.handoff_committed", nil, map[string]any{"update_id": handoff.Status.ID, "version": handoff.Status.To.Version})
+			if os.Getenv("HERDR_SOCKET_PATH") != "" && os.Getenv("HERDR_PANE_ID") != "" && handoff.Child != nil && handoff.Child.Command != nil {
+				// The original daemon is the foreground process that owns the Herdr
+				// plugin pane. Keep that process alive as a lightweight supervisor;
+				// otherwise Herdr closes the pane after a successful handoff and the
+				// successor receives the pane teardown with it. Repeated updates form
+				// a bounded-to-update-count supervisor chain that unwinds on shutdown.
+				if waitErr := handoff.Child.Command.Wait(); waitErr != nil {
+					writeDaemonLog(stderr, "warn", "update.successor_exited", waitErr, map[string]any{"update_id": handoff.Status.ID})
+				}
+			}
 		} else {
 			rolledBack, _ := daemonupdate.ReadStatus(paths.Workspace.Root)
 			writeDaemonLog(stderr, "warn", "update.handoff_rolled_back", errors.New(rolledBack.Failure), map[string]any{"update_id": handoff.Status.ID})
