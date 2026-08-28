@@ -44,7 +44,38 @@ func (e *Engine) ContextProjection(ctx context.Context, sessionID string) (Conte
 			return ContextProjection{}, err
 		}
 	}
+	if target.Work.Role == RoleIteration && target.Work.IterationRound > 1 {
+		projection.PreviousRound, err = e.previousRoundHistory(ctx, target.Work)
+		if err != nil {
+			return ContextProjection{}, err
+		}
+	}
 	return projection, nil
+}
+
+func (e *Engine) previousRoundHistory(ctx context.Context, current WorkView) (*RoundHistoryProjection, error) {
+	var work WorkView
+	var round IterationRoundView
+	var backOffMessage sql.NullString
+	err := e.db.QueryRowContext(ctx, `SELECT w.id, w.baseline_revision_id, w.role, w.status, w.generation,
+		w.attempt_id, w.iteration_round, r.attempt_id, r.round, r.kind, r.base_sha, r.status, r.back_off_message
+		FROM works w JOIN iteration_rounds r ON r.attempt_id = w.attempt_id AND r.round = w.iteration_round
+		WHERE w.attempt_id = ? AND w.role = ? AND w.iteration_round = ? ORDER BY w.created_at DESC, w.id DESC LIMIT 1`,
+		current.AttemptID, RoleIteration, current.IterationRound-1).Scan(
+		&work.ID, &work.BaselineRevisionID, &work.Role, &work.Status, &work.Generation, &work.AttemptID, &work.IterationRound,
+		&round.AttemptID, &round.Round, &round.Kind, &round.BaseSHA, &round.Status, &backOffMessage)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, domainError(CodeStateCorrupt, "Iteration Round is missing its previous Round history")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read previous Iteration Round: %w", err)
+	}
+	round.BackOffMessage = backOffMessage.String
+	journal, err := e.normalizedConversationJournal(ctx, work.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &RoundHistoryProjection{Work: work, Round: round, Journal: journal}, nil
 }
 
 func (e *Engine) recentAttemptHistories(ctx context.Context, optimizationID, currentAttemptID string, limit int64) ([]AttemptHistoryProjection, error) {

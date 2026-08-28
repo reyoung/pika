@@ -24,7 +24,8 @@
       "required": ["history_limit", "recent_terminal_attempts"],
       "properties": {
         "history_limit": {"type": "integer", "minimum": 0},
-        "recent_terminal_attempts": {"type": "array", "items": {"$ref": "#/$defs/attempt_history"}}
+        "recent_terminal_attempts": {"type": "array", "items": {"$ref": "#/$defs/attempt_history"}},
+        "previous_round": {"$ref": "#/$defs/round_history"}
       }
     }
   },
@@ -84,6 +85,9 @@
     }},
     "attempt_history": {"type": "object", "additionalProperties": false, "required": ["attempt", "messages", "summary"], "properties": {
       "attempt": {"$ref": "#/$defs/attempt"}, "messages": {"$ref": "#/$defs/file"}, "summary": {"$ref": "#/$defs/file"}
+    }},
+    "round_history": {"type": "object", "additionalProperties": false, "required": ["work", "round", "messages"], "properties": {
+      "work": {"$ref": "#/$defs/work"}, "round": {"$ref": "#/$defs/round"}, "messages": {"$ref": "#/$defs/file"}
     }},
     "file": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "bytes", "records"], "properties": {
       "path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "bytes": {"type": "integer", "minimum": 0}, "records": {"type": "integer", "minimum": 0}

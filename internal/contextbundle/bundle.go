@@ -57,6 +57,13 @@ type AttemptHistory struct {
 type IterationContext struct {
 	HistoryLimit           int64            `json:"history_limit"`
 	RecentTerminalAttempts []AttemptHistory `json:"recent_terminal_attempts"`
+	PreviousRound          *RoundHistory    `json:"previous_round,omitempty"`
+}
+
+type RoundHistory struct {
+	Work     symphony.WorkView           `json:"work"`
+	Round    symphony.IterationRoundView `json:"round"`
+	Messages FileReference               `json:"messages"`
 }
 
 type Document struct {
@@ -150,6 +157,17 @@ func (m Materializer) Materialize(ctx context.Context, session symphony.AgentSes
 	files := map[string][]byte{messagesRelative: messages}
 	if projection.TargetWork.Work.Role == symphony.RoleIteration {
 		document.Iteration = &IterationContext{HistoryLimit: projection.TargetWork.IterationHistoryLimit, RecentTerminalAttempts: []AttemptHistory{}}
+		if projection.PreviousRound != nil {
+			previousRecords := recordsFor(projection.PreviousRound.Journal)
+			previousMessages, err := encodeJSONL(previousRecords)
+			if err != nil {
+				return Bundle{}, err
+			}
+			previousRelative := filepath.Join(session.ID, "previous-round", fmt.Sprintf("round-%d", projection.PreviousRound.Round.Round), "messages.jsonl")
+			files[previousRelative] = previousMessages
+			document.Iteration.PreviousRound = &RoundHistory{Work: projection.PreviousRound.Work, Round: projection.PreviousRound.Round,
+				Messages: FileReference{Path: filepath.Join(m.Root, previousRelative), SHA256: digest(previousMessages), Bytes: int64(len(previousMessages)), Records: int64(len(previousRecords))}}
+		}
 		for _, history := range projection.AttemptHistories {
 			historyRecords := recordsFor(history.Journal)
 			historyMessages, err := encodeJSONL(historyRecords)
@@ -322,6 +340,13 @@ func (m Materializer) verifyStored(snapshot symphony.ContextSnapshot) (Bundle, e
 		return Bundle{}, errors.New("frozen context.json is invalid")
 	}
 	if document.Iteration != nil {
+		if document.Iteration.PreviousRound != nil {
+			reference := document.Iteration.PreviousRound.Messages
+			actualDigest, actualBytes, err := digestPath(reference.Path)
+			if err != nil || actualDigest != reference.SHA256 || actualBytes != reference.Bytes {
+				return Bundle{}, errors.New("frozen previous Round history digest does not match its file")
+			}
+		}
 		for _, history := range document.Iteration.RecentTerminalAttempts {
 			for _, reference := range []FileReference{history.Messages, history.Summary} {
 				actualDigest, actualBytes, err := digestPath(reference.Path)

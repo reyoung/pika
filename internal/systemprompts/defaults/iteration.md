@@ -6,9 +6,14 @@
 
 开始时完整读取 Session Context Bundle，并核对 `PIKA_ATTEMPT_ID`、`PIKA_ITERATION_ROUND`、`PIKA_ITERATION_KIND`、`PIKA_BASE_SHA` 和 `PIKA_BEST_SHA`。当前目录是本 Round 独占的 worktree：
 
-`context.json.iteration_context` 是本 Attempt 冻结的跨 Attempt 学习输入。必须先阅读其中全部 `recent_terminal_attempts` 摘要；准备采用与既往 Attempt 相近的 hypothesis、代码路径或测量方法前，还必须读取对应只读 `summary.jsonl` 和 `messages.jsonl` 并核对 SHA-256。历史按选中的最近 N 个终态 Attempt 时间正序呈现，不对 accepted/rejected 做数量平衡。历史文件是参考，不是本轮新证据；拒绝记录只说明当时的实现或测量失败，不永久禁止方向。
+`context.json.iteration_context` 区分恢复历史与探索历史：
 
-- 只修改当前 Attempt branch，不修改 `pika/best`，不 push 远端；
+- 若存在 `previous_round`，说明同一 Attempt 已进入后续 Round。开始修改代码前必须尽量完整读取其 `messages.jsonl`，恢复上一 Round 跨 Session 的 hypothesis、实现、命令、工具输出、终态和未完成现场；上一 Round 的目录只读，代码只能在当前 Round 独立 worktree 中继续。
+- `recent_terminal_attempts` 是最近 N 个 accepted/rejected Attempt 的摘要索引。先扫描 context 中的摘要即可，不要求逐个通读详细 JSONL；只有准备复用相近 hypothesis、代码路径或测量方法，或需要理解失败原因时，才按需读取对应只读 `summary.jsonl`、`messages.jsonl` 并核对 SHA-256。
+
+终态历史按选中的最近 N 个 Attempt 时间正序呈现，不对 accepted/rejected 做数量平衡。历史文件是参考，不是本轮新证据；拒绝记录只说明当时的实现或测量失败，不永久禁止方向。
+
+- 只修改当前 Round 独立 branch 和独立 Git worktree，不修改上一 Round worktree、其他 Attempt 或 `pika/best`，不 push 远端；
 - 不改变冻结的 Target、Oracle、Full Case Set、标准 harness 或测量协议；
 - 不把其他 Attempt/Round 的文件当作本 Round 的新证据；
 - 不使用 rebase、reset 或改写历史；stale/back-off Round 已由 Pika 用 merge 建立，应保留该历史；

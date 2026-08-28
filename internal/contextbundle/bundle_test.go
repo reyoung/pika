@@ -157,9 +157,14 @@ func TestMaterializeFreezesRecentAttemptSummariesAndDetailedHistory(t *testing.T
 		Session: session,
 		View: symphony.View{Optimization: symphony.OptimizationView{ID: "optimization", Status: symphony.OptimizationOptimizing, Revision: 1,
 			Repository: "/repo", IterationConcurrency: 1, MaxPendingAttempts: 1, IterationHistoryLimit: 2}},
-		TargetWork: symphony.RuntimeWork{Work: symphony.WorkView{ID: "current-work", Role: symphony.RoleIteration, AttemptID: "current", IterationRound: 1},
+		TargetWork: symphony.RuntimeWork{Work: symphony.WorkView{ID: "current-work", Role: symphony.RoleIteration, AttemptID: "current", IterationRound: 2},
 			OptimizationID: "optimization", OptimizationRepository: "/repo", Repository: "/attempt", IterationHistoryLimit: 2},
-		GeneratorWork: symphony.WorkView{ID: "current-work", Role: symphony.RoleIteration, AttemptID: "current", IterationRound: 1},
+		GeneratorWork: symphony.WorkView{ID: "current-work", Role: symphony.RoleIteration, AttemptID: "current", IterationRound: 2},
+		PreviousRound: &symphony.RoundHistoryProjection{
+			Work:    symphony.WorkView{ID: "previous-work", Role: symphony.RoleIteration, Status: symphony.WorkCompleted, AttemptID: "current", IterationRound: 1},
+			Round:   symphony.IterationRoundView{AttemptID: "current", Round: 1, Kind: "initial", BaseSHA: "base", Status: "candidate"},
+			Journal: symphony.ConversationJournalView{Turns: []symphony.ConversationTurnView{{ID: "previous-turn", Provider: "codex", AgentSessionID: "previous-session", ProviderSessionID: "native-previous", ProviderTurnID: "previous", Status: "completed", StartedAt: "2026-01-01T00:00:00Z", AssistantMessage: "complete previous round"}}},
+		},
 		AttemptHistories: []symphony.AttemptHistoryProjection{
 			{Attempt: symphony.AttemptView{ID: "rejected", Status: "rejected", BaseSHA: "base-1", Summary: "failed approach", FailureReason: "regression", HistoryLimit: 2},
 				Journal: symphony.ConversationJournalView{Turns: []symphony.ConversationTurnView{{ID: "turn-1", Provider: "codex", AgentSessionID: "old-session", ProviderSessionID: "native", ProviderTurnID: "turn", Status: "completed", StartedAt: "2026-01-01T00:00:00Z", AssistantMessage: "details"}}}},
@@ -181,6 +186,13 @@ func TestMaterializeFreezesRecentAttemptSummariesAndDetailedHistory(t *testing.T
 	}
 	if document.Iteration == nil || document.Iteration.HistoryLimit != 2 || len(document.Iteration.RecentTerminalAttempts) != 2 {
 		t.Fatalf("iteration context = %+v", document.Iteration)
+	}
+	if document.Iteration.PreviousRound == nil || document.Iteration.PreviousRound.Messages.Records != 1 {
+		t.Fatalf("previous Round context = %+v", document.Iteration.PreviousRound)
+	}
+	previousBytes, err := os.ReadFile(document.Iteration.PreviousRound.Messages.Path)
+	if err != nil || !bytes.Contains(previousBytes, []byte("complete previous round")) {
+		t.Fatalf("previous Round history is incomplete: err=%v bytes=%s", err, previousBytes)
 	}
 	for index, want := range []string{"rejected", "accepted"} {
 		history := document.Iteration.RecentTerminalAttempts[index]

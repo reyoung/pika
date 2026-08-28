@@ -111,7 +111,7 @@ Context generation is complete and deterministic:
 1. Select current domain facts and required terminal operation.
 2. Select every normalized Turn across all Sessions for the relevant Work.
 3. Include complete observable tool and shell inputs and outputs, MCP receipts, and supplements; do not duplicate raw provider-hook events.
-4. Atomically materialize `contexts/<session-id>/context.json`, current-Work `messages.jsonl`, and any selected `attempt-history/<attempt-id>/{messages,summary}.jsonl` before provider launch.
+4. Atomically materialize `contexts/<session-id>/context.json`, current-Work `messages.jsonl`, the immediately preceding Round's complete `previous-round/round-N/messages.jsonl` when present, and selected on-demand `attempt-history/<attempt-id>/{messages,summary}.jsonl` before provider launch.
 5. Record both relative paths, SHA-256 digests, byte sizes, record count, and schema version in `context_snapshots`.
 
 The full JSON Schemas for the context document, normalized message records, and terminal Attempt summary records are versioned with the producer and embedded verbatim in every consuming System Prompt. The locator section is rendered from an embedded Go template with missing-key failures. A dispatch retry verifies every referenced digest and reuses the frozen files; a new or recovery Agent Session creates a new reviewable snapshot.

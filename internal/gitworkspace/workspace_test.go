@@ -153,6 +153,9 @@ func TestRefreshCreatesNewRoundAndMergesBestWithoutRebase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refresh stale attempt: %v", err)
 	}
+	if refreshed.Repository == old.Repository || refreshed.Branch == old.Branch {
+		t.Fatalf("Round 2 reused Round 1 code workspace: old=%+v refreshed=%+v", old, refreshed)
+	}
 	mergeSHA := strings.TrimSpace(git(t, refreshed.Repository, "rev-parse", "HEAD"))
 	parents := strings.Fields(strings.TrimSpace(git(t, refreshed.Repository, "show", "-s", "--format=%P", mergeSHA)))
 	if len(parents) != 2 || parents[0] != oldCandidate || parents[1] != bestSHA {

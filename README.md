@@ -37,7 +37,7 @@ kernel-pika-workspace/
   herdr/binding.json    current replaceable Herdr layout binding
 ```
 
-Each Agent reads its Context Bundle before acting. `messages.jsonl` spans all observed Sessions for the relevant Work and preserves complete normalized messages, shell/tool inputs and outputs, and MCP receipts; provider-specific raw hook events remain in SQLite and are not duplicated. Iteration bundles also contain the frozen N most-recent terminal Attempt summaries and digest-addressed detailed histories. Retrying one Agent Session verifies and reuses byte-identical files, while a replacement Session receives a new reviewable snapshot.
+Each Agent reads its Context Bundle before acting. `messages.jsonl` spans all observed Sessions for the relevant Work and preserves complete normalized messages, shell/tool inputs and outputs, and MCP receipts; provider-specific raw hook events remain in SQLite and are not duplicated. A later Iteration Round receives the immediately preceding Round's full history for recovery while running in its own branch and Git worktree. Iteration bundles also expose the frozen N most-recent terminal Attempt summaries and digest-addressed detail files for selective reading. Retrying one Agent Session verifies and reuses byte-identical files, while a replacement Session receives a new reviewable snapshot.
 
 Run `pika-go resume /path/to/kernel-pika-workspace`, or run `pika-go kick-off` anywhere inside it, to continue. Existing configuration is reused and init is not repeated. A Workspace is intentionally not relocatable because it records the absolute source repository and Git common-directory filesystem identity.
 

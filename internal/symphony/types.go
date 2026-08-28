@@ -466,10 +466,17 @@ type ContextProjection struct {
 	GeneratorWork    WorkView                   `json:"generator_work"`
 	Journal          ConversationJournalView    `json:"-"`
 	AttemptHistories []AttemptHistoryProjection `json:"-"`
+	PreviousRound    *RoundHistoryProjection    `json:"-"`
 }
 
 type AttemptHistoryProjection struct {
 	Attempt AttemptView             `json:"attempt"`
+	Journal ConversationJournalView `json:"-"`
+}
+
+type RoundHistoryProjection struct {
+	Work    WorkView                `json:"work"`
+	Round   IterationRoundView      `json:"round"`
 	Journal ConversationJournalView `json:"-"`
 }
 
