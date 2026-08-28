@@ -213,7 +213,7 @@ func probeProviders(ctx context.Context, providers *provider.Registry, kinds []s
 			return fmt.Errorf("probe %s provider: %w", kind, err)
 		}
 		if !capabilities.Compatible || !capabilities.Authenticated || !capabilities.Journal || !capabilities.TurnStop ||
-			!capabilities.FollowUp || !capabilities.FullOutput || !capabilities.FreshSession {
+			!capabilities.FollowUp || !capabilities.FullOutput || !capabilities.FreshSession || !capabilities.Interrupt {
 			return fmt.Errorf("probe %s provider: required capabilities are unavailable", kind)
 		}
 	}

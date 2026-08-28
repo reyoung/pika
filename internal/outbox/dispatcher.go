@@ -18,6 +18,10 @@ type Sink interface {
 	Dispatch(context.Context, symphony.RuntimeEffect) error
 }
 
+type ExactStore interface {
+	ClaimRuntimeEffect(context.Context, string) (symphony.RuntimeEffect, bool, error)
+}
+
 type Dispatcher struct {
 	Store Store
 	Sink  Sink
@@ -44,6 +48,27 @@ func (d Dispatcher) DispatchPending(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (d Dispatcher) DispatchEffect(ctx context.Context, id string) error {
+	if d.Store == nil || d.Sink == nil {
+		return errors.New("outbox store and sink are required")
+	}
+	store, ok := d.Store.(ExactStore)
+	if !ok {
+		return errors.New("outbox store does not support exact effect dispatch")
+	}
+	effect, found, err := store.ClaimRuntimeEffect(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("runtime effect %s is not pending or dispatchable", id)
+	}
+	if err := d.Sink.Dispatch(ctx, effect); err != nil {
+		return fmt.Errorf("dispatch runtime effect %s: %w", effect.ID, err)
+	}
+	return d.Store.MarkEffectDispatched(context.WithoutCancel(ctx), effect.ID)
 }
 
 type Recorder struct {

@@ -181,7 +181,10 @@ func (e *Engine) ClaimPendingEffects(ctx context.Context, limit int) ([]RuntimeE
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `SELECT sequence, id, optimization_id, effect_type, payload_json
-		FROM runtime_outbox WHERE status = 'pending' ORDER BY sequence LIMIT ?`, limit)
+		FROM runtime_outbox WHERE status = 'pending'
+		AND (effect_type NOT IN ('work.start_requested', 'followup.deliver_requested')
+			OR EXISTS (SELECT 1 FROM optimizations o WHERE o.id = runtime_outbox.optimization_id AND o.scheduler_status = 'running'))
+		ORDER BY CASE WHEN effect_type = 'scheduler.control_requested' THEN 0 ELSE 1 END, sequence LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("read claimable runtime effects: %w", err)
 	}
@@ -212,9 +215,49 @@ func (e *Engine) ClaimPendingEffects(ctx context.Context, limit int) ([]RuntimeE
 	return effects, nil
 }
 
+func (e *Engine) ClaimRuntimeEffect(ctx context.Context, id string) (RuntimeEffect, bool, error) {
+	if id == "" {
+		return RuntimeEffect{}, false, errors.New("runtime effect ID is required")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RuntimeEffect{}, false, fmt.Errorf("begin exact runtime effect claim: %w", err)
+	}
+	defer tx.Rollback()
+	var effect RuntimeEffect
+	var payload []byte
+	err = tx.QueryRowContext(ctx, `SELECT sequence, id, optimization_id, effect_type, payload_json
+		FROM runtime_outbox WHERE id = ? AND status = 'pending'
+		AND (effect_type NOT IN ('work.start_requested', 'followup.deliver_requested')
+			OR EXISTS (SELECT 1 FROM optimizations o WHERE o.id = runtime_outbox.optimization_id AND o.scheduler_status = 'running'))`, id).Scan(
+		&effect.Sequence, &effect.ID, &effect.OptimizationID, &effect.Type, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RuntimeEffect{}, false, nil
+	}
+	if err != nil {
+		return RuntimeEffect{}, false, fmt.Errorf("read exact runtime effect: %w", err)
+	}
+	effect.Payload = payload
+	if _, err := tx.ExecContext(ctx, `UPDATE runtime_outbox SET status = 'dispatching', attempts = attempts + 1, claimed_at = ?
+		WHERE id = ? AND status = 'pending'`, e.timestamp(), id); err != nil {
+		return RuntimeEffect{}, false, fmt.Errorf("claim exact runtime effect: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return RuntimeEffect{}, false, fmt.Errorf("commit exact runtime effect claim: %w", err)
+	}
+	return effect, true, nil
+}
+
 func (e *Engine) RecoverUncertainEffects(ctx context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if _, err := e.db.ExecContext(ctx, `UPDATE session_control_actions
+		SET status = 'delivery_unknown', error_message = 'daemon stopped while control delivery was in progress', completed_at = ?
+		WHERE status = 'dispatching'`, e.timestamp()); err != nil {
+		return fmt.Errorf("recover uncertain scheduler control actions: %w", err)
+	}
 	if _, err := e.db.ExecContext(ctx, `UPDATE runtime_outbox SET status = 'pending', claimed_at = NULL WHERE status = 'dispatching'`); err != nil {
 		return fmt.Errorf("recover uncertain runtime effects: %w", err)
 	}
@@ -820,6 +863,10 @@ func (e *Engine) Apply(ctx context.Context, command Command) (Receipt, error) {
 		receipt, err = e.applyCancelWork(ctx, tx, typed)
 	case RequestShutdown:
 		receipt, err = e.applyRequestShutdown(ctx, tx, typed)
+	case PauseScheduler:
+		receipt, err = e.applyPauseScheduler(ctx, tx, typed)
+	case ResumeScheduler:
+		receipt, err = e.applyResumeScheduler(ctx, tx, typed)
 	case StartBaselineDraft:
 		receipt, err = e.applyStartBaselineDraft(ctx, tx, typed)
 	case FinishIteration:
@@ -1280,6 +1327,13 @@ func (e *Engine) applyRequestShutdown(ctx context.Context, tx *sql.Tx, command R
 	if optimization.Status == OptimizationDraining {
 		return Receipt{}, domainError(CodeInvalidTransition, "optimization is already draining")
 	}
+	var schedulerStatus SchedulerStatus
+	if err := tx.QueryRowContext(ctx, `SELECT scheduler_status FROM optimizations WHERE id = ?`, optimization.ID).Scan(&schedulerStatus); err != nil {
+		return Receipt{}, fmt.Errorf("read Scheduler state before shutdown: %w", err)
+	}
+	if schedulerStatus == SchedulerPaused {
+		return Receipt{}, domainError(CodeInvalidTransition, "resume the Scheduler before requesting graceful shutdown")
+	}
 	receiptID := e.newID()
 	eventID := e.newID()
 	now := e.timestamp()
@@ -1421,13 +1475,28 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		return View{}, domainError(CodeInvalidCommand, "unsupported query")
 	}
 	var view View
-	if err := e.db.QueryRowContext(ctx, `SELECT id, status, revision, repository, iteration_concurrency, max_pending_attempts, iteration_history_limit FROM optimizations LIMIT 1`).Scan(
+	var schedulerPausedAt sql.NullString
+	if err := e.db.QueryRowContext(ctx, `SELECT id, status, revision, repository, iteration_concurrency, max_pending_attempts,
+		iteration_history_limit, scheduler_status, scheduler_paused_at, scheduler_epoch FROM optimizations LIMIT 1`).Scan(
 		&view.Optimization.ID, &view.Optimization.Status, &view.Optimization.Revision, &view.Optimization.Repository,
 		&view.Optimization.IterationConcurrency, &view.Optimization.MaxPendingAttempts, &view.Optimization.IterationHistoryLimit,
+		&view.Scheduler.Status, &schedulerPausedAt, &view.Scheduler.Epoch,
 	); errors.Is(err, sql.ErrNoRows) {
 		return View{}, domainError(CodeNotInitialized, "optimization is not initialized")
 	} else if err != nil {
 		return View{}, fmt.Errorf("read optimization: %w", err)
+	}
+	view.Scheduler.PausedAt = schedulerPausedAt.String
+	var latestCycleID string
+	if err := e.db.QueryRowContext(ctx, `SELECT id FROM scheduler_control_cycles
+		WHERE optimization_id = ? ORDER BY epoch DESC LIMIT 1`, view.Optimization.ID).Scan(&latestCycleID); err == nil {
+		latest, cycleErr := e.SchedulerControlCycle(ctx, latestCycleID)
+		if cycleErr != nil {
+			return View{}, cycleErr
+		}
+		view.Scheduler.Latest = &latest
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return View{}, fmt.Errorf("read latest Scheduler control cycle: %w", err)
 	}
 	baselineRows, err := e.db.QueryContext(ctx, `SELECT b.id, b.number, b.status, b.definition_json, b.repository_sha, b.predecessor_id,
 		v.failure_kind, v.reason, v.requested_changes, v.evidence_json
@@ -1668,6 +1737,31 @@ func validateOnlineState(ctx context.Context, db *sql.DB) error {
 	}
 	if invalidCount != 0 {
 		return domainError(CodeStateCorrupt, "optimization has an invalid status or revision")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM optimizations
+		WHERE scheduler_status NOT IN ('running', 'paused') OR scheduler_epoch < 0
+		OR (scheduler_status = 'paused' AND scheduler_paused_at IS NULL)
+		OR (scheduler_status = 'running' AND scheduler_paused_at IS NOT NULL)`).Scan(&invalidCount); err != nil {
+		return fmt.Errorf("validate Scheduler state: %w", err)
+	}
+	if invalidCount != 0 {
+		return domainError(CodeStateCorrupt, "Scheduler has an invalid status, epoch, or pause timestamp")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM scheduler_control_cycles
+		WHERE epoch < 1 OR action NOT IN ('pause', 'resume') OR status NOT IN ('pending', 'complete', 'partial')`).Scan(&invalidCount); err != nil {
+		return fmt.Errorf("validate Scheduler control cycles: %w", err)
+	}
+	if invalidCount != 0 {
+		return domainError(CodeStateCorrupt, "Scheduler control cycle has an invalid action, status, or epoch")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM session_control_actions
+		WHERE action NOT IN ('pause', 'resume')
+		OR status NOT IN ('pending', 'dispatching', 'sent', 'skipped', 'failed', 'delivery_unknown', 'observed')
+		OR (action = 'resume' AND COALESCE(message, '') != '继续') OR (action = 'pause' AND message IS NOT NULL)`).Scan(&invalidCount); err != nil {
+		return fmt.Errorf("validate Session control actions: %w", err)
+	}
+	if invalidCount != 0 {
+		return domainError(CodeStateCorrupt, "Session control action has an invalid action, status, or message")
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM baseline_revisions
         WHERE status NOT IN ('drafting', 'submitted', 'verifying', 'accepted', 'rejected') OR number < 1`).Scan(&invalidCount); err != nil {

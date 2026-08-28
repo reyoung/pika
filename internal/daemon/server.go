@@ -31,6 +31,7 @@ type Config struct {
 	IngestProviderHookEvent func(context.Context, string, string, string, json.RawMessage) error
 	Backup                  func(context.Context, string) error
 	DrainReady              func(context.Context) (bool, error)
+	SchedulerControl        func(context.Context, symphony.Command) (protocol.SchedulerControlResponse, error)
 }
 
 type PreparedInit struct {
@@ -170,6 +171,36 @@ func Serve(ctx context.Context, cfg Config) error {
 			}
 			applyAndWrite(w, request, cfg.Symphony, cfg.AfterCommit, symphony.RequestShutdown{Meta: commandMeta(input.Mutation)})
 		})
+		if cfg.SchedulerControl != nil {
+			mux.HandleFunc("POST /v1/scheduler/pause", func(w http.ResponseWriter, request *http.Request) {
+				var input protocol.SchedulerControlRequest
+				if !decodeJSON(w, request, &input) {
+					return
+				}
+				controlCtx, cancel := context.WithTimeout(request.Context(), 60*time.Second)
+				defer cancel()
+				response, err := cfg.SchedulerControl(controlCtx, symphony.PauseScheduler{Meta: commandMeta(input.Mutation)})
+				if err != nil {
+					writeError(w, err)
+					return
+				}
+				writeJSON(w, http.StatusOK, response)
+			})
+			mux.HandleFunc("POST /v1/scheduler/resume", func(w http.ResponseWriter, request *http.Request) {
+				var input protocol.SchedulerControlRequest
+				if !decodeJSON(w, request, &input) {
+					return
+				}
+				controlCtx, cancel := context.WithTimeout(request.Context(), 60*time.Second)
+				defer cancel()
+				response, err := cfg.SchedulerControl(controlCtx, symphony.ResumeScheduler{Meta: commandMeta(input.Mutation)})
+				if err != nil {
+					writeError(w, err)
+					return
+				}
+				writeJSON(w, http.StatusOK, response)
+			})
+		}
 		if cfg.Backup != nil {
 			mux.HandleFunc("POST /v1/backups", func(w http.ResponseWriter, request *http.Request) {
 				var input protocol.BackupRequest

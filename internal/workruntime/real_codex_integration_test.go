@@ -174,6 +174,7 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 	}); err != nil {
 		t.Fatalf("initialize disposable Optimization: %v", err)
 	}
+	exerciseRealSchedulerPauseResume(t, testCtx, stateRoot, client, pikaSocket, spec.requestTag)
 	followUpTarget := exerciseRealCodexFollowUp(t, testCtx, stateRoot, client, pikaSocket, daemon, &serverOutput)
 	crashedOutput := crashRealCodexDaemon(t, daemon)
 	daemon = nil
@@ -245,6 +246,73 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 		t.Fatalf("incomplete real-Codex journal: provider_sessions=%d tool_events=%d", len(providerSessionIDs), toolEvents)
 	}
 	t.Logf("real Codex release matrix advanced Best to sequence %d with %d provider sessions and %d observable tool events", view.Best.Sequence, len(providerSessionIDs), toolEvents)
+}
+
+func exerciseRealSchedulerPauseResume(t *testing.T, ctx context.Context, stateRoot string, client *herdr.Client, socketPath, requestTag string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	engine, err := symphony.Open(ctx, filepath.Join(stateRoot, "instances", "real-codex", "pika.db"), symphony.Options{})
+	if err != nil {
+		t.Fatalf("open real provider journal before Scheduler pause: %v", err)
+	}
+	defer engine.Close()
+	var before symphony.View
+	var targetID string
+	for time.Now().Before(deadline) {
+		view, err := control.Status(ctx, socketPath)
+		if err == nil {
+			before = view
+			for index := len(view.AgentSessions) - 1; index >= 0; index-- {
+				session := view.AgentSessions[index]
+				if session.Status != symphony.AgentSessionStarting && session.Status != symphony.AgentSessionRunning {
+					continue
+				}
+				journal, journalErr := engine.ConversationJournal(ctx, session.WorkID)
+				if journalErr != nil || len(journal.Tools) == 0 {
+					continue
+				}
+				snapshot, snapshotErr := client.Snapshot(ctx)
+				if snapshotErr != nil {
+					break
+				}
+				for _, agent := range snapshot.Agents {
+					if agent.Name != nil && *agent.Name == session.AgentName && (agent.AgentStatus == "working" || agent.AgentStatus == "blocked") {
+						targetID = session.ID
+						break
+					}
+				}
+				if targetID != "" {
+					break
+				}
+			}
+			if targetID != "" {
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if targetID == "" {
+		t.Fatalf("real provider did not expose an active runtime Agent before Scheduler pause: sessions=%+v", before.AgentSessions)
+	}
+	pause, err := control.PauseScheduler(ctx, socketPath, protocol.SchedulerControlRequest{Mutation: protocol.Mutation{RequestID: requestTag + "-pause"}})
+	if err != nil {
+		t.Fatalf("pause real provider: %v", err)
+	}
+	if pause.Control.HasDeliveryFailure() || len(pause.Control.Actions) != 1 || pause.Control.Actions[0].Status != symphony.SchedulerActionSent || pause.Control.Actions[0].AgentSessionID != targetID {
+		t.Fatalf("real pause cycle=%+v", pause.Control)
+	}
+	resume, err := control.ResumeScheduler(ctx, socketPath, protocol.SchedulerControlRequest{Mutation: protocol.Mutation{RequestID: requestTag + "-resume"}})
+	if err != nil {
+		t.Fatalf("resume real provider: %v", err)
+	}
+	if resume.Control.HasDeliveryFailure() || len(resume.Control.Actions) != 1 {
+		t.Fatalf("real resume cycle=%+v target=%s", resume.Control, targetID)
+	}
+	resumeAction := resume.Control.Actions[0]
+	if (resumeAction.Status != symphony.SchedulerActionSent && resumeAction.Status != symphony.SchedulerActionObserved) ||
+		resumeAction.AgentSessionID != targetID || resumeAction.Message != "继续" {
+		t.Fatalf("real resume cycle=%+v target=%s", resume.Control, targetID)
+	}
 }
 
 func configureRealCodexHerdr(t *testing.T, root string) (string, string) {
@@ -386,7 +454,10 @@ type realCodexSessionObservation struct {
 
 func exerciseRealCodexFollowUp(t *testing.T, ctx context.Context, stateRoot string, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) realCodexSessionObservation {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Minute)
+	// Scheduler pause/resume adds an interrupted provider turn before Baseline
+	// completion. Keep the existing workflow assertion, but budget the resumed
+	// turn separately from the original two-minute model window.
+	deadline := time.Now().Add(4 * time.Minute)
 	var target symphony.WorkView
 	for time.Now().Before(deadline) {
 		view, err := control.Status(ctx, socketPath)

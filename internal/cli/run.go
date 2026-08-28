@@ -31,6 +31,7 @@ import (
 	"github.com/reyoung/pika-go/internal/plugininstall"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/provider"
+	"github.com/reyoung/pika-go/internal/scheduler"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/toolapp"
 	"github.com/reyoung/pika-go/internal/workruntime"
@@ -53,8 +54,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	switch args[0] {
 	case "kick-off":
 		return runKickOff(ctx, args[1:], stdin, stdout, stderr)
+	case "open":
+		return runOpen(ctx, args[1:], stdin, stdout, stderr)
+	case "pause":
+		return runSchedulerControl(ctx, "pause", args[1:], stdout, stderr)
 	case "resume":
-		return runResume(ctx, args[1:], stdin, stdout, stderr)
+		return runSchedulerControl(ctx, "resume", args[1:], stdout, stderr)
 	case "workspace":
 		return runWorkspace(ctx, args[1:], stdout, stderr)
 	case "install":
@@ -192,6 +197,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	var afterCommit func(context.Context)
 	var mcpHandler http.Handler
 	var applyGitIntent func(context.Context, string, string) (string, error)
+	var schedulerControl func(context.Context, symphony.Command) (protocol.SchedulerControlResponse, error)
 	if paths.DatabasePath != "" {
 		worktreeRoot := paths.WorktreeRoot
 		runtimeRoot := paths.RuntimeRoot
@@ -386,7 +392,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				option.Compatible, option.Authenticated = capabilities.Compatible, capabilities.Authenticated
 				option.Capabilities = map[string]bool{
 					"journal": capabilities.Journal, "turn_stop": capabilities.TurnStop, "follow_up": capabilities.FollowUp,
-					"full_output": capabilities.FullOutput, "fresh_session": capabilities.FreshSession,
+					"full_output": capabilities.FullOutput, "fresh_session": capabilities.FreshSession, "interrupt": capabilities.Interrupt,
 				}
 				modelCtx, cancelModels := context.WithTimeout(optionsCtx, 4*time.Second)
 				models, modelErr := providerRegistry.Models(modelCtx, kind, provider.ModelRequest{
@@ -470,6 +476,11 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				default:
 				}
 			}
+			schedulerController := scheduler.Controller{
+				Store: engine, Dispatcher: dispatcher, Exclusive: &coordinator,
+				After: func() { afterCommit(ctx) },
+			}
+			schedulerControl = schedulerController.Apply
 			afterListen = func(listenCtx context.Context) error {
 				if err := coordinator.RecoverAndDispatch(listenCtx); err != nil {
 					return fmt.Errorf("recover runtime after daemon listen: %w", err)
@@ -562,7 +573,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		drainReady = engine.DrainReady
 	}
 	writeDaemonLog(stderr, "info", "daemon.starting", nil, map[string]any{"instance_id": paths.InstanceID, "protocol_version": protocol.Version, "version": Version})
-	if err := daemon.Serve(ctx, daemon.Config{SocketPath: paths.SocketPath, Version: Version, InstanceID: paths.InstanceID, Symphony: symphonyService, PrepareInit: prepareInit, InitOptions: initOptions, RecordInitFailure: recordInitFailure, AfterListen: afterListen, AfterCommit: afterCommit, MCPHandler: mcpHandler, ApplyGitIntent: applyGitIntent, IngestProviderEvent: ingestProviderEvent, IngestProviderHookEvent: ingestProviderHookEvent, Backup: backup, DrainReady: drainReady}); err != nil {
+	if err := daemon.Serve(ctx, daemon.Config{SocketPath: paths.SocketPath, Version: Version, InstanceID: paths.InstanceID, Symphony: symphonyService, PrepareInit: prepareInit, InitOptions: initOptions, RecordInitFailure: recordInitFailure, AfterListen: afterListen, AfterCommit: afterCommit, MCPHandler: mcpHandler, ApplyGitIntent: applyGitIntent, IngestProviderEvent: ingestProviderEvent, IngestProviderHookEvent: ingestProviderHookEvent, Backup: backup, DrainReady: drainReady, SchedulerControl: schedulerControl}); err != nil {
 		writeDaemonLog(stderr, "error", "daemon.stopped", err, map[string]any{"instance_id": paths.InstanceID})
 		return 1
 	}
@@ -824,7 +835,7 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			}
 			return 0
 		}
-		_, _ = fmt.Fprintf(stdout, "optimization %s: %s (revision %d)\n", view.Optimization.ID, view.Optimization.Status, view.Optimization.Revision)
+		_, _ = fmt.Fprintf(stdout, "optimization %s: %s (revision %d), scheduler: %s\n", view.Optimization.ID, view.Optimization.Status, view.Optimization.Revision, view.Scheduler.Status)
 		return 0
 	}
 	if !control.IsHTTPStatus(statusErr, http.StatusNotFound) {
@@ -1270,6 +1281,42 @@ func runShutdown(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	}
 	receipt, err := control.Shutdown(ctx, resolvedSocket, protocol.ShutdownRequest{Mutation: mutation})
 	return writeMutationResult("shutdown", receipt, err, stdout, stderr)
+}
+
+func runSchedulerControl(ctx context.Context, action string, args []string, stdout, stderr io.Writer) int {
+	flags := newCommandFlagSet(action, stderr)
+	socketPath, requestID, expectedRevision := mutationFlags(flags)
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
+	}
+	if flags.NArg() != 0 {
+		_, _ = fmt.Fprintf(stderr, "%s: positional arguments are not supported\n", action)
+		return 2
+	}
+	resolvedSocket, mutation, code := resolveMutation(ctx, *socketPath, *requestID, *expectedRevision, stderr)
+	if code != 0 {
+		return code
+	}
+	request := protocol.SchedulerControlRequest{Mutation: mutation}
+	var response protocol.SchedulerControlResponse
+	var err error
+	if action == "pause" {
+		response, err = control.PauseScheduler(ctx, resolvedSocket, request)
+	} else {
+		response, err = control.ResumeScheduler(ctx, resolvedSocket, request)
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%s: %v\n", action, err)
+		return 1
+	}
+	if err := json.NewEncoder(stdout).Encode(response); err != nil {
+		_, _ = fmt.Fprintf(stderr, "%s: encode output: %v\n", action, err)
+		return 1
+	}
+	if response.Control.HasDeliveryFailure() {
+		return 1
+	}
+	return 0
 }
 
 func runBackup(ctx context.Context, args []string, stdout, stderr io.Writer) int {

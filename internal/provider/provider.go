@@ -23,6 +23,7 @@ type Capabilities struct {
 	FollowUp      bool   `json:"follow_up"`
 	FullOutput    bool   `json:"full_output"`
 	FreshSession  bool   `json:"fresh_session"`
+	Interrupt     bool   `json:"interrupt"`
 	Compatible    bool   `json:"compatible"`
 }
 
@@ -110,4 +111,10 @@ type Adapter interface {
 	Probe(context.Context, ProbeRequest) (Capabilities, error)
 	PrepareSession(context.Context, SessionActivation) (Launch, error)
 	Normalize(SessionBinding, json.RawMessage) ([]JournalEvent, error)
+}
+
+// InterruptAdapter owns the terminal sequence that interrupts one active turn
+// without ending the provider process or its durable Pika Agent Session.
+type InterruptAdapter interface {
+	InterruptKeys() []string
 }

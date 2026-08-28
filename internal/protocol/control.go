@@ -1,6 +1,10 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/reyoung/pika-go/internal/symphony"
+)
 
 type Mutation struct {
 	RequestID        string `json:"request_id"`
@@ -53,6 +57,15 @@ type CancelWorkRequest struct {
 
 type ShutdownRequest struct {
 	Mutation
+}
+
+type SchedulerControlRequest struct {
+	Mutation
+}
+
+type SchedulerControlResponse struct {
+	Receipt symphony.Receipt                   `json:"receipt"`
+	Control symphony.SchedulerControlCycleView `json:"control"`
 }
 
 type BackupRequest struct {

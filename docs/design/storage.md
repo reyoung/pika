@@ -18,7 +18,7 @@ Herdr persists terminal layout; Pika persists desired workflow and correlations.
 
 | Table | Purpose |
 | --- | --- |
-| `optimizations` | singleton identity, lifecycle status, domain revision, repository |
+| `optimizations` | singleton identity, lifecycle status, orthogonal Scheduler status/pause timestamp/epoch, domain revision, repository |
 | `baseline_revisions` | immutable Definition bytes/digest, frozen Repository Snapshot SHA, predecessor identity, and accepted/rejected verification projection |
 | `best_revisions` | accepted Best history and Git/evidence identity |
 | `attempts` | candidate identity, hypothesis, terminal status |
@@ -47,6 +47,8 @@ Herdr persists terminal layout; Pika persists desired workflow and correlations.
 | `operation_receipts` | idempotency key, canonical request digest, committed response |
 | `domain_events` | ordered audit of committed domain transitions |
 | `runtime_outbox` | Herdr/provider effects that must be dispatched or reconciled |
+| `scheduler_control_cycles` | durable pause/resume epoch, action, aggregate delivery status, and timestamps |
+| `session_control_actions` | one audited interrupt/resume delivery result per targeted Agent Session |
 | `migrations` | applied schema version and checksum |
 | `workspace_identity` | immutable Workspace/source Git identity mirrored from `workspace.json` |
 | `git_worktrees` | durable role/Attempt to branch, repository path, HEAD, and lifecycle mapping |
@@ -152,5 +154,7 @@ Because `pane.updated` is approximate, the database stores the observed source r
 - Old or out-of-order events remain auditable but cannot mutate current Work.
 - A terminal operation transaction includes its receipt, result, domain event, and successor outbox effect.
 - Runtime effect uncertainty never causes a second domain transition.
+- A Scheduler action left `dispatching` after a crash becomes `delivery_unknown`; recovery may finish untouched actions but never blindly resends the uncertain one.
+- While Scheduler state is paused, start and Follow-up delivery effects remain pending while close, cleanup, and Scheduler control effects continue.
 - Schema migration failure prevents scheduling and leaves the prior database recoverable.
 - Workspace relocation or source Git common-directory identity drift prevents daemon startup; recovery never resets, cleans, rebases, or checks out an active worktree.

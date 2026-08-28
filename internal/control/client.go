@@ -94,6 +94,22 @@ func Shutdown(ctx context.Context, socketPath string, request protocol.ShutdownR
 	return mutate(ctx, socketPath, "/v1/shutdown", request)
 }
 
+func PauseScheduler(ctx context.Context, socketPath string, request protocol.SchedulerControlRequest) (protocol.SchedulerControlResponse, error) {
+	return controlScheduler(ctx, socketPath, "/v1/scheduler/pause", request)
+}
+
+func ResumeScheduler(ctx context.Context, socketPath string, request protocol.SchedulerControlRequest) (protocol.SchedulerControlResponse, error) {
+	return controlScheduler(ctx, socketPath, "/v1/scheduler/resume", request)
+}
+
+func controlScheduler(ctx context.Context, socketPath, path string, request protocol.SchedulerControlRequest) (protocol.SchedulerControlResponse, error) {
+	var response protocol.SchedulerControlResponse
+	if err := doJSONWithTimeout(ctx, socketPath, http.MethodPost, path, request, &response, 65*time.Second); err != nil {
+		return protocol.SchedulerControlResponse{}, err
+	}
+	return response, nil
+}
+
 func Backup(ctx context.Context, socketPath string, request protocol.BackupRequest) (protocol.BackupResponse, error) {
 	var response protocol.BackupResponse
 	if err := doJSON(ctx, socketPath, http.MethodPost, "/v1/backups", request, &response); err != nil {

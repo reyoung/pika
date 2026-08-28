@@ -29,6 +29,17 @@ type Coordinator struct {
 	mu           sync.Mutex
 }
 
+// Exclusive runs a control-plane transaction while runtime reconciliation and
+// ordinary outbox dispatch are stopped at the same seam.
+func (c *Coordinator) Exclusive(run func() error) error {
+	if run == nil {
+		return errors.New("exclusive runtime operation is required")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return run()
+}
+
 func (c *Coordinator) RecoverAndDispatch(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
