@@ -103,6 +103,11 @@ func (r *HerdrRuntime) Start(ctx context.Context, spec StartSpec) (Observation, 
 			return Observation{}, fmt.Errorf("name agent pane %s: %w", paneID, err)
 		}
 	}
+	if spec.PreferredPaneID != "" {
+		if err := r.prepareWorkingDirectory(ctx, paneID, spec.Repository); err != nil {
+			return Observation{}, err
+		}
+	}
 	cleanup, err := r.prepareEnvironment(ctx, paneID, spec.Environment)
 	if err != nil {
 		return Observation{}, err
@@ -118,6 +123,43 @@ func (r *HerdrRuntime) Start(ctx context.Context, spec StartSpec) (Observation, 
 	}
 	observation := observationFromAgent(agent)
 	return observation, nil
+}
+
+func (r *HerdrRuntime) prepareWorkingDirectory(ctx context.Context, paneID, repository string) error {
+	if repository == "" || !filepath.IsAbs(repository) {
+		return errors.New("absolute assigned repository is required for a reused agent pane")
+	}
+	command := "cd -- " + shellQuote(repository)
+	if err := r.Runtime.SendInput(ctx, paneID, command, []string{"enter"}); err != nil {
+		return fmt.Errorf("change agent pane %s to assigned repository: %w", paneID, err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		pane, err := r.Runtime.GetPane(waitCtx, paneID)
+		if err == nil && pane.ForegroundCWD != nil && sameDirectory(*pane.ForegroundCWD, repository) {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("wait for agent pane %s to enter assigned repository %s: %w", paneID, repository, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func sameDirectory(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if left == right {
+		return true
+	}
+	resolvedLeft, leftErr := filepath.EvalSymlinks(left)
+	resolvedRight, rightErr := filepath.EvalSymlinks(right)
+	return leftErr == nil && rightErr == nil && filepath.Clean(resolvedLeft) == filepath.Clean(resolvedRight)
 }
 
 func shortPaneID(paneID string) string {
