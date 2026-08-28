@@ -97,7 +97,10 @@ func (r *Runtime) Start(ctx context.Context, spec StartSpec) (Agent, error) {
 		agent, err := r.GetAgent(waitCtx, spec.PaneID)
 		if err == nil {
 			if agent.AgentStatus == "blocked" {
-				return Agent{}, fmt.Errorf("agent %s is blocked during startup", spec.Name)
+				// A blocked agent is still a successfully launched process. The
+				// orchestrator must be allowed to bind its session and deliver the
+				// activation prompt that can make it interactive.
+				return agent, nil
 			}
 			if agent.InteractiveReady {
 				return agent, nil
