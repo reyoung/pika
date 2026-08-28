@@ -81,7 +81,7 @@ func TestSchedulerPausePersistsTargetsAndGatesStarts(t *testing.T) {
 	}
 }
 
-func TestSchedulerPauseTargetsEveryActiveRoleAndRejectsShutdown(t *testing.T) {
+func TestSchedulerPauseTargetsEveryActiveRoleAndShutdownAtomicallyDrains(t *testing.T) {
 	ctx := context.Background()
 	engine, err := symphony.Open(ctx, filepath.Join(t.TempDir(), "pika.db"), symphony.Options{NewID: countingIDs()})
 	if err != nil {
@@ -111,8 +111,23 @@ func TestSchedulerPauseTargetsEveryActiveRoleAndRejectsShutdown(t *testing.T) {
 	if action.AgentSessionID != "session" || action.Role != symphony.RoleBaselineDraft || action.Action != "pause" {
 		t.Fatalf("control target=%+v", action)
 	}
-	if _, err := engine.Apply(ctx, symphony.RequestShutdown{Meta: symphony.CommandMeta{RequestID: "shutdown"}}); err == nil {
-		t.Fatal("shutdown succeeded while Scheduler was paused")
+	shutdown, err := engine.Apply(ctx, symphony.RequestShutdown{Meta: symphony.CommandMeta{RequestID: "shutdown"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, _ := engine.Inspect(ctx, symphony.Status{})
+	if shutdown.Revision != paused.Optimization.Revision+1 || after.Optimization.Status != symphony.OptimizationDraining {
+		t.Fatalf("shutdown receipt=%+v optimization=%+v", shutdown, after.Optimization)
+	}
+	if after.Scheduler.Status != symphony.SchedulerRunning || after.Scheduler.Epoch != paused.Scheduler.Epoch+1 {
+		t.Fatalf("Scheduler was not atomically resumed for drain: before=%+v after=%+v", paused.Scheduler, after.Scheduler)
+	}
+	if after.Scheduler.Latest == nil || after.Scheduler.Latest.Action != "resume" || len(after.Scheduler.Latest.Actions) != 1 {
+		t.Fatalf("shutdown resume targets=%+v", after.Scheduler.Latest)
+	}
+	resume := after.Scheduler.Latest.Actions[0]
+	if resume.AgentSessionID != "session" || resume.Action != "resume" || resume.Message != "继续" {
+		t.Fatalf("shutdown resume target=%+v", resume)
 	}
 }
 
@@ -134,6 +149,47 @@ func TestSchedulerControlIsInvalidWhileDraining(t *testing.T) {
 	}
 	if _, err := engine.Apply(ctx, symphony.ResumeScheduler{Meta: symphony.CommandMeta{RequestID: "resume"}}); err == nil {
 		t.Fatal("resume succeeded while draining")
+	}
+}
+
+func TestPausedShutdownDoesNotRefillIterationSlots(t *testing.T) {
+	ctx := context.Background()
+	engine := acceptedOptimization(t, ctx)
+	before, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Attempts) == 0 {
+		t.Fatal("accepted optimization did not seed Iteration Attempts")
+	}
+	var iterationWorkID string
+	for _, work := range before.Works {
+		if work.Role == symphony.RoleIteration && work.Status == symphony.WorkPending {
+			iterationWorkID = work.ID
+			break
+		}
+	}
+	if iterationWorkID == "" {
+		t.Fatal("accepted optimization has no pending Iteration Work")
+	}
+	if _, err := engine.Apply(ctx, symphony.PauseScheduler{Meta: symphony.CommandMeta{RequestID: "pause"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Apply(ctx, symphony.RequestShutdown{Meta: symphony.CommandMeta{RequestID: "shutdown"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Apply(ctx, symphony.FinishIteration{
+		Meta: symphony.CommandMeta{RequestID: "finish"}, WorkID: iterationWorkID,
+		Outcome: symphony.IterationRejected, Summary: "drained",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Optimization.Status != symphony.OptimizationDraining || len(after.Attempts) != len(before.Attempts) {
+		t.Fatalf("paused shutdown refilled Iteration slots: before=%d after=%d status=%s", len(before.Attempts), len(after.Attempts), after.Optimization.Status)
 	}
 }
 

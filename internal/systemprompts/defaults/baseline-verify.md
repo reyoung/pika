@@ -28,6 +28,8 @@ Repository Snapshot SHA 是 daemon 在提交 Definition 时冻结的完整仓库
 - 对全部 Case 运行 correctness；
 - 对全部 Case × Metric 运行正式 benchmark；
 - 核对 pair 数、执行顺序、有效样本、stdout/stderr、退出码和 artifact identity；
+- 核对每个 Case 的 canonical inputs 与固定 Oracle output 不向被测实现暴露；每次 warm-up 和 measured invocation 前都在设备上恢复 working inputs，每次 invocation 后都校验 working output，且 checked invocation 数与实际执行数完全一致；
+- 核对逐次校验在设备端累计紧凑统计并批量回传 CPU，没有为每次校验复制完整 tensor 或强制 CPU/GPU 同步；同时核对 kernel latency 排除输入恢复与输出校验，端到端 metric 包含这些必要工作；
 - 确认多 Case benchmark 没有为每个 Case 重复重量级初始化；
 - 确认结果可复现，且后续 Iteration 可以使用同一套冻结协议。
 

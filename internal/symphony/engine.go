@@ -1328,24 +1328,45 @@ func (e *Engine) applyRequestShutdown(ctx context.Context, tx *sql.Tx, command R
 		return Receipt{}, domainError(CodeInvalidTransition, "optimization is already draining")
 	}
 	var schedulerStatus SchedulerStatus
-	if err := tx.QueryRowContext(ctx, `SELECT scheduler_status FROM optimizations WHERE id = ?`, optimization.ID).Scan(&schedulerStatus); err != nil {
+	var schedulerPausedAt sql.NullString
+	var schedulerEpoch int64
+	if err := tx.QueryRowContext(ctx, `SELECT scheduler_status, scheduler_paused_at, scheduler_epoch
+		FROM optimizations WHERE id = ?`, optimization.ID).Scan(&schedulerStatus, &schedulerPausedAt, &schedulerEpoch); err != nil {
 		return Receipt{}, fmt.Errorf("read Scheduler state before shutdown: %w", err)
-	}
-	if schedulerStatus == SchedulerPaused {
-		return Receipt{}, domainError(CodeInvalidTransition, "resume the Scheduler before requesting graceful shutdown")
 	}
 	receiptID := e.newID()
 	eventID := e.newID()
-	now := e.timestamp()
+	nowTime := e.now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
 	nextRevision := optimization.Revision + 1
-	if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET status = ?, revision = ?, updated_at = ? WHERE id = ?`, OptimizationDraining, nextRevision, now, optimization.ID); err != nil {
+	payload := map[string]any{"previous_status": string(optimization.Status), "scheduler_was_paused": schedulerStatus == SchedulerPaused}
+	if schedulerStatus == SchedulerPaused {
+		if !schedulerPausedAt.Valid {
+			return Receipt{}, domainError(CodeStateCorrupt, "paused Scheduler has no pause timestamp")
+		}
+		if err := shiftWaitingFollowUps(ctx, tx, schedulerPausedAt.String, nowTime); err != nil {
+			return Receipt{}, err
+		}
+		nextEpoch := schedulerEpoch + 1
+		if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET status = ?, scheduler_status = ?, scheduler_paused_at = NULL,
+			scheduler_epoch = ?, revision = ?, updated_at = ? WHERE id = ?`, OptimizationDraining, SchedulerRunning,
+			nextEpoch, nextRevision, now, optimization.ID); err != nil {
+			return Receipt{}, fmt.Errorf("atomically resume Scheduler for shutdown drain: %w", err)
+		}
+		cycleID, effectID, err := e.createSchedulerControlCycle(ctx, tx, optimization.ID, nextEpoch, "resume", now)
+		if err != nil {
+			return Receipt{}, err
+		}
+		payload["resume_cycle_id"] = cycleID
+		payload["resume_effect_id"] = effectID
+	} else if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET status = ?, revision = ?, updated_at = ? WHERE id = ?`, OptimizationDraining, nextRevision, now, optimization.ID); err != nil {
 		return Receipt{}, fmt.Errorf("request optimization shutdown: %w", err)
 	}
-	payload := mustJSON(map[string]string{"previous_status": string(optimization.Status)})
-	if err := insertEvent(ctx, tx, eventID, optimization.ID, nextRevision, "optimization.shutdown_requested", payload, now); err != nil {
+	payloadJSON := mustJSON(payload)
+	if err := insertEvent(ctx, tx, eventID, optimization.ID, nextRevision, "optimization.shutdown_requested", payloadJSON, now); err != nil {
 		return Receipt{}, err
 	}
-	return Receipt{ID: receiptID, Revision: nextRevision, Result: payload}, nil
+	return Receipt{ID: receiptID, Revision: nextRevision, Result: payloadJSON}, nil
 }
 
 func (e *Engine) applyStartBaselineDraft(ctx context.Context, tx *sql.Tx, command StartBaselineDraft) (Receipt, error) {

@@ -59,7 +59,6 @@ func (e *Engine) applySchedulerControl(ctx context.Context, tx *sql.Tx, meta Com
 	nowTime := e.now().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
 	nextRevision, nextEpoch := optimization.Revision+1, epoch+1
-	cycleID, effectID := e.newID(), e.newID()
 	if action == "resume" {
 		if !pausedAt.Valid {
 			return Receipt{}, domainError(CodeStateCorrupt, "paused Scheduler has no pause timestamp")
@@ -77,10 +76,24 @@ func (e *Engine) applySchedulerControl(ctx context.Context, tx *sql.Tx, meta Com
 			return Receipt{}, fmt.Errorf("pause Scheduler: %w", err)
 		}
 	}
+	cycleID, effectID, err := e.createSchedulerControlCycle(ctx, tx, optimization.ID, nextEpoch, action, now)
+	if err != nil {
+		return Receipt{}, err
+	}
+	payload := mustJSON(map[string]any{"cycle_id": cycleID, "action": action, "epoch": nextEpoch})
+	if err := insertEvent(ctx, tx, e.newID(), optimization.ID, nextRevision, "scheduler."+action+"d", payload, now); err != nil {
+		return Receipt{}, err
+	}
+	result := mustJSON(schedulerCommandResult{SchedulerStatus: want, Epoch: nextEpoch, CycleID: cycleID, EffectID: effectID})
+	return Receipt{ID: e.newID(), Revision: nextRevision, Result: result}, nil
+}
+
+func (e *Engine) createSchedulerControlCycle(ctx context.Context, tx *sql.Tx, optimizationID string, epoch int64, action, now string) (string, string, error) {
+	cycleID, effectID := e.newID(), e.newID()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO scheduler_control_cycles
 		(id, optimization_id, epoch, action, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)`,
-		cycleID, optimization.ID, nextEpoch, action, now); err != nil {
-		return Receipt{}, fmt.Errorf("create Scheduler control cycle: %w", err)
+		cycleID, optimizationID, epoch, action, now); err != nil {
+		return "", "", fmt.Errorf("create Scheduler control cycle: %w", err)
 	}
 
 	query := `SELECT s.id, s.work_id, s.role, s.agent_kind, s.agent_name
@@ -92,7 +105,7 @@ func (e *Engine) applySchedulerControl(ctx context.Context, tx *sql.Tx, meta Com
 	query += ` ORDER BY s.created_at, s.id`
 	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
-		return Receipt{}, fmt.Errorf("read Scheduler control targets: %w", err)
+		return "", "", fmt.Errorf("read Scheduler control targets: %w", err)
 	}
 	var resumeSessionIDs []string
 	for rows.Next() {
@@ -100,7 +113,7 @@ func (e *Engine) applySchedulerControl(ctx context.Context, tx *sql.Tx, meta Com
 		var role WorkRole
 		if err := rows.Scan(&sessionID, &workID, &role, &agentKind, &agentName); err != nil {
 			_ = rows.Close()
-			return Receipt{}, fmt.Errorf("scan Scheduler control target: %w", err)
+			return "", "", fmt.Errorf("scan Scheduler control target: %w", err)
 		}
 		message := ""
 		if action == "resume" {
@@ -112,29 +125,24 @@ func (e *Engine) applySchedulerControl(ctx context.Context, tx *sql.Tx, meta Com
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), 'pending', ?)`, e.newID(), cycleID, sessionID,
 			workID, role, agentKind, agentName, action, message, now); err != nil {
 			_ = rows.Close()
-			return Receipt{}, fmt.Errorf("create Session control action: %w", err)
+			return "", "", fmt.Errorf("create Session control action: %w", err)
 		}
 	}
 	if err := rows.Close(); err != nil {
-		return Receipt{}, fmt.Errorf("close Scheduler control targets: %w", err)
+		return "", "", fmt.Errorf("close Scheduler control targets: %w", err)
 	}
 	if action == "resume" {
 		for _, sessionID := range resumeSessionIDs {
 			if _, err := tx.ExecContext(ctx, `UPDATE followup_requests SET status = 'superseded', updated_at = ?
 				WHERE target_agent_session_id = ? AND status = 'waiting'`, now, sessionID); err != nil {
-				return Receipt{}, fmt.Errorf("supersede waiting Follow-up on Scheduler resume: %w", err)
+				return "", "", fmt.Errorf("supersede waiting Follow-up on Scheduler resume: %w", err)
 			}
 		}
 	}
-	payload := mustJSON(map[string]any{"cycle_id": cycleID, "action": action, "epoch": nextEpoch})
-	if err := insertEvent(ctx, tx, e.newID(), optimization.ID, nextRevision, "scheduler."+action+"d", payload, now); err != nil {
-		return Receipt{}, err
+	if err := insertEffect(ctx, tx, effectID, optimizationID, "scheduler.control_requested", mustJSON(map[string]string{"cycle_id": cycleID}), now); err != nil {
+		return "", "", err
 	}
-	if err := insertEffect(ctx, tx, effectID, optimization.ID, "scheduler.control_requested", mustJSON(map[string]string{"cycle_id": cycleID}), now); err != nil {
-		return Receipt{}, err
-	}
-	result := mustJSON(schedulerCommandResult{SchedulerStatus: want, Epoch: nextEpoch, CycleID: cycleID, EffectID: effectID})
-	return Receipt{ID: e.newID(), Revision: nextRevision, Result: result}, nil
+	return cycleID, effectID, nil
 }
 
 func shiftWaitingFollowUps(ctx context.Context, tx *sql.Tx, pausedAtText string, resumeAt time.Time) error {

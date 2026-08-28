@@ -43,6 +43,27 @@ func TestRoleSystemPromptsAreEmbeddedAndMatchCurrentContracts(t *testing.T) {
 			if test.logicalName == "integration" && !strings.Contains(prompt, "apply_best_update") {
 				t.Fatalf("Integration prompt omits scoped Best application MCP: %q", prompt)
 			}
+			if test.logicalName == "integration" {
+				for _, requirement := range []string{"每次 warm-up 和 measured invocation", "checked invocation 数", "NaN 或其他 sentinel", "接近或超过一个数量级", "首次调用、capture/compile/setup"} {
+					if !strings.Contains(prompt, requirement) {
+						t.Fatalf("Integration prompt omits suspicious-speedup validation requirement %q: %q", requirement, prompt)
+					}
+				}
+			}
+			if test.logicalName == "baseline" {
+				for _, requirement := range []string{"per-run integrity", "canonical input tensors", "每次 warm-up 和 measured invocation", "设备端累计", "端到端口径"} {
+					if !strings.Contains(prompt, requirement) {
+						t.Fatalf("Baseline prompt omits per-run benchmark integrity requirement %q: %q", requirement, prompt)
+					}
+				}
+			}
+			if test.logicalName == "baseline-verify" {
+				for _, requirement := range []string{"canonical inputs", "checked invocation 数", "设备端累计紧凑统计", "端到端 metric"} {
+					if !strings.Contains(prompt, requirement) {
+						t.Fatalf("Baseline Verification prompt omits per-run benchmark integrity requirement %q: %q", requirement, prompt)
+					}
+				}
+			}
 			if (test.logicalName == "baseline" || test.logicalName == "iteration") && !strings.Contains(prompt, "commit_changes") {
 				t.Fatalf("write-capable Role prompt omits scoped commit MCP: %q", prompt)
 			}

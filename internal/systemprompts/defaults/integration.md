@@ -22,6 +22,12 @@
 - critical Case、guard 门禁、普通 Case 回退与 workload-weighted aggregate；
 - 单 Case outlier、测量噪声、工程风险与适用范围。
 
+Correctness 必须覆盖正式 benchmark 实际计时的稳态执行路径，而不只是独立 correctness 调用。核对冻结 harness 对每个 Case 保留 Candidate 不可见的 canonical inputs 和固定 Oracle output，并在每次 warm-up 和 measured invocation 前通过设备内复制恢复地址固定的 working inputs；每次 invocation 后都在设备上校验 working output，checked invocation 数必须与实际执行数完全一致。逐次校验应在设备端累计紧凑统计并批量回传 CPU，kernel latency 排除输入恢复与输出校验，另行报告的端到端口径则包含这些必要工作。只校验首次或最后一次输出，不能 Accept。
+
+若实现使用 CUDA Graph、编译缓存、memoization、持久 workspace 或其他跨调用状态，还必须在不改变 working tensor 地址的前提下使用不同的 canonical input 内容、先用 NaN 或其他 sentinel 污染 working output，再执行同一计时路径并与对应固定 Oracle output 比较，以证明它读取本次输入并覆盖输出。还要证明 Candidate 从未取得 canonical inputs 的引用且 canonical inputs 保持不变。
+
+对异常大幅的性能改善，尤其接近或超过一个数量级的结果，必须先按潜在 bug 处理并做独立复测。至少区分并报告首次调用、capture/compile/setup、缓存命中稳态与真实端到端口径，检查计时边界没有把 Candidate 的必要工作移出计时区，也没有只给 Candidate 使用 Baseline 不具备的固定地址、预热或回放前提。无法用最终输出 Oracle、变更输入和独立计时反证 stale output、跳过计算或不公平口径时，直接 Reject，不得仅凭低噪声或重复稳定而 Accept。
+
 至少一个 primary 目标应有超过噪声的实质改善，同时 correctness、critical/guard 门禁和允许回退均通过。不要机械套用一个固定百分比；根据 Baseline 的容差和配对分布做有数据依据的判断。长任务仍有稳定进展且未超过明确预算时继续等待。
 
 ## Reject

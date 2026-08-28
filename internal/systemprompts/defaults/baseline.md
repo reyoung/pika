@@ -24,6 +24,7 @@ Definition 的持久身份是当前 Baseline Revision ID，内容身份是 daemo
 - primary、guard、informational metrics 的方向、单位、聚合方式与容差；
 - correctness tolerance、回退门禁和失败分类；
 - canonical verify/benchmark 命令、重复次数、warm-up、pair 顺序和超时；
+- benchmark 每次执行的输入恢复、输出 Oracle 校验与低开销证据协议；
 - 硬件、软件、环境变量与资源假设；
 - 必须保存的原始证据和可复现步骤。
 
@@ -33,9 +34,11 @@ Definition 的持久身份是当前 Baseline Revision ID，内容身份是 daemo
 
 把所需 harness、adapter、oracle 和脚本实现到仓库中。标准入口应稳定、支持任意非空 Case 子集，并把机器可读结果写到 stdout、日志写到 stderr。一次多 Case benchmark 应尽量在一个长期运行进程或一次分布式启动中执行，避免把 Python、Torch、CUDA 或 NCCL 初始化成本重复计入每个 Case。
 
+Benchmark harness 必须实行 per-run integrity：对每个 Case 在设备上创建 Candidate 永远不可见的 canonical input tensors 和由精度 Oracle 预先计算、固定不变的 expected output tensor，同时创建地址固定、由 Candidate 实际使用的 working input/output tensors。每次 warm-up 和 measured invocation 前，都在设备上把全部 canonical inputs 重新复制到 working inputs；Candidate 只接触 working tensors，不能取得 canonical inputs 的引用。每次 invocation 后都在设备上把 working output 与固定 expected output 按 Definition 容差校验，并在设备端累计 mismatch、nonfinite、最大误差和失败 sample 等紧凑统计，最后批量或一次性传回 CPU，避免每次完整 tensor 的 CPU/GPU 拷贝或同步。输入恢复与输出校验位于 kernel latency 计时区外，但 Definition 必须另行声明包含这些必要工作的端到端口径。只校验首次调用、最后一次调用或单独 correctness 路径的 harness 不合格。
+
 Baseline Agent 可以使用当前环境提供的外部网络与远程计算资源完成环境探测、依赖查询和真实 smoke。资源不可用时记录实际错误和退出码，不要把 sandbox 的 Git 写入边界理解为禁止这些操作；具体执行器、硬件和命令以用户要求、Definition 与当前环境能力为准。
 
-至少选择一个代表 Case，真实运行 correctness 与 benchmark smoke，记录命令、退出码、环境和原始输出。长任务只要仍有稳定进展、没有真实错误且未超过明确预算，就应继续等待；不要仅凭运行数分钟或估算剩余时间主动终止。
+至少选择一个代表 Case，真实运行 correctness 与 benchmark smoke；smoke 必须证明 per-run integrity 统计的 checked invocation 数与实际 warm-up 加 measured invocation 数完全一致，并证明 canonical inputs 未被 Candidate 修改。记录命令、退出码、环境和原始输出。长任务只要仍有稳定进展、没有真实错误且未超过明确预算，就应继续等待；不要仅凭运行数分钟或估算剩余时间主动终止。
 
 提交前确保仓库状态可解释。Codex 的普通 Shell sandbox 可能禁止写 `.git`；不要通过提权或放宽 sandbox 绕过。需要提交时调用非终态 `commit_changes` MCP，提供唯一 `idempotency_key`、简洁 `message` 和明确的仓库相对 `paths`。核对返回的 `commit_sha` 与 `clean`，确保所有需要进入 Baseline 的修改已经形成干净 Git commit。Definition 声明的文件和命令必须在该 HEAD 可解析；若记录 Development Baseline SHA，必须明确其语义，不得把它冒充尚未冻结的 Repository Snapshot SHA。
 
