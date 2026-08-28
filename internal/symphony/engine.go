@@ -425,12 +425,12 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 	var attemptID, integrationID, parentWorkID, followUpRequestID, baseSHA, candidateSHA, iterationKind, backOffMessage sql.NullString
 	var expectedBestSHA, integrationStatus, gitIntentID, gitIntentState sql.NullString
 	var predecessorBaselineID, baselineRepositorySHA sql.NullString
-	var iterationRound, fifoPosition sql.NullInt64
+	var iterationRound, fifoPosition, historyLimit sql.NullInt64
 	var baselineDefinition []byte
 	err := e.db.QueryRowContext(ctx, `SELECT w.id, w.baseline_revision_id, w.role, w.status, w.generation,
 		w.attempt_id, w.iteration_round, w.integration_id, w.parent_work_id, w.followup_request_id,
 		o.id, o.status, o.revision, o.repository, b.number, b.status, b.definition_json, b.repository_sha, b.predecessor_id,
-		a.base_sha, a.candidate_sha, r.kind, r.back_off_message,
+		a.base_sha, a.candidate_sha, a.history_limit, r.kind, r.back_off_message,
 		i.expected_best_sha, i.fifo_position, i.status, g.id, g.state
 		FROM works w JOIN optimizations o ON o.id = w.optimization_id
 		JOIN baseline_revisions b ON b.id = w.baseline_revision_id
@@ -443,7 +443,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		&runtimeWork.Work.Status, &runtimeWork.Work.Generation, &attemptID, &iterationRound, &integrationID, &parentWorkID, &followUpRequestID,
 		&runtimeWork.OptimizationID, &runtimeWork.OptimizationStatus, &runtimeWork.OptimizationRevision, &runtimeWork.Repository,
 		&runtimeWork.BaselineNumber, &runtimeWork.BaselineStatus, &baselineDefinition, &baselineRepositorySHA, &predecessorBaselineID,
-		&baseSHA, &candidateSHA, &iterationKind, &backOffMessage,
+		&baseSHA, &candidateSHA, &historyLimit, &iterationKind, &backOffMessage,
 		&expectedBestSHA, &fifoPosition, &integrationStatus, &gitIntentID, &gitIntentState,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -460,6 +460,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 	runtimeWork.Work.FollowUpRequestID = followUpRequestID.String
 	runtimeWork.BaseSHA = baseSHA.String
 	runtimeWork.CandidateSHA = candidateSHA.String
+	runtimeWork.IterationHistoryLimit = historyLimit.Int64
 	runtimeWork.IterationKind = iterationKind.String
 	runtimeWork.BackOffMessage = backOffMessage.String
 	runtimeWork.ExpectedBestSHA = expectedBestSHA.String
@@ -510,6 +511,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		runtimeWork.OptimizationRepository = target.OptimizationRepository
 		runtimeWork.BaseSHA, runtimeWork.CandidateSHA = target.BaseSHA, target.CandidateSHA
 		runtimeWork.IterationKind, runtimeWork.BackOffMessage = target.IterationKind, target.BackOffMessage
+		runtimeWork.IterationHistoryLimit = target.IterationHistoryLimit
 		runtimeWork.BestSHA, runtimeWork.BestSequence = target.BestSHA, target.BestSequence
 		runtimeWork.ExpectedBestSHA = target.ExpectedBestSHA
 		runtimeWork.IntegrationFIFOPosition, runtimeWork.IntegrationStatus = target.IntegrationFIFOPosition, target.IntegrationStatus
@@ -1356,7 +1358,7 @@ func (e *Engine) applyInit(ctx context.Context, tx *sql.Tx, command Init) (Recei
 	if command.OptimizationID == "" || command.Repository == "" {
 		return Receipt{}, domainError(CodeInvalidCommand, "optimization_id and repository are required")
 	}
-	if command.IterationConcurrency < 0 || command.MaxPendingAttempts < 0 {
+	if command.IterationConcurrency < 0 || command.MaxPendingAttempts < 0 || command.IterationHistoryLimit < 0 {
 		return Receipt{}, domainError(CodeInvalidCommand, "scheduler limits must be positive")
 	}
 	if command.IterationConcurrency == 0 {
@@ -1364,6 +1366,11 @@ func (e *Engine) applyInit(ctx context.Context, tx *sql.Tx, command Init) (Recei
 	}
 	if command.MaxPendingAttempts == 0 {
 		command.MaxPendingAttempts = 8
+	}
+	// Zero explicitly disables history. Direct Engine callers that predate this
+	// field receive the default unless they mark the value as configured.
+	if !command.IterationHistoryLimitSet {
+		command.IterationHistoryLimit = 20
 	}
 	var count int
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM optimizations").Scan(&count); err != nil {
@@ -1380,9 +1387,9 @@ func (e *Engine) applyInit(ctx context.Context, tx *sql.Tx, command Init) (Recei
 	effectID := e.newID()
 	now := e.timestamp()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO optimizations
-		(id, status, revision, repository, iteration_concurrency, max_pending_attempts, created_at, updated_at)
-		VALUES (?, ?, 1, ?, ?, ?, ?, ?)`, command.OptimizationID, OptimizationDraftingBaseline, command.Repository,
-		command.IterationConcurrency, command.MaxPendingAttempts, now, now); err != nil {
+		(id, status, revision, repository, iteration_concurrency, max_pending_attempts, iteration_history_limit, created_at, updated_at)
+		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)`, command.OptimizationID, OptimizationDraftingBaseline, command.Repository,
+		command.IterationConcurrency, command.MaxPendingAttempts, command.IterationHistoryLimit, now, now); err != nil {
 		return Receipt{}, fmt.Errorf("create optimization: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_revisions
@@ -1414,9 +1421,9 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		return View{}, domainError(CodeInvalidCommand, "unsupported query")
 	}
 	var view View
-	if err := e.db.QueryRowContext(ctx, `SELECT id, status, revision, repository, iteration_concurrency, max_pending_attempts FROM optimizations LIMIT 1`).Scan(
+	if err := e.db.QueryRowContext(ctx, `SELECT id, status, revision, repository, iteration_concurrency, max_pending_attempts, iteration_history_limit FROM optimizations LIMIT 1`).Scan(
 		&view.Optimization.ID, &view.Optimization.Status, &view.Optimization.Revision, &view.Optimization.Repository,
-		&view.Optimization.IterationConcurrency, &view.Optimization.MaxPendingAttempts,
+		&view.Optimization.IterationConcurrency, &view.Optimization.MaxPendingAttempts, &view.Optimization.IterationHistoryLimit,
 	); errors.Is(err, sql.ErrNoRows) {
 		return View{}, domainError(CodeNotInitialized, "optimization is not initialized")
 	} else if err != nil {
@@ -1505,7 +1512,7 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		return View{}, fmt.Errorf("read current best: %w", err)
 	}
 	attemptRows, err := e.db.QueryContext(ctx, `SELECT id, slot_index, status, base_best_sequence, base_sha,
-		current_iteration_round, candidate_sha, summary, failure_reason FROM attempts WHERE optimization_id = ? ORDER BY created_at, id`, view.Optimization.ID)
+		current_iteration_round, candidate_sha, summary, failure_reason, history_limit FROM attempts WHERE optimization_id = ? ORDER BY created_at, id`, view.Optimization.ID)
 	if err != nil {
 		return View{}, fmt.Errorf("read attempts: %w", err)
 	}
@@ -1513,7 +1520,7 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		var attempt AttemptView
 		var candidateSHA, summary, failureReason sql.NullString
 		if err := attemptRows.Scan(&attempt.ID, &attempt.SlotIndex, &attempt.Status, &attempt.BaseBestSequence, &attempt.BaseSHA,
-			&attempt.CurrentIterationRound, &candidateSHA, &summary, &failureReason); err != nil {
+			&attempt.CurrentIterationRound, &candidateSHA, &summary, &failureReason, &attempt.HistoryLimit); err != nil {
 			_ = attemptRows.Close()
 			return View{}, fmt.Errorf("scan attempt: %w", err)
 		}

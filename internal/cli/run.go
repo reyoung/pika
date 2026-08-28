@@ -334,6 +334,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				return daemon.PreparedInit{}, prepareErr
 			}
 			schedulerConfig, configErr := configuration.LoadScheduler(instanceConfigPath)
+			var contextConfig configuration.Context
+			if configErr == nil {
+				contextConfig, configErr = configuration.LoadContext(instanceConfigPath)
+			}
 			var followUpConfig configuration.FollowUp
 			if configErr == nil {
 				followUpConfig, configErr = configuration.LoadFollowUp(instanceConfigPath)
@@ -360,7 +364,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				}
 				return daemon.PreparedInit{}, fmt.Errorf("configure instance: %w", configErr)
 			}
-			return daemon.PreparedInit{Rollback: rollback, IterationConcurrency: schedulerConfig.IterationConcurrency, MaxPendingAttempts: schedulerConfig.MaxPendingAttempts}, nil
+			return daemon.PreparedInit{Rollback: rollback, IterationConcurrency: schedulerConfig.IterationConcurrency, MaxPendingAttempts: schedulerConfig.MaxPendingAttempts, IterationHistoryLimit: contextConfig.IterationHistoryLimit}, nil
 		}
 		initOptions = func(optionsCtx context.Context) (protocol.InitOptionsResponse, error) {
 			_, statErr := os.Stat(instanceConfigPath)
@@ -444,7 +448,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				// still require the user to review new or changed Codex hooks.
 				activationEnvironment["PIKA_CODEX_BYPASS_HOOK_TRUST"] = "1"
 			}
-			preparer := activation.Preparer{Store: engine, InstructionRoot: paths.InstructionsRoot, SocketPath: paths.SocketPath, Environment: activationEnvironment, AgentConfigPath: instanceConfigPath, Providers: providerRegistry}
+			preparer := activation.Preparer{Store: engine, InstructionRoot: paths.InstructionsRoot, ContextsRoot: paths.ContextsRoot, SocketPath: paths.SocketPath, Environment: activationEnvironment, AgentConfigPath: instanceConfigPath, Providers: providerRegistry}
 			dispatcher := outbox.Dispatcher{Store: engine, Sink: workruntime.Sink{Store: engine, Runtime: runtimeAdapter, AgentKind: "codex", AgentConfigPath: instanceConfigPath, Providers: providerRegistry, ProviderRuntimeRoot: runtimeRoot, RequireProviderCapabilities: true, Preparer: preparer, WorkspacePreparer: gitworkspace.RuntimePreparer{Repository: assignedRepository, Root: worktreeRoot, Namespace: branchNamespace, Recorder: engine}}}
 			coordinator := workruntime.Coordinator{
 				Reconciler:  workruntime.Reconciler{Store: engine, Runtime: runtimeAdapter, ProviderRuntimeRoot: runtimeRoot},

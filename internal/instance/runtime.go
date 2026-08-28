@@ -30,6 +30,7 @@ type RuntimePaths struct {
 	DatabasePath     string
 	LockPath         string
 	InstructionsRoot string
+	ContextsRoot     string
 	WorktreeRoot     string
 	RuntimeRoot      string
 }
@@ -48,7 +49,7 @@ func ResolveRuntime(options RuntimeOptions) (RuntimePaths, error) {
 		return RuntimePaths{
 			SocketPath: socketPath, Workspace: &workspace, WorkspaceRoot: workspace.Root,
 			InstanceID: workspace.Identity.ID, InstanceDir: workspace.Root, ConfigPath: workspace.ConfigPath,
-			DatabasePath: workspace.DatabasePath, LockPath: workspace.LockPath, InstructionsRoot: workspace.InstructionsRoot,
+			DatabasePath: workspace.DatabasePath, LockPath: workspace.LockPath, InstructionsRoot: workspace.InstructionsRoot, ContextsRoot: workspace.ContextsRoot,
 			WorktreeRoot: workspace.Root, RuntimeRoot: workspace.RuntimeRoot,
 		}, nil
 	}
@@ -80,6 +81,7 @@ func ResolveRuntime(options RuntimeOptions) (RuntimePaths, error) {
 	paths.DatabasePath = filepath.Join(paths.InstanceDir, "pika.db")
 	paths.LockPath = filepath.Join(paths.InstanceDir, "daemon.lock")
 	paths.InstructionsRoot = filepath.Join(paths.ConfigRoot, "instances", paths.InstanceID, "instructions")
+	paths.ContextsRoot = filepath.Join(paths.InstanceDir, "contexts")
 	paths.WorktreeRoot = filepath.Join(paths.InstanceDir, "worktrees")
 	paths.RuntimeRoot = filepath.Join(paths.InstanceDir, "runtime")
 	return paths, nil

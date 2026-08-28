@@ -99,6 +99,42 @@ max_pending_attempts = 6
 	}
 }
 
+func TestLoadContextReadsIterationHistoryLimit(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[context.iteration]\nhistory_limit = 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := configuration.LoadContext(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.IterationHistoryLimit != 0 {
+		t.Fatalf("context config = %+v", config)
+	}
+}
+
+func TestLoadContextRejectsMissingUnknownNegativeOrDuplicateHistoryLimit(t *testing.T) {
+	t.Parallel()
+	for name, contents := range map[string]string{
+		"missing":   "[context.iteration]\n",
+		"unknown":   "[context.iteration]\nother = 1\n",
+		"negative":  "[context.iteration]\nhistory_limit = -1\n",
+		"not-int":   "[context.iteration]\nhistory_limit = twenty\n",
+		"duplicate": "[context.iteration]\nhistory_limit = 1\nhistory_limit = 2\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := configuration.LoadContext(path); err == nil {
+				t.Fatal("invalid context configuration was accepted")
+			}
+		})
+	}
+}
+
 func TestLoadSchedulerRejectsMissingUnknownOrNonPositiveFields(t *testing.T) {
 	t.Parallel()
 	for name, contents := range map[string]string{

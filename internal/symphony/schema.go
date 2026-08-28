@@ -8,7 +8,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 15
+const schemaVersion = 17
 
 const schemaV1 = `
 CREATE TABLE optimizations (
@@ -525,6 +525,26 @@ CREATE TABLE git_worktrees (
 );
 `
 
+const schemaV16 = `
+ALTER TABLE optimizations ADD COLUMN iteration_history_limit INTEGER NOT NULL DEFAULT 20 CHECK(iteration_history_limit >= 0);
+ALTER TABLE attempts ADD COLUMN history_limit INTEGER NOT NULL DEFAULT 20 CHECK(history_limit >= 0);
+`
+
+const schemaV17 = `
+CREATE TABLE context_snapshots (
+    agent_session_id TEXT PRIMARY KEY REFERENCES agent_sessions(id),
+    schema_version INTEGER NOT NULL,
+    context_relative_path TEXT NOT NULL,
+    context_sha256 TEXT NOT NULL,
+    context_bytes INTEGER NOT NULL,
+    messages_relative_path TEXT NOT NULL,
+    messages_sha256 TEXT NOT NULL,
+    messages_bytes INTEGER NOT NULL,
+    message_records INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+`
+
 var schemaMigrations = []struct {
 	version int
 	sql     string
@@ -544,6 +564,8 @@ var schemaMigrations = []struct {
 	{version: 13, sql: schemaV13},
 	{version: 14, sql: schemaV14},
 	{version: 15, sql: schemaV15},
+	{version: 16, sql: schemaV16},
+	{version: 17, sql: schemaV17},
 }
 
 func migrate(ctx context.Context, db *sql.DB, now string) error {

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pika-go.local/schemas/attempt-summary-v2.json",
+  "title": "Pika terminal Attempt summary record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "attempt"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "attempt": {"type": "object"}
+  }
+}

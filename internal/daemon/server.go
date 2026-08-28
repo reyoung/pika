@@ -34,9 +34,10 @@ type Config struct {
 }
 
 type PreparedInit struct {
-	Rollback             func() error
-	IterationConcurrency int64
-	MaxPendingAttempts   int64
+	Rollback              func() error
+	IterationConcurrency  int64
+	MaxPendingAttempts    int64
+	IterationHistoryLimit int64
 }
 
 func Serve(ctx context.Context, cfg Config) error {
@@ -119,12 +120,14 @@ func Serve(ctx context.Context, cfg Config) error {
 				}
 			}
 			receipt, err := cfg.Symphony.Apply(request.Context(), symphony.Init{
-				Meta:                 symphony.CommandMeta{RequestID: input.RequestID, ExpectedRevision: input.ExpectedRevision},
-				OptimizationID:       cfg.InstanceID,
-				Repository:           input.Repository,
-				CallerPaneID:         input.CallerPaneID,
-				IterationConcurrency: prepared.IterationConcurrency,
-				MaxPendingAttempts:   prepared.MaxPendingAttempts,
+				Meta:                     symphony.CommandMeta{RequestID: input.RequestID, ExpectedRevision: input.ExpectedRevision},
+				OptimizationID:           cfg.InstanceID,
+				Repository:               input.Repository,
+				CallerPaneID:             input.CallerPaneID,
+				IterationConcurrency:     prepared.IterationConcurrency,
+				MaxPendingAttempts:       prepared.MaxPendingAttempts,
+				IterationHistoryLimit:    prepared.IterationHistoryLimit,
+				IterationHistoryLimitSet: true,
 			})
 			if err != nil {
 				if rollbackErr := prepared.Rollback(); rollbackErr != nil {

@@ -270,6 +270,9 @@ func validateConfigurationPath(path, repository string, providers *provider.Regi
 	if _, err := LoadScheduler(path); err != nil {
 		return nil, err
 	}
+	if _, err := LoadContext(path); err != nil {
+		return nil, err
+	}
 	if _, err := LoadFollowUp(path); err != nil {
 		return nil, err
 	}
@@ -372,6 +375,9 @@ repository = ` + strconv.Quote(repository) + `
 [scheduler]
 iteration_concurrency = 4
 max_pending_attempts = 8
+
+[context.iteration]
+history_limit = 20
 
 `)
 	for _, role := range AgentRoleOrder {

@@ -30,9 +30,13 @@ func (e *Engine) seedOptimization(ctx context.Context, tx *sql.Tx, optimizationI
 
 func (e *Engine) createIterationAttempt(ctx context.Context, tx *sql.Tx, optimizationID, baselineID string, slot, bestSequence int64, bestSHA, kind, backOffMessage, now string) error {
 	attemptID, roundID, workID, effectID := e.newID(), e.newID(), e.newID(), e.newID()
+	var historyLimit int64
+	if err := tx.QueryRowContext(ctx, `SELECT iteration_history_limit FROM optimizations WHERE id = ?`, optimizationID).Scan(&historyLimit); err != nil {
+		return fmt.Errorf("read iteration history limit: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO attempts
-		(id, optimization_id, slot_index, status, base_best_sequence, base_sha, current_iteration_round, created_at, updated_at)
-		VALUES (?, ?, ?, 'iterating', ?, ?, 1, ?, ?)`, attemptID, optimizationID, slot, bestSequence, bestSHA, now, now); err != nil {
+		(id, optimization_id, slot_index, status, base_best_sequence, base_sha, current_iteration_round, history_limit, created_at, updated_at)
+		VALUES (?, ?, ?, 'iterating', ?, ?, 1, ?, ?, ?)`, attemptID, optimizationID, slot, bestSequence, bestSHA, historyLimit, now, now); err != nil {
 		return fmt.Errorf("create attempt: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO iteration_rounds

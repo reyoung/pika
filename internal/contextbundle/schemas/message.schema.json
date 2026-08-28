@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pika-go.local/schemas/message-v2.json",
+  "title": "Pika normalized conversation record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "sequence", "turn", "tools", "tool_supplements"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "sequence": {"type": "integer", "minimum": 1},
+    "turn": {"type": "object"},
+    "tools": {"type": "array", "items": {"type": "object"}},
+    "tool_supplements": {"type": "array", "items": {"type": "object"}}
+  }
+}

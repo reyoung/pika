@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pika-go.local/schemas/context-v2.json",
+  "title": "Pika Agent Session Context Bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "session", "optimization", "work", "generator_work", "terminal_operation", "messages"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "session": {"type": "object"},
+    "optimization": {"type": "object"},
+    "baseline": {"type": "object"},
+    "best": {"type": "object"},
+    "work": {"type": "object"},
+    "generator_work": {"type": "object"},
+    "terminal_operation": {"type": "string", "minLength": 1},
+    "messages": {"$ref": "#/$defs/file"},
+    "iteration_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["history_limit", "recent_terminal_attempts"],
+      "properties": {
+        "history_limit": {"type": "integer", "minimum": 0},
+        "recent_terminal_attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["attempt", "messages", "summary"],
+            "properties": {
+              "attempt": {"$ref": "#/$defs/attempt"},
+              "messages": {"$ref": "#/$defs/file"},
+              "summary": {"$ref": "#/$defs/file"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "records"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "bytes": {"type": "integer", "minimum": 0},
+        "records": {"type": "integer", "minimum": 0}
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "slot_index", "status", "base_best_sequence", "base_sha", "current_iteration_round", "history_limit"],
+      "properties": {
+        "id": {"type": "string"},
+        "slot_index": {"type": "integer"},
+        "status": {"enum": ["accepted", "rejected"]},
+        "base_best_sequence": {"type": "integer"},
+        "base_sha": {"type": "string"},
+        "current_iteration_round": {"type": "integer"},
+        "candidate_sha": {"type": "string"},
+        "summary": {"type": "string"},
+        "failure_reason": {"type": "string"},
+        "history_limit": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

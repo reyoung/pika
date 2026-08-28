@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/reyoung/pika-go/internal/configuration"
+	"github.com/reyoung/pika-go/internal/contextbundle"
 	"github.com/reyoung/pika-go/internal/instructions"
 	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/symphony"
@@ -20,6 +21,7 @@ import (
 )
 
 type Store interface {
+	contextbundle.Store
 	FreezeInstruction(context.Context, symphony.InstructionSnapshot) (symphony.InstructionSnapshot, error)
 	MintAgentGrant(context.Context, string, []string, time.Duration) (symphony.AgentGrant, error)
 }
@@ -27,6 +29,7 @@ type Store interface {
 type Preparer struct {
 	Store           Store
 	InstructionRoot string
+	ContextsRoot    string
 	GrantTTL        time.Duration
 	SocketPath      string
 	Environment     map[string]string
@@ -35,8 +38,8 @@ type Preparer struct {
 }
 
 func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, work symphony.RuntimeWork) (workruntime.Preparation, error) {
-	if p.Store == nil || p.InstructionRoot == "" {
-		return workruntime.Preparation{}, errors.New("activation store and instruction root are required")
+	if p.Store == nil || p.InstructionRoot == "" || p.ContextsRoot == "" {
+		return workruntime.Preparation{}, errors.New("activation store, instruction root, and contexts root are required")
 	}
 	logicalName, err := logicalNameForRole(session.Role)
 	if session.Role == symphony.RoleFollowUp {
@@ -73,7 +76,19 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 		agentConfiguration = configured
 	}
 	contentHash := sha256.Sum256(contents)
-	systemPrompt, err := systemprompts.RenderForProvider(logicalName, work, contents, agentConfiguration.Kind)
+	bundle, err := (contextbundle.Materializer{Store: p.Store, Root: p.ContextsRoot}).Materialize(ctx, session)
+	if err != nil {
+		return workruntime.Preparation{}, fmt.Errorf("materialize Agent Session Context Bundle: %w", err)
+	}
+	contextSchema, messageSchema, summarySchema, err := contextbundle.Schemas()
+	if err != nil {
+		return workruntime.Preparation{}, err
+	}
+	systemPrompt, err := systemprompts.RenderForProviderFromBundle(logicalName, contents, agentConfiguration.Kind, systemprompts.ContextFiles{
+		ContextPath: bundle.ContextPath, ContextSHA256: bundle.ContextSHA256,
+		MessagesPath: bundle.MessagesPath, MessagesSHA256: bundle.MessagesSHA256,
+		ContextSchema: contextSchema, MessageSchema: messageSchema, SummarySchema: summarySchema,
+	})
 	if err != nil {
 		return workruntime.Preparation{}, fmt.Errorf("render System Prompt %s: %w", logicalName, err)
 	}
@@ -117,6 +132,10 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 		"PIKA_BASE_SHA":             work.BaseSHA,
 		"PIKA_BEST_SHA":             work.BestSHA,
 		"PIKA_SYSTEM_PROMPT_SHA256": stored.ActivationSHA256,
+		"PIKA_CONTEXT_PATH":         bundle.ContextPath,
+		"PIKA_CONTEXT_SHA256":       bundle.ContextSHA256,
+		"PIKA_MESSAGES_PATH":        bundle.MessagesPath,
+		"PIKA_MESSAGES_SHA256":      bundle.MessagesSHA256,
 	}
 	adapter, err := registry.Resolve(session.AgentKind)
 	if err != nil {
@@ -162,7 +181,7 @@ func agentConfigRole(role symphony.WorkRole) string {
 }
 
 func kickoffPrompt(work symphony.RuntimeWork) string {
-	return fmt.Sprintf("开始 Pika Work `%s`。先调用 `get_context` 核对当前领域状态和历史，再按 System Prompt 工作；完成时必须调用 `%s`。",
+	return fmt.Sprintf("开始 Pika Work `%s`。先按 System Prompt 完整读取并核对只读 Context Bundle，再开始工作；完成时必须调用 `%s`。",
 		work.Work.ID, terminalOperation(work.Work.Role))
 }
 

@@ -55,12 +55,14 @@ type Command interface {
 }
 
 type Init struct {
-	Meta                 CommandMeta `json:"meta"`
-	OptimizationID       string      `json:"optimization_id"`
-	Repository           string      `json:"repository"`
-	CallerPaneID         string      `json:"caller_pane_id,omitempty"`
-	IterationConcurrency int64       `json:"iteration_concurrency,omitempty"`
-	MaxPendingAttempts   int64       `json:"max_pending_attempts,omitempty"`
+	Meta                     CommandMeta `json:"meta"`
+	OptimizationID           string      `json:"optimization_id"`
+	Repository               string      `json:"repository"`
+	CallerPaneID             string      `json:"caller_pane_id,omitempty"`
+	IterationConcurrency     int64       `json:"iteration_concurrency,omitempty"`
+	MaxPendingAttempts       int64       `json:"max_pending_attempts,omitempty"`
+	IterationHistoryLimit    int64       `json:"iteration_history_limit,omitempty"`
+	IterationHistoryLimitSet bool        `json:"-"`
 }
 
 func (Init) commandName() string        { return "init" }
@@ -222,12 +224,13 @@ type Receipt struct {
 }
 
 type OptimizationView struct {
-	ID                   string             `json:"id"`
-	Status               OptimizationStatus `json:"status"`
-	Revision             int64              `json:"revision"`
-	Repository           string             `json:"repository"`
-	IterationConcurrency int64              `json:"iteration_concurrency"`
-	MaxPendingAttempts   int64              `json:"max_pending_attempts"`
+	ID                    string             `json:"id"`
+	Status                OptimizationStatus `json:"status"`
+	Revision              int64              `json:"revision"`
+	Repository            string             `json:"repository"`
+	IterationConcurrency  int64              `json:"iteration_concurrency"`
+	MaxPendingAttempts    int64              `json:"max_pending_attempts"`
+	IterationHistoryLimit int64              `json:"iteration_history_limit"`
 }
 
 type BaselineView struct {
@@ -266,6 +269,7 @@ type AttemptView struct {
 	CandidateSHA          string `json:"candidate_sha,omitempty"`
 	Summary               string `json:"summary,omitempty"`
 	FailureReason         string `json:"failure_reason,omitempty"`
+	HistoryLimit          int64  `json:"history_limit"`
 }
 
 type BestView struct {
@@ -412,6 +416,7 @@ type RuntimeWork struct {
 	FollowUpMaxMessages             int64              `json:"followup_max_messages,omitempty"`
 	FollowUpGeneratorMax            int64              `json:"followup_generator_max_attempts,omitempty"`
 	FollowUpGeneratorTry            int64              `json:"followup_generator_attempt,omitempty"`
+	IterationHistoryLimit           int64              `json:"iteration_history_limit,omitempty"`
 }
 
 type ActiveAgentSession struct {
@@ -440,6 +445,32 @@ type InstructionSnapshot struct {
 	Content          []byte `json:"-"`
 	SystemPrompt     []byte `json:"-"`
 	ActivationSHA256 string `json:"activation_sha256"`
+}
+
+type ContextSnapshot struct {
+	AgentSessionID       string `json:"agent_session_id"`
+	SchemaVersion        int64  `json:"schema_version"`
+	ContextRelativePath  string `json:"context_relative_path"`
+	ContextSHA256        string `json:"context_sha256"`
+	ContextBytes         int64  `json:"context_bytes"`
+	MessagesRelativePath string `json:"messages_relative_path"`
+	MessagesSHA256       string `json:"messages_sha256"`
+	MessagesBytes        int64  `json:"messages_bytes"`
+	MessageRecords       int64  `json:"message_records"`
+}
+
+type AttemptHistoryProjection struct {
+	Attempt AttemptView              `json:"attempt"`
+	Journal ConversationJournalView  `json:"-"`
+}
+
+type ContextProjection struct {
+	Session         AgentSession               `json:"session"`
+	View            View                       `json:"-"`
+	TargetWork      RuntimeWork                `json:"target_work"`
+	GeneratorWork   WorkView                   `json:"generator_work"`
+	Journal         ConversationJournalView    `json:"-"`
+	AttemptHistories []AttemptHistoryProjection `json:"-"`
 }
 
 type View struct {

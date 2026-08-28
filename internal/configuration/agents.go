@@ -20,6 +20,59 @@ type Scheduler struct {
 	MaxPendingAttempts   int64 `json:"max_pending_attempts"`
 }
 
+const DefaultIterationHistoryLimit int64 = 20
+
+type Context struct {
+	IterationHistoryLimit int64 `json:"iteration_history_limit"`
+}
+
+func LoadContext(path string) (Context, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return Context{}, fmt.Errorf("open instance configuration: %w", err)
+	}
+	defer file.Close()
+	section := ""
+	var value string
+	scanner := bufio.NewScanner(file)
+	for lineNumber := 1; scanner.Scan(); lineNumber++ {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+			continue
+		}
+		if section != "context.iteration" {
+			continue
+		}
+		key, encoded, found := strings.Cut(line, "=")
+		if !found {
+			return Context{}, fmt.Errorf("invalid context.iteration entry on line %d", lineNumber)
+		}
+		key, encoded = strings.TrimSpace(key), strings.TrimSpace(strings.SplitN(encoded, "#", 2)[0])
+		if key != "history_limit" {
+			return Context{}, fmt.Errorf("unknown context.iteration field %q", key)
+		}
+		if value != "" {
+			return Context{}, errors.New("duplicate context.iteration field \"history_limit\"")
+		}
+		value = encoded
+	}
+	if err := scanner.Err(); err != nil {
+		return Context{}, fmt.Errorf("read instance configuration: %w", err)
+	}
+	if value == "" {
+		return Context{}, errors.New("context.iteration requires history_limit")
+	}
+	limit, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || limit < 0 {
+		return Context{}, errors.New("context.iteration.history_limit must be a non-negative integer")
+	}
+	return Context{IterationHistoryLimit: limit}, nil
+}
+
 type Identity struct {
 	Version    int64  `json:"version"`
 	Repository string `json:"repository"`

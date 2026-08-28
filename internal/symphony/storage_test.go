@@ -62,6 +62,7 @@ func TestOpenConfiguresAndMigratesSQLite(t *testing.T) {
 		"runtime_outbox": false, "session_grants": false, "works": false, "attempts": false,
 		"best_revisions": false, "iteration_rounds": false, "integrations": false, "git_intents": false,
 		"workspace_identity": false, "git_worktrees": false,
+		"context_snapshots": false,
 	}
 	rows, err := engine.db.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table'`)
 	if err != nil {
