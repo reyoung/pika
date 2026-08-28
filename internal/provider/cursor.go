@@ -40,6 +40,8 @@ func NewCursorAdapter(options ...CursorOptions) CursorAdapter {
 
 func (CursorAdapter) Kind() string { return "cursor" }
 
+func (CursorAdapter) InterruptKeys() []string { return []string{"ctrl+c"} }
+
 func (CursorAdapter) Validate(configuration AgentConfiguration) error {
 	if configuration.Kind != "cursor" {
 		return fmt.Errorf("Cursor Adapter cannot validate Agent kind %q", configuration.Kind)
@@ -108,7 +110,7 @@ func (adapter CursorAdapter) Probe(ctx context.Context, request ProbeRequest) (C
 	}
 	return Capabilities{
 		Kind: "cursor", Executable: executable, Version: version, Authenticated: true,
-		Journal: true, TurnStop: true, FollowUp: true, FullOutput: true, FreshSession: true, Compatible: true,
+		Journal: true, TurnStop: true, FollowUp: true, FullOutput: true, FreshSession: true, Interrupt: true, Compatible: true,
 	}, nil
 }
 

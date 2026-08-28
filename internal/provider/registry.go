@@ -100,3 +100,19 @@ func (r *Registry) Resolve(kind string) (Adapter, error) {
 	}
 	return adapter, nil
 }
+
+func (r *Registry) InterruptKeys(kind string) ([]string, error) {
+	adapter, err := r.Resolve(kind)
+	if err != nil {
+		return nil, err
+	}
+	interrupter, ok := adapter.(InterruptAdapter)
+	if !ok {
+		return nil, fmt.Errorf("provider Adapter %q does not support turn interruption", kind)
+	}
+	keys := interrupter.InterruptKeys()
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("provider Adapter %q returned an empty interrupt sequence", kind)
+	}
+	return append([]string(nil), keys...), nil
+}

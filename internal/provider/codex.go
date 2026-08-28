@@ -17,6 +17,8 @@ func NewCodexAdapter() CodexAdapter { return CodexAdapter{} }
 
 func (CodexAdapter) Kind() string { return "codex" }
 
+func (CodexAdapter) InterruptKeys() []string { return []string{"ctrl+c"} }
+
 var agentValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
 func (CodexAdapter) Validate(configuration AgentConfiguration) error {
@@ -65,7 +67,7 @@ func (CodexAdapter) Probe(ctx context.Context, request ProbeRequest) (Capabiliti
 	}
 	return Capabilities{
 		Kind: "codex", Executable: executable, Version: version, Authenticated: true,
-		Journal: true, TurnStop: true, FollowUp: true, FullOutput: true, FreshSession: true, Compatible: true,
+		Journal: true, TurnStop: true, FollowUp: true, FullOutput: true, FreshSession: true, Interrupt: true, Compatible: true,
 	}, nil
 }
 

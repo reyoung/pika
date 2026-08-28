@@ -37,7 +37,7 @@ pika-go kick-off --repository /absolute/path/to/repository --config /absolute/pa
 Resume existing durable state with:
 
 ```bash
-pika-go resume /absolute/path/to/repository-pika-workspace
+pika-go open /absolute/path/to/repository-pika-workspace
 ```
 
 Running `pika-go kick-off` inside that directory has the same auto-resume behavior. Existing `pika.toml` is reused; init is not repeated. Do not move the Workspace or its source Git common directory. Their absolute and filesystem identities are validated at daemon startup.
@@ -67,7 +67,7 @@ The destination must not already exist. The daemon checkpoints pending WAL frame
 2. Request graceful shutdown with `pika-go shutdown`. The command acknowledges entry into `draining`; wait for the Unix socket to disappear after pending Work, runtime effects, and child Agents finish normally. Pika does not kill them.
 3. Verify and extract the new release archive.
 4. Run the new `./pika-go install`; it replaces the installed binary and manifest using atomic file updates, then updates the Herdr registration.
-5. Run `pika-go resume /absolute/path/to/workspace` and confirm `pika-go status --json` reports the expected Optimization and protocol version before starting more Work.
+5. Run `pika-go open /absolute/path/to/workspace` and confirm `pika-go status --json` reports the expected Optimization and protocol version before starting more Work.
 
 Database migrations run during daemon startup. A newer unsupported schema, checksum mismatch, failed migration, failed SQLite integrity check, or invalid online domain state prevents scheduling. Keep the backup and the old release until the upgraded daemon has completed a real workflow transition.
 

@@ -8,7 +8,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 16
+const schemaVersion = 17
 
 const schemaV1 = `
 CREATE TABLE optimizations (
@@ -540,6 +540,45 @@ CREATE TABLE context_snapshots (
 );
 `
 
+const schemaV17 = `
+ALTER TABLE optimizations ADD COLUMN scheduler_status TEXT NOT NULL DEFAULT 'running';
+ALTER TABLE optimizations ADD COLUMN scheduler_paused_at TEXT;
+ALTER TABLE optimizations ADD COLUMN scheduler_epoch INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE scheduler_control_cycles (
+    id TEXT PRIMARY KEY,
+    optimization_id TEXT NOT NULL REFERENCES optimizations(id),
+    epoch INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(optimization_id, epoch)
+);
+CREATE TABLE session_control_actions (
+    id TEXT PRIMARY KEY,
+    cycle_id TEXT NOT NULL REFERENCES scheduler_control_cycles(id),
+    agent_session_id TEXT NOT NULL REFERENCES agent_sessions(id),
+    work_id TEXT NOT NULL REFERENCES works(id),
+    role TEXT NOT NULL,
+    agent_kind TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    action TEXT NOT NULL,
+    message TEXT,
+    status TEXT NOT NULL,
+    observed_agent_status TEXT,
+    error_message TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    observed_at TEXT,
+    suppress_activity_until TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(cycle_id, agent_session_id)
+);
+CREATE INDEX scheduler_control_actions_cycle_status
+    ON session_control_actions(cycle_id, status);
+`
+
 var schemaMigrations = []struct {
 	version int
 	sql     string
@@ -560,6 +599,7 @@ var schemaMigrations = []struct {
 	{version: 14, sql: schemaV14},
 	{version: 15, sql: schemaV15},
 	{version: 16, sql: schemaV16},
+	{version: 17, sql: schemaV17},
 }
 
 func migrate(ctx context.Context, db *sql.DB, now string) error {

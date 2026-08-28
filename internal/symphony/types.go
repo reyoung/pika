@@ -16,6 +16,13 @@ const (
 	OptimizationDraining          OptimizationStatus = "draining"
 )
 
+type SchedulerStatus string
+
+const (
+	SchedulerRunning SchedulerStatus = "running"
+	SchedulerPaused  SchedulerStatus = "paused"
+)
+
 type BaselineStatus string
 
 const (
@@ -197,6 +204,20 @@ type RequestShutdown struct {
 func (RequestShutdown) commandName() string        { return "request_shutdown" }
 func (c RequestShutdown) commandMeta() CommandMeta { return c.Meta }
 
+type PauseScheduler struct {
+	Meta CommandMeta `json:"meta"`
+}
+
+func (PauseScheduler) commandName() string        { return "pause_scheduler" }
+func (c PauseScheduler) commandMeta() CommandMeta { return c.Meta }
+
+type ResumeScheduler struct {
+	Meta CommandMeta `json:"meta"`
+}
+
+func (ResumeScheduler) commandName() string        { return "resume_scheduler" }
+func (c ResumeScheduler) commandMeta() CommandMeta { return c.Meta }
+
 type StartBaselineDraft struct {
 	Meta CommandMeta `json:"meta"`
 }
@@ -336,6 +357,60 @@ type FollowUpPolicy struct {
 	GeneratorMaxAttempts int64 `json:"generator_max_attempts"`
 }
 
+type SchedulerControlActionStatus string
+
+const (
+	SchedulerActionPending         SchedulerControlActionStatus = "pending"
+	SchedulerActionDispatching     SchedulerControlActionStatus = "dispatching"
+	SchedulerActionSent            SchedulerControlActionStatus = "sent"
+	SchedulerActionSkipped         SchedulerControlActionStatus = "skipped"
+	SchedulerActionFailed          SchedulerControlActionStatus = "failed"
+	SchedulerActionDeliveryUnknown SchedulerControlActionStatus = "delivery_unknown"
+	SchedulerActionObserved        SchedulerControlActionStatus = "observed"
+)
+
+type SchedulerControlActionView struct {
+	ID                  string                       `json:"id"`
+	AgentSessionID      string                       `json:"agent_session_id"`
+	WorkID              string                       `json:"work_id"`
+	Role                WorkRole                     `json:"role"`
+	AgentKind           string                       `json:"agent_kind"`
+	AgentName           string                       `json:"agent_name"`
+	Action              string                       `json:"action"`
+	Message             string                       `json:"message,omitempty"`
+	Status              SchedulerControlActionStatus `json:"status"`
+	ObservedAgentStatus string                       `json:"observed_agent_status,omitempty"`
+	Error               string                       `json:"error,omitempty"`
+	StartedAt           string                       `json:"started_at,omitempty"`
+	CompletedAt         string                       `json:"completed_at,omitempty"`
+}
+
+type SchedulerControlCycleView struct {
+	ID          string                       `json:"id,omitempty"`
+	Epoch       int64                        `json:"epoch"`
+	Action      string                       `json:"action,omitempty"`
+	Status      string                       `json:"status,omitempty"`
+	CreatedAt   string                       `json:"created_at,omitempty"`
+	CompletedAt string                       `json:"completed_at,omitempty"`
+	Actions     []SchedulerControlActionView `json:"actions,omitempty"`
+}
+
+func (c SchedulerControlCycleView) HasDeliveryFailure() bool {
+	for _, action := range c.Actions {
+		if action.Status == SchedulerActionFailed || action.Status == SchedulerActionDeliveryUnknown {
+			return true
+		}
+	}
+	return false
+}
+
+type SchedulerView struct {
+	Status   SchedulerStatus            `json:"status"`
+	PausedAt string                     `json:"paused_at,omitempty"`
+	Epoch    int64                      `json:"epoch"`
+	Latest   *SchedulerControlCycleView `json:"latest_control,omitempty"`
+}
+
 type InitDiagnostic struct {
 	ID        string `json:"id"`
 	Message   string `json:"message"`
@@ -464,6 +539,7 @@ type ContextProjection struct {
 
 type View struct {
 	Optimization       OptimizationView     `json:"optimization"`
+	Scheduler          SchedulerView        `json:"scheduler"`
 	Baseline           *BaselineView        `json:"baseline,omitempty"`
 	Baselines          []BaselineView       `json:"baselines"`
 	Works              []WorkView           `json:"works"`

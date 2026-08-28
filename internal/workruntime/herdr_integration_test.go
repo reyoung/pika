@@ -108,6 +108,36 @@ func TestDaemonRestartCreatesFreshSessionMoveAndLostPaneReplacement(t *testing.T
 		firstSession = session
 		return binding.TerminalID == first.TerminalID
 	})
+	herdrRuntime := herdr.NewRuntime(client)
+	if _, err := herdrRuntime.Prompt(ctx, first.PaneID, "/hang"); err != nil {
+		t.Fatalf("make fake Agent busy before Scheduler pause: %v", err)
+	}
+	if err := herdrRuntime.SendAgentKeys(ctx, agentNameValue(first), []string{"enter"}); err != nil {
+		t.Fatalf("submit fake Agent hang prompt: %v", err)
+	}
+	waitForHerdrAgentStatus(t, ctx, client, agentNameValue(first), "working")
+	pause, err := control.PauseScheduler(ctx, pikaSocket, protocol.SchedulerControlRequest{Mutation: protocol.Mutation{RequestID: "pause"}})
+	if err != nil {
+		t.Fatalf("pause Scheduler through real Herdr: %v", err)
+	}
+	if pause.Control.HasDeliveryFailure() || len(pause.Control.Actions) != 1 || pause.Control.Actions[0].Status != symphony.SchedulerActionSent {
+		t.Fatalf("real Herdr pause cycle=%+v", pause.Control)
+	}
+	waitForPaneText(t, ctx, client, first.PaneID, "FAKE_AGENT_INTERRUPTED")
+	waitForHerdrAgentStatus(t, ctx, client, agentNameValue(first), "idle")
+	resume, err := control.ResumeScheduler(ctx, pikaSocket, protocol.SchedulerControlRequest{Mutation: protocol.Mutation{RequestID: "resume"}})
+	if err != nil {
+		t.Fatalf("resume Scheduler through real Herdr: %v", err)
+	}
+	if resume.Control.HasDeliveryFailure() || len(resume.Control.Actions) != 1 ||
+		resume.Control.Actions[0].AgentSessionID != firstSession.ID || resume.Control.Actions[0].Status != symphony.SchedulerActionSent {
+		t.Fatalf("real Herdr resume cycle=%+v original Session=%s", resume.Control, firstSession.ID)
+	}
+	waitForPaneText(t, ctx, client, first.PaneID, `FAKE_AGENT_PROMPT "继续"`)
+	current, _, found, err := readCurrentSession(stateRoot, workID)
+	if err != nil || !found || current.ID != firstSession.ID {
+		t.Fatalf("Scheduler control replaced Session: current=%+v found=%v err=%v", current, found, err)
+	}
 	stopDaemon()
 	if _, err := herdr.NewRuntime(client).GetAgent(ctx, first.PaneID); err != nil {
 		t.Fatalf("agent did not survive daemon crash: %v", err)
@@ -1468,6 +1498,37 @@ func waitForNamedAgent(t *testing.T, ctx context.Context, client *herdr.Client, 
 	}
 	t.Fatal("managed agent did not appear")
 	return herdr.Agent{}
+}
+
+func waitForHerdrAgentStatus(t *testing.T, ctx context.Context, client *herdr.Client, target, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var last herdr.Agent
+	var lastErr error
+	runtimeAdapter := herdr.NewRuntime(client)
+	for time.Now().Before(deadline) {
+		last, lastErr = runtimeAdapter.GetAgent(ctx, target)
+		if lastErr == nil && last.AgentStatus == want {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var paneResult struct {
+		Read struct {
+			Text string `json:"text"`
+		} `json:"read"`
+	}
+	_ = client.Call(ctx, "pane.read", map[string]any{"pane_id": last.PaneID, "source": "recent", "lines": 100, "format": "text"}, &paneResult)
+	t.Fatalf("Herdr Agent %s status=%s want=%s err=%v pane=%q", target, last.AgentStatus, want, lastErr, paneResult.Read.Text)
+}
+
+func readCurrentSession(stateRoot, workID string) (symphony.AgentSession, symphony.PaneBinding, bool, error) {
+	engine, err := symphony.Open(context.Background(), filepath.Join(stateRoot, "instances", "integration-instance", "pika.db"), symphony.Options{})
+	if err != nil {
+		return symphony.AgentSession{}, symphony.PaneBinding{}, false, err
+	}
+	defer engine.Close()
+	return engine.CurrentAgentSession(context.Background(), workID)
 }
 
 func waitForPaneText(t *testing.T, ctx context.Context, client *herdr.Client, paneID, text string) {

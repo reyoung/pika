@@ -3,6 +3,7 @@ package fakeagent_test
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,19 @@ func TestRunBecomesReadyAndAcceptsPrompts(t *testing.T) {
 	want := "FAKE_AGENT_READY\nFAKE_AGENT_PROMPT \"investigate the kernel\"\n"
 	if output.String() != want {
 		t.Fatalf("output = %q, want %q", output.String(), want)
+	}
+}
+
+func TestRunInterruptKeepsSessionAliveForResumePrompt(t *testing.T) {
+	interrupts := make(chan os.Signal, 1)
+	interrupts <- os.Interrupt
+	input := strings.NewReader("继续\n/exit\n")
+	var output bytes.Buffer
+	if code := fakeagent.RunWithInterrupts(context.Background(), input, &output, interrupts); code != 0 {
+		t.Fatalf("exit code=%d", code)
+	}
+	if !strings.Contains(output.String(), "FAKE_AGENT_INTERRUPTED") || !strings.Contains(output.String(), `FAKE_AGENT_PROMPT "继续"`) {
+		t.Fatalf("output=%q", output.String())
 	}
 }
 
