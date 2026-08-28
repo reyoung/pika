@@ -221,6 +221,11 @@ func (e *Engine) ObservePaneActivity(ctx context.Context, paneID string) error {
 	}
 	nowTime := e.now().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
+	if suppress, err := e.suppressSchedulerResumePaneActivityTx(ctx, tx, sessionID, now); err != nil {
+		return err
+	} else if suppress {
+		return tx.Commit()
+	}
 	due := nowTime.Add(e.followUpInactivity).Format(time.RFC3339Nano)
 	var requestID, status string
 	err = tx.QueryRowContext(ctx, `SELECT id, status FROM followup_requests WHERE target_work_id = ?
@@ -272,6 +277,17 @@ func (e *Engine) PromoteDueFollowUps(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("begin due Follow-up promotion: %w", err)
 	}
 	defer tx.Rollback()
+	var schedulerStatus SchedulerStatus
+	err = tx.QueryRowContext(ctx, `SELECT scheduler_status FROM optimizations LIMIT 1`).Scan(&schedulerStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, tx.Commit()
+	}
+	if err != nil {
+		return false, fmt.Errorf("read Scheduler state for Follow-up promotion: %w", err)
+	}
+	if schedulerStatus == SchedulerPaused {
+		return false, tx.Commit()
+	}
 	var activeGenerators int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM works WHERE role = ? AND status = ?`, RoleFollowUp, WorkPending).Scan(&activeGenerators); err != nil {
 		return false, fmt.Errorf("count Follow-up generators: %w", err)

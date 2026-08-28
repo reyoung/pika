@@ -18,6 +18,15 @@ pika-go kick-off
 
 `kick-off` first verifies that Herdr native Agent restore is disabled. If the required setting is missing, it asks before atomically updating the Herdr configuration and reloading the server; declining leaves the file untouched and creates no workspace. It then creates a durable sibling directory named `<repository>-pika-workspace`, creates a Pika-owned base linked worktree at `repo/`, and launches a replaceable Herdr workspace with the durable Workspace as its cwd. The daemon, `pika-go init`, and every Agent therefore run outside the user's source checkout.
 
+Pause and continue the Scheduler without replacing current Work or Agent Sessions:
+
+```bash
+pika-go pause
+pika-go resume
+```
+
+Pause freezes new Session starts and Follow-up clocks and interrupts active Agent turns. Resume sends `继续` to surviving pending-Work Sessions before releasing held scheduling. `pika-go status --json` reports durable Scheduler state and the latest per-Session control results.
+
 The Workspace is the resume point for the complete autotune process:
 
 ```text
@@ -32,7 +41,7 @@ kernel-pika-workspace/
   herdr/binding.json    current replaceable Herdr layout binding
 ```
 
-Run `pika-go resume /path/to/kernel-pika-workspace`, or run `pika-go kick-off` anywhere inside it, to continue. Existing configuration is reused and init is not repeated. A Workspace is intentionally not relocatable because it records the absolute source repository and Git common-directory filesystem identity.
+Run `pika-go open /path/to/kernel-pika-workspace`, or run `pika-go kick-off` anywhere inside it, to open existing durable state. Existing configuration is reused and init is not repeated. A Workspace is intentionally not relocatable because it records the absolute source repository and Git common-directory filesystem identity.
 
 During first init, backend, model, reasoning effort, and Cursor launch permissions are numbered choices rather than free-form IDs or raw argv. Cursor permissions separately cover command approval, MCP approval, and persistent workspace trust. Each provider exposes an explicit default model choice: Cursor shows `auto-routing (default)` and invokes its real `auto` model ID without a reasoning-effort override; Codex `default` preserves the Codex CLI's configured model and effort. Use `--defaults` for a non-interactive all-Codex configuration or `--config PATH` for a complete Workspace TOML.
 
@@ -41,7 +50,7 @@ Pre-Workspace instances are never migrated automatically. Discover and import a 
 ```bash
 pika-go workspace legacy-list
 pika-go workspace import --instance INSTANCE_ID --workspace /absolute/path/to/workspace
-pika-go resume /absolute/path/to/workspace
+pika-go open /absolute/path/to/workspace
 ```
 
 Import preserves the legacy SQLite history, configuration, instructions, artifacts, linked worktrees, and source/Attempt HEAD, index, staged, unstaged, and untracked state. The legacy checkout is left in place.
@@ -54,6 +63,7 @@ make verify
 make real-codex-integration  # opt-in; consumes model quota
 make real-cursor-integration  # opt-in; consumes model quota
 make real-mixed-provider-integration  # opt-in; consumes both providers' quota
+make real-pause-resume-integration  # opt-in; full Codex/Cursor/mixed gates with Scheduler control
 ```
 
 `make install` compiles the native `pika-go` binary into the plugin root and copies the CLI into `/usr/local/bin` by default. Override `PREFIX` to choose another installation prefix, or set `PREFIX=` to only build the plugin-root binary.

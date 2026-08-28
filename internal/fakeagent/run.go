@@ -17,6 +17,10 @@ import (
 )
 
 func Run(ctx context.Context, input io.Reader, output io.Writer) int {
+	return RunWithInterrupts(ctx, input, output, nil)
+}
+
+func RunWithInterrupts(ctx context.Context, input io.Reader, output io.Writer, interrupts <-chan os.Signal) int {
 	if delayValue := os.Getenv("PIKA_GO_FAKE_AGENT_START_DELAY"); delayValue != "" {
 		delay, err := time.ParseDuration(delayValue)
 		if err != nil || delay < 0 {
@@ -42,51 +46,84 @@ func Run(ctx context.Context, input io.Reader, output io.Writer) int {
 		autorun = runOptimizationScenario
 	}
 	var autorunOnce sync.Once
-	scanner := bufio.NewScanner(input)
-	for scanner.Scan() {
-		line := scanner.Text()
-		switch {
-		case line == "/exit":
-			return 0
-		case line == "/hang":
-			setTitle(output, "⠋ FAKE_AGENT_WORKING")
-			<-ctx.Done()
-			return 0
-		case line == "/finish":
-			setTitle(output, "⠋ FAKE_AGENT_WORKING")
-			runBaselineAcceptedScenario(ctx, output)
-			setTitle(output, "FAKE_AGENT_READY")
-		case strings.HasPrefix(line, "/sleep "):
-			setTitle(output, "⠋ FAKE_AGENT_WORKING")
-			duration, err := time.ParseDuration(strings.TrimSpace(strings.TrimPrefix(line, "/sleep ")))
-			if err != nil {
-				_, _ = fmt.Fprintf(output, "FAKE_AGENT_ERROR %s\n", strconv.Quote(err.Error()))
-				continue
-			}
-			timer := time.NewTimer(duration)
+	lines := make(chan string)
+	scanErrors := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(input)
+		for scanner.Scan() {
 			select {
+			case lines <- scanner.Text():
 			case <-ctx.Done():
-				timer.Stop()
-				return 0
-			case <-timer.C:
-				setTitle(output, "FAKE_AGENT_READY")
-				_, _ = fmt.Fprintln(output, "FAKE_AGENT_AWAKE")
+				return
 			}
-		default:
-			setTitle(output, "⠋ FAKE_AGENT_WORKING")
-			_, _ = fmt.Fprintf(output, "FAKE_AGENT_PROMPT %s\n", strconv.Quote(line))
+		}
+		scanErrors <- scanner.Err()
+		close(lines)
+	}()
+	var sleepTimer *time.Timer
+	var sleepDone <-chan time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			if sleepTimer != nil {
+				sleepTimer.Stop()
+			}
+			return 0
+		case <-interrupts:
+			if sleepTimer != nil {
+				sleepTimer.Stop()
+				sleepTimer, sleepDone = nil, nil
+			}
 			setTitle(output, "FAKE_AGENT_READY")
-			if autorun != nil {
-				autorunOnce.Do(func() { go autorun(ctx, output) })
+			_, _ = fmt.Fprintln(output, "FAKE_AGENT_INTERRUPTED")
+		case <-sleepDone:
+			sleepTimer, sleepDone = nil, nil
+			setTitle(output, "FAKE_AGENT_READY")
+			_, _ = fmt.Fprintln(output, "FAKE_AGENT_AWAKE")
+		case line, ok := <-lines:
+			if !ok {
+				if err := <-scanErrors; err != nil {
+					_, _ = fmt.Fprintf(output, "FAKE_AGENT_ERROR %s\n", strconv.Quote(err.Error()))
+					return 1
+				}
+				return 0
+			}
+			switch {
+			case line == "/exit":
+				return 0
+			case strings.Contains(line, "/hang"):
+				setTitle(output, "⠋ FAKE_AGENT_WORKING")
+			case line == "/finish":
+				setTitle(output, "⠋ FAKE_AGENT_WORKING")
+				runBaselineAcceptedScenario(ctx, output)
+				setTitle(output, "FAKE_AGENT_READY")
+			case strings.HasPrefix(line, "/sleep "):
+				setTitle(output, "⠋ FAKE_AGENT_WORKING")
+				duration, err := time.ParseDuration(strings.TrimSpace(strings.TrimPrefix(line, "/sleep ")))
+				if err != nil {
+					_, _ = fmt.Fprintf(output, "FAKE_AGENT_ERROR %s\n", strconv.Quote(err.Error()))
+					continue
+				}
+				if sleepTimer != nil {
+					sleepTimer.Stop()
+				}
+				sleepTimer = time.NewTimer(duration)
+				sleepDone = sleepTimer.C
+			default:
+				setTitle(output, "⠋ FAKE_AGENT_WORKING")
+				_, _ = fmt.Fprintf(output, "FAKE_AGENT_PROMPT %s\n", strconv.Quote(line))
+				if os.Getenv("PIKA_GO_FAKE_AGENT_HANG_ON_PROMPT") != "1" || line == schedulerResumeMessage {
+					setTitle(output, "FAKE_AGENT_READY")
+				}
+				if autorun != nil {
+					autorunOnce.Do(func() { go autorun(ctx, output) })
+				}
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		_, _ = fmt.Fprintf(output, "FAKE_AGENT_ERROR %s\n", strconv.Quote(err.Error()))
-		return 1
-	}
-	return 0
 }
+
+const schedulerResumeMessage = "继续"
 
 func runOptimizationScenario(ctx context.Context, output io.Writer) {
 	timer := time.NewTimer(300 * time.Millisecond)

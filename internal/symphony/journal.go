@@ -179,6 +179,13 @@ func (e *Engine) applyJournalEvent(ctx context.Context, tx *sql.Tx, agentSession
 			status = CASE WHEN stopped_at IS NULL THEN 'running' ELSE status END WHERE id = ?`, event.UserMessage, turnID); err != nil {
 			return fmt.Errorf("record user prompt: %w", err)
 		}
+		generatedByScheduler, err := e.ObserveSchedulerResumePrompt(ctx, tx, agentSessionID, event.UserMessage, now)
+		if err != nil {
+			return err
+		}
+		if generatedByScheduler {
+			break
+		}
 		// A provider reports the prompt injected by followup delivery as another
 		// user message. BeginFollowUpDelivery moves the request to dispatching
 		// before sending that prompt, so keep that state protected just like the

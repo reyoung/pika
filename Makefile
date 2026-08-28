@@ -4,7 +4,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 PREFIX ?= /usr/local
 DESTDIR ?=
 
-.PHONY: build install fake-agent test-driver test verify herdr-integration crash-integration real-codex-integration real-cursor-integration real-mixed-provider-integration dist clean
+.PHONY: build install fake-agent test-driver test verify herdr-integration crash-integration real-codex-integration real-cursor-integration real-mixed-provider-integration real-pause-resume-integration dist clean
 
 build:
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o pika-go ./cmd/pika-go
@@ -45,6 +45,9 @@ real-cursor-integration: build
 
 real-mixed-provider-integration: build
 	PIKA_GO_REAL_MIXED_PROVIDER_INTEGRATION=1 PIKA_GO_BIN="$(CURDIR)/pika-go" $(GO) test ./internal/workruntime -run '^TestRealMixedProviderCompletesBothAlternatingMatrices$$' -v -count=1 -timeout 60m
+
+real-pause-resume-integration: build
+	PIKA_GO_REAL_CODEX_INTEGRATION=1 PIKA_GO_REAL_CURSOR_INTEGRATION=1 PIKA_GO_REAL_MIXED_PROVIDER_INTEGRATION=1 PIKA_GO_BIN="$(CURDIR)/pika-go" $(GO) test ./internal/workruntime -run '^TestReal(CodexCompletesDisposableOptimization|CursorCompletesDisposableOptimization|MixedProviderCompletesBothAlternatingMatrices)$$' -v -count=1 -timeout 90m
 
 dist: clean
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o dist/pika-go_darwin_arm64/pika-go ./cmd/pika-go

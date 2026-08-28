@@ -22,11 +22,19 @@ var publicCommandHelp = map[string]commandHelp{
 		details:  "Creates a durable sibling Workspace by default, opens Herdr with that directory as its cwd, and starts the daemon there. A Workspace already found at or above the current directory is resumed automatically.",
 		examples: []string{"pika-go kick-off", "pika-go kick-off --repository /path/to/repo --defaults", "pika-go kick-off --workspace /path/to/workspace"},
 	},
-	"resume": {
-		synopsis: "resume [WORKSPACE] [options]",
-		summary:  "Resume a durable Optimization Workspace in Herdr",
+	"open": {
+		synopsis: "open [WORKSPACE] [options]",
+		summary:  "Open a durable Optimization Workspace in Herdr",
 		details:  "When WORKSPACE is omitted, searches the current directory and its parents for workspace.json.",
-		examples: []string{"pika-go resume", "pika-go resume ../kernel-pika-workspace"},
+		examples: []string{"pika-go open", "pika-go open ../kernel-pika-workspace"},
+	},
+	"pause": {
+		synopsis: "pause [options]",
+		summary:  "Pause Agent scheduling and interrupt active Agent turns",
+	},
+	"resume": {
+		synopsis: "resume [options]",
+		summary:  "Resume Agent scheduling and continue active Agent Sessions",
 	},
 	"workspace": {
 		synopsis: "workspace legacy-list [options]\n  pika-go workspace import --instance ID --workspace PATH [options]",
@@ -158,7 +166,7 @@ func printUsage(output io.Writer) {
 
 Usage:
   pika-go kick-off [options]
-  pika-go resume [WORKSPACE] [options]
+  pika-go open [WORKSPACE] [options]
   pika-go COMMAND [options]
 
 Get started:
@@ -168,7 +176,9 @@ Get started:
 
 Workflow commands:
   kick-off         Create or resume an Optimization Workspace in Herdr
-  resume           Resume a durable Optimization Workspace in Herdr
+  open             Open a durable Optimization Workspace in Herdr
+  pause            Pause scheduling and interrupt active Agent turns
+  resume           Resume scheduling and continue active Agent Sessions
   status           Show the current optimization and daemon status
   draft-baseline   Start another baseline draft
   back-off         Reject the current verification or integration work

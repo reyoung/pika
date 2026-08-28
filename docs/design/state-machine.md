@@ -31,6 +31,19 @@ stateDiagram-v2
 
 `Optimizing` contains parallel Iteration Work and one serial Integration queue. An Optimization is not failed merely because one Attempt is rejected or cancelled.
 
+Scheduler state is orthogonal to the Optimization lifecycle:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running
+    Running --> Paused: pika-go pause
+    Paused --> Running: pika-go resume
+    Running --> Running: repeated resume (no-op)
+    Paused --> Paused: repeated pause (no-op)
+```
+
+Pause commits before its high-priority Session interrupt cycle and prevents later start or Follow-up delivery effects from being claimed. Resume sends `继续` to surviving pending-Work Sessions before releasing held effects. Neither transition completes, cancels, replaces, or otherwise advances Work. Waiting Follow-up deadlines shift by only the time since the latest of Scheduler pause, request creation, or observed pane activity; a waiting request for a resumed target is superseded.
+
 ## 2. Baseline Revision
 
 ```mermaid
@@ -164,6 +177,8 @@ The supplied `-m` message is persisted and included in the successor Context Bun
 ## 8. Cancellation and shutdown
 
 `cancel-work` is a Work transition and may close the selected Work's pane. `shutdown` is an Optimization transition and never cancels or kills active children.
+
+Shutdown is rejected while Scheduler state is `Paused`, and Scheduler control is rejected while Optimization state is `Draining`.
 
 The daemon's drain barrier is stricter than “no visible child pane”: it requires no pending Work, no pending or dispatching runtime effect, and no starting or running Agent Session. A recorder-only or damaged runtime may therefore remain draining indefinitely. When the barrier becomes true, the daemon stops accepting control requests, removes its Unix socket, and exits normally.
 

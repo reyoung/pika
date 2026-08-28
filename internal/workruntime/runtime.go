@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -68,6 +69,10 @@ type ProviderPrompter interface {
 	PromptForProvider(context.Context, string, string, string) error
 }
 
+type AgentKeySender interface {
+	SendAgentKeys(context.Context, string, []string) error
+}
+
 type Store interface {
 	RuntimeWork(context.Context, string) (symphony.RuntimeWork, error)
 	EnsureAgentSession(context.Context, symphony.AgentSession) error
@@ -79,6 +84,10 @@ type Store interface {
 	ReadAgentSession(context.Context, string) (symphony.AgentSession, error)
 	BeginFollowUpDelivery(context.Context, string, string) (string, string, bool, error)
 	FinishFollowUpDelivery(context.Context, string, bool) error
+	PendingSchedulerControlActions(context.Context, string) ([]symphony.SchedulerControlActionView, error)
+	BeginSchedulerControlAction(context.Context, string, string) (bool, error)
+	FinishSchedulerControlAction(context.Context, string, symphony.SchedulerControlActionStatus, string) error
+	CompleteSchedulerControlCycle(context.Context, string) error
 }
 
 type Sink struct {
@@ -106,8 +115,185 @@ func (s Sink) Dispatch(ctx context.Context, effect symphony.RuntimeEffect) error
 		return s.closeSession(ctx, effect)
 	case "followup.deliver_requested":
 		return s.deliverFollowUp(ctx, effect)
+	case "scheduler.control_requested":
+		return s.controlScheduler(ctx, effect)
 	default:
 		return fmt.Errorf("unsupported runtime effect %q", effect.Type)
+	}
+}
+
+func (s Sink) controlScheduler(ctx context.Context, effect symphony.RuntimeEffect) error {
+	var payload struct {
+		CycleID string `json:"cycle_id"`
+	}
+	if err := json.Unmarshal(effect.Payload, &payload); err != nil || payload.CycleID == "" {
+		return fmt.Errorf("decode Scheduler control effect %s: cycle_id is required", effect.ID)
+	}
+	actions, err := s.Store.PendingSchedulerControlActions(ctx, payload.CycleID)
+	if err != nil {
+		return err
+	}
+	snapshot, snapshotErr := s.Runtime.Snapshot(ctx)
+	registry := s.Providers
+	if registry == nil {
+		registry = provider.DefaultRegistry()
+	}
+	semaphore := make(chan struct{}, 32)
+	errorsFound := make(chan error, len(actions))
+	var group sync.WaitGroup
+	for _, action := range actions {
+		action := action
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				durableCtx := context.WithoutCancel(ctx)
+				begun, beginErr := s.Store.BeginSchedulerControlAction(durableCtx, action.ID, "unknown")
+				if beginErr != nil {
+					errorsFound <- beginErr
+					return
+				}
+				if begun {
+					if finishErr := s.Store.FinishSchedulerControlAction(durableCtx, action.ID, symphony.SchedulerActionFailed, "Scheduler control deadline exceeded before delivery"); finishErr != nil {
+						errorsFound <- finishErr
+					}
+				}
+				return
+			}
+			actionCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			durableCtx := context.WithoutCancel(ctx)
+			observed := "unknown"
+			observation, found := findObservation(snapshot, action.AgentName, "")
+			if found {
+				observed = strings.ToLower(observation.Status)
+			}
+			begun, beginErr := s.Store.BeginSchedulerControlAction(durableCtx, action.ID, observed)
+			if beginErr != nil {
+				errorsFound <- beginErr
+				return
+			}
+			if !begun {
+				return
+			}
+			finish := func(status symphony.SchedulerControlActionStatus, message string) {
+				if finishErr := s.Store.FinishSchedulerControlAction(durableCtx, action.ID, status, message); finishErr != nil {
+					errorsFound <- finishErr
+				}
+			}
+			if snapshotErr != nil {
+				finish(symphony.SchedulerActionFailed, "snapshot runtime: "+snapshotErr.Error())
+				return
+			}
+			if !found {
+				finish(symphony.SchedulerActionSkipped, "Agent Session is no longer present in the runtime")
+				return
+			}
+			session, readErr := s.Store.ReadAgentSession(durableCtx, action.AgentSessionID)
+			if readErr != nil || (session.Status != symphony.AgentSessionStarting && session.Status != symphony.AgentSessionRunning) {
+				finish(symphony.SchedulerActionSkipped, "Agent Session is no longer active")
+				return
+			}
+			if action.Action == "resume" {
+				work, workErr := s.Store.RuntimeWork(durableCtx, action.WorkID)
+				if workErr != nil || work.Work.Status != symphony.WorkPending || observed == "done" || observed == "exited" {
+					finish(symphony.SchedulerActionSkipped, "Agent Session or Work is no longer resumable")
+					return
+				}
+				if observed == "unknown" || observed == "" {
+					finish(symphony.SchedulerActionFailed, "runtime Agent status is unknown")
+					return
+				}
+				// An interrupt acknowledgement only proves key delivery. If resume
+				// immediately follows pause, wait for the interrupted turn to leave
+				// working before injecting the continuation; otherwise a provider TUI
+				// may acknowledge and silently discard the prompt during teardown.
+				if observed == "working" {
+					observation, found, observed, readErr = waitForPromptableAgent(actionCtx, s.Runtime, action.AgentName)
+					if readErr != nil {
+						finish(symphony.SchedulerActionFailed, readErr.Error())
+						return
+					}
+					if !found || observed == "done" || observed == "exited" {
+						finish(symphony.SchedulerActionSkipped, "Agent Session is no longer resumable")
+						return
+					}
+				}
+				if promptErr := promptProvider(actionCtx, s.Runtime, observation.PaneID, action.Message, action.AgentKind); promptErr != nil {
+					finish(symphony.SchedulerActionFailed, promptErr.Error())
+					return
+				}
+				finish(symphony.SchedulerActionSent, "")
+				return
+			}
+			if action.Action != "pause" {
+				finish(symphony.SchedulerActionFailed, "unsupported Scheduler control action")
+				return
+			}
+			switch observed {
+			case "idle", "done", "exited":
+				finish(symphony.SchedulerActionSkipped, "Agent has no active turn")
+				return
+			case "working", "blocked":
+			default:
+				finish(symphony.SchedulerActionFailed, "runtime Agent status is unknown")
+				return
+			}
+			keys, keysErr := registry.InterruptKeys(action.AgentKind)
+			if keysErr != nil {
+				finish(symphony.SchedulerActionFailed, keysErr.Error())
+				return
+			}
+			sender, ok := s.Runtime.(AgentKeySender)
+			if !ok {
+				finish(symphony.SchedulerActionFailed, "runtime does not support Agent key delivery")
+				return
+			}
+			if sendErr := sender.SendAgentKeys(actionCtx, action.AgentName, keys); sendErr != nil {
+				finish(symphony.SchedulerActionFailed, sendErr.Error())
+				return
+			}
+			finish(symphony.SchedulerActionSent, "")
+		}()
+	}
+	group.Wait()
+	close(errorsFound)
+	for actionErr := range errorsFound {
+		if actionErr != nil {
+			return actionErr
+		}
+	}
+	return s.Store.CompleteSchedulerControlCycle(context.WithoutCancel(ctx), payload.CycleID)
+}
+
+func waitForPromptableAgent(ctx context.Context, runtime Runtime, agentName string) (Observation, bool, string, error) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		snapshot, err := runtime.Snapshot(ctx)
+		if err != nil {
+			return Observation{}, false, "unknown", fmt.Errorf("snapshot runtime while waiting for interrupted Agent: %w", err)
+		}
+		observation, found := findObservation(snapshot, agentName, "")
+		if !found {
+			return Observation{}, false, "", nil
+		}
+		status := strings.ToLower(observation.Status)
+		switch status {
+		case "idle", "blocked", "done", "exited":
+			return observation, true, status, nil
+		case "working":
+		default:
+			return Observation{}, true, status, fmt.Errorf("runtime Agent status became %q while waiting for interrupt", status)
+		}
+		select {
+		case <-ctx.Done():
+			return Observation{}, true, status, fmt.Errorf("wait for interrupted Agent to become promptable: %w", ctx.Err())
+		case <-ticker.C:
+		}
 	}
 }
 

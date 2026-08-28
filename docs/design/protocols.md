@@ -46,10 +46,14 @@ Initial endpoints:
 | `POST /v1/back-offs` | apply the allowed earlier-phase transition with a message |
 | `POST /v1/works/{work_id}/cancel` | cancel the selected whole Work |
 | `POST /v1/shutdown` | enter graceful draining |
+| `POST /v1/scheduler/pause` | commit Scheduler Pause and synchronously interrupt active turns |
+| `POST /v1/scheduler/resume` | continue surviving Sessions, then release held scheduling |
 | `POST /v1/provider-events/{provider}` | ingest one provider hook event |
 | `POST /mcp` | role-scoped MCP JSON-RPC endpoint used by `mcp-proxy` |
 
 Every control response carries `X-Pika-Protocol-Version`. The CLI rejects a missing or different version before decoding or applying a response; `/v1/health` repeats the same version in its JSON body. Backup destinations must be absolute and absent. Backup is an operational snapshot and does not mutate the Optimization revision.
+
+Scheduler control was added in protocol version 2. Both requests embed the standard `Mutation`. Their response is `{ "receipt": ..., "control": ... }`, where `control` contains the durable cycle and every per-Session result. Delivery is bounded to 15 seconds per Session, 32 concurrent Sessions, and 60 seconds overall. The HTTP response remains successful for `partial` delivery because the Scheduler state is already committed; the CLI prints the response and exits non-zero when an action is `failed` or `delivery_unknown`.
 
 For a new instance, `POST /v1/init` requires the complete `configuration_toml`; an existing instance rejects a replacement candidate and keeps its file byte-for-byte. Initialization may take longer than ordinary control calls because it validates configuration, probes referenced provider executables and authentication, installs provider-owned integration resources, and prepares Git/SQLite state. The CLI therefore uses a 30-second HTTP ceiling for init while ordinary control calls keep the two-second ceiling. Provider-event ingestion has a separate ten-second ceiling because a single Hook may durably carry more than 16 MiB of complete Shell/MCP output.
 
@@ -82,6 +86,8 @@ pika-go status [--json]
 pika-go draft-baseline [--agent NAME]
 pika-go back-off -m MESSAGE [--agent NAME]
 pika-go cancel-work WORK_ID
+pika-go pause
+pika-go resume
 pika-go shutdown
 pika-go backup --output /absolute/path/to/snapshot.db
 pika-go edit-instruction NAME
@@ -103,7 +109,7 @@ pika-go hook cursor
 
 `init` automatically creates and starts the first Baseline Draft. `draft-baseline` is therefore a recovery/control command, not a normal extra stage: it is accepted only when Baseline Draft is the declared paused successor and always creates a fresh Agent Session. It returns `invalid_transition` if a draft is already active or the Optimization has advanced beyond the Baseline phase.
 
-Herdr metadata tokens and workspace/tab/pane IDs are not durable Optimization identity. `pika-go resume [WORKSPACE]` opens the immutable `workspace.json`, validates the source Git common-directory identity, creates a fresh Herdr layout, republishes metadata, and recovers SQLite/outbox state through fresh Agent Sessions. `kick-off` auto-discovers the same marker. Pika never guesses between multiple Workspaces, relocates one, or silently initializes over existing `pika.toml`/`pika.db`.
+Herdr metadata tokens and workspace/tab/pane IDs are not durable Optimization identity. `pika-go open [WORKSPACE]` opens the immutable `workspace.json`, validates the source Git common-directory identity, creates a fresh Herdr layout, republishes metadata, and recovers SQLite/outbox state through fresh Agent Sessions. `kick-off` auto-discovers the same marker. Pika never guesses between multiple Workspaces, relocates one, or silently initializes over existing `pika.toml`/`pika.db`.
 
 ## 4. Herdr socket adapter
 

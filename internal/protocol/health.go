@@ -4,7 +4,7 @@ import "fmt"
 
 const VersionHeader = "X-Pika-Protocol-Version"
 
-const Version = 1
+const Version = 2
 
 type Health struct {
 	Status          string `json:"status"`

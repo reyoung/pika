@@ -178,3 +178,10 @@ func (r *Runtime) SendKeys(ctx context.Context, paneID string, keys []string) er
 	}
 	return r.client.Call(ctx, "pane.send_keys", map[string]any{"pane_id": paneID, "keys": keys}, nil)
 }
+
+func (r *Runtime) SendAgentKeys(ctx context.Context, target string, keys []string) error {
+	if target == "" || len(keys) == 0 {
+		return errors.New("agent target and keys are required")
+	}
+	return r.client.Call(ctx, "agent.send_keys", map[string]any{"target": target, "keys": keys}, nil)
+}

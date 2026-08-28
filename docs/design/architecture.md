@@ -37,7 +37,7 @@ Optimization Workspace = one durable Optimization
 │       └── pika-go mcp-proxy ───────────► daemon         │
 │                                                         │
 │ control shell pane                                      │
-│   pika-go status | back-off | cancel-work | shutdown    │
+│   pika-go status | pause | resume | back-off | shutdown │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -138,7 +138,7 @@ There is no dynamic `register_role`, `enqueue_work`, `steer_work`, or `append_gu
 
 The normal user entrypoint runs from an existing Herdr shell pane. It validates Herdr and its fresh-Session configuration before creating anything. It then discovers an existing `workspace.json` or creates a sibling `<repository>-pika-workspace` with a stable random ID and `repo/` base linked worktree. The Source Repository must be clean for normal creation and is never assigned to an Agent. The plugin pane is opened with the durable Workspace as cwd plus `PIKA_GO_WORKSPACE`; its PATH is prefixed with the directory of the invoking executable, so the manifest's `pika-go daemon` entrypoint cannot accidentally resolve relative to the optimized repository.
 
-`kick-off` records the new replaceable Herdr workspace/tab/control-pane/daemon-pane IDs in `herdr/binding.json`, waits for daemon health, and sends a visible init command only when `pika.toml` is absent. Otherwise it resumes SQLite/outbox state. `pika-go resume [WORKSPACE]` is the explicit equivalent; running `kick-off` inside a Workspace auto-resumes it.
+`kick-off` records the new replaceable Herdr workspace/tab/control-pane/daemon-pane IDs in `herdr/binding.json`, waits for daemon health, and sends a visible init command only when `pika.toml` is absent. Otherwise it recovers SQLite/outbox state. `pika-go open [WORKSPACE]` is the explicit equivalent; running `kick-off` inside a Workspace auto-opens it.
 
 If daemon startup or initialization fails, the command reports the Workspace and daemon Pane IDs and leaves the visible Workspace open for diagnostics. It does not silently fall back to a non-persistent daemon or initialize the original Workspace.
 
@@ -194,6 +194,14 @@ Concurrency:
 When a terminal MCP transaction succeeds, the daemon closes that Agent pane or returns the designated reusable pane to its shell, records the Agent Session end, and immediately projects the next Work.
 
 ## 7. Human control
+
+### Scheduler Pause and resume
+
+`pika-go pause` durably stops new Agent Session starts and Follow-up delivery/promotion, freezes waiting Follow-up clocks, and interrupts every active `working` or `blocked` Pika Session through its Provider Adapter. It preserves Work, Agent Session, and pane identity. `idle` or `done` Sessions are safe skips; unknown runtime state is reported as a failed delivery and receives no unsafe key sequence.
+
+`pika-go resume` first sends the exact prompt `继续` to every still-active Session whose Work remains pending. Only after that bounded control cycle finishes does the daemon release held starts and Follow-up deliveries. Repeated pause or resume requests in the requested state are successful no-ops; they do not advance revision or resend control. A crash after delivery begins records `delivery_unknown` and recovery never blindly repeats that action.
+
+The `SchedulerController` is the deep Module that serializes the durable transition, exact high-priority control effect, and ordinary runtime dispatcher behind one interface. Per-Session delivery is limited to 15 seconds with at most 32 concurrent actions; the complete command is bounded at 60 seconds. Partial delivery remains a committed Scheduler transition and is exposed through status and the command response.
 
 ### Direct steering
 
@@ -274,6 +282,8 @@ Provider session IDs are retained in the journal but never used to resume. Recov
 6. After all three sets are empty, flush state, remove the Unix socket, and exit automatically.
 
 Shutdown does not send interrupt keys, cancel turns, or forcibly close child Agent panes. Consequently it may wait indefinitely for an Agent or user. Closing the daemon pane directly is a crash, not graceful shutdown; the next daemon start reconciles the remaining runtime.
+
+Graceful shutdown is rejected while the Scheduler is paused, because a paused Scheduler cannot drain held starts or Follow-up deliveries. Scheduler pause/resume is rejected after the Optimization enters `draining`.
 
 ## 11. Technology and distribution
 

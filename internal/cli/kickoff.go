@@ -19,8 +19,8 @@ import (
 
 const kickOffPluginID = "pika-go"
 
-func runResume(ctx context.Context, args []string, input io.Reader, stdout, stderr io.Writer) int {
-	flags := newCommandFlagSet("resume", stderr)
+func runOpen(ctx context.Context, args []string, input io.Reader, stdout, stderr io.Writer) int {
+	flags := newCommandFlagSet("open", stderr)
 	label := flags.String("label", "", "`LABEL` for the new Herdr workspace")
 	noFocus := flags.Bool("no-focus", false, "Create the Herdr workspace without switching to it")
 	timeout := flags.Duration("timeout", 30*time.Second, "Maximum time to wait for the daemon")
@@ -28,7 +28,7 @@ func runResume(ctx context.Context, args []string, input io.Reader, stdout, stde
 		return code
 	}
 	if flags.NArg() > 1 {
-		_, _ = fmt.Fprintln(stderr, "resume: at most one WORKSPACE path is supported")
+		_, _ = fmt.Fprintln(stderr, "open: at most one WORKSPACE path is supported")
 		return 2
 	}
 	root := ""
@@ -37,7 +37,7 @@ func runResume(ctx context.Context, args []string, input io.Reader, stdout, stde
 	} else {
 		workspace, err := optimizationworkspace.Discover("")
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "resume: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "open: %v\n", err)
 			return 2
 		}
 		root = workspace.Root

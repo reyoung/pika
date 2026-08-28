@@ -70,3 +70,49 @@ func TestRuntimeStartCanReturnBeforeInteractiveReadiness(t *testing.T) {
 		t.Fatalf("fixture server: %v", err)
 	}
 }
+
+func TestRuntimeSendAgentKeysTargetsDurableAgentName(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "pika-herdr-keys-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socketPath := filepath.Join(dir, "herdr.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverDone := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer connection.Close()
+		var request struct {
+			ID     string `json:"id"`
+			Method string `json:"method"`
+			Params struct {
+				Target string   `json:"target"`
+				Keys   []string `json:"keys"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(connection).Decode(&request); err != nil {
+			serverDone <- err
+			return
+		}
+		if request.Method != "agent.send_keys" || request.Params.Target != "pika-session" || len(request.Params.Keys) != 1 || request.Params.Keys[0] != "ctrl+c" {
+			serverDone <- &fixtureError{"request", request.Method + ":" + request.Params.Target}
+			return
+		}
+		serverDone <- json.NewEncoder(connection).Encode(map[string]any{"id": request.ID, "result": map[string]any{}})
+	}()
+	if err := herdr.NewRuntime(herdr.NewClient(socketPath)).SendAgentKeys(context.Background(), "pika-session", []string{"ctrl+c"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}

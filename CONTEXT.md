@@ -58,6 +58,10 @@ _Avoid_: Rollback, reset
 A request to stop one Work's logical continuation. It is distinct from interrupting a single Agent turn.
 _Avoid_: Cancel turn, shutdown
 
+**Scheduler Pause**:
+An operator-requested suspension of new Agent Session launches and Follow-up clocks that preserves current Work and Agent Session identities.
+_Avoid_: Optimization Pause, Cancel Work, shutdown
+
 ## Agent Contracts
 
 **Role**:

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/outbox"
 	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/toolapp"
@@ -16,14 +17,27 @@ import (
 )
 
 type fakeRuntime struct {
-	snapshot   workruntime.Snapshot
-	starts     []workruntime.StartSpec
-	closedPane []string
-	prompts    []struct{ pane, message string }
-	promptErr  error
+	snapshot      workruntime.Snapshot
+	snapshotCalls int
+	snapshotHook  func(int, *workruntime.Snapshot)
+	starts        []workruntime.StartSpec
+	closedPane    []string
+	prompts       []struct{ pane, message string }
+	promptErr     error
+	keySends      []struct {
+		target string
+		keys   []string
+	}
+	keyErr error
 }
 
-func (r *fakeRuntime) Snapshot(context.Context) (workruntime.Snapshot, error) { return r.snapshot, nil }
+func (r *fakeRuntime) Snapshot(context.Context) (workruntime.Snapshot, error) {
+	r.snapshotCalls++
+	if r.snapshotHook != nil {
+		r.snapshotHook(r.snapshotCalls, &r.snapshot)
+	}
+	return r.snapshot, nil
+}
 func (r *fakeRuntime) Start(_ context.Context, spec workruntime.StartSpec) (workruntime.Observation, error) {
 	r.starts = append(r.starts, spec)
 	observation := workruntime.Observation{AgentName: spec.AgentName, AgentKind: spec.AgentKind, WorkspaceID: "w1", TabID: "w1:t1", PaneID: "w1:p2", TerminalID: "term-1", Status: "idle"}
@@ -37,6 +51,101 @@ func (r *fakeRuntime) Prompt(_ context.Context, pane, message string) error {
 func (r *fakeRuntime) Close(_ context.Context, paneID string) error {
 	r.closedPane = append(r.closedPane, paneID)
 	return nil
+}
+func (r *fakeRuntime) SendAgentKeys(_ context.Context, target string, keys []string) error {
+	r.keySends = append(r.keySends, struct {
+		target string
+		keys   []string
+	}{target: target, keys: append([]string(nil), keys...)})
+	return r.keyErr
+}
+
+func TestSchedulerPauseInterruptsAndResumeContinuesSameSession(t *testing.T) {
+	ctx := context.Background()
+	engine, _, startEffect := initializedRuntime(t, ctx)
+	runtime := &fakeRuntime{}
+	sink := workruntime.Sink{Store: engine, Runtime: runtime, AgentKind: "codex", Providers: provider.DefaultRegistry()}
+	if err := sink.Dispatch(ctx, startEffect); err != nil {
+		t.Fatal(err)
+	}
+	runtime.snapshot.Sessions[0].Status = "working"
+	dispatcher := outbox.Dispatcher{Store: engine, Sink: sink}
+	pause, err := engine.Apply(ctx, symphony.PauseScheduler{Meta: symphony.CommandMeta{RequestID: "pause"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.DispatchEffect(ctx, schedulerEffectID(t, pause)); err != nil {
+		t.Fatal(err)
+	}
+	paused, _ := engine.Inspect(ctx, symphony.Status{})
+	if len(runtime.keySends) != 1 || runtime.keySends[0].target == "" || len(runtime.keySends[0].keys) != 1 || runtime.keySends[0].keys[0] != "ctrl+c" {
+		t.Fatalf("interrupt deliveries=%+v", runtime.keySends)
+	}
+	if paused.Scheduler.Latest == nil || paused.Scheduler.Latest.Status != "complete" || paused.Scheduler.Latest.Actions[0].Status != symphony.SchedulerActionSent {
+		t.Fatalf("pause cycle=%+v", paused.Scheduler.Latest)
+	}
+	sessionID := paused.Scheduler.Latest.Actions[0].AgentSessionID
+
+	resumeSnapshots := runtime.snapshotCalls
+	runtime.snapshotHook = func(call int, snapshot *workruntime.Snapshot) {
+		// The first resume snapshot still sees the interrupted turn as working;
+		// the next observation sees the settled prompt.
+		if call > resumeSnapshots+1 {
+			snapshot.Sessions[0].Status = "idle"
+		}
+	}
+	resume, err := engine.Apply(ctx, symphony.ResumeScheduler{Meta: symphony.CommandMeta{RequestID: "resume"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.DispatchEffect(ctx, schedulerEffectID(t, resume)); err != nil {
+		t.Fatal(err)
+	}
+	resumed, _ := engine.Inspect(ctx, symphony.Status{})
+	if len(runtime.prompts) != 1 || runtime.prompts[0].message != "继续" {
+		t.Fatalf("resume prompts=%+v", runtime.prompts)
+	}
+	if resumed.Scheduler.Latest == nil || resumed.Scheduler.Latest.Actions[0].AgentSessionID != sessionID || resumed.Scheduler.Latest.Actions[0].Status != symphony.SchedulerActionSent {
+		t.Fatalf("resume cycle=%+v", resumed.Scheduler.Latest)
+	}
+	active, err := engine.ActiveAgentSessions(ctx)
+	if err != nil || len(active) != 1 || active[0].Session.ID != sessionID {
+		t.Fatalf("active Session after resume=%+v err=%v", active, err)
+	}
+}
+
+func TestSchedulerUnknownRuntimeStatusIsReportedAsPartialWithoutUnsafeKeys(t *testing.T) {
+	ctx := context.Background()
+	engine, _, startEffect := initializedRuntime(t, ctx)
+	runtime := &fakeRuntime{}
+	sink := workruntime.Sink{Store: engine, Runtime: runtime, AgentKind: "codex", Providers: provider.DefaultRegistry()}
+	if err := sink.Dispatch(ctx, startEffect); err != nil {
+		t.Fatal(err)
+	}
+	runtime.snapshot.Sessions[0].Status = "unknown"
+	pause, err := engine.Apply(ctx, symphony.PauseScheduler{Meta: symphony.CommandMeta{RequestID: "pause"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (outbox.Dispatcher{Store: engine, Sink: sink}).DispatchEffect(ctx, schedulerEffectID(t, pause)); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := engine.Inspect(ctx, symphony.Status{})
+	if len(runtime.keySends) != 0 || view.Scheduler.Latest == nil || view.Scheduler.Latest.Status != "partial" ||
+		view.Scheduler.Latest.Actions[0].Status != symphony.SchedulerActionFailed {
+		t.Fatalf("keys=%+v cycle=%+v", runtime.keySends, view.Scheduler.Latest)
+	}
+}
+
+func schedulerEffectID(t *testing.T, receipt symphony.Receipt) string {
+	t.Helper()
+	var result struct {
+		EffectID string `json:"effect_id"`
+	}
+	if err := json.Unmarshal(receipt.Result, &result); err != nil || result.EffectID == "" {
+		t.Fatalf("Scheduler receipt=%s err=%v", receipt.Result, err)
+	}
+	return result.EffectID
 }
 
 func TestStartEffectReattachesAfterUncertainAcknowledgement(t *testing.T) {

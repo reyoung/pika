@@ -299,6 +299,13 @@ func (r *HerdrRuntime) PromptForProvider(ctx context.Context, target, message, p
 	return nil
 }
 
+func (r *HerdrRuntime) SendAgentKeys(ctx context.Context, target string, keys []string) error {
+	if r.Runtime == nil {
+		return errors.New("Herdr runtime is required")
+	}
+	return r.Runtime.SendAgentKeys(ctx, target, keys)
+}
+
 func (r *HerdrRuntime) Close(ctx context.Context, paneID string) error {
 	if r.Runtime == nil {
 		return errors.New("Herdr runtime is required")

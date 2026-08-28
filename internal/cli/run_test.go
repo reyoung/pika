@@ -412,11 +412,11 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := cli.Run(context.Background(), []string{"resume", workspace.Root}, nil, &stdout, &stderr); code != 0 {
-		t.Fatalf("resume exit = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	if code := cli.Run(context.Background(), []string{"open", workspace.Root}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("open exit = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "already running in Herdr workspace w-new") {
-		t.Fatalf("resume stdout = %q", stdout.String())
+		t.Fatalf("open stdout = %q", stdout.String())
 	}
 	var resumedMethods []string
 	for range 5 {
@@ -470,8 +470,8 @@ func TestStatusReportsHealthyDaemon(t *testing.T) {
 	if got.Version == "" {
 		t.Fatal("version is empty")
 	}
-	if got.ProtocolVersion != 1 {
-		t.Fatalf("protocol_version = %d, want 1", got.ProtocolVersion)
+	if got.ProtocolVersion != 2 {
+		t.Fatalf("protocol_version = %d, want 2", got.ProtocolVersion)
 	}
 
 	cancel()
@@ -1173,6 +1173,66 @@ func TestCLIBackOffTraversesDaemonAndSQLite(t *testing.T) {
 	cancel()
 	if err := <-daemonDone; err != nil {
 		t.Fatalf("daemon exit: %v", err)
+	}
+}
+
+func TestCLISchedulerControlUsesNewCommandsAndFailsOnPartialDelivery(t *testing.T) {
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-scheduler-control-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "pika-go.sock")
+	ctx := context.Background()
+	engine, err := symphony.Open(ctx, filepath.Join(t.TempDir(), "pika.db"), symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	if _, err := engine.Apply(ctx, symphony.Init{Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: "optimization", Repository: "/repo"}); err != nil {
+		t.Fatal(err)
+	}
+	commands := make(chan symphony.Command, 2)
+	serveCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Serve(serveCtx, daemon.Config{
+			SocketPath: socketPath, Version: "test", InstanceID: "optimization", Symphony: engine,
+			SchedulerControl: func(_ context.Context, command symphony.Command) (protocol.SchedulerControlResponse, error) {
+				commands <- command
+				response := protocol.SchedulerControlResponse{Receipt: symphony.Receipt{ID: "receipt", RequestID: "request", Revision: 2}}
+				switch command.(type) {
+				case symphony.PauseScheduler:
+					response.Control = symphony.SchedulerControlCycleView{ID: "pause-cycle", Action: "pause", Status: "complete"}
+				case symphony.ResumeScheduler:
+					response.Control = symphony.SchedulerControlCycleView{ID: "resume-cycle", Action: "resume", Status: "partial", Actions: []symphony.SchedulerControlActionView{{ID: "action", Status: symphony.SchedulerActionDeliveryUnknown}}}
+				}
+				return response, nil
+			},
+		})
+	}()
+	waitForHealth(t, socketPath, &bytes.Buffer{})
+	var pauseOut, pauseErr bytes.Buffer
+	if code := cli.Run(ctx, []string{"pause", "--socket", socketPath, "--request-id", "pause"}, nil, &pauseOut, &pauseErr); code != 0 {
+		t.Fatalf("pause exit=%d out=%q err=%q", code, pauseOut.String(), pauseErr.String())
+	}
+	if _, ok := (<-commands).(symphony.PauseScheduler); !ok {
+		t.Fatal("pause endpoint did not receive PauseScheduler")
+	}
+	var resumeOut, resumeErr bytes.Buffer
+	if code := cli.Run(ctx, []string{"resume", "--socket", socketPath, "--request-id", "resume"}, nil, &resumeOut, &resumeErr); code != 1 {
+		t.Fatalf("resume exit=%d out=%q err=%q", code, resumeOut.String(), resumeErr.String())
+	}
+	if _, ok := (<-commands).(symphony.ResumeScheduler); !ok {
+		t.Fatal("resume endpoint did not receive ResumeScheduler")
+	}
+	if !strings.Contains(resumeOut.String(), "delivery_unknown") {
+		t.Fatalf("partial response was not printed: %q", resumeOut.String())
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

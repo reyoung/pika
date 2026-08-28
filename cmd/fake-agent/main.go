@@ -10,7 +10,10 @@ import (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
-	os.Exit(fakeagent.Run(ctx, os.Stdin, os.Stdout))
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	defer signal.Stop(interrupts)
+	os.Exit(fakeagent.RunWithInterrupts(ctx, os.Stdin, os.Stdout, interrupts))
 }
