@@ -10,6 +10,8 @@ import (
 
 const schemaVersion = 17
 
+func CurrentSchemaVersion() int { return schemaVersion }
+
 const schemaV1 = `
 CREATE TABLE optimizations (
     id TEXT PRIMARY KEY,

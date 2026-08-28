@@ -41,6 +41,7 @@ Initial endpoints:
 | `GET /v1/status` | Optimization, active Work, queue, pane, session, and drain view |
 | `GET /v1/init/options` | report whether configuration exists and return the selectable backend/model/effort catalog from successfully probed providers without writing state |
 | `POST /v1/backups` | create and validate a new online SQLite snapshot at an absolute path |
+| `POST /v1/update` | validate a staged local generation and begin zero-downtime process handoff |
 | `POST /v1/init` | initialize and bind the caller pane |
 | `POST /v1/baseline-drafts` | explicitly start a fresh Baseline Draft from an allowed paused state |
 | `POST /v1/back-offs` | apply the allowed earlier-phase transition with a message |
@@ -54,6 +55,8 @@ Initial endpoints:
 Every control response carries `X-Pika-Protocol-Version`. The CLI rejects a missing or different version before decoding or applying a response; `/v1/health` repeats the same version in its JSON body. Backup destinations must be absolute and absent. Backup is an operational snapshot and does not mutate the Optimization revision.
 
 Scheduler control was added in protocol version 2. Both requests embed the standard `Mutation`. Their response is `{ "receipt": ..., "control": ... }`, where `control` contains the durable cycle and every per-Session result. Delivery is bounded to 15 seconds per Session, 32 concurrent Sessions, and 60 seconds overall. The HTTP response remains successful for `partial` delivery because the Scheduler state is already committed; the CLI prints the response and exits non-zero when an action is `failed` or `delivery_unknown`.
+
+`/v1/health` also reports the process PID, binary digest, and handoff protocol. Hot update is process-level control state rather than an Optimization domain transition: durable progress is written to `runtime/daemon/update.json`, while the domain remains available through the inherited listener. The private parent/successor channel permits only `prepared`, `activate`, `ready`, and `commit`; it is never exposed on the public socket.
 
 For a new instance, `POST /v1/init` requires the complete `configuration_toml`; an existing instance rejects a replacement candidate and keeps its file byte-for-byte. Initialization may take longer than ordinary control calls because it validates configuration, probes referenced provider executables and authentication, installs provider-owned integration resources, and prepares Git/SQLite state. The CLI therefore uses a 30-second HTTP ceiling for init while ordinary control calls keep the two-second ceiling. Provider-event ingestion has a separate ten-second ceiling because a single Hook may durably carry more than 16 MiB of complete Shell/MCP output.
 

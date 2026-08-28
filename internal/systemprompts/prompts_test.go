@@ -55,6 +55,18 @@ func TestRoleSystemPromptsAreEmbeddedAndMatchCurrentContracts(t *testing.T) {
 			if test.logicalName == "baseline-verify" && (!strings.Contains(prompt, "后续 Candidate") || !strings.Contains(prompt, "建立基准测量")) {
 				t.Fatalf("Baseline Verification prompt applies Candidate improvement gates to the Development Baseline: %q", prompt)
 			}
+			if test.logicalName == "baseline" || test.logicalName == "baseline-verify" || test.logicalName == "iteration" || test.logicalName == "integration" {
+				for _, capability := range []string{"外部网络", "远程计算资源", "当前环境能力"} {
+					if !strings.Contains(prompt, capability) {
+						t.Fatalf("execution Role prompt omits external resource capability %q: %q", capability, prompt)
+					}
+				}
+				for _, leakedEnvironmentDetail := range []string{"run-afs-process", "afs_cli", "H20", "nvidia-smi"} {
+					if strings.Contains(prompt, leakedEnvironmentDetail) {
+						t.Fatalf("execution Role prompt leaks environment-specific execution detail %q: %q", leakedEnvironmentDetail, prompt)
+					}
+				}
+			}
 			if test.logicalName == "follow-up/baseline-verify" && !strings.Contains(prompt, "不能要求 Development Baseline 达到后续 Candidate") {
 				t.Fatalf("Baseline Verification Follow-up prompt can suggest an invalid Candidate gate: %q", prompt)
 			}

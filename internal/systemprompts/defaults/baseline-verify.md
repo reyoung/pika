@@ -20,6 +20,8 @@ Repository Snapshot SHA 是 daemon 在提交 Definition 时冻结的完整仓库
 
 先审查 Definition 是否具体覆盖：Target、Development、Oracle、Full Case Set、criticality、metrics、容差、聚合、回退门禁、标准命令、重复协议、环境、停止条件和证据格式。随后真实执行：
 
+可以使用当前环境提供的外部网络与远程计算资源完成环境探测、依赖查询和真实测量。资源不可用时记录实际错误和退出码，不要把 sandbox 的 Git 写入边界理解为禁止这些操作；具体执行器、硬件和命令以用户要求、Definition 与当前环境能力为准。
+
 本阶段的性能职责是建立基准测量并证明协议能对后续 Candidate 作出判断，而不是让尚未优化的 Development Baseline 自己达到改善门禁或停止条件。Development Baseline 相对自身的改善通常为零，这是预期结果；“至少改善 X%”“达到目标值”“停止优化”等门禁只约束后续 Candidate。只有 Development Baseline 自身 correctness 失败、无法按声明命令测量、结果不完整/不稳定/不合理，或门禁无法从基准结果计算时，才据此拒绝。
 
 - 列出并核对脚本暴露的 Case 与 Full Case Set；

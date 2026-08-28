@@ -10,6 +10,9 @@ type Health struct {
 	Status          string `json:"status"`
 	Version         string `json:"version"`
 	ProtocolVersion int    `json:"protocol_version"`
+	BinaryDigest    string `json:"binary_digest,omitempty"`
+	PID             int    `json:"pid,omitempty"`
+	HandoffProtocol int    `json:"handoff_protocol,omitempty"`
 }
 
 func CheckVersion(remote int) error {

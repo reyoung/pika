@@ -1,4 +1,5 @@
 /pika-go
+/pika-go-hot
 /fake-agent
 /dist/
 *.sock

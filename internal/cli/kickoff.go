@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/reyoung/pika-go/internal/control"
+	"github.com/reyoung/pika-go/internal/daemonupdate"
 	"github.com/reyoung/pika-go/internal/herdr"
 	"github.com/reyoung/pika-go/internal/instance"
 	"github.com/reyoung/pika-go/internal/optimizationworkspace"
@@ -212,6 +213,12 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 		_, _ = fmt.Fprintf(stderr, "kick-off: resolve current pika-go executable path: %v\n", err)
 		return 1
 	}
+	currentGeneration, err := daemonupdate.EnsureCurrent(ctx, workspace.Root, pikaExecutable, Version)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "kick-off: bootstrap managed daemon generation: %v\n", err)
+		return 1
+	}
+	pikaExecutable = currentGeneration.Path
 	panePath := strings.Join([]string{filepath.Dir(pikaExecutable), os.Getenv("PATH")}, string(os.PathListSeparator))
 	var opened struct {
 		PluginPane struct {
