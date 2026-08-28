@@ -1,11 +1,22 @@
 GO ?= go
 VERSION ?= dev
 LDFLAGS := -s -w -X main.version=$(VERSION)
+PREFIX ?=
+DESTDIR ?=
 
-.PHONY: build fake-agent test-driver test verify herdr-integration crash-integration real-codex-integration real-cursor-integration real-mixed-provider-integration dist clean
+.PHONY: build install fake-agent test-driver test verify herdr-integration crash-integration real-codex-integration real-cursor-integration real-mixed-provider-integration dist clean
 
 build:
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o pika-go ./cmd/pika-go
+
+# Place the native binary at ./pika-go so Herdr's pane command works after
+# `herdr plugin install`. Set PREFIX to also copy the CLI onto PATH:
+#   make install PREFIX=/usr/local
+install: build
+	@if [ -n "$(PREFIX)" ]; then \
+		install -d "$(DESTDIR)$(PREFIX)/bin"; \
+		install -m 755 pika-go "$(DESTDIR)$(PREFIX)/bin/pika-go"; \
+	fi
 
 fake-agent:
 	$(GO) build -trimpath -o fake-agent ./cmd/fake-agent

@@ -26,6 +26,7 @@ import (
 	"github.com/reyoung/pika-go/internal/instructions"
 	"github.com/reyoung/pika-go/internal/mcp"
 	"github.com/reyoung/pika-go/internal/outbox"
+	"github.com/reyoung/pika-go/internal/plugininstall"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/symphony"
@@ -48,6 +49,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 
 	switch args[0] {
+	case "install":
+		return runInstall(ctx, args[1:], stdin, stdout, stderr)
 	case "daemon":
 		return runDaemon(ctx, args[1:], stderr)
 	case "status":
@@ -83,6 +86,58 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		printUsage(stderr)
 		return 2
 	}
+}
+
+func runInstall(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("install", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	installDir := flags.String("dir", "", "Absolute plugin installation directory")
+	herdrExecutable := flags.String("herdr", "", "Herdr executable path")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "install: positional arguments are not supported")
+		return 2
+	}
+	if *installDir == "" {
+		resolved, err := plugininstall.DefaultDir()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "install: %v\n", err)
+			return 1
+		}
+		*installDir = resolved
+	}
+	if !filepath.IsAbs(*installDir) {
+		_, _ = fmt.Fprintln(stderr, "install: --dir must be an absolute path")
+		return 2
+	}
+	if *herdrExecutable == "" {
+		*herdrExecutable = os.Getenv("HERDR_BIN_PATH")
+	}
+	if *herdrExecutable == "" {
+		*herdrExecutable = "herdr"
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "install: resolve pika-go executable: %v\n", err)
+		return 1
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "install: resolve pika-go executable: %v\n", err)
+		return 1
+	}
+	result, err := plugininstall.Install(ctx, plugininstall.Options{
+		Executable: executable, HerdrExecutable: *herdrExecutable, InstallDir: filepath.Clean(*installDir), Version: Version,
+		Stdin: stdin, Stdout: stdout, Stderr: stderr,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "install: %v\n", err)
+		return 1
+	}
+	_, _ = fmt.Fprintf(stdout, "installed pika-go %s to %s\n", Version, result.InstallDir)
+	return 0
 }
 
 func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
@@ -999,7 +1054,7 @@ func runBackup(ctx context.Context, args []string, stdout, stderr io.Writer) int
 }
 
 func printUsage(w io.Writer) {
-	_, _ = fmt.Fprintln(w, "usage: pika-go <daemon|init|status|draft-baseline|back-off|cancel-work|shutdown|backup|edit-instruction|mcp-proxy|version> [options]")
+	_, _ = fmt.Fprintln(w, "usage: pika-go <install|daemon|init|status|draft-baseline|back-off|cancel-work|shutdown|backup|edit-instruction|mcp-proxy|version> [options]")
 }
 
 func mutationFlags(flags *flag.FlagSet) (socketPath, requestID *string, expectedRevision *int64) {

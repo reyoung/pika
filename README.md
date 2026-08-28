@@ -9,12 +9,23 @@ Role System Prompts are immutable resources embedded in the binary. At each fres
 ## Build and verify
 
 ```bash
-make build
+make install
 make verify
 make real-codex-integration  # opt-in; consumes model quota
 make real-cursor-integration  # opt-in; consumes model quota
 make real-mixed-provider-integration  # opt-in; consumes both providers' quota
 ```
+
+`make install` compiles the native `pika-go` binary into the plugin root. That is the Herdr plugin build step. Pass `PREFIX=/usr/local` to also copy the CLI into `$(PREFIX)/bin`.
+
+For a standalone binary installation, run:
+
+```bash
+./pika-go install
+herdr plugin pane open --plugin pika-go --entrypoint symphony
+```
+
+`pika-go install` copies the running binary and its embedded Herdr manifest to `$XDG_DATA_HOME/pika-go/plugin`, or `~/.local/share/pika-go/plugin` when `XDG_DATA_HOME` is unset, then registers that stable directory with Herdr. Use `--dir <absolute-path>` to override the destination or `--herdr <path>` to select a Herdr executable.
 
 Build all first-release targets:
 
@@ -27,7 +38,7 @@ make dist VERSION=0.1.0-dev
 ## Local Herdr smoke
 
 ```bash
-make build
+make install
 herdr plugin link .
 herdr plugin pane open --plugin pika-go --entrypoint symphony
 ./pika-go status --json

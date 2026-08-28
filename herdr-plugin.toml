@@ -5,6 +5,9 @@ min_herdr_version = "0.8.2"
 description = "Long-running automatic optimization orchestrator"
 platforms = ["linux", "macos"]
 
+[[build]]
+command = ["make", "install"]
+
 [[panes]]
 id = "symphony"
 title = "Pika-Go Symphony"

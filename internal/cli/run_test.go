@@ -24,6 +24,16 @@ import (
 	"github.com/reyoung/pika-go/internal/symphony"
 )
 
+func TestInstallRejectsRelativeDirectory(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"install", "--dir", "relative"}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("install exit = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--dir must be an absolute path") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestStatusReportsHealthyDaemon(t *testing.T) {
 	t.Parallel()
 
