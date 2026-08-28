@@ -66,14 +66,6 @@ func TestFollowUpFakeClockActivityGenerationAndSubmission(t *testing.T) {
 	}
 	grant := runningGrantForWork(t, ctx, engine, generator, "follow-up-session")
 	app := toolapp.Application{Store: engine}
-	contextResult, err := app.Invoke(ctx, grant.Token, toolapp.Call{Name: "get_context", Arguments: json.RawMessage(`{}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	contextValue := contextResult.Value.(map[string]any)
-	if contextValue["follow_up_target_role"] != symphony.RoleBaselineVerification || contextValue["terminal_operation"] != "submit_followup_message" {
-		t.Fatalf("Follow-up context = %+v", contextValue)
-	}
 	result, err := app.Invoke(ctx, grant.Token, toolapp.Call{Name: "submit_followup_message", Arguments: json.RawMessage(`{"idempotency_key":"follow-up-message","message":"请继续完成全量验证并调用 finish_baseline_verification。"}`)})
 	if err != nil || !result.Terminal {
 		t.Fatalf("submit Follow-up: result=%+v err=%v", result, err)

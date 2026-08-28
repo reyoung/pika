@@ -147,10 +147,10 @@ At Agent Session creation, Pika records:
 The rendered System Prompt has three ordered layers:
 
 1. immutable Role policy embedded in the binary;
-2. daemon-rendered dynamic System Context from committed Work state;
+2. the frozen Context Bundle locator, SHA-256 digests, and complete versioned JSON Schemas for `context.json` and each `messages.jsonl` record;
 3. the current user instruction overlay, appended only when non-empty.
 
-The dynamic layer includes the exact Work/generation, Baseline Revision, Definition digest, submitted Repository Snapshot SHA, assigned repository, terminal MCP, and Role-specific Attempt/Best/Integration/Follow-up identities. A successor Baseline Draft also receives the predecessor Revision's failure kind, reason, and requested changes; full verification evidence remains behind `get_context`. Larger and more volatile facts remain behind `get_context`. The complete three-layer prompt is frozen with the Agent Session. Editing a file affects only later Sessions; retrying the same Session reuses its stored prompt byte-for-byte, while a fresh recovery Session reads the latest overlay and current committed Work facts.
+`context.json` contains the exact Work/generation, Baseline Revision, Definition digest, submitted Repository Snapshot SHA, assigned repository, terminal operation, and Role-specific Attempt/Best/Integration/Follow-up identities. `messages.jsonl` contains the complete normalized cross-Session history for that Work, including full observable tool and shell payloads. A Follow-up generator receives the target Work's projection and history. The complete three-layer prompt and both files are frozen with the Agent Session. Editing an overlay affects only later Sessions; retrying the same Session verifies and reuses its stored prompt and Context Bundle byte-for-byte, while a fresh recovery Session snapshots the latest overlay and committed facts.
 
 ## 6. Codex managed profile
 

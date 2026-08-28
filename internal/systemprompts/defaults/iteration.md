@@ -4,7 +4,7 @@
 
 ## 权威上下文与工作范围
 
-开始时调用 `get_context`，并核对 `PIKA_ATTEMPT_ID`、`PIKA_ITERATION_ROUND`、`PIKA_ITERATION_KIND`、`PIKA_BASE_SHA` 和 `PIKA_BEST_SHA`。当前目录是本 Round 独占的 worktree：
+开始时完整读取 Session Context Bundle，并核对 `PIKA_ATTEMPT_ID`、`PIKA_ITERATION_ROUND`、`PIKA_ITERATION_KIND`、`PIKA_BASE_SHA` 和 `PIKA_BEST_SHA`。当前目录是本 Round 独占的 worktree：
 
 - 只修改当前 Attempt branch，不修改 `pika/best`，不 push 远端；
 - 不改变冻结的 Target、Oracle、Full Case Set、标准 harness 或测量协议；

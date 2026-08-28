@@ -37,7 +37,7 @@ func TestPreparationFreezesInstructionForOneSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	preparer := activation.Preparer{Store: engine, InstructionRoot: instructionRoot, SocketPath: "/tmp/pika.sock"}
+	preparer := activation.Preparer{Store: engine, InstructionRoot: instructionRoot, ContextsRoot: filepath.Join(t.TempDir(), "contexts"), SocketPath: "/tmp/pika.sock"}
 	first, err := preparer.Prepare(ctx, session, work)
 	if err != nil {
 		t.Fatalf("first preparation: %v", err)
@@ -47,6 +47,24 @@ func TestPreparationFreezesInstructionForOneSession(t *testing.T) {
 	}
 	if strings.Contains(first.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], "用户追加 Instructions") {
 		t.Fatalf("empty default instruction created an overlay: %s", first.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"])
+	}
+	contextPath, messagesPath := first.Environment["PIKA_CONTEXT_PATH"], first.Environment["PIKA_MESSAGES_PATH"]
+	if contextPath == "" || messagesPath == "" || first.Environment["PIKA_CONTEXT_SHA256"] == "" || first.Environment["PIKA_MESSAGES_SHA256"] == "" {
+		t.Fatalf("Context Bundle environment is incomplete: %+v", first.Environment)
+	}
+	if _, err := os.Stat(contextPath); err != nil {
+		t.Fatalf("context.json was not materialized: %v", err)
+	}
+	if _, err := os.Stat(messagesPath); err != nil {
+		t.Fatalf("messages.jsonl was not materialized: %v", err)
+	}
+	for _, want := range []string{contextPath, messagesPath, "json-schema.org/draft/2020-12/schema", "完整读取"} {
+		if !strings.Contains(first.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], want) {
+			t.Fatalf("frozen System Prompt omits Context Bundle contract %q", want)
+		}
+	}
+	if strings.Contains(first.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], "get_context") {
+		t.Fatal("frozen System Prompt still references removed get_context")
 	}
 	path, _ := instructions.Path(instructionRoot, "baseline")
 	if err := os.WriteFile(path, []byte("changed after session creation\n"), 0o600); err != nil {
@@ -61,6 +79,9 @@ func TestPreparationFreezesInstructionForOneSession(t *testing.T) {
 	}
 	if retried.Environment["PIKA_MCP_GRANT"] == first.Environment["PIKA_MCP_GRANT"] {
 		t.Fatal("retry did not rotate the raw grant")
+	}
+	if retried.Environment["PIKA_CONTEXT_PATH"] != contextPath || retried.Environment["PIKA_CONTEXT_SHA256"] != first.Environment["PIKA_CONTEXT_SHA256"] {
+		t.Fatal("same Agent Session did not reuse its frozen Context Bundle")
 	}
 	freshSession := session
 	freshSession.ID = "fresh-session"
@@ -79,6 +100,9 @@ func TestPreparationFreezesInstructionForOneSession(t *testing.T) {
 		!strings.Contains(fresh.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], "## 用户追加 Instructions") ||
 		!strings.Contains(fresh.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], "changed after session creation") {
 		t.Fatalf("fresh session did not combine immutable System Prompt and current user instructions: %s", fresh.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"])
+	}
+	if fresh.Environment["PIKA_CONTEXT_PATH"] == contextPath {
+		t.Fatal("fresh Agent Session reused the previous Session Context Bundle path")
 	}
 }
 
@@ -112,7 +136,7 @@ reasoning_effort = "xhigh"
 		t.Fatal(err)
 	}
 	work, _ := engine.RuntimeWork(ctx, session.WorkID)
-	prepared, err := (activation.Preparer{Store: engine, InstructionRoot: instructionRoot, AgentConfigPath: configPath}).Prepare(ctx, session, work)
+	prepared, err := (activation.Preparer{Store: engine, InstructionRoot: instructionRoot, ContextsRoot: filepath.Join(root, "contexts"), AgentConfigPath: configPath}).Prepare(ctx, session, work)
 	if err != nil {
 		t.Fatal(err)
 	}

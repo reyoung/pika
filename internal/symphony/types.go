@@ -442,6 +442,26 @@ type InstructionSnapshot struct {
 	ActivationSHA256 string `json:"activation_sha256"`
 }
 
+type ContextSnapshot struct {
+	AgentSessionID       string `json:"agent_session_id"`
+	SchemaVersion        int64  `json:"schema_version"`
+	ContextRelativePath  string `json:"context_relative_path"`
+	ContextSHA256        string `json:"context_sha256"`
+	ContextBytes         int64  `json:"context_bytes"`
+	MessagesRelativePath string `json:"messages_relative_path"`
+	MessagesSHA256       string `json:"messages_sha256"`
+	MessagesBytes        int64  `json:"messages_bytes"`
+	MessageRecords       int64  `json:"message_records"`
+}
+
+type ContextProjection struct {
+	Session       AgentSession            `json:"session"`
+	View          View                    `json:"-"`
+	TargetWork    RuntimeWork             `json:"target_work"`
+	GeneratorWork WorkView                `json:"generator_work"`
+	Journal       ConversationJournalView `json:"-"`
+}
+
 type View struct {
 	Optimization       OptimizationView     `json:"optimization"`
 	Baseline           *BaselineView        `json:"baseline,omitempty"`

@@ -95,7 +95,7 @@ func TestStdioProxyForwardsRoleScopedMCPAndTerminalReceipt(t *testing.T) {
 			Tools []toolapp.Tool `json:"tools"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal([]byte(lines[1]), &listed); err != nil || len(listed.Result.Tools) != 3 {
+	if err := json.Unmarshal([]byte(lines[1]), &listed); err != nil || len(listed.Result.Tools) != 2 {
 		t.Fatalf("tools/list response=%s err=%v", lines[1], err)
 	}
 	select {

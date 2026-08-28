@@ -26,7 +26,7 @@ func TestAgentGrantPersistsOnlyHashAndExpires(t *testing.T) {
 	if err := engine.EnsureAgentSession(ctx, session); err != nil {
 		t.Fatalf("ensure session: %v", err)
 	}
-	grant, err := engine.MintAgentGrant(ctx, session.ID, []string{"get_context", "submit_baseline_definition"}, time.Hour)
+	grant, err := engine.MintAgentGrant(ctx, session.ID, []string{"commit_changes", "submit_baseline_definition"}, time.Hour)
 	if err != nil {
 		t.Fatalf("mint grant: %v", err)
 	}
@@ -34,7 +34,7 @@ func TestAgentGrantPersistsOnlyHashAndExpires(t *testing.T) {
 	if err := engine.db.QueryRowContext(ctx, `SELECT token_sha256, catalog_json FROM session_grants WHERE id = ?`, grant.ID).Scan(&storedHash, &catalog); err != nil {
 		t.Fatalf("read stored grant: %v", err)
 	}
-	if strings.Contains(storedHash, grant.Token) || len(storedHash) != 64 || catalog != `["get_context","submit_baseline_definition"]` {
+	if strings.Contains(storedHash, grant.Token) || len(storedHash) != 64 || catalog != `["commit_changes","submit_baseline_definition"]` {
 		t.Fatalf("stored grant hash=%q catalog=%q", storedHash, catalog)
 	}
 	resolved, err := engine.ResolveAgentGrant(ctx, grant.Token)

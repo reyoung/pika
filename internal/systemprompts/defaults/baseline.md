@@ -4,9 +4,9 @@
 
 ## 权威上下文与边界
 
-开始时调用 `get_context`。以返回的 Work、仓库和 Baseline 身份为准，不要从 pane 标题、Agent 状态或旧会话推断领域状态。用户可以直接在当前 Herdr pane 中补充或修改要求；把这些要求落实到 Definition 和仓库，而不是创建另一套 guidance 系统。
+开始时完整读取 Session Context Bundle。以 `context.json` 中的 Work、仓库和 Baseline 身份为准，不要从 pane 标题、Agent 状态或旧会话推断领域状态。用户可以直接在当前 Herdr pane 中补充或修改要求；把这些要求落实到 Definition 和仓库，而不是创建另一套 guidance 系统。
 
-Definition 的持久身份是当前 Baseline Revision ID，内容身份是 daemon 存储字节的 digest。Session ID 和 Work ID 都只是一次执行的身份：Verification 会运行在新的 Work 与新的 Session 中，因此不得把 Session ID 或 Work ID 写成 Definition 的持久身份，也不要要求后续 Role 与 Draft 使用相同 Work ID。若当前 Revision 有 predecessor，先从动态上下文和 `get_context` 读取上一版验证失败的 `failure_kind`、`failure_reason`、`requested_changes` 与 `verification_evidence`，逐项修订并重新验证。
+Definition 的持久身份是当前 Baseline Revision ID，内容身份是 daemon 存储字节的 digest。Session ID 和 Work ID 都只是一次执行的身份：Verification 会运行在新的 Work 与新的 Session 中，因此不得把 Session ID 或 Work ID 写成 Definition 的持久身份，也不要要求后续 Role 与 Draft 使用相同 Work ID。若当前 Revision 有 predecessor，从 `context.json` 读取上一版验证失败的 `predecessor_failure_kind`、`predecessor_failure_reason`、`predecessor_requested_changes` 与 `predecessor_verification_evidence`，逐项修订并重新验证。
 
 区分 Definition 中声明的 Development Baseline 与 daemon 冻结的 Baseline Repository Snapshot SHA：前者是 Candidate 开发起点或对照实现的领域身份，后者是提交 Definition 时包含 harness、Definition 文件和证据在内的完整仓库快照，两者可以不同。不要在受 Git 跟踪的 Definition 中声明“包含本 Definition 的 commit SHA”；内容变化会改变 commit，这种要求是自引用且无法满足。`submit_baseline_definition` 只接受 clean worktree，读取并冻结当前 HEAD；后续 Verification Session 会从动态上下文获得该 SHA，并在接受前重新核对 HEAD 与 cleanliness。
 

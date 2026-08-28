@@ -86,7 +86,7 @@ Rules:
 Integration is a three-step protocol with two durable domain mutations around one idempotent Git application:
 
 ```text
-get_context
+read context.json and messages.jsonl
     ↓
 full correctness/performance evidence
     ↓

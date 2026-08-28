@@ -4,7 +4,7 @@ Roles are static. Each Agent Session freezes a complete developer-level System P
 
 ## 1. System Prompt and instruction layers
 
-The canonical System Prompt for each Role is compiled into the `pika-go` binary. It is product behavior, not user configuration, and cannot be changed with `$EDITOR`. At activation the daemon appends a dynamic System Context containing committed identities such as Work/generation, repository, Baseline, Attempt/Round/Base/Best, Integration Candidate, or Follow-up target/sequence/deadline.
+The canonical System Prompt for each Role is compiled into the `pika-go` binary. It is product behavior, not user configuration, and cannot be changed with `$EDITOR`. Before activation the daemon writes a read-only, per-Session Context Bundle and appends its exact paths, SHA-256 digests, and complete versioned JSON Schemas to the System Prompt.
 
 The user customization surface is a separate set of empty-by-default Markdown overlays:
 
@@ -34,19 +34,19 @@ pika-go edit-instruction follow-up/iteration
 pika-go edit-instruction follow-up/integration
 ```
 
-For a new Session the ordering is: immutable Role System Prompt, frozen dynamic System Context, then non-empty user additions. A user edit affects only later Sessions. The same Session always receives the byte-identical stored prompt on dispatch retry.
+For a new Session the ordering is: immutable Role System Prompt, frozen Context Bundle contract, then non-empty user additions. A user edit affects only later Sessions. The same Session always receives the byte-identical stored prompt and Context Bundle on dispatch retry.
 
-The dynamic layer is rendered from a single committed `RuntimeWork` projection. It is not an instruction file and is not user-editable:
+The bundle is rendered from a single committed projection. It is not an instruction file and is not user-editable:
 
-| Session | Frozen dynamic fields before the first tool call |
+| Session | Frozen `context.json` fields before the first tool call |
 | --- | --- |
 | All Roles | Optimization ID/status/revision, Work ID/generation/Role, Baseline ID/number/status/Definition digest, frozen Repository Snapshot SHA when submitted, assigned repository, terminal MCP |
-| Successor Baseline Draft | predecessor Baseline Revision ID plus rejected/superseded verification failure kind, reason, and requested changes; complete evidence remains available through `get_context` |
+| Successor Baseline Draft | predecessor Baseline Revision ID plus rejected/superseded verification failure kind, reason, requested changes, and evidence |
 | Iteration | Attempt ID, Round, kind, Base SHA, current Best SHA/revision, Back-off message when present |
 | Integration | Integration ID/FIFO/status, Attempt ID, Candidate/Base SHA, expected Best, current Best/revision, existing Git Intent ID/state when present |
-| Follow-up | Request and target Work/Role, sequence, inactivity deadline, target-message budget, generator attempt/max; target Role identities are available through `get_context` |
+| Follow-up | Request and target Work/Role, sequence, inactivity deadline, target-message budget, generator attempt/max, and target Role identities |
 
-This preserves the useful runtime-rendered part of the legacy prompts without turning it into mutable `instructions.md`. Large Baseline JSON, current global queues, conversation history, and Tool/Shell payloads are intentionally not duplicated into every prompt; `get_context` returns their current bounded projection. A replacement Session is always new and therefore receives a newly frozen dynamic projection, while a dispatch retry of the same Session reuses the stored bytes.
+`context.json` contains domain facts and a reference to `messages.jsonl`. The JSONL file contains every normalized Turn across the relevant Work's Sessions, including complete observable tool and shell inputs and outputs and MCP receipts. Raw provider-hook events stay in SQLite and are not duplicated. A replacement Session receives a newly frozen projection, while a dispatch retry of the same Session verifies and reuses the stored bytes.
 
 ## 2. Shared contract
 
@@ -61,7 +61,7 @@ Every complete rendered System Prompt must state:
 - that the user may intervene directly in the terminal;
 - that another session may continue from the journal if this session is lost.
 
-The immutable Role policy defines these rules and identity types; the dynamic System Context supplies the exact per-Session values needed before the first tool call. `get_context` returns bounded structured facts, journal excerpts, and absolute paths to larger context files. It does not return secrets or unrelated Work.
+The immutable Role policy defines these rules and identity types. The System Prompt supplies the exact Context Bundle locations, digests, and schemas needed before the first tool call; the Agent must read both complete files rather than infer their shape or skip a large tail. Bundle files are protected as user-only because observable tool output may contain sensitive data, and never include raw grants or provider credentials.
 
 ## 3. Baseline Role
 
@@ -70,7 +70,6 @@ Purpose: define a measurable, correct Optimization contract and establish the De
 MCP catalog:
 
 ```text
-get_context
 commit_changes                     # non-terminal, scoped/idempotent Git commit
 submit_baseline_definition          # terminal
 ```
@@ -101,7 +100,6 @@ Purpose: independently verify one immutable Baseline Revision and either accept 
 MCP catalog:
 
 ```text
-get_context
 finish_baseline_verification        # terminal: accepted | rejected
 ```
 
@@ -122,7 +120,6 @@ Purpose: improve one Attempt in its isolated Git workspace and produce a measure
 MCP catalog:
 
 ```text
-get_context
 commit_changes                     # non-terminal, scoped/idempotent Git commit
 finish_iteration                    # terminal: candidate | rejected
 ```
@@ -140,7 +137,6 @@ Purpose: serialize final evidence review and, only after authorization, advance 
 MCP catalog:
 
 ```text
-get_context
 prepare_best_update                 # non-terminal, returns a bounded Git intent
 apply_best_update                   # non-terminal, idempotently applies that intent in Pika
 finish_integration                  # terminal: accepted | rejected
@@ -166,11 +162,10 @@ Purpose: read the target Work's current facts and Conversation Journal and produ
 MCP catalog:
 
 ```text
-get_context
 submit_followup_message              # terminal
 ```
 
-The dynamic System Context identifies the target Work/Role, required generator operation, Follow-up sequence and inactivity deadline. `get_context` supplies the target's current domain state and bounded Conversation Journal. The generator must not make the target Role's domain decision itself.
+The Follow-up Context Bundle identifies the target Work/Role, required generator operation, Follow-up sequence and inactivity deadline, and supplies the target's current domain state and complete normalized Conversation Journal. The generator must not make the target Role's domain decision itself.
 
 Instruction selection:
 

@@ -23,39 +23,45 @@ type ProviderEventView struct {
 }
 
 type ConversationTurnView struct {
-	ID               string `json:"id"`
-	Provider         string `json:"provider"`
-	ProviderTurnID   string `json:"provider_turn_id"`
-	Status           string `json:"status"`
-	UserMessage      string `json:"user_message,omitempty"`
-	AssistantMessage string `json:"assistant_message,omitempty"`
+	ID                string `json:"id"`
+	Provider          string `json:"provider"`
+	AgentSessionID    string `json:"agent_session_id"`
+	ProviderSessionID string `json:"provider_session_id"`
+	ProviderTurnID    string `json:"provider_turn_id"`
+	Status            string `json:"status"`
+	UserMessage       string `json:"user_message,omitempty"`
+	AssistantMessage  string `json:"assistant_message,omitempty"`
+	StartedAt         string `json:"started_at"`
+	StoppedAt         string `json:"stopped_at,omitempty"`
 }
 
 type ToolEventView struct {
-	ID                string          `json:"id"`
-	Provider          string          `json:"provider"`
-	ProviderTurnID    string          `json:"provider_turn_id"`
-	ProviderToolUseID string          `json:"provider_tool_use_id"`
-	ToolName          string          `json:"tool_name"`
-	Input             json.RawMessage `json:"input"`
-	Output            json.RawMessage `json:"output,omitempty"`
-	Status            string          `json:"status"`
-	ErrorMessage      string          `json:"error_message,omitempty"`
-	FailureType       string          `json:"failure_type,omitempty"`
-	DurationMS        int64           `json:"duration_ms,omitempty"`
-	Interrupted       bool            `json:"interrupted,omitempty"`
+	ID                 string          `json:"id"`
+	Provider           string          `json:"provider"`
+	ConversationTurnID string          `json:"conversation_turn_id"`
+	ProviderTurnID     string          `json:"provider_turn_id"`
+	ProviderToolUseID  string          `json:"provider_tool_use_id"`
+	ToolName           string          `json:"tool_name"`
+	Input              json.RawMessage `json:"input"`
+	Output             json.RawMessage `json:"output,omitempty"`
+	Status             string          `json:"status"`
+	ErrorMessage       string          `json:"error_message,omitempty"`
+	FailureType        string          `json:"failure_type,omitempty"`
+	DurationMS         int64           `json:"duration_ms,omitempty"`
+	Interrupted        bool            `json:"interrupted,omitempty"`
 }
 
 type ToolSupplementView struct {
-	ID             string          `json:"id"`
-	Provider       string          `json:"provider"`
-	ProviderTurnID string          `json:"provider_turn_id"`
-	Kind           string          `json:"kind"`
-	ToolName       string          `json:"tool_name,omitempty"`
-	ServerName     string          `json:"server_name,omitempty"`
-	Input          json.RawMessage `json:"input,omitempty"`
-	Output         json.RawMessage `json:"output"`
-	DurationMS     int64           `json:"duration_ms,omitempty"`
+	ID                 string          `json:"id"`
+	Provider           string          `json:"provider"`
+	ConversationTurnID string          `json:"conversation_turn_id"`
+	ProviderTurnID     string          `json:"provider_turn_id"`
+	Kind               string          `json:"kind"`
+	ToolName           string          `json:"tool_name,omitempty"`
+	ServerName         string          `json:"server_name,omitempty"`
+	Input              json.RawMessage `json:"input,omitempty"`
+	Output             json.RawMessage `json:"output"`
+	DurationMS         int64           `json:"duration_ms,omitempty"`
 }
 
 type ConversationJournalView struct {
@@ -284,44 +290,61 @@ func (e *Engine) ensureConversationTurn(ctx context.Context, tx *sql.Tx, provide
 }
 
 func (e *Engine) ConversationJournal(ctx context.Context, workID string) (ConversationJournalView, error) {
+	return e.conversationJournal(ctx, workID, true)
+}
+
+func (e *Engine) normalizedConversationJournal(ctx context.Context, workID string) (ConversationJournalView, error) {
+	return e.conversationJournal(ctx, workID, false)
+}
+
+func (e *Engine) conversationJournal(ctx context.Context, workID string, includeProviderEvents bool) (ConversationJournalView, error) {
 	journal := ConversationJournalView{WorkID: workID}
 	if err := e.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(provider_session_id), '') FROM agent_sessions WHERE work_id = ?`, workID).Scan(&journal.ProviderSessionID); err != nil {
 		return ConversationJournalView{}, fmt.Errorf("read provider session: %w", err)
 	}
-	eventRows, err := e.db.QueryContext(ctx, `SELECT pe.sequence, pe.provider, pe.hook_event_name, pe.provider_session_id,
-		pe.provider_turn_id, pe.raw_json FROM provider_events pe JOIN agent_sessions s ON s.id = pe.agent_session_id
-		WHERE s.work_id = ? ORDER BY pe.sequence`, workID)
-	if err != nil {
-		return ConversationJournalView{}, err
-	}
-	for eventRows.Next() {
-		var event ProviderEventView
-		var turnID sql.NullString
-		if err := eventRows.Scan(&event.Sequence, &event.Provider, &event.HookEventName, &event.ProviderSessionID, &turnID, &event.Raw); err != nil {
-			_ = eventRows.Close()
+	if includeProviderEvents {
+		eventRows, err := e.db.QueryContext(ctx, `SELECT pe.sequence, pe.provider, pe.hook_event_name, pe.provider_session_id,
+			pe.provider_turn_id, pe.raw_json FROM provider_events pe JOIN agent_sessions s ON s.id = pe.agent_session_id
+			WHERE s.work_id = ? ORDER BY pe.sequence`, workID)
+		if err != nil {
 			return ConversationJournalView{}, err
 		}
-		event.ProviderTurnID = turnID.String
-		journal.Events = append(journal.Events, event)
+		for eventRows.Next() {
+			var event ProviderEventView
+			var turnID sql.NullString
+			if err := eventRows.Scan(&event.Sequence, &event.Provider, &event.HookEventName, &event.ProviderSessionID, &turnID, &event.Raw); err != nil {
+				_ = eventRows.Close()
+				return ConversationJournalView{}, err
+			}
+			event.ProviderTurnID = turnID.String
+			journal.Events = append(journal.Events, event)
+		}
+		if err := eventRows.Close(); err != nil {
+			return ConversationJournalView{}, err
+		}
+		if err := eventRows.Err(); err != nil {
+			return ConversationJournalView{}, err
+		}
 	}
-	_ = eventRows.Close()
-	turnRows, err := e.db.QueryContext(ctx, `SELECT id, provider, provider_turn_id, status, user_message, assistant_message
+	turnRows, err := e.db.QueryContext(ctx, `SELECT id, provider, agent_session_id, provider_session_id, provider_turn_id,
+		status, user_message, assistant_message, started_at, stopped_at
 		FROM conversation_turns WHERE work_id = ? ORDER BY started_at, id`, workID)
 	if err != nil {
 		return ConversationJournalView{}, err
 	}
 	for turnRows.Next() {
 		var turn ConversationTurnView
-		var user, assistant sql.NullString
-		if err := turnRows.Scan(&turn.ID, &turn.Provider, &turn.ProviderTurnID, &turn.Status, &user, &assistant); err != nil {
+		var user, assistant, stoppedAt sql.NullString
+		if err := turnRows.Scan(&turn.ID, &turn.Provider, &turn.AgentSessionID, &turn.ProviderSessionID,
+			&turn.ProviderTurnID, &turn.Status, &user, &assistant, &turn.StartedAt, &stoppedAt); err != nil {
 			_ = turnRows.Close()
 			return ConversationJournalView{}, err
 		}
-		turn.UserMessage, turn.AssistantMessage = user.String, assistant.String
+		turn.UserMessage, turn.AssistantMessage, turn.StoppedAt = user.String, assistant.String, stoppedAt.String
 		journal.Turns = append(journal.Turns, turn)
 	}
 	_ = turnRows.Close()
-	toolRows, err := e.db.QueryContext(ctx, `SELECT te.id, te.provider, te.provider_turn_id, te.provider_tool_use_id, te.tool_name, te.input_json, te.output_json,
+	toolRows, err := e.db.QueryContext(ctx, `SELECT te.id, te.provider, te.conversation_turn_id, te.provider_turn_id, te.provider_tool_use_id, te.tool_name, te.input_json, te.output_json,
 		te.status, te.error_message, te.failure_type, te.duration_ms, te.is_interrupt
 		FROM tool_events te JOIN conversation_turns ct ON ct.id = te.conversation_turn_id WHERE ct.work_id = ? ORDER BY te.observed_at, te.id`, workID)
 	if err != nil {
@@ -333,7 +356,7 @@ func (e *Engine) ConversationJournal(ctx context.Context, workID string) (Conver
 		var output []byte
 		var errorMessage, failureType sql.NullString
 		var duration sql.NullInt64
-		if err := toolRows.Scan(&tool.ID, &tool.Provider, &tool.ProviderTurnID, &tool.ProviderToolUseID, &tool.ToolName, &tool.Input, &output,
+		if err := toolRows.Scan(&tool.ID, &tool.Provider, &tool.ConversationTurnID, &tool.ProviderTurnID, &tool.ProviderToolUseID, &tool.ToolName, &tool.Input, &output,
 			&tool.Status, &errorMessage, &failureType, &duration, &tool.Interrupted); err != nil {
 			return ConversationJournalView{}, err
 		}
@@ -344,7 +367,7 @@ func (e *Engine) ConversationJournal(ctx context.Context, workID string) (Conver
 	if err := toolRows.Err(); err != nil {
 		return ConversationJournalView{}, err
 	}
-	supplementRows, err := e.db.QueryContext(ctx, `SELECT tes.id, tes.provider, tes.provider_turn_id, tes.supplement_kind, tes.tool_name,
+	supplementRows, err := e.db.QueryContext(ctx, `SELECT tes.id, tes.provider, tes.conversation_turn_id, tes.provider_turn_id, tes.supplement_kind, tes.tool_name,
 		tes.server_name, tes.input_json, tes.output_json, tes.duration_ms
 		FROM tool_event_supplements tes JOIN conversation_turns ct ON ct.id = tes.conversation_turn_id
 		WHERE ct.work_id = ? ORDER BY tes.sequence`, workID)
@@ -357,7 +380,7 @@ func (e *Engine) ConversationJournal(ctx context.Context, workID string) (Conver
 		var toolName, serverName sql.NullString
 		var input []byte
 		var duration sql.NullInt64
-		if err := supplementRows.Scan(&supplement.ID, &supplement.Provider, &supplement.ProviderTurnID, &supplement.Kind, &toolName,
+		if err := supplementRows.Scan(&supplement.ID, &supplement.Provider, &supplement.ConversationTurnID, &supplement.ProviderTurnID, &supplement.Kind, &toolName,
 			&serverName, &input, &supplement.Output, &duration); err != nil {
 			return ConversationJournalView{}, err
 		}

@@ -4,7 +4,7 @@ Pika-Go is a Herdr plugin for long-running automatic optimization. The implement
 
 Current implementation status: the Phase 0–8 first-release plan and Codex release gate pass. Phase 9 adds a provider-neutral adapter, additive Cursor MCP/Hook integration, frozen per-Session prompt injection, normalized Cursor journaling, static per-Role Codex/Cursor selection, and fresh-Session recovery. The pinned Cursor release and both mirror-image mixed-provider matrices pass their credentialed real-model gates; those commands remain explicit because they consume model quota. See the development plan for exact evidence.
 
-Role System Prompts are immutable resources embedded in the binary. At each fresh Agent Session, Pika freezes the Role prompt together with committed dynamic Work context and an optional per-Role user instruction overlay. User instruction files are empty by default and can be edited with `pika-go edit-instruction <name>`.
+Role System Prompts are immutable resources embedded in the binary. At each fresh Agent Session, Pika materializes a read-only Context Bundle, then freezes the Role prompt together with the bundle's exact paths, SHA-256 digests, complete versioned JSON Schemas, and an optional per-Role user instruction overlay. User instruction files are empty by default and can be edited with `pika-go edit-instruction <name>`.
 
 ## Quick start
 
@@ -28,9 +28,15 @@ kernel-pika-workspace/
   repo/                 Pika base linked worktree
   best/repo/            accepted Best linked worktree
   attempts/.../repo/    isolated Attempt linked worktrees
-  instructions/ contexts/ evidence/ logs/ runtime/
+  instructions/         user-owned Role overlays
+  contexts/<session-id>/
+    context.json        committed domain projection
+    messages.jsonl      complete normalized Work conversation history
+  evidence/ logs/ runtime/
   herdr/binding.json    current replaceable Herdr layout binding
 ```
+
+Each Agent reads both Context Bundle files before acting. `messages.jsonl` spans all observed Sessions for the relevant Work and preserves complete normalized messages, shell/tool inputs and outputs, and MCP receipts; provider-specific raw hook events remain in SQLite and are not duplicated. Retrying one Agent Session verifies and reuses byte-identical files, while a replacement Session receives a new reviewable snapshot.
 
 Run `pika-go resume /path/to/kernel-pika-workspace`, or run `pika-go kick-off` anywhere inside it, to continue. Existing configuration is reused and init is not repeated. A Workspace is intentionally not relocatable because it records the absolute source repository and Git common-directory filesystem identity.
 
