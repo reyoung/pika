@@ -18,10 +18,8 @@ type Store interface {
 	ResolveAgentGrant(context.Context, string) (symphony.AgentGrant, error)
 	Apply(context.Context, symphony.Command) (symphony.Receipt, error)
 	Replay(context.Context, symphony.Command) (symphony.Receipt, bool, error)
-	Inspect(context.Context, symphony.Query) (symphony.View, error)
 	RuntimeWork(context.Context, string) (symphony.RuntimeWork, error)
 	GitIntent(context.Context, string) (symphony.GitIntentView, error)
-	ConversationJournal(context.Context, string) (symphony.ConversationJournalView, error)
 }
 
 type Tool struct {
@@ -86,75 +84,6 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		return Invocation{}, forbidden(fmt.Sprintf("tool %q is not allowed for role %s", call.Name, grant.Role))
 	}
 	switch call.Name {
-	case "get_context":
-		if grant.Revoked {
-			return Invocation{}, forbidden("agent grant is revoked")
-		}
-		work, err := a.Store.RuntimeWork(ctx, grant.WorkID)
-		if err != nil {
-			return Invocation{}, err
-		}
-		if work.Work.Status != symphony.WorkPending || work.Work.Generation != grant.Generation {
-			return Invocation{}, forbidden("agent grant is stale")
-		}
-		targetWork := work
-		journalWorkID := grant.WorkID
-		if grant.Role == symphony.RoleFollowUp {
-			targetWork, err = a.Store.RuntimeWork(ctx, work.FollowUpTargetWorkID)
-			if err != nil {
-				return Invocation{}, err
-			}
-			journalWorkID = targetWork.Work.ID
-		}
-		view, err := a.Store.Inspect(ctx, symphony.Status{})
-		if err != nil {
-			return Invocation{}, err
-		}
-		journal, err := a.Store.ConversationJournal(ctx, journalWorkID)
-		if err != nil {
-			return Invocation{}, err
-		}
-		assignedRepository, err := a.repositoryFor(targetWork)
-		if err != nil {
-			return Invocation{}, err
-		}
-		return Invocation{Value: map[string]any{
-			"optimization":                      view.Optimization,
-			"baseline":                          view.Baseline,
-			"best":                              view.Best,
-			"attempts":                          view.Attempts,
-			"iteration_rounds":                  view.IterationRounds,
-			"integrations":                      view.Integrations,
-			"back_offs":                         view.BackOffs,
-			"work":                              targetWork.Work,
-			"generator_work":                    work.Work,
-			"repository":                        assignedRepository,
-			"attempt_id":                        targetWork.Work.AttemptID,
-			"iteration_round":                   targetWork.Work.IterationRound,
-			"iteration_kind":                    targetWork.IterationKind,
-			"base_sha":                          targetWork.BaseSHA,
-			"candidate_sha":                     targetWork.CandidateSHA,
-			"best_sha":                          targetWork.BestSHA,
-			"best_sequence":                     targetWork.BestSequence,
-			"expected_best_sha":                 targetWork.ExpectedBestSHA,
-			"integration_fifo_position":         targetWork.IntegrationFIFOPosition,
-			"integration_status":                targetWork.IntegrationStatus,
-			"git_intent_id":                     targetWork.GitIntentID,
-			"git_intent_state":                  targetWork.GitIntentState,
-			"back_off_message":                  targetWork.BackOffMessage,
-			"predecessor_baseline_id":           targetWork.PredecessorBaselineID,
-			"predecessor_failure_kind":          targetWork.PredecessorFailureKind,
-			"predecessor_failure_reason":        targetWork.PredecessorFailureReason,
-			"predecessor_requested_changes":     targetWork.PredecessorRequestedChanges,
-			"predecessor_verification_evidence": targetWork.PredecessorVerificationEvidence,
-			"follow_up_sequence":                work.FollowUpSequence,
-			"follow_up_target_role":             work.FollowUpTargetRole,
-			"follow_up_max_messages":            work.FollowUpMaxMessages,
-			"follow_up_generator_max_attempts":  work.FollowUpGeneratorMax,
-			"follow_up_generator_attempt":       work.FollowUpGeneratorTry,
-			"conversation_journal":              boundedJournal(journal),
-			"terminal_operation":                terminalOperation(grant.Role),
-		}}, nil
 	case "commit_changes":
 		if (grant.Role != symphony.RoleBaselineDraft && grant.Role != symphony.RoleIteration) || grant.Revoked {
 			return Invocation{}, forbidden("scoped commit requires an active write-capable role")
@@ -545,46 +474,6 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 	}
 }
 
-func boundedJournal(journal symphony.ConversationJournalView) symphony.ConversationJournalView {
-	journal.Events = tail(journal.Events, 24)
-	journal.Turns = tail(journal.Turns, 16)
-	journal.Tools = tail(journal.Tools, 24)
-	for index := range journal.Events {
-		journal.Events[index].Raw = boundedJSON(journal.Events[index].Raw, 8<<10)
-	}
-	for index := range journal.Turns {
-		journal.Turns[index].UserMessage = boundedText(journal.Turns[index].UserMessage, 8<<10)
-		journal.Turns[index].AssistantMessage = boundedText(journal.Turns[index].AssistantMessage, 8<<10)
-	}
-	for index := range journal.Tools {
-		journal.Tools[index].Input = boundedJSON(journal.Tools[index].Input, 8<<10)
-		journal.Tools[index].Output = boundedJSON(journal.Tools[index].Output, 8<<10)
-	}
-	return journal
-}
-
-func tail[T any](values []T, limit int) []T {
-	if len(values) <= limit {
-		return values
-	}
-	return values[len(values)-limit:]
-}
-
-func boundedText(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	return value[:limit] + fmt.Sprintf("\n...[truncated; original_bytes=%d]", len(value))
-}
-
-func boundedJSON(value json.RawMessage, limit int) json.RawMessage {
-	if len(value) == 0 || len(value) <= limit {
-		return value
-	}
-	replacement, _ := json.Marshal(map[string]any{"truncated": true, "original_bytes": len(value)})
-	return replacement
-}
-
 func (a Application) applyTerminal(ctx context.Context, grant symphony.AgentGrant, command symphony.Command) (symphony.Receipt, error) {
 	if !grant.Revoked {
 		return a.Store.Apply(ctx, command)
@@ -644,23 +533,6 @@ func forbidden(message string) error {
 	return &symphony.DomainError{Code: symphony.CodeForbidden, Message: message}
 }
 
-func terminalOperation(role symphony.WorkRole) string {
-	switch role {
-	case symphony.RoleBaselineDraft:
-		return "submit_baseline_definition"
-	case symphony.RoleBaselineVerification:
-		return "finish_baseline_verification"
-	case symphony.RoleIteration:
-		return "finish_iteration"
-	case symphony.RoleIntegration:
-		return "finish_integration"
-	case symphony.RoleFollowUp:
-		return "submit_followup_message"
-	default:
-		return ""
-	}
-}
-
 func toolByName(name string) (Tool, bool) {
 	object := func(properties map[string]any, required ...string) map[string]any {
 		// A variadic argument with no values is a nil slice, which JSON encodes as
@@ -670,9 +542,6 @@ func toolByName(name string) (Tool, bool) {
 		return map[string]any{"type": "object", "properties": properties, "required": requiredFields, "additionalProperties": false}
 	}
 	tools := map[string]Tool{
-		"get_context": {
-			Name: "get_context", Description: "Return the frozen Pika Work context.", InputSchema: object(map[string]any{}),
-		},
 		"submit_baseline_definition": {
 			Name: "submit_baseline_definition", Description: "Submit the immutable Baseline definition and complete this Work.",
 			InputSchema: object(map[string]any{
@@ -745,15 +614,15 @@ func toolByName(name string) (Tool, bool) {
 func CatalogForRole(role symphony.WorkRole) []string {
 	switch role {
 	case symphony.RoleBaselineDraft:
-		return []string{"get_context", "commit_changes", "submit_baseline_definition"}
+		return []string{"commit_changes", "submit_baseline_definition"}
 	case symphony.RoleBaselineVerification:
-		return []string{"get_context", "finish_baseline_verification"}
+		return []string{"finish_baseline_verification"}
 	case symphony.RoleIteration:
-		return []string{"get_context", "commit_changes", "finish_iteration"}
+		return []string{"commit_changes", "finish_iteration"}
 	case symphony.RoleIntegration:
-		return []string{"get_context", "prepare_best_update", "apply_best_update", "finish_integration"}
+		return []string{"prepare_best_update", "apply_best_update", "finish_integration"}
 	case symphony.RoleFollowUp:
-		return []string{"get_context", "submit_followup_message"}
+		return []string{"submit_followup_message"}
 	default:
 		return nil
 	}

@@ -1,70 +1,92 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pika-go.local/schemas/context-v2.json",
-  "title": "Pika Agent Session Context Bundle",
+  "title": "Pika Agent Session Context",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "session", "optimization", "work", "generator_work", "terminal_operation", "messages"],
+  "required": ["schema_version", "session", "optimization", "attempts", "iteration_rounds", "integrations", "back_offs", "work", "generator_work", "terminal_operation", "messages"],
   "properties": {
     "schema_version": {"const": 2},
-    "session": {"type": "object"},
-    "optimization": {"type": "object"},
-    "baseline": {"type": "object"},
-    "best": {"type": "object"},
-    "work": {"type": "object"},
-    "generator_work": {"type": "object"},
+    "session": {"$ref": "#/$defs/session"},
+    "optimization": {"$ref": "#/$defs/optimization"},
+    "baseline": {"$ref": "#/$defs/baseline"},
+    "best": {"$ref": "#/$defs/best"},
+    "attempts": {"type": "array", "items": {"$ref": "#/$defs/attempt"}},
+    "iteration_rounds": {"type": "array", "items": {"$ref": "#/$defs/round"}},
+    "integrations": {"type": "array", "items": {"$ref": "#/$defs/integration"}},
+    "back_offs": {"type": "array", "items": {"$ref": "#/$defs/back_off"}},
+    "work": {"$ref": "#/$defs/runtime_work"},
+    "generator_work": {"$ref": "#/$defs/work"},
     "terminal_operation": {"type": "string", "minLength": 1},
     "messages": {"$ref": "#/$defs/file"},
     "iteration_context": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["history_limit", "recent_terminal_attempts"],
       "properties": {
         "history_limit": {"type": "integer", "minimum": 0},
-        "recent_terminal_attempts": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["attempt", "messages", "summary"],
-            "properties": {
-              "attempt": {"$ref": "#/$defs/attempt"},
-              "messages": {"$ref": "#/$defs/file"},
-              "summary": {"$ref": "#/$defs/file"}
-            }
-          }
-        }
+        "recent_terminal_attempts": {"type": "array", "items": {"$ref": "#/$defs/attempt_history"}}
       }
     }
   },
   "$defs": {
-    "file": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["path", "sha256", "bytes", "records"],
-      "properties": {
-        "path": {"type": "string", "minLength": 1},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "bytes": {"type": "integer", "minimum": 0},
-        "records": {"type": "integer", "minimum": 0}
-      }
-    },
-    "attempt": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "slot_index", "status", "base_best_sequence", "base_sha", "current_iteration_round", "history_limit"],
-      "properties": {
-        "id": {"type": "string"},
-        "slot_index": {"type": "integer"},
-        "status": {"enum": ["accepted", "rejected"]},
-        "base_best_sequence": {"type": "integer"},
-        "base_sha": {"type": "string"},
-        "current_iteration_round": {"type": "integer"},
-        "candidate_sha": {"type": "string"},
-        "summary": {"type": "string"},
-        "failure_reason": {"type": "string"},
-        "history_limit": {"type": "integer", "minimum": 0}
-      }
-    }
+    "session": {"type": "object", "additionalProperties": false, "required": ["id", "work_id", "generation", "role", "agent_kind", "agent_name", "status"], "properties": {
+      "id": {"type": "string"}, "work_id": {"type": "string"}, "generation": {"type": "integer"}, "role": {"type": "string"},
+      "agent_kind": {"enum": ["codex", "cursor"]}, "agent_name": {"type": "string"}, "provider_version": {"type": "string"},
+      "provider_capabilities": {}, "status": {"type": "string"}
+    }},
+    "optimization": {"type": "object", "additionalProperties": false, "required": ["id", "status", "revision", "repository", "iteration_concurrency", "max_pending_attempts", "iteration_history_limit"], "properties": {
+      "id": {"type": "string"}, "status": {"type": "string"}, "revision": {"type": "integer"}, "repository": {"type": "string"},
+      "iteration_concurrency": {"type": "integer"}, "max_pending_attempts": {"type": "integer"}, "iteration_history_limit": {"type": "integer", "minimum": 0}
+    }},
+    "baseline": {"type": "object", "additionalProperties": false, "required": ["id", "number", "status"], "properties": {
+      "id": {"type": "string"}, "number": {"type": "integer"}, "status": {"type": "string"}, "definition": {},
+      "repository_sha": {"type": "string"}, "predecessor_id": {"type": "string"}, "failure_kind": {"type": "string"},
+      "failure_reason": {"type": "string"}, "requested_changes": {"type": "string"}, "verification_evidence": {}
+    }},
+    "best": {"type": "object", "additionalProperties": false, "required": ["id", "sequence", "commit_sha"], "properties": {
+      "id": {"type": "string"}, "sequence": {"type": "integer"}, "commit_sha": {"type": "string"}, "source_attempt_id": {"type": "string"}
+    }},
+    "attempt": {"type": "object", "additionalProperties": false, "required": ["id", "slot_index", "status", "base_best_sequence", "base_sha", "current_iteration_round", "history_limit"], "properties": {
+      "id": {"type": "string"}, "slot_index": {"type": "integer"}, "status": {"type": "string"}, "base_best_sequence": {"type": "integer"},
+      "base_sha": {"type": "string"}, "current_iteration_round": {"type": "integer"}, "candidate_sha": {"type": "string"},
+      "summary": {"type": "string"}, "failure_reason": {"type": "string"}, "history_limit": {"type": "integer", "minimum": 0}
+    }},
+    "round": {"type": "object", "additionalProperties": false, "required": ["attempt_id", "round", "kind", "base_sha", "status"], "properties": {
+      "attempt_id": {"type": "string"}, "round": {"type": "integer"}, "kind": {"type": "string"}, "base_sha": {"type": "string"},
+      "status": {"type": "string"}, "back_off_message": {"type": "string"}
+    }},
+    "integration": {"type": "object", "additionalProperties": false, "required": ["sequence", "fifo_position", "id", "attempt_id", "iteration_round", "status", "candidate_sha", "expected_best_sha"], "properties": {
+      "sequence": {"type": "integer"}, "fifo_position": {"type": "integer"}, "id": {"type": "string"}, "attempt_id": {"type": "string"},
+      "iteration_round": {"type": "integer"}, "status": {"type": "string"}, "candidate_sha": {"type": "string"},
+      "expected_best_sha": {"type": "string"}, "intent_id": {"type": "string"}
+    }},
+    "back_off": {"type": "object", "additionalProperties": false, "required": ["id", "source_work_id", "successor_baseline_revision_id", "message"], "properties": {
+      "id": {"type": "string"}, "source_work_id": {"type": "string"}, "successor_baseline_revision_id": {"type": "string"}, "message": {"type": "string"}
+    }},
+    "work": {"type": "object", "additionalProperties": false, "required": ["id", "baseline_revision_id", "role", "status", "generation"], "properties": {
+      "id": {"type": "string"}, "baseline_revision_id": {"type": "string"}, "role": {"type": "string"}, "status": {"type": "string"},
+      "generation": {"type": "integer"}, "attempt_id": {"type": "string"}, "iteration_round": {"type": "integer"},
+      "integration_id": {"type": "string"}, "parent_work_id": {"type": "string"}, "followup_request_id": {"type": "string"}
+    }},
+    "runtime_work": {"type": "object", "additionalProperties": false, "required": ["work", "repository", "optimization_repository", "optimization_id", "optimization_status", "optimization_revision", "baseline_number", "baseline_status"], "properties": {
+      "work": {"$ref": "#/$defs/work"}, "repository": {"type": "string"}, "optimization_repository": {"type": "string"},
+      "optimization_id": {"type": "string"}, "optimization_status": {"type": "string"}, "optimization_revision": {"type": "integer"},
+      "baseline_number": {"type": "integer"}, "baseline_status": {"type": "string"}, "baseline_definition_sha256": {"type": "string"},
+      "baseline_repository_sha": {"type": "string"}, "predecessor_baseline_id": {"type": "string"}, "predecessor_failure_kind": {"type": "string"},
+      "predecessor_failure_reason": {"type": "string"}, "predecessor_requested_changes": {"type": "string"}, "predecessor_verification_evidence": {},
+      "base_sha": {"type": "string"}, "candidate_sha": {"type": "string"}, "iteration_kind": {"type": "string"}, "back_off_message": {"type": "string"},
+      "best_sha": {"type": "string"}, "best_sequence": {"type": "integer"}, "expected_best_sha": {"type": "string"},
+      "integration_fifo_position": {"type": "integer"}, "integration_status": {"type": "string"}, "git_intent_id": {"type": "string"},
+      "git_intent_state": {"type": "string"}, "followup_target_work_id": {"type": "string"}, "followup_target_role": {"type": "string"},
+      "followup_sequence": {"type": "integer"}, "followup_due_at": {"type": "string"}, "followup_max_messages": {"type": "integer"},
+      "followup_generator_max_attempts": {"type": "integer"}, "followup_generator_attempt": {"type": "integer"},
+      "iteration_history_limit": {"type": "integer", "minimum": 0}
+    }},
+    "attempt_history": {"type": "object", "additionalProperties": false, "required": ["attempt", "messages", "summary"], "properties": {
+      "attempt": {"$ref": "#/$defs/attempt"}, "messages": {"$ref": "#/$defs/file"}, "summary": {"$ref": "#/$defs/file"}
+    }},
+    "file": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "bytes", "records"], "properties": {
+      "path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "bytes": {"type": "integer", "minimum": 0}, "records": {"type": "integer", "minimum": 0}
+    }}
   }
 }

@@ -4,7 +4,7 @@
 
 ## 权威上下文与不可变边界
 
-开始时调用 `get_context`，读取其中的 Baseline Definition、Work、仓库和 Best 身份。不要修改 Target、Development、Oracle、Cases、Metrics、harness、Git 或 Definition。发现问题时保存证据并拒绝，由新的 Baseline Draft 修订；不要在验证阶段静默修复。
+开始时完整读取 Session Context Bundle，读取其中的 Baseline Definition、Work、仓库和 Best 身份。不要修改 Target、Development、Oracle、Cases、Metrics、harness、Git 或 Definition。发现问题时保存证据并拒绝，由新的 Baseline Draft 修订；不要在验证阶段静默修复。
 
 当前 Verification Work ID 必然不同于提交 Definition 的 Draft Work ID；两者都是执行身份，不能作为 Definition 有效性判断，也不能要求 Definition 把其中任一个记录为跨阶段身份。需要核对持久归属时，以当前 Baseline Revision ID、Definition digest、动态上下文中的 Repository Snapshot SHA 和声明的 artifact identity 为准。
 

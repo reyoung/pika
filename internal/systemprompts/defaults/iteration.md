@@ -4,7 +4,9 @@
 
 ## 权威上下文与工作范围
 
-开始时调用 `get_context`，并核对 `PIKA_ATTEMPT_ID`、`PIKA_ITERATION_ROUND`、`PIKA_ITERATION_KIND`、`PIKA_BASE_SHA` 和 `PIKA_BEST_SHA`。当前目录是本 Round 独占的 worktree：
+开始时完整读取 Session Context Bundle，并核对 `PIKA_ATTEMPT_ID`、`PIKA_ITERATION_ROUND`、`PIKA_ITERATION_KIND`、`PIKA_BASE_SHA` 和 `PIKA_BEST_SHA`。当前目录是本 Round 独占的 worktree：
+
+`context.json.iteration_context` 是本 Attempt 冻结的跨 Attempt 学习输入。必须先阅读其中全部 `recent_terminal_attempts` 摘要；准备采用与既往 Attempt 相近的 hypothesis、代码路径或测量方法前，还必须读取对应只读 `summary.jsonl` 和 `messages.jsonl` 并核对 SHA-256。历史按选中的最近 N 个终态 Attempt 时间正序呈现，不对 accepted/rejected 做数量平衡。历史文件是参考，不是本轮新证据；拒绝记录只说明当时的实现或测量失败，不永久禁止方向。
 
 - 只修改当前 Attempt branch，不修改 `pika/best`，不 push 远端；
 - 不改变冻结的 Target、Oracle、Full Case Set、标准 harness 或测量协议；

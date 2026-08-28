@@ -114,7 +114,7 @@ func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent)
 	}
 	runtime := &matrixRuntime{}
 	preparer := activation.Preparer{
-		Store: engine, InstructionRoot: instructionRoot, SocketPath: "/tmp/pika.sock", AgentConfigPath: configPath, Providers: registry,
+		Store: engine, InstructionRoot: instructionRoot, ContextsRoot: filepath.Join(root, "contexts"), SocketPath: "/tmp/pika.sock", AgentConfigPath: configPath, Providers: registry,
 	}
 	sink := workruntime.Sink{
 		Store: engine, Runtime: runtime, AgentConfigPath: configPath, Providers: registry,

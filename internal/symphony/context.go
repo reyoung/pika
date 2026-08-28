@@ -7,9 +7,6 @@ import (
 	"fmt"
 )
 
-// ContextProjection returns the complete committed input needed to freeze one
-// Agent Session. Role-specific selection belongs here so Context Bundle callers
-// do not need to understand Symphony tables or lifecycle states.
 func (e *Engine) ContextProjection(ctx context.Context, sessionID string) (ContextProjection, error) {
 	if sessionID == "" {
 		return ContextProjection{}, errors.New("agent session ID is required")
@@ -124,7 +121,8 @@ func (e *Engine) ReadContextSnapshot(ctx context.Context, sessionID string) (Con
 		context_bytes, messages_relative_path, messages_sha256, messages_bytes, message_records
 		FROM context_snapshots WHERE agent_session_id = ?`, sessionID).Scan(
 		&snapshot.AgentSessionID, &snapshot.SchemaVersion, &snapshot.ContextRelativePath, &snapshot.ContextSHA256,
-		&snapshot.ContextBytes, &snapshot.MessagesRelativePath, &snapshot.MessagesSHA256, &snapshot.MessagesBytes, &snapshot.MessageRecords)
+		&snapshot.ContextBytes, &snapshot.MessagesRelativePath, &snapshot.MessagesSHA256, &snapshot.MessagesBytes, &snapshot.MessageRecords,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ContextSnapshot{}, false, nil
 	}

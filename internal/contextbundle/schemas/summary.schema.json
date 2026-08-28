@@ -1,12 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pika-go.local/schemas/attempt-summary-v2.json",
-  "title": "Pika terminal Attempt summary record",
+  "title": "Pika Terminal Attempt Summary Record",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "attempt"],
   "properties": {
     "schema_version": {"const": 2},
-    "attempt": {"type": "object"}
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "slot_index", "status", "base_best_sequence", "base_sha", "current_iteration_round", "history_limit"],
+      "properties": {
+        "id": {"type": "string"}, "slot_index": {"type": "integer"}, "status": {"enum": ["accepted", "rejected"]},
+        "base_best_sequence": {"type": "integer"}, "base_sha": {"type": "string"}, "current_iteration_round": {"type": "integer"},
+        "candidate_sha": {"type": "string"}, "summary": {"type": "string"}, "failure_reason": {"type": "string"},
+        "history_limit": {"type": "integer", "minimum": 0}
+      }
+    }
   }
 }

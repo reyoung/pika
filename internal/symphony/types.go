@@ -459,18 +459,18 @@ type ContextSnapshot struct {
 	MessageRecords       int64  `json:"message_records"`
 }
 
-type AttemptHistoryProjection struct {
-	Attempt AttemptView              `json:"attempt"`
-	Journal ConversationJournalView  `json:"-"`
+type ContextProjection struct {
+	Session          AgentSession               `json:"session"`
+	View             View                       `json:"-"`
+	TargetWork       RuntimeWork                `json:"target_work"`
+	GeneratorWork    WorkView                   `json:"generator_work"`
+	Journal          ConversationJournalView    `json:"-"`
+	AttemptHistories []AttemptHistoryProjection `json:"-"`
 }
 
-type ContextProjection struct {
-	Session         AgentSession               `json:"session"`
-	View            View                       `json:"-"`
-	TargetWork      RuntimeWork                `json:"target_work"`
-	GeneratorWork   WorkView                   `json:"generator_work"`
-	Journal         ConversationJournalView    `json:"-"`
-	AttemptHistories []AttemptHistoryProjection `json:"-"`
+type AttemptHistoryProjection struct {
+	Attempt AttemptView             `json:"attempt"`
+	Journal ConversationJournalView `json:"-"`
 }
 
 type View struct {

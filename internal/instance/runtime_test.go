@@ -102,6 +102,9 @@ func TestResolveRuntimeBuildsPerInstanceLayout(t *testing.T) {
 	if paths.LockPath != filepath.Join(root, "state", "instances", "instance-1", "daemon.lock") {
 		t.Fatalf("lock path = %q", paths.LockPath)
 	}
+	if paths.ContextsRoot != filepath.Join(root, "state", "instances", "instance-1", "contexts") {
+		t.Fatalf("contexts root = %q", paths.ContextsRoot)
+	}
 }
 
 func TestSocketForHerdrWorkspaceMatchesEnvironmentDiscovery(t *testing.T) {

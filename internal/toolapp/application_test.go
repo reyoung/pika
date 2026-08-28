@@ -54,40 +54,15 @@ func TestRoleCatalogAndTerminalReplay(t *testing.T) {
 	}
 	app := toolapp.Application{Store: engine, WorktreeRoot: filepath.Join(t.TempDir(), "worktrees")}
 	tools, err := app.Catalog(ctx, grant.Token)
-	if err != nil || len(tools) != 3 || tools[1].Name != "commit_changes" || tools[2].Name != "submit_baseline_definition" {
+	if err != nil || len(tools) != 2 || tools[0].Name != "commit_changes" || tools[1].Name != "submit_baseline_definition" {
 		t.Fatalf("tools=%+v err=%v", tools, err)
 	}
-	required, ok := tools[0].InputSchema["required"].([]string)
-	if !ok || required == nil || len(required) != 0 {
-		t.Fatalf("zero-argument tool must expose Cursor-compatible required array: %#v", tools[0].InputSchema["required"])
-	}
 	encodedCatalog, err := json.Marshal(tools)
-	if err != nil || !strings.Contains(string(encodedCatalog), `"name":"get_context"`) || !strings.Contains(string(encodedCatalog), `"required":[]`) {
+	if err != nil || strings.Contains(string(encodedCatalog), `"name":"get_context"`) {
 		t.Fatalf("serialized tool catalog is not strict JSON Schema: %s err=%v", encodedCatalog, err)
 	}
 	if _, err := app.Invoke(ctx, grant.Token, toolapp.Call{Name: "finish_baseline_verification", Arguments: json.RawMessage(`{}`)}); err == nil {
 		t.Fatal("draft grant invoked verification tool")
-	}
-	largeOutput := strings.Repeat("x", 10<<10)
-	hook, _ := json.Marshal(map[string]any{
-		"session_id": "codex-session", "turn_id": "turn-1", "hook_event_name": "PostToolUse",
-		"tool_name": "Bash", "tool_use_id": "tool-1", "tool_input": map[string]any{"command": "benchmark"},
-		"tool_response": map[string]any{"output": largeOutput},
-	})
-	if err := engine.IngestProviderEvent(ctx, "codex", session.ID, hook); err != nil {
-		t.Fatalf("ingest journal event: %v", err)
-	}
-	contextResult, err := app.Invoke(ctx, grant.Token, toolapp.Call{Name: "get_context", Arguments: json.RawMessage(`{}`)})
-	if err != nil {
-		t.Fatalf("get context: %v", err)
-	}
-	contextValue := contextResult.Value.(map[string]any)
-	journal := contextValue["conversation_journal"].(symphony.ConversationJournalView)
-	if len(journal.Tools) != 1 || !strings.Contains(string(journal.Tools[0].Output), `"truncated":true`) {
-		t.Fatalf("bounded journal = %+v", journal)
-	}
-	if contextValue["terminal_operation"] != "submit_baseline_definition" {
-		t.Fatalf("context terminal operation = %v", contextValue["terminal_operation"])
 	}
 	arguments := json.RawMessage(`{"idempotency_key":"terminal-1","definition":{"target":"kernel","metric":"latency"}}`)
 	first, err := app.Invoke(ctx, grant.Token, toolapp.Call{Name: "submit_baseline_definition", Arguments: arguments})
@@ -117,9 +92,6 @@ func TestRoleCatalogAndTerminalReplay(t *testing.T) {
 	replayedReceipt := replayed.Value.(symphony.Receipt)
 	if replayedReceipt.ID != firstReceipt.ID || !replayedReceipt.Replayed {
 		t.Fatalf("replayed receipt=%+v first=%+v", replayedReceipt, firstReceipt)
-	}
-	if _, err := app.Invoke(ctx, grant.Token, toolapp.Call{Name: "get_context", Arguments: json.RawMessage(`{}`)}); err == nil {
-		t.Fatal("revoked grant read context")
 	}
 }
 
@@ -330,16 +302,6 @@ func TestIterationAndIntegrationToolsVerifyGitBeforeAdvancingBest(t *testing.T) 
 		frozenContext.ExpectedBestSHA != baselineSHA || frozenContext.IntegrationFIFOPosition != 1 || frozenContext.IntegrationStatus != "best_update_prepared" ||
 		frozenContext.GitIntentID != intentID || frozenContext.GitIntentState != "pending" {
 		t.Fatalf("Integration dynamic context = %+v", frozenContext)
-	}
-	contextResult, err := app.Invoke(ctx, integrationGrant.Token, toolapp.Call{Name: "get_context", Arguments: json.RawMessage(`{}`)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	contextValue := contextResult.Value.(map[string]any)
-	if contextValue["expected_best_sha"] != baselineSHA || contextValue["integration_fifo_position"] != int64(1) ||
-		contextValue["integration_status"] != "best_update_prepared" || contextValue["git_intent_id"] != intentID ||
-		contextValue["git_intent_state"] != "pending" {
-		t.Fatalf("Integration get_context omitted recovery state: %+v", contextValue)
 	}
 	applied, err := app.Invoke(ctx, integrationGrant.Token, toolapp.Call{Name: "apply_best_update", Arguments: json.RawMessage(`{"intent_id":"` + intentID + `","message":"accept candidate"}`)})
 	if err != nil {

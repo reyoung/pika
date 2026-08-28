@@ -69,7 +69,7 @@ The daemon reconciles these authorities; it never collapses them. For example, `
 
 - Own the Optimization state machine, scheduler, concurrency, and FIFO Integration queue.
 - Create and close Agent panes through Herdr.
-- Build immutable Role activation and bounded Context Bundles.
+- Build immutable Role activation and complete, per-Session Context Bundles.
 - Serve the CLI control protocol and Role-scoped MCP application.
 - Normalize provider hooks into Agent Sessions, Turns, messages, and tool events.
 - Generate Follow-up Requests and deliver their messages to the still-running target Agent.
@@ -78,7 +78,7 @@ The daemon reconciles these authorities; it never collapses them. For example, `
 ### Coding agent
 
 - Work inside its assigned Git workspace.
-- Read Pika context through MCP and referenced files.
+- Fully read the frozen local `context.json` and `messages.jsonl` described by the System Prompt schemas.
 - Produce evidence and call exactly one valid terminal operation.
 - Remain open for direct user input and automatic Follow-up until Work terminates.
 
@@ -205,7 +205,7 @@ Pika does not proxy steering. The user types directly into the Codex/OpenCode/Cu
 
 ### Agent activation
 
-Before starting a Session, the daemon renders and freezes three layers: the binary-owned Role System Prompt, dynamic System Context from committed Symphony state, and the non-empty user instruction overlay. Codex receives that value as `developer_instructions` through the instance wrapper. Cursor stores it in private per-Session state and returns it as `sessionStart.additional_context`; Cursor's dynamic layer also bootstraps the environment-scoped `pika_go` MCP namespace. The Cursor kickoff is a positional initial prompt; later Herdr prompt injection is reserved for human/Follow-up messages and is not used to emulate a System Prompt.
+Before starting a Session, the daemon materializes its Context Bundle and renders three frozen layers: the binary-owned Role System Prompt; exact bundle paths, digests, and complete versioned JSON Schemas; and the non-empty user instruction overlay. Codex receives that value as `developer_instructions` through the instance wrapper. Cursor stores it in private per-Session state and returns it as `sessionStart.additional_context`; Cursor's frozen layer also bootstraps the environment-scoped `pika_go` MCP namespace. The Cursor kickoff is a positional initial prompt; later Herdr prompt injection is reserved for human/Follow-up messages and is not used to emulate a System Prompt.
 
 ### Back-off
 

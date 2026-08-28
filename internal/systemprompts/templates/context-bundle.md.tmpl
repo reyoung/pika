@@ -1,0 +1,26 @@
+## Pika Session Context Bundle
+
+开始工作前，必须完整读取下面两个只读文件。它们是当前 Agent Session 冻结的领域状态与同一 Work 历史权威；Iteration 的跨 Attempt 摘要与详细历史路径位于 `context.json` 的 `iteration_context` 中。不要从 pane 标题、旧会话或自然语言猜测身份，也不要跳过大文件的后半部分。
+
+- Context：[{{.ContextPath}}](<{{.ContextPath}}>), SHA-256 `{{.ContextSHA256}}`
+- 完整标准化历史：[{{.MessagesPath}}](<{{.MessagesPath}}>), SHA-256 `{{.MessagesSHA256}}`
+
+### context.json JSON Schema
+
+```json
+{{.ContextSchemaText}}
+```
+
+### messages.jsonl 单行 JSON Schema
+
+```json
+{{.MessageSchemaText}}
+```
+
+### summary.jsonl 单行 JSON Schema
+
+```json
+{{.SummarySchemaText}}
+```
+
+每个 JSONL 非空行分别符合对应 schema。读取并核对 `context.json` 中的 `terminal_operation` 后，再使用 Role 允许的 MCP 完成工作。

@@ -38,6 +38,7 @@ Herdr persists terminal layout; Pika persists desired workflow and correlations.
 | `provider_events` | deduplicated raw hook envelope for audit and forward-compatible reprocessing |
 | `followup_requests` | target, inactivity deadline, generation attempts, message, delivery, supersession |
 | `instruction_snapshots` | user overlay plus the byte-exact frozen rendered System Prompt and digest for one Agent Session |
+| `context_snapshots` | frozen Context Bundle paths, schema version, SHA-256 digests, byte sizes, and JSONL record count |
 
 ### Reliability
 
@@ -73,7 +74,7 @@ byte_size
 content_sha256
 ```
 
-SQLite `TEXT` is used for valid UTF-8 JSON/text and `BLOB` for arbitrary bytes. The database preserves the full payload; previews, token budgets, and relevance filtering are concerns of Context Builder queries, not retention.
+SQLite `TEXT` is used for valid UTF-8 JSON/text and `BLOB` for arbitrary bytes. The database preserves the full payload; status previews and token budgets do not affect retention or Context Bundle completeness.
 
 This choice intentionally favors one-file state and simple backup over database size. Implementations must not impose a hidden truncation limit. If disk growth later becomes a real problem, retention or compression requires a new explicit design decision and migration.
 
@@ -105,13 +106,15 @@ The normalized journal saves:
 
 Provider transcript paths are metadata. Pika does not depend on an undocumented transcript schema to rebuild history.
 
-Context generation is bounded and deterministic:
+Context generation is complete and deterministic:
 
 1. Select current domain facts and required terminal operation.
-2. Select recent and relevant Turns across all Sessions for the Work.
-3. Include concise tool-output excerpts only when relevant.
-4. Materialize a complete `messages.jsonl` or evidence view under the instance context directory when the Role needs a file.
-5. Record the query inputs and generated digest on the new Agent Session.
+2. Select every normalized Turn across all Sessions for the relevant Work.
+3. Include complete observable tool and shell inputs and outputs, MCP receipts, and supplements; do not duplicate raw provider-hook events.
+4. Atomically materialize `contexts/<session-id>/context.json`, current-Work `messages.jsonl`, and any selected `attempt-history/<attempt-id>/{messages,summary}.jsonl` before provider launch.
+5. Record both relative paths, SHA-256 digests, byte sizes, record count, and schema version in `context_snapshots`.
+
+The full JSON Schemas for the context document, normalized message records, and terminal Attempt summary records are versioned with the producer and embedded verbatim in every consuming System Prompt. The locator section is rendered from an embedded Go template with missing-key failures. A dispatch retry verifies every referenced digest and reuses the frozen files; a new or recovery Agent Session creates a new reviewable snapshot.
 
 When Baseline Verification rejects or supersedes a revision, the historical view retains its failure kind, reason, requested changes, and evidence. The successor Baseline Draft projection copies none of that into a mutable Definition automatically; it exposes the predecessor facts to the new Session so the Agent can make an explicit revision. Baseline Revision ID is durable identity, while Work and Agent Session IDs remain execution-only.
 
@@ -136,7 +139,7 @@ Because `pane.updated` is approximate, the database stores the observed source r
 
 - Workspace state directories are mode `0700`; the manifest, configuration, database, and lock are user-only.
 - Raw bearer grants and provider credentials are never persisted; store hashes or references.
-- Tool output may contain secrets. It is never printed by default in `status` and is supplied to later Agents only through explicit Context Builder selection.
+- Tool output may contain secrets. It is never printed by default in `status`; Context Bundle directories and files are user-only and intentionally include the complete normalized history needed by the relevant Work.
 - Journal and tool data are retained for the lifetime of the Optimization. Deleting an Optimization is a separate explicit destructive command and is not implied by shutdown.
 - Backups copy the SQLite database using a SQLite-safe online backup/checkpoint procedure, not a blind copy of a live WAL set.
 - `pika-go backup --output <absolute-path>` refuses overwrite and live SQLite paths, performs a passive WAL checkpoint plus `VACUUM INTO`, applies mode `0600`, and validates `quick_check` and the exact supported schema before success.

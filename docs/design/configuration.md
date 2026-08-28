@@ -45,6 +45,9 @@ repository = "/absolute/path/to/repo"
 iteration_concurrency = 4
 max_pending_attempts = 8
 
+[context.iteration]
+history_limit = 20
+
 [agents.baseline]
 kind = "codex"
 model = "gpt-5.6-sol"
@@ -96,7 +99,7 @@ This example deliberately mixes providers; the shipped `--defaults` configuratio
 
 Exact defaults beyond the accepted five-minute inactivity timeout remain implementation choices and are printed by interactive `pika-go init` before commit.
 
-If `pika.toml` already exists, init treats it as user-owned input: it validates version and repository identity, preserves the file byte-for-byte, and rejects invalid scheduler, Follow-up, or Role Agent fields. `iteration_concurrency` and `max_pending_attempts` are copied into the durable Optimization during init; later edits affect only a future Optimization rather than silently changing the running scheduler.
+If `pika.toml` already exists, init treats it as user-owned input: it validates version and repository identity, preserves the file byte-for-byte, and rejects invalid scheduler, Context, Follow-up, or Role Agent fields. `iteration_concurrency`, `max_pending_attempts`, and `context.iteration.history_limit` are copied into the durable Optimization during init. Every Attempt freezes the current history limit when it is created; later edits affect only a future Optimization rather than silently changing running work. A limit of `0` disables cross-Attempt history injection.
 
 ## 3. Static Agent selection
 
@@ -147,10 +150,10 @@ At Agent Session creation, Pika records:
 The rendered System Prompt has three ordered layers:
 
 1. immutable Role policy embedded in the binary;
-2. daemon-rendered dynamic System Context from committed Work state;
+2. the frozen Context Bundle locator, SHA-256 digests, and complete versioned JSON Schemas for `context.json`, `messages.jsonl`, and terminal Attempt `summary.jsonl` records;
 3. the current user instruction overlay, appended only when non-empty.
 
-The dynamic layer includes the exact Work/generation, Baseline Revision, Definition digest, submitted Repository Snapshot SHA, assigned repository, terminal MCP, and Role-specific Attempt/Best/Integration/Follow-up identities. A successor Baseline Draft also receives the predecessor Revision's failure kind, reason, and requested changes; full verification evidence remains behind `get_context`. Larger and more volatile facts remain behind `get_context`. The complete three-layer prompt is frozen with the Agent Session. Editing a file affects only later Sessions; retrying the same Session reuses its stored prompt byte-for-byte, while a fresh recovery Session reads the latest overlay and current committed Work facts.
+`context.json` contains the exact Work/generation, Baseline Revision, Definition digest, submitted Repository Snapshot SHA, assigned repository, terminal operation, and Role-specific Attempt/Best/Integration/Follow-up identities. `messages.jsonl` contains the complete normalized cross-Session history for that Work, including full observable tool and shell payloads. Iteration additionally receives up to its frozen N most-recent accepted/rejected Attempts, presented chronologically with summaries plus digest-addressed `attempt-history/<attempt-id>/messages.jsonl` and `summary.jsonl` files. A Follow-up generator receives the target Work's projection and the same frozen Iteration history policy. The complete three-layer prompt and files are frozen with the Agent Session. Editing an overlay affects only later Sessions; retrying the same Session verifies and reuses its stored prompt and Context Bundle byte-for-byte, while a fresh recovery Session snapshots the latest overlay and committed facts.
 
 ## 6. Codex managed profile
 

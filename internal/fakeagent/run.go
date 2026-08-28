@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -157,20 +158,15 @@ func runOptimizationIteration(ctx context.Context, output io.Writer) {
 }
 
 func runOptimizationIntegration(ctx context.Context, output io.Writer) {
-	contextCall := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_context","arguments":{}}}`
-	response, err := callMCPUntilActive(ctx, contextCall)
+	intentID, err := pendingIntentFromContext(os.Getenv("PIKA_CONTEXT_PATH"))
 	if err != nil {
-		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), response)
-		return
-	}
-	intentID, err := pendingIntentID(response)
-	if err != nil {
-		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), response)
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
 		return
 	}
 	if intentID == "" {
 		prepare := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"prepare_best_update","arguments":{"idempotency_key":"fake-prepare-%s","validation":{"guard":"passed"}}}}`, os.Getenv("PIKA_SESSION_ID"))
-		response, err = callMCPUntilActive(ctx, prepare)
+		response, callErr := callMCPUntilActive(ctx, prepare)
+		err = callErr
 		if err != nil {
 			_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), response)
 			return
@@ -214,31 +210,30 @@ func runOptimizationIntegration(ctx context.Context, output io.Writer) {
 	}
 }
 
-func pendingIntentID(response string) (string, error) {
-	var envelope struct {
-		Result struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
+func pendingIntentFromContext(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("PIKA_CONTEXT_PATH is required")
 	}
-	if err := json.Unmarshal([]byte(response), &envelope); err != nil || len(envelope.Result.Content) == 0 {
-		return "", fmt.Errorf("decode MCP context envelope: %w", err)
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read Pika Context Bundle: %w", err)
 	}
 	var value struct {
-		GitIntentID    string `json:"git_intent_id"`
-		GitIntentState string `json:"git_intent_state"`
+		Work struct {
+			GitIntentID    string `json:"git_intent_id"`
+			GitIntentState string `json:"git_intent_state"`
+		} `json:"work"`
 	}
-	if err := json.Unmarshal([]byte(envelope.Result.Content[0].Text), &value); err != nil {
-		return "", fmt.Errorf("decode MCP Integration context: %w", err)
+	if err := json.Unmarshal(contents, &value); err != nil {
+		return "", fmt.Errorf("decode Pika Integration context: %w", err)
 	}
-	if value.GitIntentID == "" && value.GitIntentState == "" {
+	if value.Work.GitIntentID == "" && value.Work.GitIntentState == "" {
 		return "", nil
 	}
-	if value.GitIntentID == "" || value.GitIntentState != "pending" {
-		return "", fmt.Errorf("inconsistent Git intent context: id=%q state=%q", value.GitIntentID, value.GitIntentState)
+	if value.Work.GitIntentID == "" || value.Work.GitIntentState != "pending" {
+		return "", fmt.Errorf("inconsistent Git intent context: id=%q state=%q", value.Work.GitIntentID, value.Work.GitIntentState)
 	}
-	return value.GitIntentID, nil
+	return value.Work.GitIntentID, nil
 }
 
 func acquireFakePosition() (int, bool) {

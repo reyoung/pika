@@ -315,9 +315,9 @@ func configureRealProviderInstance(t *testing.T, ctx context.Context, repository
 	}
 	instructionRoot := filepath.Join(configRoot, "instances", "real-codex", "instructions")
 	roleInstructions := map[string]string{
-		"baseline-verify.md": "At the beginning of this Session, immediately after get_context and before any other tool or shell work, run `pika-real-gate verification` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
-		"iteration.md":       "At the beginning of this Session, immediately after get_context and before any other tool or shell work, run `pika-real-gate iteration` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
-		"integration.md":     "At the beginning of this Session, immediately after get_context and before any other tool or shell work, run `pika-real-gate integration` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
+		"baseline-verify.md": "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate verification` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
+		"iteration.md":       "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate iteration` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
+		"integration.md":     "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate integration` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
 	}
 	for name, instruction := range roleInstructions {
 		if err := os.WriteFile(filepath.Join(instructionRoot, name), []byte(instruction), 0o600); err != nil {

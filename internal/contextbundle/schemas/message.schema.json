@@ -1,15 +1,52 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pika-go.local/schemas/message-v2.json",
-  "title": "Pika normalized conversation record",
+  "title": "Pika Session Context Message Record",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "sequence", "turn", "tools", "tool_supplements"],
   "properties": {
     "schema_version": {"const": 2},
     "sequence": {"type": "integer", "minimum": 1},
-    "turn": {"type": "object"},
-    "tools": {"type": "array", "items": {"type": "object"}},
-    "tool_supplements": {"type": "array", "items": {"type": "object"}}
+    "turn": {"$ref": "#/$defs/turn"},
+    "tools": {"type": "array", "items": {"$ref": "#/$defs/tool"}},
+    "tool_supplements": {"type": "array", "items": {"$ref": "#/$defs/supplement"}}
+  },
+  "$defs": {
+    "turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider", "agent_session_id", "provider_session_id", "provider_turn_id", "status", "started_at"],
+      "properties": {
+        "id": {"type": "string"}, "provider": {"enum": ["codex", "cursor"]},
+        "agent_session_id": {"type": "string"}, "provider_session_id": {"type": "string"},
+        "provider_turn_id": {"type": "string"}, "status": {"type": "string"},
+        "user_message": {"type": "string"}, "assistant_message": {"type": "string"},
+        "started_at": {"type": "string"}, "stopped_at": {"type": "string"}
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider", "conversation_turn_id", "provider_turn_id", "provider_tool_use_id", "tool_name", "input", "status"],
+      "properties": {
+        "id": {"type": "string"}, "provider": {"enum": ["codex", "cursor"]},
+        "conversation_turn_id": {"type": "string"}, "provider_turn_id": {"type": "string"},
+        "provider_tool_use_id": {"type": "string"}, "tool_name": {"type": "string"},
+        "input": {}, "output": {}, "status": {"type": "string"}, "error_message": {"type": "string"},
+        "failure_type": {"type": "string"}, "duration_ms": {"type": "integer"}, "interrupted": {"type": "boolean"}
+      }
+    },
+    "supplement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider", "conversation_turn_id", "provider_turn_id", "kind", "output"],
+      "properties": {
+        "id": {"type": "string"}, "provider": {"enum": ["codex", "cursor"]},
+        "conversation_turn_id": {"type": "string"}, "provider_turn_id": {"type": "string"},
+        "kind": {"type": "string"}, "tool_name": {"type": "string"}, "server_name": {"type": "string"},
+        "input": {}, "output": {}, "duration_ms": {"type": "integer"}
+      }
+    }
   }
 }

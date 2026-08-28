@@ -94,7 +94,7 @@ func TestCursorAdapterNormalizesConversationAndFullToolEvidence(t *testing.T) {
 		},
 		{
 			name: "mcp-output",
-			raw:  `{"conversation_id":"conversation","generation_id":"generation","hook_event_name":"afterMCPExecution","tool_name":"get_context","tool_input":"{\"scope\":\"work\"}","mcp_server_name":"pika_go","result_json":"{\"ok\":true}","duration":15}`,
+			raw:  `{"conversation_id":"conversation","generation_id":"generation","hook_event_name":"afterMCPExecution","tool_name":"finish_iteration","tool_input":"{\"scope\":\"work\"}","mcp_server_name":"pika_go","result_json":"{\"ok\":true}","duration":15}`,
 			want: provider.JournalToolSupplement,
 			check: func(t *testing.T, event provider.JournalEvent) {
 				if event.Supplement == nil || event.Supplement.Kind != "mcp" || event.Supplement.ServerName != "pika_go" || string(event.Supplement.Input) != `{"scope":"work"}` || string(event.Supplement.Output) != `{"ok":true}` {

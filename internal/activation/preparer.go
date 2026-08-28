@@ -80,11 +80,15 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 	if err != nil {
 		return workruntime.Preparation{}, fmt.Errorf("materialize Agent Session Context Bundle: %w", err)
 	}
-	contextSchema, messageSchema, summarySchema, err := contextbundle.Schemas()
+	contextSchema, messageSchema, err := contextbundle.Schemas()
 	if err != nil {
 		return workruntime.Preparation{}, err
 	}
-	systemPrompt, err := systemprompts.RenderForProviderFromBundle(logicalName, contents, agentConfiguration.Kind, systemprompts.ContextFiles{
+	summarySchema, err := contextbundle.SummarySchema()
+	if err != nil {
+		return workruntime.Preparation{}, err
+	}
+	systemPrompt, err := systemprompts.RenderForProvider(logicalName, contents, agentConfiguration.Kind, systemprompts.ContextFiles{
 		ContextPath: bundle.ContextPath, ContextSHA256: bundle.ContextSHA256,
 		MessagesPath: bundle.MessagesPath, MessagesSHA256: bundle.MessagesSHA256,
 		ContextSchema: contextSchema, MessageSchema: messageSchema, SummarySchema: summarySchema,

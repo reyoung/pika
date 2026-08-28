@@ -526,11 +526,6 @@ CREATE TABLE git_worktrees (
 `
 
 const schemaV16 = `
-ALTER TABLE optimizations ADD COLUMN iteration_history_limit INTEGER NOT NULL DEFAULT 20 CHECK(iteration_history_limit >= 0);
-ALTER TABLE attempts ADD COLUMN history_limit INTEGER NOT NULL DEFAULT 20 CHECK(history_limit >= 0);
-`
-
-const schemaV17 = `
 CREATE TABLE context_snapshots (
     agent_session_id TEXT PRIMARY KEY REFERENCES agent_sessions(id),
     schema_version INTEGER NOT NULL,
@@ -543,6 +538,11 @@ CREATE TABLE context_snapshots (
     message_records INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );
+`
+
+const schemaV17 = `
+ALTER TABLE optimizations ADD COLUMN iteration_history_limit INTEGER NOT NULL DEFAULT 20 CHECK(iteration_history_limit >= 0);
+ALTER TABLE attempts ADD COLUMN history_limit INTEGER NOT NULL DEFAULT 20 CHECK(history_limit >= 0);
 `
 
 var schemaMigrations = []struct {

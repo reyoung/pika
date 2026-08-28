@@ -144,7 +144,7 @@ func TestAgentSessionHistoryPreservesFreshRecoverySessions(t *testing.T) {
 	if err := engine.BindPane(ctx, first.ID, symphony.PaneBinding{WorkspaceID: "w1", TabID: "t1", PaneID: "p1", TerminalID: "term-1"}); err != nil {
 		t.Fatal(err)
 	}
-	grant, err := engine.MintAgentGrant(ctx, first.ID, []string{"get_context"}, time.Hour)
+	grant, err := engine.MintAgentGrant(ctx, first.ID, []string{"finish_iteration"}, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

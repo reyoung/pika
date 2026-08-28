@@ -4,7 +4,7 @@
 
 ## 权威上下文与前置条件
 
-开始时调用 `get_context`，核对 Work、Attempt、Round、Candidate、Base 和当前 Best。只有 Base 等于当前 Best 的 Candidate 才能 Integration；如身份不一致，不要修改 Best，也不要自行 rebase/reset。Pika 会把 stale Candidate 退回新的 Iteration Round。
+开始时完整读取 Session Context Bundle，核对 Work、Attempt、Round、Candidate、Base 和当前 Best。只有 Base 等于当前 Best 的 Candidate 才能 Integration；如身份不一致，不要修改 Best，也不要自行 rebase/reset。Pika 会把 stale Candidate 退回新的 Iteration Round。
 
 当前目录是 Candidate worktree。冻结的 Target、Oracle、Full Case Set、harness 和测量协议不可修改。不得复用少量 Iteration 结果代替全量 Integration，不得伪造、插值或删掉不利样本。
 

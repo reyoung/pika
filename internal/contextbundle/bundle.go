@@ -60,16 +60,25 @@ type IterationContext struct {
 }
 
 type Document struct {
-	SchemaVersion     int64                     `json:"schema_version"`
-	Session           symphony.AgentSession     `json:"session"`
-	Optimization      symphony.OptimizationView `json:"optimization"`
-	Baseline          *symphony.BaselineView    `json:"baseline,omitempty"`
-	Best              *symphony.BestView        `json:"best,omitempty"`
-	Work              symphony.RuntimeWork      `json:"work"`
-	GeneratorWork     symphony.WorkView         `json:"generator_work"`
-	TerminalOperation string                    `json:"terminal_operation"`
-	Messages          FileReference             `json:"messages"`
-	Iteration         *IterationContext         `json:"iteration_context,omitempty"`
+	SchemaVersion     int64                         `json:"schema_version"`
+	Session           symphony.AgentSession         `json:"session"`
+	Optimization      symphony.OptimizationView     `json:"optimization"`
+	Baseline          *symphony.BaselineView        `json:"baseline,omitempty"`
+	Best              *symphony.BestView            `json:"best,omitempty"`
+	Attempts          []symphony.AttemptView        `json:"attempts"`
+	IterationRounds   []symphony.IterationRoundView `json:"iteration_rounds"`
+	Integrations      []symphony.IntegrationView    `json:"integrations"`
+	BackOffs          []symphony.BackOffView        `json:"back_offs"`
+	Work              symphony.RuntimeWork          `json:"work"`
+	GeneratorWork     symphony.WorkView             `json:"generator_work"`
+	TerminalOperation string                        `json:"terminal_operation"`
+	Messages          FileReference                 `json:"messages"`
+	Iteration         *IterationContext             `json:"iteration_context,omitempty"`
+}
+
+type SummaryRecord struct {
+	SchemaVersion int64                `json:"schema_version"`
+	Attempt       symphony.AttemptView `json:"attempt"`
 }
 
 type MessageRecord struct {
@@ -80,25 +89,24 @@ type MessageRecord struct {
 	ToolSupplements []symphony.ToolSupplementView `json:"tool_supplements"`
 }
 
-type SummaryRecord struct {
-	SchemaVersion int64                 `json:"schema_version"`
-	Attempt       symphony.AttemptView `json:"attempt"`
-}
-
-func Schemas() (contextSchema, messageSchema, summarySchema []byte, err error) {
+func Schemas() (contextSchema, messageSchema []byte, err error) {
 	contextSchema, err = schemaFiles.ReadFile("schemas/context.schema.json")
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("read embedded context schema: %w", err)
+		return nil, nil, fmt.Errorf("read embedded context schema: %w", err)
 	}
 	messageSchema, err = schemaFiles.ReadFile("schemas/message.schema.json")
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("read embedded message schema: %w", err)
+		return nil, nil, fmt.Errorf("read embedded message schema: %w", err)
 	}
-	summarySchema, err = schemaFiles.ReadFile("schemas/summary.schema.json")
+	return contextSchema, messageSchema, nil
+}
+
+func SummarySchema() ([]byte, error) {
+	contents, err := schemaFiles.ReadFile("schemas/summary.schema.json")
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("read embedded summary schema: %w", err)
+		return nil, fmt.Errorf("read embedded summary schema: %w", err)
 	}
-	return contextSchema, messageSchema, summarySchema, nil
+	return contents, nil
 }
 
 func (m Materializer) Materialize(ctx context.Context, session symphony.AgentSession) (Bundle, error) {
@@ -121,47 +129,64 @@ func (m Materializer) Materialize(ctx context.Context, session symphony.AgentSes
 	if projection.Session.ID != session.ID || projection.Session.WorkID != session.WorkID || projection.Session.Generation != session.Generation {
 		return Bundle{}, errors.New("Context Projection does not match the requested Agent Session")
 	}
-	files := map[string][]byte{}
+	records := recordsFor(projection.Journal)
+	messages, err := encodeJSONL(records)
+	if err != nil {
+		return Bundle{}, err
+	}
+	contextRelative := filepath.Join(session.ID, "context.json")
 	messagesRelative := filepath.Join(session.ID, "messages.jsonl")
-	messages := mustEncodeJSONL(recordsFor(projection.Journal))
-	files[messagesRelative] = messages
+	messagesPath := filepath.Join(m.Root, messagesRelative)
+	messagesDigest := digest(messages)
 	document := Document{
 		SchemaVersion: SchemaVersion, Session: projection.Session, Optimization: projection.View.Optimization,
-		Baseline: projection.View.Baseline, Best: projection.View.Best, Work: projection.TargetWork,
-		GeneratorWork: projection.GeneratorWork, TerminalOperation: terminalOperation(projection.Session.Role),
-		Messages: reference(filepath.Join(m.Root, messagesRelative), messages, int64(len(recordsFor(projection.Journal)))),
+		Baseline: projection.View.Baseline, Best: projection.View.Best,
+		Attempts: nonNil(projection.View.Attempts), IterationRounds: nonNil(projection.View.IterationRounds),
+		Integrations: nonNil(projection.View.Integrations), BackOffs: nonNil(projection.View.BackOffs),
+		Work: projection.TargetWork, GeneratorWork: projection.GeneratorWork,
+		TerminalOperation: terminalOperation(projection.Session.Role),
+		Messages:          FileReference{Path: messagesPath, SHA256: messagesDigest, Bytes: int64(len(messages)), Records: int64(len(records))},
 	}
+	files := map[string][]byte{messagesRelative: messages}
 	if projection.TargetWork.Work.Role == symphony.RoleIteration {
 		document.Iteration = &IterationContext{HistoryLimit: projection.TargetWork.IterationHistoryLimit, RecentTerminalAttempts: []AttemptHistory{}}
 		for _, history := range projection.AttemptHistories {
-			root := filepath.Join(session.ID, "attempt-history", history.Attempt.ID)
 			historyRecords := recordsFor(history.Journal)
-			historyMessages := mustEncodeJSONL(historyRecords)
-			summary := mustEncodeJSONL([]SummaryRecord{{SchemaVersion: SchemaVersion, Attempt: history.Attempt}})
-			messagesPath, summaryPath := filepath.Join(root, "messages.jsonl"), filepath.Join(root, "summary.jsonl")
-			files[messagesPath], files[summaryPath] = historyMessages, summary
+			historyMessages, err := encodeJSONL(historyRecords)
+			if err != nil {
+				return Bundle{}, err
+			}
+			summary, err := encodeSummaryJSONL(SummaryRecord{SchemaVersion: SchemaVersion, Attempt: history.Attempt})
+			if err != nil {
+				return Bundle{}, err
+			}
+			root := filepath.Join(session.ID, "attempt-history", history.Attempt.ID)
+			historyMessagesRelative := filepath.Join(root, "messages.jsonl")
+			summaryRelative := filepath.Join(root, "summary.jsonl")
+			files[historyMessagesRelative], files[summaryRelative] = historyMessages, summary
 			document.Iteration.RecentTerminalAttempts = append(document.Iteration.RecentTerminalAttempts, AttemptHistory{
-				Attempt: history.Attempt,
-				Messages: reference(filepath.Join(m.Root, messagesPath), historyMessages, int64(len(historyRecords))),
-				Summary: reference(filepath.Join(m.Root, summaryPath), summary, 1),
+				Attempt:  history.Attempt,
+				Messages: FileReference{Path: filepath.Join(m.Root, historyMessagesRelative), SHA256: digest(historyMessages), Bytes: int64(len(historyMessages)), Records: int64(len(historyRecords))},
+				Summary:  FileReference{Path: filepath.Join(m.Root, summaryRelative), SHA256: digest(summary), Bytes: int64(len(summary)), Records: 1},
 			})
 		}
 	}
-	contextRelative := filepath.Join(session.ID, "context.json")
 	contextBytes, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		return Bundle{}, fmt.Errorf("encode context.json: %w", err)
 	}
 	contextBytes = append(contextBytes, '\n')
+	contextDigest := digest(contextBytes)
 	files[contextRelative] = contextBytes
+
 	if err := m.writeAtomically(session.ID, files); err != nil {
 		return Bundle{}, err
 	}
 	candidate := symphony.ContextSnapshot{
 		AgentSessionID: session.ID, SchemaVersion: SchemaVersion,
-		ContextRelativePath: contextRelative, ContextSHA256: digest(contextBytes), ContextBytes: int64(len(contextBytes)),
-		MessagesRelativePath: messagesRelative, MessagesSHA256: digest(messages), MessagesBytes: int64(len(messages)),
-		MessageRecords: document.Messages.Records,
+		ContextRelativePath: contextRelative, ContextSHA256: contextDigest, ContextBytes: int64(len(contextBytes)),
+		MessagesRelativePath: messagesRelative, MessagesSHA256: messagesDigest, MessagesBytes: int64(len(messages)),
+		MessageRecords: int64(len(records)),
 	}
 	stored, err := m.Store.FreezeContextSnapshot(ctx, candidate)
 	if err != nil {
@@ -188,25 +213,32 @@ func recordsFor(journal symphony.ConversationJournalView) []MessageRecord {
 	return records
 }
 
-func mustEncodeJSONL[T any](records []T) []byte {
+func encodeJSONL(records []MessageRecord) ([]byte, error) {
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)
 	encoder.SetEscapeHTML(false)
 	for _, record := range records {
 		if err := encoder.Encode(record); err != nil {
-			panic(err)
+			return nil, fmt.Errorf("encode messages.jsonl: %w", err)
 		}
 	}
-	return output.Bytes()
+	return output.Bytes(), nil
 }
 
-func reference(path string, contents []byte, records int64) FileReference {
-	return FileReference{Path: path, SHA256: digest(contents), Bytes: int64(len(contents)), Records: records}
+func encodeSummaryJSONL(record SummaryRecord) ([]byte, error) {
+	contents, err := json.Marshal(record)
+	if err != nil {
+		return nil, fmt.Errorf("encode summary.jsonl: %w", err)
+	}
+	return append(contents, '\n'), nil
 }
 
 func (m Materializer) writeAtomically(sessionID string, files map[string][]byte) error {
 	if err := os.MkdirAll(m.Root, 0o700); err != nil {
 		return fmt.Errorf("create Context Bundle root: %w", err)
+	}
+	if err := os.Chmod(m.Root, 0o700); err != nil {
+		return fmt.Errorf("protect Context Bundle root: %w", err)
 	}
 	finalRoot := filepath.Join(m.Root, sessionID)
 	if _, err := os.Stat(finalRoot); err == nil {
@@ -234,6 +266,9 @@ func (m Materializer) writeAtomically(sessionID string, files map[string][]byte)
 			return err
 		}
 	}
+	if err := os.Chmod(temporary, 0o700); err != nil {
+		return fmt.Errorf("protect Context Bundle directory: %w", err)
+	}
 	if err := os.Rename(temporary, finalRoot); err != nil {
 		return fmt.Errorf("publish Context Bundle: %w", err)
 	}
@@ -253,7 +288,10 @@ func writeFile(path string, contents []byte) error {
 		_ = file.Close()
 		return fmt.Errorf("sync Context Bundle file %s: %w", filepath.Base(path), err)
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close Context Bundle file %s: %w", filepath.Base(path), err)
+	}
+	return nil
 }
 
 func (m Materializer) verifyStored(snapshot symphony.ContextSnapshot) (Bundle, error) {
@@ -275,16 +313,19 @@ func (m Materializer) verifyStored(snapshot symphony.ContextSnapshot) (Bundle, e
 		messagesDigest != snapshot.MessagesSHA256 || messagesBytes != snapshot.MessagesBytes {
 		return Bundle{}, errors.New("frozen Context Bundle digest does not match its files")
 	}
-	var document Document
 	contents, err := os.ReadFile(contextPath)
-	if err != nil || json.Unmarshal(contents, &document) != nil {
+	if err != nil {
+		return Bundle{}, err
+	}
+	var document Document
+	if err := json.Unmarshal(contents, &document); err != nil {
 		return Bundle{}, errors.New("frozen context.json is invalid")
 	}
 	if document.Iteration != nil {
 		for _, history := range document.Iteration.RecentTerminalAttempts {
-			for _, ref := range []FileReference{history.Messages, history.Summary} {
-				actual, size, err := digestPath(ref.Path)
-				if err != nil || actual != ref.SHA256 || size != ref.Bytes {
+			for _, reference := range []FileReference{history.Messages, history.Summary} {
+				actualDigest, actualBytes, err := digestPath(reference.Path)
+				if err != nil || actualDigest != reference.SHA256 || actualBytes != reference.Bytes {
 					return Bundle{}, errors.New("frozen Attempt history digest does not match its file")
 				}
 			}

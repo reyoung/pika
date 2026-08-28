@@ -36,32 +36,32 @@ type ConversationTurnView struct {
 }
 
 type ToolEventView struct {
-	ID                string          `json:"id"`
-	Provider          string          `json:"provider"`
-	ConversationTurnID string         `json:"conversation_turn_id"`
-	ProviderTurnID    string          `json:"provider_turn_id"`
-	ProviderToolUseID string          `json:"provider_tool_use_id"`
-	ToolName          string          `json:"tool_name"`
-	Input             json.RawMessage `json:"input"`
-	Output            json.RawMessage `json:"output,omitempty"`
-	Status            string          `json:"status"`
-	ErrorMessage      string          `json:"error_message,omitempty"`
-	FailureType       string          `json:"failure_type,omitempty"`
-	DurationMS        int64           `json:"duration_ms,omitempty"`
-	Interrupted       bool            `json:"interrupted,omitempty"`
+	ID                 string          `json:"id"`
+	Provider           string          `json:"provider"`
+	ConversationTurnID string          `json:"conversation_turn_id"`
+	ProviderTurnID     string          `json:"provider_turn_id"`
+	ProviderToolUseID  string          `json:"provider_tool_use_id"`
+	ToolName           string          `json:"tool_name"`
+	Input              json.RawMessage `json:"input"`
+	Output             json.RawMessage `json:"output,omitempty"`
+	Status             string          `json:"status"`
+	ErrorMessage       string          `json:"error_message,omitempty"`
+	FailureType        string          `json:"failure_type,omitempty"`
+	DurationMS         int64           `json:"duration_ms,omitempty"`
+	Interrupted        bool            `json:"interrupted,omitempty"`
 }
 
 type ToolSupplementView struct {
-	ID             string          `json:"id"`
-	Provider       string          `json:"provider"`
-	ConversationTurnID string      `json:"conversation_turn_id"`
-	ProviderTurnID string          `json:"provider_turn_id"`
-	Kind           string          `json:"kind"`
-	ToolName       string          `json:"tool_name,omitempty"`
-	ServerName     string          `json:"server_name,omitempty"`
-	Input          json.RawMessage `json:"input,omitempty"`
-	Output         json.RawMessage `json:"output"`
-	DurationMS     int64           `json:"duration_ms,omitempty"`
+	ID                 string          `json:"id"`
+	Provider           string          `json:"provider"`
+	ConversationTurnID string          `json:"conversation_turn_id"`
+	ProviderTurnID     string          `json:"provider_turn_id"`
+	Kind               string          `json:"kind"`
+	ToolName           string          `json:"tool_name,omitempty"`
+	ServerName         string          `json:"server_name,omitempty"`
+	Input              json.RawMessage `json:"input,omitempty"`
+	Output             json.RawMessage `json:"output"`
+	DurationMS         int64           `json:"duration_ms,omitempty"`
 }
 
 type ConversationJournalView struct {
@@ -304,8 +304,8 @@ func (e *Engine) conversationJournal(ctx context.Context, workID string, include
 	}
 	if includeProviderEvents {
 		eventRows, err := e.db.QueryContext(ctx, `SELECT pe.sequence, pe.provider, pe.hook_event_name, pe.provider_session_id,
-		pe.provider_turn_id, pe.raw_json FROM provider_events pe JOIN agent_sessions s ON s.id = pe.agent_session_id
-		WHERE s.work_id = ? ORDER BY pe.sequence`, workID)
+			pe.provider_turn_id, pe.raw_json FROM provider_events pe JOIN agent_sessions s ON s.id = pe.agent_session_id
+			WHERE s.work_id = ? ORDER BY pe.sequence`, workID)
 		if err != nil {
 			return ConversationJournalView{}, err
 		}
@@ -335,8 +335,8 @@ func (e *Engine) conversationJournal(ctx context.Context, workID string, include
 	for turnRows.Next() {
 		var turn ConversationTurnView
 		var user, assistant, stoppedAt sql.NullString
-		if err := turnRows.Scan(&turn.ID, &turn.Provider, &turn.AgentSessionID, &turn.ProviderSessionID, &turn.ProviderTurnID,
-			&turn.Status, &user, &assistant, &turn.StartedAt, &stoppedAt); err != nil {
+		if err := turnRows.Scan(&turn.ID, &turn.Provider, &turn.AgentSessionID, &turn.ProviderSessionID,
+			&turn.ProviderTurnID, &turn.Status, &user, &assistant, &turn.StartedAt, &stoppedAt); err != nil {
 			_ = turnRows.Close()
 			return ConversationJournalView{}, err
 		}
