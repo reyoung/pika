@@ -2,7 +2,6 @@ package symphony_test
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -201,7 +200,7 @@ func TestRecoveryLeavesTerminalWorkSessionForCommittedCloseEffect(t *testing.T) 
 		t.Fatal(err)
 	}
 	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
-		Meta: symphony.CommandMeta{RequestID: "terminal"}, WorkID: draft.ID, Definition: json.RawMessage(`{"target":"kernel"}`),
+		Meta: symphony.CommandMeta{RequestID: "terminal"}, WorkID: draft.ID, Definition: validBaselineDefinition(),
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,7 @@ package toolapp_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity/testcontract"
 	"github.com/reyoung/pika-go/internal/gitworkspace"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/toolapp"
@@ -64,7 +66,7 @@ func TestRoleCatalogAndTerminalReplay(t *testing.T) {
 	if _, err := app.Invoke(ctx, grant.Token, toolapp.Call{Name: "finish_baseline_verification", Arguments: json.RawMessage(`{}`)}); err == nil {
 		t.Fatal("draft grant invoked verification tool")
 	}
-	arguments := json.RawMessage(`{"idempotency_key":"terminal-1","definition":{"target":"kernel","metric":"latency"}}`)
+	arguments := submitDefinitionArguments("terminal-1")
 	first, err := app.Invoke(ctx, grant.Token, toolapp.Call{Name: "submit_baseline_definition", Arguments: arguments})
 	if err != nil {
 		t.Fatalf("submit definition: %v", err)
@@ -122,7 +124,7 @@ func TestBaselineAcceptanceRejectsRepositoryDriftAfterSubmission(t *testing.T) {
 	view, _ := engine.Inspect(ctx, symphony.Status{})
 	draftGrant := runningGrant(t, ctx, engine, pendingRole(t, view, symphony.RoleBaselineDraft), "draft-session")
 	app := toolapp.Application{Store: engine, WorktreeRoot: filepath.Join(t.TempDir(), "worktrees")}
-	if _, err := app.Invoke(ctx, draftGrant.Token, toolapp.Call{Name: "submit_baseline_definition", Arguments: json.RawMessage(`{"idempotency_key":"submit","definition":{"target":"kernel"}}`)}); err != nil {
+	if _, err := app.Invoke(ctx, draftGrant.Token, toolapp.Call{Name: "submit_baseline_definition", Arguments: submitDefinitionArguments("submit")}); err != nil {
 		t.Fatalf("submit definition: %v", err)
 	}
 
@@ -133,7 +135,7 @@ func TestBaselineAcceptanceRejectsRepositoryDriftAfterSubmission(t *testing.T) {
 	runGit(t, repository, "commit", "-m", "drift")
 	view, _ = engine.Inspect(ctx, symphony.Status{})
 	verificationGrant := runningGrant(t, ctx, engine, pendingRole(t, view, symphony.RoleBaselineVerification), "verification-session")
-	_, err = app.Invoke(ctx, verificationGrant.Token, toolapp.Call{Name: "finish_baseline_verification", Arguments: json.RawMessage(`{"idempotency_key":"accept","decision":"accepted","evidence":{"verified":true}}`)})
+	_, err = app.Invoke(ctx, verificationGrant.Token, toolapp.Call{Name: "finish_baseline_verification", Arguments: acceptVerificationArguments("accept")})
 	if err == nil || !strings.Contains(err.Error(), "repository changed after Baseline submission") {
 		t.Fatalf("accept after repository drift error = %v", err)
 	}
@@ -169,7 +171,7 @@ func TestBaselineSubmissionRejectsDirtyRepository(t *testing.T) {
 	view, _ := engine.Inspect(ctx, symphony.Status{})
 	draftGrant := runningGrant(t, ctx, engine, pendingRole(t, view, symphony.RoleBaselineDraft), "draft-session")
 	app := toolapp.Application{Store: engine, WorktreeRoot: filepath.Join(t.TempDir(), "worktrees")}
-	_, err = app.Invoke(ctx, draftGrant.Token, toolapp.Call{Name: "submit_baseline_definition", Arguments: json.RawMessage(`{"idempotency_key":"submit","definition":{"target":"kernel"}}`)})
+	_, err = app.Invoke(ctx, draftGrant.Token, toolapp.Call{Name: "submit_baseline_definition", Arguments: submitDefinitionArguments("submit")})
 	if err == nil || !strings.Contains(err.Error(), "repository must be clean") {
 		t.Fatalf("dirty Baseline submission error = %v", err)
 	}
@@ -202,7 +204,7 @@ func TestBaselineAcceptanceRejectsDirtyRepositoryAfterSubmission(t *testing.T) {
 	view, _ := engine.Inspect(ctx, symphony.Status{})
 	draftGrant := runningGrant(t, ctx, engine, pendingRole(t, view, symphony.RoleBaselineDraft), "draft-session")
 	app := toolapp.Application{Store: engine, WorktreeRoot: filepath.Join(t.TempDir(), "worktrees")}
-	if _, err := app.Invoke(ctx, draftGrant.Token, toolapp.Call{Name: "submit_baseline_definition", Arguments: json.RawMessage(`{"idempotency_key":"submit","definition":{"target":"kernel"}}`)}); err != nil {
+	if _, err := app.Invoke(ctx, draftGrant.Token, toolapp.Call{Name: "submit_baseline_definition", Arguments: submitDefinitionArguments("submit")}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(repository, "uncommitted.txt"), []byte("drift\n"), 0o600); err != nil {
@@ -210,7 +212,7 @@ func TestBaselineAcceptanceRejectsDirtyRepositoryAfterSubmission(t *testing.T) {
 	}
 	view, _ = engine.Inspect(ctx, symphony.Status{})
 	verificationGrant := runningGrant(t, ctx, engine, pendingRole(t, view, symphony.RoleBaselineVerification), "verification-session")
-	_, err = app.Invoke(ctx, verificationGrant.Token, toolapp.Call{Name: "finish_baseline_verification", Arguments: json.RawMessage(`{"idempotency_key":"accept","decision":"accepted","evidence":{"verified":true}}`)})
+	_, err = app.Invoke(ctx, verificationGrant.Token, toolapp.Call{Name: "finish_baseline_verification", Arguments: acceptVerificationArguments("accept")})
 	if err == nil || !strings.Contains(err.Error(), "repository changed after Baseline submission") {
 		t.Fatalf("accept with dirty repository error = %v", err)
 	}
@@ -247,11 +249,11 @@ func TestIterationAndIntegrationToolsVerifyGitBeforeAdvancingBest(t *testing.T) 
 		t.Fatal(err)
 	}
 	view, _ := engine.Inspect(ctx, symphony.Status{})
-	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: view.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`)}); err != nil {
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: view.Works[0].ID, Definition: testcontract.Definition()}); err != nil {
 		t.Fatal(err)
 	}
 	view, _ = engine.Inspect(ctx, symphony.Status{})
-	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{Meta: symphony.CommandMeta{RequestID: "accept"}, WorkID: pendingRole(t, view, symphony.RoleBaselineVerification).ID, Decision: symphony.VerificationAccepted, InitialBestSHA: baselineSHA}); err != nil {
+	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{Meta: symphony.CommandMeta{RequestID: "accept"}, WorkID: pendingRole(t, view, symphony.RoleBaselineVerification).ID, Decision: symphony.VerificationAccepted, Evidence: testcontract.Evidence(), InitialBestSHA: baselineSHA}); err != nil {
 		t.Fatal(err)
 	}
 	view, _ = engine.Inspect(ctx, symphony.Status{})
@@ -285,7 +287,7 @@ func TestIterationAndIntegrationToolsVerifyGitBeforeAdvancingBest(t *testing.T) 
 	view, _ = engine.Inspect(ctx, symphony.Status{})
 	integration := pendingRole(t, view, symphony.RoleIntegration)
 	integrationGrant := runningGrant(t, ctx, engine, integration, "integration-session")
-	prepared, err := app.Invoke(ctx, integrationGrant.Token, toolapp.Call{Name: "prepare_best_update", Arguments: json.RawMessage(`{"idempotency_key":"prepare","validation":{"guard":"passed"}}`)})
+	prepared, err := app.Invoke(ctx, integrationGrant.Token, toolapp.Call{Name: "prepare_best_update", Arguments: prepareBestArguments("prepare")})
 	if err != nil {
 		t.Fatalf("prepare Best update: %v", err)
 	}
@@ -413,7 +415,7 @@ func TestDefinitionPathRecordsStableArtifactInTerminalTransaction(t *testing.T) 
 	t.Parallel()
 	ctx := context.Background()
 	repository := t.TempDir()
-	definition := []byte(`{"target":"kernel","metric":"latency"}`)
+	definition := []byte(testcontract.Definition())
 	runGit(t, repository, "init", "--quiet", "--initial-branch=main")
 	runGit(t, repository, "config", "user.name", "Pika Test")
 	runGit(t, repository, "config", "user.email", "pika@example.invalid")
@@ -451,4 +453,16 @@ func TestDefinitionPathRecordsStableArtifactInTerminalTransaction(t *testing.T) 
 	if err != nil || len(artifacts) != 1 || artifacts[0].ReceiptID != receipt.ID || artifacts[0].RelativePath != "baseline.json" || artifacts[0].ByteSize != int64(len(definition)) || len(artifacts[0].ContentSHA256) != 64 {
 		t.Fatalf("artifacts=%+v err=%v", artifacts, err)
 	}
+}
+
+func submitDefinitionArguments(idempotencyKey string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"idempotency_key":%q,"definition":%s}`, idempotencyKey, testcontract.Definition()))
+}
+
+func acceptVerificationArguments(idempotencyKey string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"idempotency_key":%q,"decision":"accepted","evidence":%s}`, idempotencyKey, testcontract.Evidence()))
+}
+
+func prepareBestArguments(idempotencyKey string) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"idempotency_key":%q,"validation":%s}`, idempotencyKey, testcontract.Validation()))
 }

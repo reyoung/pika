@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/reyoung/pika-go/internal/activation"
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity/testcontract"
 	"github.com/reyoung/pika-go/internal/configuration"
 	"github.com/reyoung/pika-go/internal/instructions"
 	"github.com/reyoung/pika-go/internal/outbox"
@@ -134,7 +135,7 @@ func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent)
 	view, _ := engine.Inspect(ctx, symphony.Status{})
 	baseline := matrixPendingWork(t, view, symphony.RoleBaselineDraft)
 	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
-		Meta: symphony.CommandMeta{RequestID: "baseline"}, WorkID: baseline.ID, Definition: json.RawMessage(`{"target":"kernel"}`),
+		Meta: symphony.CommandMeta{RequestID: "baseline"}, WorkID: baseline.ID, Definition: testcontract.Definition(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +192,7 @@ func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent)
 
 	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{
 		Meta: symphony.CommandMeta{RequestID: "verify"}, WorkID: verification.ID,
-		Decision: symphony.VerificationAccepted, InitialBestSHA: "baseline-sha",
+		Decision: symphony.VerificationAccepted, Evidence: testcontract.Evidence(), InitialBestSHA: "baseline-sha",
 	}); err != nil {
 		t.Fatal(err)
 	}

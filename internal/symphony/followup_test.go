@@ -416,7 +416,7 @@ func eligibleFollowUpTarget(t *testing.T, ctx context.Context, engine *symphony.
 		t.Fatal(err)
 	}
 	view, _ := engine.Inspect(ctx, symphony.Status{})
-	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: view.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`)}); err != nil {
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: view.Works[0].ID, Definition: validBaselineDefinition()}); err != nil {
 		t.Fatal(err)
 	}
 	view, _ = engine.Inspect(ctx, symphony.Status{})

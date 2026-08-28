@@ -146,7 +146,7 @@ func TestBaselineLifecycleSurvivesReopenBetweenEveryTransition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open for submit: %v", err)
 	}
-	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: initial.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`)}); err != nil {
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: initial.Works[0].ID, Definition: validBaselineDefinition()}); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	submitted, _ := engine.Inspect(ctx, symphony.Status{})
@@ -159,7 +159,7 @@ func TestBaselineLifecycleSurvivesReopenBetweenEveryTransition(t *testing.T) {
 		t.Fatalf("open for finish: %v", err)
 	}
 	t.Cleanup(func() { _ = engine.Close() })
-	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{Meta: symphony.CommandMeta{RequestID: "finish"}, WorkID: submitted.Works[len(submitted.Works)-1].ID, Decision: symphony.VerificationAccepted}); err != nil {
+	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{Meta: symphony.CommandMeta{RequestID: "finish"}, WorkID: submitted.Works[len(submitted.Works)-1].ID, Decision: symphony.VerificationAccepted, Evidence: validBenchmarkEvidence()}); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
 	finished, _ := engine.Inspect(ctx, symphony.Status{})
@@ -179,7 +179,7 @@ func TestDrainingDraftMayFinishButDoesNotStartVerification(t *testing.T) {
 	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
 		Meta:       symphony.CommandMeta{RequestID: "submit"},
 		WorkID:     draft.Works[0].ID,
-		Definition: json.RawMessage(`{"target":"kernel"}`),
+		Definition: validBaselineDefinition(),
 	}); err != nil {
 		t.Fatalf("finish draft while draining: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestDrainReadyRequiresNoPendingWorkActiveSessionOrRuntimeEffect(t *testing.
 	}
 	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
 		Meta: symphony.CommandMeta{RequestID: "finish"}, WorkID: draft.Works[0].ID,
-		Definition: json.RawMessage(`{"target":"kernel"}`),
+		Definition: validBaselineDefinition(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestDrainingVerificationMayFinishWithoutStartingSuccessor(t *testing.T) {
 		finish       symphony.FinishBaselineVerification
 		wantBaseline symphony.BaselineStatus
 	}{
-		{name: "accepted", finish: symphony.FinishBaselineVerification{Decision: symphony.VerificationAccepted}, wantBaseline: symphony.BaselineAccepted},
+		{name: "accepted", finish: symphony.FinishBaselineVerification{Decision: symphony.VerificationAccepted, Evidence: validBenchmarkEvidence()}, wantBaseline: symphony.BaselineAccepted},
 		{name: "rejected", finish: symphony.FinishBaselineVerification{Decision: symphony.VerificationRejected, FailureKind: "invalid", Reason: "failed", RequestedChanges: "fix it"}, wantBaseline: symphony.BaselineRejected},
 	}
 	for _, test := range tests {
@@ -302,7 +302,7 @@ func draftState(t *testing.T, ctx context.Context) (*symphony.Engine, symphony.V
 func submittedState(t *testing.T, ctx context.Context) (*symphony.Engine, symphony.View) {
 	t.Helper()
 	engine, draft := draftState(t, ctx)
-	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: draft.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`)}); err != nil {
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: draft.Works[0].ID, Definition: validBaselineDefinition()}); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	view, err := engine.Inspect(ctx, symphony.Status{})
@@ -316,7 +316,7 @@ func acceptedState(t *testing.T, ctx context.Context) (*symphony.Engine, symphon
 	t.Helper()
 	engine, submitted := submittedState(t, ctx)
 	work := submitted.Works[len(submitted.Works)-1]
-	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{Meta: symphony.CommandMeta{RequestID: "finish"}, WorkID: work.ID, Decision: symphony.VerificationAccepted}); err != nil {
+	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{Meta: symphony.CommandMeta{RequestID: "finish"}, WorkID: work.ID, Decision: symphony.VerificationAccepted, Evidence: validBenchmarkEvidence()}); err != nil {
 		t.Fatalf("accept baseline: %v", err)
 	}
 	view, err := engine.Inspect(ctx, symphony.Status{})

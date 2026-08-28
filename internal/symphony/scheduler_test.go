@@ -277,7 +277,7 @@ func TestPausedSchedulerAcceptsTerminalDomainResultButHoldsSuccessorStart(t *tes
 		t.Fatal(err)
 	}
 	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"},
-		WorkID: before.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`)}); err != nil {
+		WorkID: before.Works[0].ID, Definition: validBaselineDefinition()}); err != nil {
 		t.Fatalf("terminal result while paused: %v", err)
 	}
 	after, _ := engine.Inspect(ctx, symphony.Status{})

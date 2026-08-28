@@ -243,7 +243,7 @@ func integrationReadyEngine(t *testing.T, ctx context.Context, path string, chec
 		t.Fatal(err)
 	}
 	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
-		Meta: symphony.CommandMeta{RequestID: "submit-baseline"}, WorkID: view.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`),
+		Meta: symphony.CommandMeta{RequestID: "submit-baseline"}, WorkID: view.Works[0].ID, Definition: validBaselineDefinition(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func integrationReadyEngine(t *testing.T, ctx context.Context, path string, chec
 	verification := pendingWorkByRole(t, view, symphony.RoleBaselineVerification)
 	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{
 		Meta: symphony.CommandMeta{RequestID: "accept-baseline"}, WorkID: verification.ID,
-		Decision: symphony.VerificationAccepted, InitialBestSHA: "baseline-sha",
+		Decision: symphony.VerificationAccepted, Evidence: validBenchmarkEvidence(), InitialBestSHA: "baseline-sha",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func integrationReadyEngine(t *testing.T, ctx context.Context, path string, chec
 	}
 	integration := pendingWorkByRole(t, view, symphony.RoleIntegration)
 	if _, err := engine.Apply(ctx, symphony.PrepareBestUpdate{
-		Meta: symphony.CommandMeta{RequestID: "prepare-best"}, WorkID: integration.ID, Validation: json.RawMessage(`{"guard":"passed"}`),
+		Meta: symphony.CommandMeta{RequestID: "prepare-best"}, WorkID: integration.ID, Validation: validIntegrationValidation(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestTerminalReceiptReplayAfterReopenDoesNotDuplicateSuccessor(t *testing.T)
 	command := symphony.SubmitBaselineDefinition{
 		Meta:       symphony.CommandMeta{RequestID: "terminal-submit"},
 		WorkID:     draft.Works[0].ID,
-		Definition: json.RawMessage(`{"target":"kernel"}`),
+		Definition: validBaselineDefinition(),
 	}
 	original, err := engine.Apply(ctx, command)
 	if err != nil {

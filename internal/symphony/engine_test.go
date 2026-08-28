@@ -2,7 +2,6 @@ package symphony_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -74,14 +73,14 @@ func TestInitPersistsSchedulerSettingsUsedWhenOptimizationStarts(t *testing.T) {
 	}
 	draft, _ := engine.Inspect(ctx, symphony.Status{})
 	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
-		Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: draft.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`),
+		Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: draft.Works[0].ID, Definition: validBaselineDefinition(),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	verification, _ := engine.Inspect(ctx, symphony.Status{})
 	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{
 		Meta: symphony.CommandMeta{RequestID: "verify"}, WorkID: verification.Works[1].ID,
-		Decision: symphony.VerificationAccepted, InitialBestSHA: "best-0",
+		Decision: symphony.VerificationAccepted, Evidence: validBenchmarkEvidence(), InitialBestSHA: "best-0",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +118,7 @@ func TestSubmitBaselineDefinitionStartsIndependentVerification(t *testing.T) {
 	}
 
 	revision := before.Optimization.Revision
-	definition := json.RawMessage(`{"target":"kernel","metric":"latency_ms"}`)
+	definition := validBaselineDefinition()
 	receipt, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
 		Meta:       symphony.CommandMeta{RequestID: "submit", ExpectedRevision: &revision},
 		WorkID:     before.Works[0].ID,
@@ -204,7 +203,7 @@ func TestFinishBaselineVerificationTransitions(t *testing.T) {
 				FailureKind:      test.failureKind,
 				Reason:           test.reason,
 				RequestedChanges: test.requestedChanges,
-				Evidence:         json.RawMessage(`{"command":"benchmark --verify"}`),
+				Evidence:         validBenchmarkEvidence(),
 			}); err != nil {
 				t.Fatalf("finish verification: %v", err)
 			}
@@ -233,14 +232,14 @@ func TestFinishBaselineVerificationTransitions(t *testing.T) {
 			}
 			if test.decision == symphony.VerificationRejected {
 				historical := after.Baselines[0]
-				if historical.FailureKind != test.failureKind || historical.FailureReason != test.reason || historical.RequestedChanges != test.requestedChanges || string(historical.VerificationEvidence) != `{"command":"benchmark --verify"}` {
+				if historical.FailureKind != test.failureKind || historical.FailureReason != test.reason || historical.RequestedChanges != test.requestedChanges || string(historical.VerificationEvidence) != string(validBenchmarkEvidence()) {
 					t.Fatalf("historical rejection context = %+v", historical)
 				}
 				runtimeWork, err := engine.RuntimeWork(ctx, after.Works[len(after.Works)-1].ID)
 				if err != nil {
 					t.Fatalf("read successor Draft runtime context: %v", err)
 				}
-				if runtimeWork.PredecessorBaselineID != historical.ID || runtimeWork.PredecessorFailureKind != test.failureKind || runtimeWork.PredecessorFailureReason != test.reason || runtimeWork.PredecessorRequestedChanges != test.requestedChanges || string(runtimeWork.PredecessorVerificationEvidence) != `{"command":"benchmark --verify"}` {
+				if runtimeWork.PredecessorBaselineID != historical.ID || runtimeWork.PredecessorFailureKind != test.failureKind || runtimeWork.PredecessorFailureReason != test.reason || runtimeWork.PredecessorRequestedChanges != test.requestedChanges || string(runtimeWork.PredecessorVerificationEvidence) != string(validBenchmarkEvidence()) {
 					t.Fatalf("successor Draft rejection context = %+v", runtimeWork)
 				}
 			}
@@ -354,7 +353,7 @@ func openSubmittedBaseline(t *testing.T, ctx context.Context) *symphony.Engine {
 	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
 		Meta:       symphony.CommandMeta{RequestID: "submit"},
 		WorkID:     initial.Works[0].ID,
-		Definition: json.RawMessage(`{"target":"kernel","metric":"latency_ms"}`),
+		Definition: validBaselineDefinition(),
 	}); err != nil {
 		t.Fatalf("submit baseline: %v", err)
 	}

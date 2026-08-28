@@ -44,21 +44,21 @@ func TestRoleSystemPromptsAreEmbeddedAndMatchCurrentContracts(t *testing.T) {
 				t.Fatalf("Integration prompt omits scoped Best application MCP: %q", prompt)
 			}
 			if test.logicalName == "integration" {
-				for _, requirement := range []string{"每次 warm-up 和 measured invocation", "checked invocation 数", "NaN 或其他 sentinel", "接近或超过一个数量级", "首次调用、capture/compile/setup"} {
+				for _, requirement := range []string{"每次 warm-up 和 measured invocation", "checked invocation 数", "NaN 或其他 sentinel", "接近或超过一个数量级", "首次调用、capture/compile/setup", `"performance_claim"`, `"independent_retest"`, `"max_case_speedup"`} {
 					if !strings.Contains(prompt, requirement) {
 						t.Fatalf("Integration prompt omits suspicious-speedup validation requirement %q: %q", requirement, prompt)
 					}
 				}
 			}
 			if test.logicalName == "baseline" {
-				for _, requirement := range []string{"per-run integrity", "canonical input tensors", "每次 warm-up 和 measured invocation", "设备端累计", "端到端口径"} {
+				for _, requirement := range []string{"per-run integrity", "canonical input tensors", "每次 warm-up 和 measured invocation", "设备端累计", "端到端口径", `"schema_version": 1`, `"restore_inputs_before_every_invocation"`, `"canonical_inputs_candidate_visible": false`} {
 					if !strings.Contains(prompt, requirement) {
 						t.Fatalf("Baseline prompt omits per-run benchmark integrity requirement %q: %q", requirement, prompt)
 					}
 				}
 			}
 			if test.logicalName == "baseline-verify" {
-				for _, requirement := range []string{"canonical inputs", "checked invocation 数", "设备端累计紧凑统计", "端到端 metric"} {
+				for _, requirement := range []string{"canonical inputs", "checked invocation 数", "设备端累计紧凑统计", "端到端 metric", `"checked_invocations"`, `"canonical_input_mutations"`, `"tolerance_passed"`} {
 					if !strings.Contains(prompt, requirement) {
 						t.Fatalf("Baseline Verification prompt omits per-run benchmark integrity requirement %q: %q", requirement, prompt)
 					}

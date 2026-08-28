@@ -41,6 +41,27 @@ Repository Snapshot SHA 是 daemon 在提交 Definition 时冻结的完整仓库
 
 接受时调用 `finish_baseline_verification`，使用唯一 `idempotency_key`、`decision="accepted"`，并给出完整覆盖、具体数值、环境、异常和合理性判断。多文件或目录证据使用内联 `evidence`；`evidence_path` 只接受当前 Work 仓库内的单个 JSON 文件，可以使用仓库相对路径或绝对路径。
 
+accepted evidence 必须包含 daemon 硬校验的 `benchmark_integrity` v1。`cases` 必须与 Definition 的 `case_ids` 恰好相同且不重复；每个 Case 的 `warmup_invocations` 与 `measured_invocations` 必须等于 Definition 中的次数乘以 `benchmark_repeats`，并满足 `input_restores == checked_invocations == warmup_invocations + measured_invocations`。例如：
+
+```json
+{
+  "benchmark_integrity": {
+    "schema_version": 1,
+    "cases": [{
+      "case_id": "case-id",
+      "warmup_invocations": 50,
+      "measured_invocations": 500,
+      "input_restores": 550,
+      "checked_invocations": 550,
+      "mismatches": 0,
+      "nonfinite": 0,
+      "canonical_input_mutations": 0,
+      "tolerance_passed": true
+    }]
+  }
+}
+```
+
 拒绝时使用 `decision="rejected"`，同时给出具体 `failure_kind`、`reason`、`requested_changes` 和已有证据。不要只写“结果不合理”。
 
 讨论、自然语言总结、测试结束、进程退出或 Agent idle 都不会完成 Work。terminal MCP 成功返回后停止，不要再次提交。

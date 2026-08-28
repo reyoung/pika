@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity"
 	"github.com/reyoung/pika-go/internal/evidence"
 	"github.com/reyoung/pika-go/internal/gitworkspace"
 	"github.com/reyoung/pika-go/internal/symphony"
@@ -543,10 +544,10 @@ func toolByName(name string) (Tool, bool) {
 	}
 	tools := map[string]Tool{
 		"submit_baseline_definition": {
-			Name: "submit_baseline_definition", Description: "Submit the immutable Baseline definition and complete this Work.",
+			Name: "submit_baseline_definition", Description: "Submit the immutable Baseline definition and complete this Work. The daemon requires benchmark_integrity schema_version 1.",
 			InputSchema: object(map[string]any{
 				"idempotency_key": map[string]any{"type": "string", "minLength": 1},
-				"definition":      map[string]any{"type": "object"},
+				"definition":      benchmarkintegrity.DefinitionSchema(),
 				"definition_path": map[string]any{"type": "string", "minLength": 1},
 			}, "idempotency_key"),
 		},
@@ -561,14 +562,14 @@ func toolByName(name string) (Tool, bool) {
 			}, "idempotency_key", "message", "paths"),
 		},
 		"finish_baseline_verification": {
-			Name: "finish_baseline_verification", Description: "Accept or reject one immutable Baseline revision and complete this Work. evidence_path may be repository-relative or absolute, but must identify one JSON file inside the assigned Work repository; use inline evidence for multiple files or directories.",
+			Name: "finish_baseline_verification", Description: "Accept or reject one immutable Baseline revision and complete this Work. accepted evidence requires benchmark_integrity schema_version 1 with exact per-invocation counts. evidence_path may be repository-relative or absolute, but must identify one JSON file inside the assigned Work repository; use inline evidence for multiple files or directories.",
 			InputSchema: object(map[string]any{
 				"idempotency_key":   map[string]any{"type": "string", "minLength": 1},
 				"decision":          map[string]any{"type": "string", "enum": []string{"accepted", "rejected"}},
 				"failure_kind":      map[string]any{"type": "string"},
 				"reason":            map[string]any{"type": "string"},
 				"requested_changes": map[string]any{"type": "string"},
-				"evidence":          map[string]any{},
+				"evidence":          map[string]any{"type": "object", "description": "For decision=accepted, must satisfy the benchmark_integrity v1 Evidence contract described by the Role System Prompt."},
 				"evidence_path":     map[string]any{"type": "string", "minLength": 1, "description": "One JSON file inside the assigned Work repository, as a repository-relative or absolute path."},
 			}, "idempotency_key", "decision"),
 		},
@@ -582,8 +583,8 @@ func toolByName(name string) (Tool, bool) {
 			}, "idempotency_key", "outcome", "summary"),
 		},
 		"prepare_best_update": {
-			Name: "prepare_best_update", Description: "Validate Integration evidence and issue a bounded Git intent.",
-			InputSchema: object(map[string]any{"idempotency_key": map[string]any{"type": "string", "minLength": 1}, "validation": map[string]any{"type": "object"}}, "idempotency_key", "validation"),
+			Name: "prepare_best_update", Description: "Validate Integration evidence and issue a bounded Git intent. Requires benchmark_integrity and performance_claim schema_version 1; >=10x claims require independent_retest.",
+			InputSchema: object(map[string]any{"idempotency_key": map[string]any{"type": "string", "minLength": 1}, "validation": benchmarkintegrity.IntegrationSchema()}, "idempotency_key", "validation"),
 		},
 		"apply_best_update": {
 			Name: "apply_best_update", Description: "Apply exactly one active Integration's bounded Git intent inside the Pika control plane.",

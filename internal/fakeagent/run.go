@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity/testcontract"
 	"github.com/reyoung/pika-go/internal/mcp"
 )
 
@@ -211,7 +212,7 @@ func runOptimizationIntegration(ctx context.Context, output io.Writer) {
 		return
 	}
 	if intentID == "" {
-		prepare := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"prepare_best_update","arguments":{"idempotency_key":"fake-prepare-%s","validation":{"guard":"passed"}}}}`, os.Getenv("PIKA_SESSION_ID"))
+		prepare := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"prepare_best_update","arguments":{"idempotency_key":"fake-prepare-%s","validation":%s}}}`, os.Getenv("PIKA_SESSION_ID"), testcontract.Validation())
 		response, callErr := callMCPUntilActive(ctx, prepare)
 		err = callErr
 		if err != nil {
@@ -404,7 +405,7 @@ func runBaselineAcceptedScenario(ctx context.Context, output io.Writer) {
 		if scenario == "baseline-rejected" && os.Getenv("PIKA_BASELINE_NUMBER") != "1" {
 			return
 		}
-		call = fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_baseline_definition","arguments":{"idempotency_key":"fake-baseline-submit-%s","definition":{"target":"fake-kernel","development_baseline":"main","cases":[{"name":"smoke","critical":true}],"oracle":{"kind":"exact"},"metric":"latency_ms","aggregation":"median","regression_guard":0.05,"harness":"fake","repeat":3,"stop_condition":"verified"}}}}`, sessionID)
+		call = fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_baseline_definition","arguments":{"idempotency_key":"fake-baseline-submit-%s","definition":%s}}}`, sessionID, testcontract.Definition())
 	case "baseline_verification":
 		if scenario == "baseline-follow-up" {
 			return
@@ -412,7 +413,7 @@ func runBaselineAcceptedScenario(ctx context.Context, output io.Writer) {
 		if scenario == "baseline-rejected" {
 			call = fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"finish_baseline_verification","arguments":{"idempotency_key":"fake-baseline-verify-%s","decision":"rejected","failure_kind":"missing_case","reason":"coverage is incomplete","requested_changes":"add the missing case","evidence":{"scenario":"fake"}}}}`, sessionID)
 		} else {
-			call = fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"finish_baseline_verification","arguments":{"idempotency_key":"fake-baseline-verify-%s","decision":"accepted","evidence":{"scenario":"fake"}}}}`, sessionID)
+			call = fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"finish_baseline_verification","arguments":{"idempotency_key":"fake-baseline-verify-%s","decision":"accepted","evidence":%s}}}`, sessionID, testcontract.Evidence())
 		}
 	case "follow_up":
 		runFollowUp(ctx, output)

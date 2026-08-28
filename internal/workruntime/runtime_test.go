@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity/testcontract"
 	"github.com/reyoung/pika-go/internal/outbox"
 	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/symphony"
@@ -294,7 +295,7 @@ func TestFollowUpDeliveryIsRevalidatedAndTransportFailureIsNotRetried(t *testing
 				t.Fatal(err)
 			}
 			view, _ := engine.Inspect(ctx, symphony.Status{})
-			if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: view.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`)}); err != nil {
+			if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: view.Works[0].ID, Definition: testcontract.Definition()}); err != nil {
 				t.Fatal(err)
 			}
 			view, _ = engine.Inspect(ctx, symphony.Status{})

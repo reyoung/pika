@@ -22,7 +22,7 @@ func TestAcceptedBaselineSeedsBestAndIterationConcurrency(t *testing.T) {
 		Meta:           symphony.CommandMeta{RequestID: "accept-baseline"},
 		WorkID:         verification.ID,
 		Decision:       symphony.VerificationAccepted,
-		Evidence:       json.RawMessage(`{"stable":true}`),
+		Evidence:       validBenchmarkEvidence(),
 		InitialBestSHA: "baseline-sha",
 	}); err != nil {
 		t.Fatalf("accept baseline: %v", err)
@@ -102,7 +102,7 @@ func TestIterationsQueueFIFOAndBestAdvanceRefreshesStaleCandidates(t *testing.T)
 	prepareCommand := symphony.PrepareBestUpdate{
 		Meta:       symphony.CommandMeta{RequestID: "prepare-best"},
 		WorkID:     integrationWork.ID,
-		Validation: json.RawMessage(`{"guard":"passed"}`),
+		Validation: validIntegrationValidation(),
 	}
 	if _, err := engine.Apply(ctx, prepareCommand); err != nil {
 		t.Fatalf("prepare Best update: %v", err)
@@ -259,7 +259,7 @@ func acceptedOptimization(t *testing.T, ctx context.Context) *symphony.Engine {
 	work := pendingWorkByRole(t, view, symphony.RoleBaselineVerification)
 	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{
 		Meta: symphony.CommandMeta{RequestID: "accept-baseline"}, WorkID: work.ID,
-		Decision: symphony.VerificationAccepted, InitialBestSHA: "baseline-sha",
+		Decision: symphony.VerificationAccepted, Evidence: validBenchmarkEvidence(), InitialBestSHA: "baseline-sha",
 	}); err != nil {
 		t.Fatalf("accept baseline: %v", err)
 	}

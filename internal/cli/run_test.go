@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity/testcontract"
 	"github.com/reyoung/pika-go/internal/cli"
 	"github.com/reyoung/pika-go/internal/configuration"
 	"github.com/reyoung/pika-go/internal/control"
@@ -1212,7 +1213,7 @@ func TestCLIBackOffTraversesDaemonAndSQLite(t *testing.T) {
 		t.Fatalf("init: %v", err)
 	}
 	draft, _ := engine.Inspect(ctx, symphony.Status{})
-	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: draft.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`)}); err != nil {
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: draft.Works[0].ID, Definition: testcontract.Definition()}); err != nil {
 		t.Fatalf("submit baseline: %v", err)
 	}
 
@@ -1416,7 +1417,7 @@ func TestDaemonGracefulShutdownWaitsForChildThenExits(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 
-	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "finish"}, WorkID: view.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`)}); err != nil {
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "finish"}, WorkID: view.Works[0].ID, Definition: testcontract.Definition()}); err != nil {
 		t.Fatal(err)
 	}
 	closeEffects, err := engine.ClaimPendingEffects(ctx, 10)

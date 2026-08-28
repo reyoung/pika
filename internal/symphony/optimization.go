@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity"
 )
 
 func (e *Engine) seedOptimization(ctx context.Context, tx *sql.Tx, optimizationID, baselineID, bestSHA, now string) error {
@@ -318,14 +320,21 @@ func (e *Engine) applyPrepareBestUpdate(ctx context.Context, tx *sql.Tx, command
 		return Receipt{}, err
 	}
 	var integrationID, attemptID, candidateSHA, expectedBestSHA string
+	var baselineDefinition []byte
 	var role WorkRole
 	var status WorkStatus
-	if err := tx.QueryRowContext(ctx, `SELECT w.integration_id, w.attempt_id, w.role, w.status, i.candidate_sha, i.expected_best_sha
-		FROM works w JOIN integrations i ON i.id = w.integration_id WHERE w.id = ?`, command.WorkID).Scan(&integrationID, &attemptID, &role, &status, &candidateSHA, &expectedBestSHA); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT w.integration_id, w.attempt_id, w.role, w.status, i.candidate_sha, i.expected_best_sha, b.definition_json
+		FROM works w
+		JOIN integrations i ON i.id = w.integration_id
+		JOIN baseline_revisions b ON b.id = w.baseline_revision_id
+		WHERE w.id = ?`, command.WorkID).Scan(&integrationID, &attemptID, &role, &status, &candidateSHA, &expectedBestSHA, &baselineDefinition); err != nil {
 		return Receipt{}, domainError(CodeInvalidTransition, "integration work is not active")
 	}
 	if role != RoleIntegration || status != WorkPending {
 		return Receipt{}, domainError(CodeInvalidTransition, "work is not an active integration")
+	}
+	if err := benchmarkintegrity.ValidateIntegration(baselineDefinition, command.Validation); err != nil {
+		return Receipt{}, domainError(CodeInvalidCommand, "invalid integration validation: "+err.Error())
 	}
 	var bestSHA string
 	if err := tx.QueryRowContext(ctx, `SELECT commit_sha FROM best_revisions WHERE optimization_id = ? ORDER BY sequence DESC LIMIT 1`, optimization.ID).Scan(&bestSHA); err != nil {

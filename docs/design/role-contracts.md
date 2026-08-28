@@ -85,6 +85,8 @@ The submitted definition covers at least:
 - stop conditions;
 - evidence paths and digests.
 
+It also includes the daemon-validated `benchmark_integrity` v1 object. This object freezes the Full Case Set and formal repeat/invocation counts, and requires protected device-resident canonical inputs and Oracle outputs, stable-address working tensors, input restore and output validation around every warm-up and measured invocation, compact deferred host evidence, and distinct kernel/end-to-end timing boundaries.
+
 The Definition is durably owned by its Baseline Revision. Its stored-byte digest identifies its content. Work and Agent Session IDs identify one execution only and must not be embedded as cross-Role validity requirements: the independent Verification necessarily has a different Work and Session. A successor Draft receives the prior verification failure fields and evidence rather than guessing why the predecessor was rejected. Repository commits use `commit_changes`; the Agent's ordinary shell does not need permission to write Git metadata.
 
 `submit_baseline_definition` freezes the clean repository HEAD as a separate Repository Snapshot SHA. The Definition may identify an earlier Development Baseline, but it must not attempt to contain the SHA of the commit that contains that same tracked Definition: that is self-referential. Verification receives both the Definition digest and Repository Snapshot SHA from committed dynamic context.
@@ -108,6 +110,8 @@ The Role must not silently repair the submitted definition. A rejected result re
 Verification treats the daemon's Definition digest as the identity of the stored JSON bytes. It does not materialize an inline Definition into the repository or compare that digest with an independently formatted file unless the Definition/artifact receipt explicitly declares the file as the submission source. The verifier must not reject a Baseline for repository dirtiness that its own temporary files created.
 
 Baseline Verification establishes Development Baseline measurements and proves that the frozen protocol can judge future Candidates. Candidate improvement thresholds and stop conditions do not apply to the Development Baseline itself; a zero improvement relative to itself is expected. They apply in Iteration and Integration. The Baseline is rejected only when the Development Baseline is incorrect, unmeasurable, incomplete, unstable or implausible, or when the declared gate cannot be computed from the evidence.
+
+Acceptance evidence must satisfy `benchmark_integrity` v1 for exactly the frozen Case IDs. Pika rejects acceptance unless every declared warm-up and measured invocation has a matching input restore and output check, and all mismatch, nonfinite, and canonical-input-mutation counts are zero.
 
 This Role is Follow-up eligible.
 
@@ -150,6 +154,8 @@ The Role:
 - applies only the authorized Git mutation through the grant-scoped Pika MCP control plane, never by connecting to the daemon from an ordinary Agent shell;
 - supplies post-mutation Git evidence to `finish_integration`;
 - never pushes or changes a user source branch.
+
+`prepare_best_update` requires the same exact-coverage `benchmark_integrity` v1 evidence plus `performance_claim` v1. If either the primary aggregate or maximum per-Case speedup is at least 10x, Pika refuses the Git Intent unless the validation records a passing independent retest with changed canonical inputs, output sentinel, cold-start/setup/steady-state/end-to-end measurements, and a fair timing boundary.
 
 Staleness or user Back-off creates a new Iteration Round of the same Attempt with a fresh Agent Session. This Role is Follow-up eligible.
 

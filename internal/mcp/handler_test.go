@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity/testcontract"
 	"github.com/reyoung/pika-go/internal/control"
 	"github.com/reyoung/pika-go/internal/daemon"
 	"github.com/reyoung/pika-go/internal/mcp"
@@ -80,7 +82,7 @@ func TestStdioProxyForwardsRoleScopedMCPAndTerminalReceipt(t *testing.T) {
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`,
 		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
 		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"submit_baseline_definition","arguments":{"idempotency_key":"terminal","definition":{"target":"kernel","metric":"latency"}}}}`,
+		fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"submit_baseline_definition","arguments":{"idempotency_key":"terminal","definition":%s}}}`, testcontract.Definition()),
 	}, "\n") + "\n"
 	var output bytes.Buffer
 	if err := mcp.RunProxy(ctx, socketPath, grant.Token, strings.NewReader(input), &output); err != nil {

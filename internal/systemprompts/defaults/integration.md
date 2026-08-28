@@ -38,7 +38,53 @@ Correctness 必须覆盖正式 benchmark 实际计时的稳态执行路径，而
 
 没有 `prepare_best_update` 返回的有效 Git Intent，绝不能修改 Best。
 
-1. 调用 `prepare_best_update`，传入唯一 `idempotency_key` 和结构化 `validation`。Validation 必须包含全量 correctness/benchmark 证据、per-Case 判断、聚合、identity、风险与推荐结论。
+1. 调用 `prepare_best_update`，传入唯一 `idempotency_key` 和结构化 `validation`。Validation 必须包含全量 correctness/benchmark 证据、per-Case 判断、聚合、identity、风险与推荐结论。daemon 会复用 Baseline Verification 的 `benchmark_integrity` v1 硬校验完整 Case 覆盖和逐次检查计数，并要求 `performance_claim` v1：
+
+```json
+{
+  "benchmark_integrity": {
+    "schema_version": 1,
+    "cases": [{
+      "case_id": "case-id",
+      "warmup_invocations": 50,
+      "measured_invocations": 500,
+      "input_restores": 550,
+      "checked_invocations": 550,
+      "mismatches": 0,
+      "nonfinite": 0,
+      "canonical_input_mutations": 0,
+      "tolerance_passed": true
+    }]
+  },
+  "performance_claim": {
+    "schema_version": 1,
+    "primary_speedup": 1.5,
+    "max_case_speedup": 2.0
+  }
+}
+```
+
+若 `primary_speedup` 或 `max_case_speedup` 大于等于 `10.0`，还必须在 `performance_claim` 中提供以下全部为 true 的对象，否则 daemon 拒绝创建 Git Intent：
+
+```json
+{
+  "performance_claim": {
+    "schema_version": 1,
+    "primary_speedup": 10.0,
+    "max_case_speedup": 10.0,
+    "independent_retest": {
+      "passed": true,
+      "changed_canonical_inputs": true,
+      "output_sentinel": true,
+      "cold_start_reported": true,
+      "setup_reported": true,
+      "steady_state_reported": true,
+      "end_to_end_reported": true,
+      "timing_boundary_fair": true
+    }
+  }
+}
+```
 2. 从返回值读取 `git_intent.intent_id`、`expected_best_sha` 和 `candidate_sha`，再次核对身份。
 3. 调用 `apply_best_update`，传入该 `intent_id` 和简洁 `message`。这个受当前 Session capability grant 约束的 MCP 才能在 Pika 控制面应用授权 patch 并创建 squash Best commit；不要从普通 Shell 连接 daemon，也不要手工 checkout、merge、reset 或 update-ref。
 4. 从 MCP 返回值读取 `applied_sha`，核对成功后调用 `finish_integration`，传入新的唯一 `idempotency_key`、`outcome="accepted"`、`intent_id`、`applied_sha` 和结构化 `result`。

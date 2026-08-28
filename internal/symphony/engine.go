@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity"
 	"github.com/reyoung/pika-go/internal/provider"
 	_ "modernc.org/sqlite"
 )
@@ -974,6 +975,9 @@ func (e *Engine) applySubmitBaselineDefinition(ctx context.Context, tx *sql.Tx, 
 	if baselineStatus != BaselineDrafting {
 		return Receipt{}, domainError(CodeInvalidTransition, "baseline revision is not drafting")
 	}
+	if err := benchmarkintegrity.ValidateDefinition(command.Definition); err != nil {
+		return Receipt{}, domainError(CodeInvalidCommand, "invalid benchmark integrity contract: "+err.Error())
+	}
 
 	receiptID := e.newID()
 	now := e.timestamp()
@@ -1088,7 +1092,8 @@ func (e *Engine) applyFinishBaselineVerification(ctx context.Context, tx *sql.Tx
 	var baselineNumber int64
 	var baselineStatus BaselineStatus
 	var baselineRepositorySHA sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT number, status, repository_sha FROM baseline_revisions WHERE id = ?`, baselineID).Scan(&baselineNumber, &baselineStatus, &baselineRepositorySHA); err != nil {
+	var baselineDefinition []byte
+	if err := tx.QueryRowContext(ctx, `SELECT number, status, repository_sha, definition_json FROM baseline_revisions WHERE id = ?`, baselineID).Scan(&baselineNumber, &baselineStatus, &baselineRepositorySHA, &baselineDefinition); err != nil {
 		return Receipt{}, fmt.Errorf("read baseline revision: %w", err)
 	}
 	if baselineStatus != BaselineVerifying {
@@ -1096,6 +1101,11 @@ func (e *Engine) applyFinishBaselineVerification(ctx context.Context, tx *sql.Tx
 	}
 	if command.Decision == VerificationAccepted && baselineRepositorySHA.Valid && command.InitialBestSHA != baselineRepositorySHA.String {
 		return Receipt{}, domainError(CodeInvalidCommand, "initial Best SHA must equal the frozen Baseline repository snapshot")
+	}
+	if command.Decision == VerificationAccepted {
+		if err := benchmarkintegrity.ValidateEvidence(baselineDefinition, command.Evidence); err != nil {
+			return Receipt{}, domainError(CodeInvalidCommand, "invalid benchmark integrity evidence: "+err.Error())
+		}
 	}
 
 	receiptID := e.newID()

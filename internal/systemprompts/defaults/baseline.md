@@ -46,4 +46,29 @@ Baseline Agent 可以使用当前环境提供的外部网络与远程计算资�
 
 调用 `submit_baseline_definition`，参数包含唯一且可重试的 `idempotency_key`，以及内联 `definition` JSON 对象或仓库内的 `definition_path`，二者只能选一个。Definition 应完整包含上面的合同、文件/命令身份以及 smoke 证据引用。
 
+daemon 会硬校验 Definition 中的 `benchmark_integrity` v1；缺失、字段不完整或语义为 false 都会拒绝。`case_ids` 必须恰好列出冻结的 Full Case Set；invocation 数是每个 Case、每次正式 benchmark repeat 的实际次数。至少提交以下结构（可在外层增加 workload 自有字段，但不能改写此对象）：
+
+```json
+{
+  "benchmark_integrity": {
+    "schema_version": 1,
+    "case_ids": ["case-id"],
+    "benchmark_repeats": 5,
+    "warmup_invocations_per_repeat": 10,
+    "measured_invocations_per_repeat": 100,
+    "canonical_inputs_device_resident": true,
+    "canonical_inputs_candidate_visible": false,
+    "oracle_outputs_device_resident": true,
+    "oracle_outputs_immutable": true,
+    "working_tensor_addresses_stable": true,
+    "restore_inputs_before_every_invocation": true,
+    "check_outputs_after_every_invocation": true,
+    "device_side_validation": true,
+    "deferred_compact_host_transfer": true,
+    "kernel_timing_excludes_integrity": true,
+    "end_to_end_timing_includes_integrity": true
+  }
+}
+```
+
 讨论、自然语言总结、进程退出或 Agent idle 都不会完成 Work。仅当 terminal MCP 成功返回时才算完成；成功后不要再次提交。

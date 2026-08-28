@@ -3,7 +3,6 @@ package testdriver_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity/testcontract"
 	"github.com/reyoung/pika-go/internal/gitworkspace"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/testdriver"
@@ -90,7 +90,7 @@ func TestKillAtStopsProcessWhenTerminalReceiptIsCommitted(t *testing.T) {
 	}
 	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
 		Meta: symphony.CommandMeta{RequestID: "terminal-submit"}, WorkID: view.Works[0].ID,
-		Definition: json.RawMessage(`{"target":"kernel"}`),
+		Definition: testcontract.Definition(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestKillAtStopsProcessAfterGitIntentCommitBeforeDomainFinish(t *testing.T) 
 	}
 	view, _ := engine.Inspect(ctx, symphony.Status{})
 	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
-		Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: view.Works[0].ID, Definition: json.RawMessage(`{"target":"kernel"}`),
+		Meta: symphony.CommandMeta{RequestID: "submit"}, WorkID: view.Works[0].ID, Definition: testcontract.Definition(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestKillAtStopsProcessAfterGitIntentCommitBeforeDomainFinish(t *testing.T) 
 	verification := pendingWork(t, view, symphony.RoleBaselineVerification)
 	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{
 		Meta: symphony.CommandMeta{RequestID: "verify"}, WorkID: verification.ID,
-		Decision: symphony.VerificationAccepted, InitialBestSHA: baselineSHA,
+		Decision: symphony.VerificationAccepted, Evidence: testcontract.Evidence(), InitialBestSHA: baselineSHA,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestKillAtStopsProcessAfterGitIntentCommitBeforeDomainFinish(t *testing.T) 
 	view, _ = engine.Inspect(ctx, symphony.Status{})
 	integration := pendingWork(t, view, symphony.RoleIntegration)
 	if _, err := engine.Apply(ctx, symphony.PrepareBestUpdate{
-		Meta: symphony.CommandMeta{RequestID: "prepare"}, WorkID: integration.ID, Validation: json.RawMessage(`{"guard":"passed"}`),
+		Meta: symphony.CommandMeta{RequestID: "prepare"}, WorkID: integration.ID, Validation: testcontract.Validation(),
 	}); err != nil {
 		t.Fatal(err)
 	}
