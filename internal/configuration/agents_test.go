@@ -54,6 +54,32 @@ args = ["--force", "--approve-mcps", "--trust", "--header", "X-Test: value"]
 	}
 }
 
+func TestLoadAgentAcceptsExplicitProviderDefaults(t *testing.T) {
+	t.Parallel()
+	for name, contents := range map[string]string{
+		"codex": `[agents.iteration]
+kind = "codex"
+model = ""
+reasoning_effort = ""
+`,
+		"cursor-auto-routing": `[agents.iteration]
+kind = "cursor"
+model = "auto"
+reasoning_effort = ""
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := configuration.LoadAgent(path, "iteration"); err != nil {
+				t.Fatalf("load provider default: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadSchedulerReadsConcurrencyAndQueueLimit(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.toml")

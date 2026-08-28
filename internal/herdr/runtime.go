@@ -144,6 +144,20 @@ func (r *Runtime) GetPane(ctx context.Context, paneID string) (Pane, error) {
 	return result.Pane, nil
 }
 
+func (r *Runtime) RenamePane(ctx context.Context, paneID, label string) error {
+	if paneID == "" || label == "" {
+		return errors.New("pane ID and label are required")
+	}
+	return r.client.Call(ctx, "pane.rename", map[string]string{"pane_id": paneID, "label": label}, nil)
+}
+
+func (r *Runtime) RenameTab(ctx context.Context, tabID, label string) error {
+	if tabID == "" || label == "" {
+		return errors.New("tab ID and label are required")
+	}
+	return r.client.Call(ctx, "tab.rename", map[string]string{"tab_id": tabID, "label": label}, nil)
+}
+
 func (r *Runtime) ClosePane(ctx context.Context, paneID string) error {
 	if paneID == "" {
 		return errors.New("pane ID is required")

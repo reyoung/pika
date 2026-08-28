@@ -21,7 +21,15 @@ type ProviderOption struct {
 	Compatible    bool            `json:"compatible"`
 	Authenticated bool            `json:"authenticated"`
 	Capabilities  map[string]bool `json:"capabilities,omitempty"`
+	Models        []ModelOption   `json:"models,omitempty"`
 	Error         string          `json:"error,omitempty"`
+}
+
+type ModelOption struct {
+	ID               string   `json:"id"`
+	DisplayName      string   `json:"display_name,omitempty"`
+	ReasoningEfforts []string `json:"reasoning_efforts"`
+	Default          bool     `json:"default,omitempty"`
 }
 
 type InitOptionsResponse struct {

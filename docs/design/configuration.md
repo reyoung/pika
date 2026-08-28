@@ -99,7 +99,7 @@ path = "/absolute/path/to/reference"
 description = "Known-correct implementation"
 ```
 
-This example deliberately mixes providers; the shipped `--defaults` configuration remains all-Codex. Cursor accepts reasoning effort `low`, `medium`, `high`, `xhigh`, or `max`; `ultra` is Codex-only. Cursor `args` is an argv array, never a shell string. Pika supplies workspace, Plugin, model, and `--sandbox enabled`, so configuration cannot override those values or request `--resume`, `--continue`, `--print`, an initial prompt, or disabled sandboxing.
+This example deliberately mixes providers; the shipped `--defaults` configuration remains all-Codex. Cursor accepts reasoning effort `low`, `medium`, `high`, `xhigh`, or `max`; `ultra` is Codex-only. Its explicit provider-default configuration is `model = "auto"` with `reasoning_effort = ""`; init displays that real Cursor model as `auto-routing (default)` and does not ask for an effort. Codex's explicit provider default uses empty model and effort strings, leaving both choices to the Codex CLI configuration. Cursor `args` is an argv array, never a shell string. Pika supplies workspace, Plugin, model, and `--sandbox enabled`, so configuration cannot override those values or request `--resume`, `--continue`, `--print`, an initial prompt, or disabled sandboxing.
 
 Exact defaults beyond the accepted five-minute inactivity timeout remain implementation choices and are printed by interactive `pika-go init` before commit.
 
@@ -115,14 +115,14 @@ Pika rejects configuration that enables automatic Follow-up for an Agent adapter
 
 ## 4. Initialization
 
-`pika-go init` performs an interactive flow similar to the old Pika initializer but excludes Web concerns. For a new interactive instance, it asks independently for provider kind, model, reasoning effort, and Cursor argv for all five static Roles. Cursor defaults to `--force --approve-mcps`; appending `--trust` is a separate question that defaults to no because it changes Cursor's persistent workspace trust.
+`pika-go init` performs an interactive flow similar to the old Pika initializer but excludes Web concerns. For a new interactive instance, it asks independently for backend, model, reasoning effort, and Cursor argv for all five static Roles. Backend, model, and reasoning effort are numbered lists. The backend list contains only providers that passed daemon probing; Codex model choices come from its visible local model cache, and Cursor choices are derived from the pinned CLI's `--list-models` output. Effort choices are narrowed to the selected model, and arbitrary provider or model IDs are not accepted. Cursor defaults to `--force --approve-mcps`; appending `--trust` is a separate question that defaults to no because it changes Cursor's persistent workspace trust.
 
 New non-interactive or `--json` initialization requires exactly one of:
 
 - `--defaults`, which renders the all-Codex default configuration;
 - `--config PATH`, which reads a complete candidate TOML for the same canonical repository.
 
-The CLI first reads `GET /v1/init/options`. It sends the complete candidate to `POST /v1/init`; the daemon validates it and probes exactly the distinct referenced providers before any durable write. Codex-only init does not require Cursor, Cursor-only init does not require Codex, and mixed init rolls back atomically if either provider fails. Existing configuration is never regenerated or overwritten and therefore skips the questions and rejects both flags.
+The CLI first reads `GET /v1/init/options`, including each available provider's model/effort catalog. It sends the complete candidate to `POST /v1/init`; the daemon validates it and probes exactly the distinct referenced providers before any durable write. Codex-only init does not require Cursor, Cursor-only init does not require Codex, and mixed init rolls back atomically if either provider fails. Existing configuration is never regenerated or overwritten and therefore skips the questions and rejects both flags.
 
 It configures:
 
@@ -188,7 +188,7 @@ The active Herdr configuration must explicitly contain:
 resume_agents_on_restore = false
 ```
 
-Init reads the resolved Herdr configuration and requires `server.reload_config` to return `applied`. It does not edit the file. Codex and Cursor launch wrappers also reject native resume arguments. This keeps provider session IDs as journal correlation only and makes every daemon recovery a fresh Pika Agent Session.
+`pika-go kick-off` checks this setting before creating a Workspace. When it is missing or not false, the command asks permission to atomically update only this setting and reload Herdr; refusal or non-interactive EOF leaves the file unchanged. A failed reload restores the exact original file and attempts to reload that restored configuration. Direct `pika-go init` remains read-only: it validates the resolved Herdr configuration and requires `server.reload_config` to return `applied`. Codex and Cursor launch wrappers also reject native resume arguments. This keeps provider session IDs as journal correlation only and makes every daemon recovery a fresh Pika Agent Session.
 
 ## 9. Validation
 

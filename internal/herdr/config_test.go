@@ -104,3 +104,155 @@ func TestRequireFreshSessionsReloadsValidatedConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestConfigureFreshSessionsUpdatesExistingSettingAndReloads(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		original string
+		want     string
+	}{
+		{
+			name:     "replace existing value",
+			original: "[ui]\nsidebar = true\n\n[session]\nresume_agents_on_restore = true # keep this explanation\n\n[remote]\nconnect_timeout_seconds = 10\n",
+			want:     "[ui]\nsidebar = true\n\n[session]\nresume_agents_on_restore = false # keep this explanation\n\n[remote]\nconnect_timeout_seconds = 10\n",
+		},
+		{
+			name:     "append missing session section",
+			original: "[ui]\nsidebar = true\n",
+			want:     "[ui]\nsidebar = true\n\n[session]\nresume_agents_on_restore = false\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory, err := os.MkdirTemp("/tmp", "pika-herdr-configure-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(directory) })
+			configPath := filepath.Join(directory, "config.toml")
+			if err := os.WriteFile(configPath, []byte(test.original), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			listener, err := net.Listen("unix", filepath.Join(directory, "herdr.sock"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			done := make(chan error, 1)
+			go func() {
+				connection, acceptErr := listener.Accept()
+				if acceptErr != nil {
+					done <- acceptErr
+					return
+				}
+				defer connection.Close()
+				var request struct {
+					ID     string `json:"id"`
+					Method string `json:"method"`
+				}
+				if decodeErr := json.NewDecoder(connection).Decode(&request); decodeErr != nil {
+					done <- decodeErr
+					return
+				}
+				if request.Method != "server.reload_config" {
+					done <- &fixtureError{"method", request.Method}
+					return
+				}
+				done <- json.NewEncoder(connection).Encode(map[string]any{
+					"id": request.ID, "result": map[string]any{"status": "applied", "diagnostics": []string{}},
+				})
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := herdr.ConfigureFreshSessions(ctx, herdr.NewClient(listener.Addr().String()), configPath); err != nil {
+				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(contents) != test.want {
+				t.Fatalf("configured contents:\n%s\nwant:\n%s", contents, test.want)
+			}
+			info, err := os.Stat(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0o640 {
+				t.Fatalf("configured mode=%v", info.Mode().Perm())
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestConfigureFreshSessionsRestoresOriginalWhenReloadFails(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "pika-herdr-configure-rollback-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	configPath := filepath.Join(directory, "config.toml")
+	original := "[session]\nresume_agents_on_restore = true\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", filepath.Join(directory, "herdr.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	done := make(chan error, 1)
+	go func() {
+		for index := range 2 {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				done <- acceptErr
+				return
+			}
+			var request struct {
+				ID     string `json:"id"`
+				Method string `json:"method"`
+			}
+			if decodeErr := json.NewDecoder(connection).Decode(&request); decodeErr != nil {
+				_ = connection.Close()
+				done <- decodeErr
+				return
+			}
+			if request.Method != "server.reload_config" {
+				_ = connection.Close()
+				done <- &fixtureError{"method", request.Method}
+				return
+			}
+			status := "applied"
+			diagnostics := []string{}
+			if index == 0 {
+				status = "failed"
+				diagnostics = []string{"fixture rejected reload"}
+			}
+			encodeErr := json.NewEncoder(connection).Encode(map[string]any{
+				"id": request.ID, "result": map[string]any{"status": status, "diagnostics": diagnostics},
+			})
+			_ = connection.Close()
+			if encodeErr != nil {
+				done <- encodeErr
+				return
+			}
+		}
+		done <- nil
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err = herdr.ConfigureFreshSessions(ctx, herdr.NewClient(listener.Addr().String()), configPath)
+	if err == nil || !strings.Contains(err.Error(), "original Herdr configuration restored") {
+		t.Fatalf("configure error = %v", err)
+	}
+	contents, readErr := os.ReadFile(configPath)
+	if readErr != nil || string(contents) != original {
+		t.Fatalf("restored contents=%q err=%v", contents, readErr)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

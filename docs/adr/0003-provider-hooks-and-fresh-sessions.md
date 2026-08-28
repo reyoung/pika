@@ -9,6 +9,6 @@ Codex and Cursor implement the same deep Provider Adapter contract: validate con
 - Provider transcript files are debugging inputs, not stable protocols or domain authority.
 - A Codex-owned profile layer injects Pika hooks without copying the user's complete `CODEX_HOME`.
 - Cursor init additively installs one environment-parameterized global MCP entry and event-specific hooks while preserving existing configuration. Each Session keeps only its frozen prompt/argv privately, injects the prompt through `sessionStart.additional_context`, and loads the `pika_go` dynamic namespace before Role MCP calls.
-- Init requires Herdr `session.resume_agents_on_restore = false` and a successful live config reload. Both provider wrappers reject resume arguments as defense in depth.
+- `pika-go kick-off` checks Herdr before creating a workspace and, with explicit user consent, atomically sets `session.resume_agents_on_restore = false` and requires a successful live config reload. A reload failure restores the original file. Direct `pika-go init` remains read-only and rejects invalid configuration. Both provider wrappers reject resume arguments as defense in depth.
 - Cursor Shell and MCP supplements, including large output, are retained in SQLite alongside the normalized logical Tool event.
 - Providers lacking reliable turn and conversation events may still run under Herdr, but automatic Follow-up and complete journaling are disabled.

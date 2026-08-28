@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +50,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 
 	switch args[0] {
+	case "kick-off":
+		return runKickOff(ctx, args[1:], stdin, stdout, stderr)
 	case "install":
 		return runInstall(ctx, args[1:], stdin, stdout, stderr)
 	case "daemon":
@@ -78,7 +81,25 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	case "version", "--version", "-version":
 		_, _ = fmt.Fprintln(stdout, Version)
 		return 0
-	case "help", "--help", "-h":
+	case "help":
+		if len(args) == 1 {
+			printUsage(stdout)
+			return 0
+		}
+		if len(args) != 2 {
+			_, _ = fmt.Fprintln(stderr, "help: exactly one COMMAND is supported")
+			return 2
+		}
+		if _, ok := publicCommandHelp[args[1]]; !ok {
+			_, _ = fmt.Fprintf(stderr, "help: unknown command %q\n", args[1])
+			return 2
+		}
+		if args[1] == "version" {
+			printCommandUsage(stdout, "version", nil)
+			return 0
+		}
+		return Run(ctx, []string{args[1], "--help"}, stdin, stdout, stdout)
+	case "--help", "-h":
 		printUsage(stdout)
 		return 0
 	default:
@@ -89,12 +110,11 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 }
 
 func runInstall(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("install", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	installDir := flags.String("dir", "", "Absolute plugin installation directory")
-	herdrExecutable := flags.String("herdr", "", "Herdr executable path")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	flags := newCommandFlagSet("install", stderr)
+	installDir := flags.String("dir", "", "Absolute plugin installation `PATH`")
+	herdrExecutable := flags.String("herdr", "", "Herdr executable `PATH`")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	if flags.NArg() != 0 {
 		_, _ = fmt.Fprintln(stderr, "install: positional arguments are not supported")
@@ -141,14 +161,13 @@ func runInstall(ctx context.Context, args []string, stdin io.Reader, stdout, std
 }
 
 func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
-	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	socketPath := flags.String("socket", "", "Unix socket path")
-	stateDir := flags.String("state-dir", "", "Plugin state directory")
-	configDir := flags.String("config-dir", "", "Plugin configuration directory")
-	instanceID := flags.String("instance", "", "Pika instance ID")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	flags := newCommandFlagSet("daemon", stderr)
+	socketPath := flags.String("socket", "", "Unix socket `PATH`")
+	stateDir := flags.String("state-dir", "", "Plugin state directory `PATH`")
+	configDir := flags.String("config-dir", "", "Plugin configuration directory `PATH`")
+	instanceID := flags.String("instance", "", "Pika instance `ID`")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	paths, err := instance.ResolveRuntime(instance.RuntimeOptions{
 		SocketPath: *socketPath,
@@ -316,7 +335,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			}
 			for _, kind := range providerRegistry.Kinds() {
 				option := protocol.ProviderOption{Kind: kind}
-				probeCtx, cancelProbe := context.WithTimeout(optionsCtx, 500*time.Millisecond)
+				probeCtx, cancelProbe := context.WithTimeout(optionsCtx, 2*time.Second)
 				capabilities, probeErr := providerRegistry.Probe(probeCtx, kind, provider.ProbeRequest{Executable: map[string]string{"codex": codexExecutable, "cursor": cursorExecutable}[kind]})
 				cancelProbe()
 				if probeErr != nil {
@@ -329,6 +348,22 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				option.Capabilities = map[string]bool{
 					"journal": capabilities.Journal, "turn_stop": capabilities.TurnStop, "follow_up": capabilities.FollowUp,
 					"full_output": capabilities.FullOutput, "fresh_session": capabilities.FreshSession,
+				}
+				modelCtx, cancelModels := context.WithTimeout(optionsCtx, 4*time.Second)
+				models, modelErr := providerRegistry.Models(modelCtx, kind, provider.ModelRequest{
+					Executable: map[string]string{"codex": codexExecutable, "cursor": cursorExecutable}[kind],
+					ConfigRoot: map[string]string{"codex": codexHome}[kind],
+				})
+				cancelModels()
+				if modelErr != nil {
+					option.Error = modelErr.Error()
+					response.Providers = append(response.Providers, option)
+					continue
+				}
+				for _, model := range models {
+					option.Models = append(option.Models, protocol.ModelOption{
+						ID: model.ID, DisplayName: model.DisplayName, ReasoningEfforts: model.ReasoningEfforts, Default: model.Default,
+					})
 				}
 				response.Providers = append(response.Providers, option)
 			}
@@ -579,12 +614,11 @@ func runHook(ctx context.Context, args []string, stdin io.Reader, stdout io.Writ
 }
 
 func runApplyBestUpdate(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("apply-best-update", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	socketPath := flags.String("socket", "", "Unix socket path")
-	message := flags.String("m", "", "Best commit message")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	flags := newCommandFlagSet("apply-best-update", stderr)
+	socketPath := flags.String("socket", "", "Unix socket `PATH`")
+	message := flags.String("m", "", "Best commit `MESSAGE`")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	if flags.NArg() != 1 {
 		_, _ = fmt.Fprintln(stderr, "apply-best-update: exactly one INTENT_ID is required")
@@ -608,11 +642,10 @@ func runApplyBestUpdate(ctx context.Context, args []string, stdout, stderr io.Wr
 }
 
 func runMCPProxy(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("mcp-proxy", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	socketPath := flags.String("socket", "", "Unix socket path")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	flags := newCommandFlagSet("mcp-proxy", stderr)
+	socketPath := flags.String("socket", "", "Unix socket `PATH`")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	resolvedSocket, err := instance.ResolveSocketContext(ctx, *socketPath)
 	if err != nil {
@@ -627,13 +660,12 @@ func runMCPProxy(ctx context.Context, args []string, stdin io.Reader, stdout, st
 }
 
 func runEditInstruction(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("edit-instruction", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	configRoot := flags.String("config-dir", "", "Plugin configuration directory")
-	instanceID := flags.String("instance", "", "Pika instance ID")
-	socketPath := flags.String("socket", "", "Unix socket path used to derive the instance")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	flags := newCommandFlagSet("edit-instruction", stderr)
+	configRoot := flags.String("config-dir", "", "Plugin configuration directory `PATH`")
+	instanceID := flags.String("instance", "", "Pika instance `ID`")
+	socketPath := flags.String("socket", "", "Unix socket `PATH` used to derive the instance")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	if flags.NArg() != 1 {
 		_, _ = fmt.Fprintln(stderr, "edit-instruction: exactly one instruction name is required")
@@ -691,12 +723,11 @@ func runEditInstruction(ctx context.Context, args []string, stdin io.Reader, std
 }
 
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("status", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	socketPath := flags.String("socket", "", "Unix socket path")
+	flags := newCommandFlagSet("status", stderr)
+	socketPath := flags.String("socket", "", "Unix socket `PATH`")
 	jsonOutput := flags.Bool("json", false, "Print JSON")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	resolvedSocket, err := instance.ResolveSocketContext(ctx, *socketPath)
 	if err != nil {
@@ -736,16 +767,19 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 }
 
 func runInit(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("init", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	socketPath := flags.String("socket", "", "Unix socket path")
-	repository := flags.String("repository", "", "Absolute repository path")
-	requestID := flags.String("request-id", "", "Idempotency request ID")
+	return runInitForPane(ctx, args, stdin, stdout, stderr, os.Getenv("HERDR_PANE_ID"))
+}
+
+func runInitForPane(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, callerPaneID string) int {
+	flags := newCommandFlagSet("init", stderr)
+	socketPath := flags.String("socket", "", "Unix socket `PATH`")
+	repository := flags.String("repository", "", "Absolute repository `PATH`")
+	requestID := flags.String("request-id", "", "Idempotency request `ID`")
 	jsonOutput := flags.Bool("json", false, "Print JSON only")
 	defaults := flags.Bool("defaults", false, "Use the all-Codex default configuration")
-	configPath := flags.String("config", "", "Read the complete instance TOML from PATH")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	configPath := flags.String("config", "", "Read the complete instance TOML from `PATH`")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	if *repository == "" || !filepath.IsAbs(*repository) {
 		_, _ = fmt.Fprintln(stderr, "init: repository must be an absolute path")
@@ -816,7 +850,7 @@ func runInit(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	receipt, err := control.Init(ctx, resolvedSocket, protocol.InitRequest{
 		Mutation:          protocol.Mutation{RequestID: *requestID},
 		Repository:        *repository,
-		CallerPaneID:      os.Getenv("HERDR_PANE_ID"),
+		CallerPaneID:      callerPaneID,
 		ConfigurationTOML: configurationTOML,
 	})
 	if err != nil {
@@ -851,12 +885,15 @@ func isInteractiveInput(input io.Reader) bool {
 
 func promptAgentConfiguration(input io.Reader, output io.Writer, repository string, options protocol.InitOptionsResponse) (string, error) {
 	reader := bufio.NewReader(input)
-	available := make(map[string]bool, len(options.Providers))
+	available := make(map[string]protocol.ProviderOption, len(options.Providers))
+	providerChoices := make([]promptChoice, 0, len(options.Providers))
 	for _, option := range options.Providers {
-		available[option.Kind] = true
 		state := "available"
 		if option.Error != "" {
 			state = option.Error
+		} else {
+			available[option.Kind] = option
+			providerChoices = append(providerChoices, promptChoice{Value: option.Kind, Label: option.Kind})
 		}
 		_, _ = fmt.Fprintf(output, "Provider %s: %s %s (%s)\n", option.Kind, option.Executable, option.Version, state)
 	}
@@ -865,20 +902,58 @@ func promptAgentConfiguration(input io.Reader, output io.Writer, repository stri
 	for _, role := range configuration.AgentRoleOrder {
 		defaults := agents[role]
 		_, _ = fmt.Fprintf(output, "\nConfigure agents.%s\n", role)
-		kind, err := promptValue(reader, output, "  kind", defaults.Kind)
+		kind, err := promptList(reader, output, "  backend", defaults.Kind, providerChoices)
 		if err != nil {
 			return "", err
 		}
-		if !available[kind] {
-			return "", fmt.Errorf("provider %q was not returned by the daemon", kind)
+		providerOption := available[kind]
+		modelChoices := make([]promptChoice, 0, len(providerOption.Models))
+		for _, model := range providerOption.Models {
+			label := model.ID
+			if model.Default {
+				label = model.DisplayName
+				if label == "" {
+					label = "default"
+				}
+				if label != "default" {
+					label += " (default)"
+				}
+			} else if model.DisplayName != "" && model.DisplayName != model.ID {
+				label = fmt.Sprintf("%s (%s)", model.DisplayName, model.ID)
+			}
+			modelChoices = append(modelChoices, promptChoice{Value: model.ID, Label: label})
 		}
-		model, err := promptValue(reader, output, "  model", defaults.Model)
+		defaultModel := defaults.Model
+		if defaults.Kind != kind || !modelOptionExists(providerOption.Models, defaultModel) {
+			defaultModel = providerDefaultModel(providerOption.Models)
+		}
+		model, err := promptList(reader, output, "  model", defaultModel, modelChoices)
 		if err != nil {
 			return "", err
 		}
-		effort, err := promptValue(reader, output, "  reasoning effort", defaults.ReasoningEffort)
-		if err != nil {
-			return "", err
+		var efforts []string
+		for _, option := range providerOption.Models {
+			if option.ID == model {
+				efforts = option.ReasoningEfforts
+				break
+			}
+		}
+		effort := ""
+		if len(efforts) == 0 {
+			_, _ = fmt.Fprintln(output, "  reasoning effort: provider default")
+		} else {
+			effortChoices := make([]promptChoice, 0, len(efforts))
+			for _, availableEffort := range efforts {
+				effortChoices = append(effortChoices, promptChoice{Value: availableEffort, Label: availableEffort})
+			}
+			defaultEffort := defaults.ReasoningEffort
+			if defaults.Kind != kind || defaults.Model != model || !choiceExists(effortChoices, defaultEffort) {
+				defaultEffort = efforts[0]
+			}
+			effort, err = promptList(reader, output, "  reasoning effort", defaultEffort, effortChoices)
+			if err != nil {
+				return "", err
+			}
 		}
 		agent := configuration.Agent{Kind: kind, Model: model, ReasoningEffort: effort}
 		if kind == "cursor" {
@@ -913,6 +988,77 @@ func promptAgentConfiguration(input io.Reader, output io.Writer, repository stri
 	return configuration.RenderConfiguration(repository, agents)
 }
 
+func modelOptionExists(models []protocol.ModelOption, id string) bool {
+	for _, model := range models {
+		if model.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func providerDefaultModel(models []protocol.ModelOption) string {
+	for _, model := range models {
+		if model.Default {
+			return model.ID
+		}
+	}
+	if len(models) != 0 {
+		return models[0].ID
+	}
+	return ""
+}
+
+func choiceExists(choices []promptChoice, value string) bool {
+	for _, choice := range choices {
+		if choice.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+type promptChoice struct {
+	Value string
+	Label string
+}
+
+func promptList(reader *bufio.Reader, output io.Writer, label, defaultValue string, choices []promptChoice) (string, error) {
+	if len(choices) == 0 {
+		return "", fmt.Errorf("%s has no available choices", strings.TrimSpace(label))
+	}
+	defaultIndex := 0
+	for index, choice := range choices {
+		if choice.Value == defaultValue {
+			defaultIndex = index
+			break
+		}
+	}
+	_, _ = fmt.Fprintf(output, "%s:\n", label)
+	for index, choice := range choices {
+		_, _ = fmt.Fprintf(output, "    %d) %s\n", index+1, choice.Label)
+	}
+	for {
+		_, _ = fmt.Fprintf(output, "  Select %s [%d]: ", strings.TrimSpace(label), defaultIndex+1)
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+		value := strings.TrimSpace(line)
+		if value == "" && !errors.Is(err, io.EOF) {
+			return choices[defaultIndex].Value, nil
+		}
+		if errors.Is(err, io.EOF) && line == "" {
+			return "", io.ErrUnexpectedEOF
+		}
+		selected, parseErr := strconv.Atoi(value)
+		if parseErr == nil && selected >= 1 && selected <= len(choices) {
+			return choices[selected-1].Value, nil
+		}
+		_, _ = fmt.Fprintf(output, "  Enter a number from 1 to %d.\n", len(choices))
+	}
+}
+
 func promptValue(reader *bufio.Reader, output io.Writer, label, defaultValue string) (string, error) {
 	_, _ = fmt.Fprintf(output, "%s [%s]: ", label, defaultValue)
 	line, err := reader.ReadString('\n')
@@ -930,11 +1076,10 @@ func promptValue(reader *bufio.Reader, output io.Writer, label, defaultValue str
 }
 
 func runDraftBaseline(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("draft-baseline", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newCommandFlagSet("draft-baseline", stderr)
 	socketPath, requestID, expectedRevision := mutationFlags(flags)
-	if err := flags.Parse(args); err != nil {
-		return 2
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	resolvedSocket, mutation, code := resolveMutation(ctx, *socketPath, *requestID, *expectedRevision, stderr)
 	if code != 0 {
@@ -945,12 +1090,11 @@ func runDraftBaseline(ctx context.Context, args []string, stdout, stderr io.Writ
 }
 
 func runBackOff(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("back-off", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newCommandFlagSet("back-off", stderr)
 	socketPath, requestID, expectedRevision := mutationFlags(flags)
-	message := flags.String("m", "", "Back-off message")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	message := flags.String("m", "", "Back-off `MESSAGE`")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	if *message == "" {
 		_, _ = fmt.Fprintln(stderr, "back-off: -m message is required")
@@ -991,11 +1135,10 @@ func runBackOff(ctx context.Context, args []string, stdout, stderr io.Writer) in
 }
 
 func runCancelWork(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("cancel-work", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newCommandFlagSet("cancel-work", stderr)
 	socketPath, requestID, expectedRevision := mutationFlags(flags)
-	if err := flags.Parse(args); err != nil {
-		return 2
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	if flags.NArg() != 1 {
 		_, _ = fmt.Fprintln(stderr, "cancel-work: exactly one WORK_ID is required")
@@ -1010,11 +1153,10 @@ func runCancelWork(ctx context.Context, args []string, stdout, stderr io.Writer)
 }
 
 func runShutdown(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("shutdown", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	flags := newCommandFlagSet("shutdown", stderr)
 	socketPath, requestID, expectedRevision := mutationFlags(flags)
-	if err := flags.Parse(args); err != nil {
-		return 2
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	resolvedSocket, mutation, code := resolveMutation(ctx, *socketPath, *requestID, *expectedRevision, stderr)
 	if code != 0 {
@@ -1025,12 +1167,11 @@ func runShutdown(ctx context.Context, args []string, stdout, stderr io.Writer) i
 }
 
 func runBackup(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("backup", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	socketPath := flags.String("socket", "", "Unix socket path")
-	destination := flags.String("output", "", "Absolute destination path for the SQLite snapshot")
-	if err := flags.Parse(args); err != nil {
-		return 2
+	flags := newCommandFlagSet("backup", stderr)
+	socketPath := flags.String("socket", "", "Unix socket `PATH`")
+	destination := flags.String("output", "", "Absolute destination `PATH` for the SQLite snapshot")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
 	}
 	if *destination == "" || !filepath.IsAbs(*destination) {
 		_, _ = fmt.Fprintln(stderr, "backup: --output must be an absolute path")
@@ -1053,14 +1194,10 @@ func runBackup(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	return 0
 }
 
-func printUsage(w io.Writer) {
-	_, _ = fmt.Fprintln(w, "usage: pika-go <install|daemon|init|status|draft-baseline|back-off|cancel-work|shutdown|backup|edit-instruction|mcp-proxy|version> [options]")
-}
-
 func mutationFlags(flags *flag.FlagSet) (socketPath, requestID *string, expectedRevision *int64) {
-	return flags.String("socket", "", "Unix socket path"),
-		flags.String("request-id", "", "Idempotency request ID"),
-		flags.Int64("expected-revision", -1, "Expected domain revision")
+	return flags.String("socket", "", "Unix socket `PATH`"),
+		flags.String("request-id", "", "Idempotency request `ID`"),
+		flags.Int64("expected-revision", -1, "Expected domain revision `N`")
 }
 
 func resolveMutation(ctx context.Context, socketPath, requestID string, expectedRevision int64, stderr io.Writer) (string, protocol.Mutation, int) {

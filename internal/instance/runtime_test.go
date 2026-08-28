@@ -104,6 +104,24 @@ func TestResolveRuntimeBuildsPerInstanceLayout(t *testing.T) {
 	}
 }
 
+func TestSocketForHerdrWorkspaceMatchesEnvironmentDiscovery(t *testing.T) {
+	t.Setenv("PIKA_GO_SOCKET", "")
+	t.Setenv("HERDR_SOCKET_PATH", "/tmp/herdr-kick-off.sock")
+	t.Setenv("HERDR_PANE_ID", "w17:p4")
+
+	fromEnvironment, err := instance.ResolveSocket("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromWorkspace, err := instance.SocketForHerdrWorkspace("/tmp/herdr-kick-off.sock", "w17")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromWorkspace != fromEnvironment {
+		t.Fatalf("workspace socket = %q, environment socket = %q", fromWorkspace, fromEnvironment)
+	}
+}
+
 func TestResolveRuntimeRequiresConfigAndStateTogether(t *testing.T) {
 	t.Setenv("HERDR_PLUGIN_CONFIG_DIR", "")
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", "")

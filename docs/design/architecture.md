@@ -129,6 +129,12 @@ There is no dynamic `register_role`, `enqueue_work`, `steer_work`, or `append_gu
 
 ## 5. Process startup and initialization
 
+### `pika-go kick-off`
+
+The normal user entrypoint runs from an existing Herdr shell pane. It validates the repository and Herdr protocol, then verifies the active Herdr configuration before creating any layout. If native Agent restore is not explicitly disabled, `kick-off` shows the exact file and setting and asks for consent. Yes atomically changes only `session.resume_agents_on_restore`, preserves the file mode and other bytes, requires `server.reload_config` to return `applied`, and restores the original file if reload fails. No or unavailable input leaves the file untouched and creates no Workspace. Once preflight passes, `kick-off` creates a background Workspace rooted at that repository and opens the installed `symphony` plugin entrypoint as a split beside the new Workspace's root pane. The plugin host injects the stable config/state directories into the daemon pane. `kick-off` derives the new Workspace's bootstrap socket, waits for daemon health, sends a visible `pika-go init` command using its own absolute executable path to the root Pane, and focuses that Workspace, Tab, and Pane unless `--no-focus` was requested. Pinning the executable avoids a stale PATH installation. The init process receives the new Pane ID from Herdr and that pane becomes the preferred Baseline Agent pane. The original caller pane is never bound to the new Optimization.
+
+If daemon startup or initialization fails, the command reports the Workspace and daemon Pane IDs and leaves the visible Workspace open for diagnostics. It does not silently fall back to a non-persistent daemon or initialize the original Workspace.
+
 ### Daemon startup
 
 The Herdr plugin opens `pika-go daemon` in a normal pane. A plugin startup hook is not used as a process supervisor.
@@ -285,9 +291,9 @@ platforms = ["linux", "macos"]
 
 [[panes]]
 id = "symphony"
-title = "Pika-Go Symphony"
+title = "Daemon"
 placement = "split"
 command = ["./pika-go", "daemon"]
 ```
 
-The daemon pane starts with the plugin root as its working directory; `pika-go init` later supplies the Optimization repository. A release archive contains the correct binary for its OS/architecture and the manifest. Local development uses `herdr plugin link`; release installation can use a platform-specific package or a Herdr plugin repository whose build step installs the matching binary.
+The daemon pane starts with the plugin root as its working directory; `pika-go kick-off` supplies the Optimization repository through `init`. The kick-off layout names its tab `Optimization`, its interactive root pane `Setup`, and the plugin pane `Daemon`. Once Work starts, Agent panes are renamed for their Role (`Baseline`, `Verify`, `Iteration R<n>`, `Integration`, or `Follow-up`); concurrent Iteration panes include their short Herdr pane ID, such as `Iteration R2 · p4`, and an unknown Role falls back to `p<n>`. A release archive contains the correct binary for its OS/architecture and the manifest. Local development uses `herdr plugin link`; release installation can use a platform-specific package or a Herdr plugin repository whose build step installs the matching binary.

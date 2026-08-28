@@ -39,6 +39,12 @@ func (CursorAdapter) Validate(configuration AgentConfiguration) error {
 	if configuration.Kind != "cursor" {
 		return fmt.Errorf("Cursor Adapter cannot validate Agent kind %q", configuration.Kind)
 	}
+	if configuration.Model == "auto" {
+		if configuration.ReasoningEffort != "" {
+			return errors.New("Cursor auto-routing does not accept reasoning_effort")
+		}
+		return validateCursorArgs(configuration.Args)
+	}
 	if !agentValuePattern.MatchString(configuration.Model) {
 		return errors.New("invalid Cursor model")
 	}
@@ -130,9 +136,14 @@ func (adapter CursorAdapter) PrepareSession(_ context.Context, activation Sessio
 	for key, value := range activation.Environment {
 		environment[key] = value
 	}
-	parameterizedModel := activation.Configuration.Model + "-" + activation.Configuration.ReasoningEffort
+	parameterizedModel := activation.Configuration.Model
+	if activation.Configuration.ReasoningEffort != "" {
+		parameterizedModel += "-" + activation.Configuration.ReasoningEffort
+	}
 	environment["PIKA_AGENT_MODEL"] = activation.Configuration.Model
-	environment["PIKA_AGENT_REASONING_EFFORT"] = activation.Configuration.ReasoningEffort
+	if activation.Configuration.ReasoningEffort != "" {
+		environment["PIKA_AGENT_REASONING_EFFORT"] = activation.Configuration.ReasoningEffort
+	}
 	environment["PIKA_CURSOR_MODEL"] = parameterizedModel
 	environment["PIKA_CURSOR_WORKSPACE"] = activation.Repository
 	environment["PIKA_CURSOR_ARGS_FILE"] = filepath.Join(sessionDir, "cursor.args")

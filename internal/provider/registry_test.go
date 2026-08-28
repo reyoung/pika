@@ -58,3 +58,24 @@ func TestCodexAdapterIsSelectedThroughRegistry(t *testing.T) {
 		t.Fatalf("event = %+v", event)
 	}
 }
+
+func TestCodexAdapterAcceptsProviderDefaultModel(t *testing.T) {
+	t.Parallel()
+	adapter := provider.NewCodexAdapter()
+	configuration := provider.AgentConfiguration{Kind: "codex"}
+	if err := adapter.Validate(configuration); err != nil {
+		t.Fatalf("validate Codex default configuration: %v", err)
+	}
+	launch, err := adapter.PrepareSession(context.Background(), provider.SessionActivation{
+		Configuration: configuration, SystemPrompt: []byte("frozen system prompt"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := launch.Environment["PIKA_AGENT_MODEL"]; present {
+		t.Fatalf("Codex default unexpectedly overrides model: %+v", launch.Environment)
+	}
+	if _, present := launch.Environment["PIKA_AGENT_REASONING_EFFORT"]; present {
+		t.Fatalf("Codex default unexpectedly overrides reasoning effort: %+v", launch.Environment)
+	}
+}

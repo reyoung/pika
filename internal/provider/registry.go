@@ -70,6 +70,18 @@ func (r *Registry) Capabilities(kind string) (Capabilities, bool) {
 	return capabilities, found
 }
 
+func (r *Registry) Models(ctx context.Context, kind string, request ModelRequest) ([]Model, error) {
+	adapter, err := r.Resolve(kind)
+	if err != nil {
+		return nil, err
+	}
+	lister, ok := adapter.(modelLister)
+	if !ok {
+		return nil, fmt.Errorf("provider Adapter %q does not expose a model catalog", kind)
+	}
+	return lister.ListModels(ctx, request)
+}
+
 func DefaultRegistry() *Registry {
 	registry, err := NewRegistry(NewCodexAdapter(), NewCursorAdapter())
 	if err != nil {

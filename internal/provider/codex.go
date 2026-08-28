@@ -23,6 +23,12 @@ func (CodexAdapter) Validate(configuration AgentConfiguration) error {
 	if configuration.Kind != "codex" {
 		return fmt.Errorf("Codex Adapter cannot validate Agent kind %q", configuration.Kind)
 	}
+	if configuration.Model == "" && configuration.ReasoningEffort == "" {
+		if len(configuration.Args) != 0 {
+			return errors.New("Codex launch args are not supported")
+		}
+		return nil
+	}
 	if !agentValuePattern.MatchString(configuration.Model) {
 		return errors.New("invalid Codex model")
 	}

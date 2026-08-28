@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/reyoung/pika-go/internal/configuration"
 	"github.com/reyoung/pika-go/internal/control"
 	"github.com/reyoung/pika-go/internal/daemon"
+	"github.com/reyoung/pika-go/internal/instance"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
@@ -31,6 +33,325 @@ func TestInstallRejectsRelativeDirectory(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--dir must be an absolute path") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestHelpExplainsThePrimaryWorkflow(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"--help"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("help exit = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{
+		"Pika-Go orchestrates long-running coding-agent optimization in Herdr.",
+		"Get started:",
+		"pika-go install",
+		"pika-go kick-off",
+		"Workflow commands:",
+		"pika-go COMMAND --help",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("help output is missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("help stderr = %q", stderr.String())
+	}
+}
+
+func TestCommandHelpShowsSynopsisOptionsAndExamples(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"help", "kick-off"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("command help exit = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{
+		"Usage:\n  pika-go kick-off [options]",
+		"Create a Herdr workspace and start an optimization",
+		"--repository",
+		"--timeout",
+		"Examples:",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("command help is missing %q:\n%s", want, stdout.String())
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("command help stderr = %q", stderr.String())
+	}
+}
+
+func TestKickOffRequiresHerdrBeforeCreatingAnything(t *testing.T) {
+	t.Setenv("HERDR_SOCKET_PATH", "")
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"kick-off", "--repository", t.TempDir()}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("kick-off exit = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no Herdr session detected") || !strings.Contains(stderr.String(), "Start Herdr") {
+		t.Fatalf("kick-off stderr = %q", stderr.String())
+	}
+}
+
+func TestKickOffDoesNotCreateWorkspaceWhenHerdrConfigurationIsDeclined(t *testing.T) {
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-kick-off-config-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	herdrSocket := filepath.Join(socketDir, "herdr.sock")
+	listener, err := net.Listen("unix", herdrSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	done := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer connection.Close()
+		var request struct {
+			ID     string `json:"id"`
+			Method string `json:"method"`
+		}
+		if decodeErr := json.NewDecoder(connection).Decode(&request); decodeErr != nil {
+			done <- decodeErr
+			return
+		}
+		if request.Method != "session.snapshot" {
+			done <- fmt.Errorf("method = %s", request.Method)
+			return
+		}
+		done <- json.NewEncoder(connection).Encode(map[string]any{
+			"id": request.ID, "result": map[string]any{"snapshot": map[string]any{"version": "0.8.2", "protocol": 20}},
+		})
+	}()
+	configPath := filepath.Join(socketDir, "config.toml")
+	original := "[session]\n# resume_agents_on_restore = true\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_SOCKET_PATH", herdrSocket)
+	t.Setenv("HERDR_CONFIG_PATH", configPath)
+	var stdout, stderr bytes.Buffer
+	code := cli.Run(context.Background(), []string{"kick-off", "--repository", t.TempDir()}, strings.NewReader("n\n"), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("kick-off exit = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "May Pika-Go update it and reload Herdr now? [y/N]") || !strings.Contains(stderr.String(), "resume_agents_on_restore = false") {
+		t.Fatalf("kick-off stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	contents, err := os.ReadFile(configPath)
+	if err != nil || string(contents) != original {
+		t.Fatalf("declined config contents=%q err=%v", contents, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T) {
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-kick-off-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	herdrSocket := filepath.Join(socketDir, "herdr.sock")
+	herdrListener, err := net.Listen("unix", herdrSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = herdrListener.Close() })
+
+	type herdrRequest struct {
+		Method string
+		Params map[string]any
+	}
+	herdrRequests := make(chan herdrRequest, 16)
+	herdrDone := make(chan error, 1)
+	go func() {
+		for {
+			connection, acceptErr := herdrListener.Accept()
+			if acceptErr != nil {
+				if errors.Is(acceptErr, net.ErrClosed) {
+					herdrDone <- nil
+				} else {
+					herdrDone <- acceptErr
+				}
+				return
+			}
+			var request struct {
+				ID     string         `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+			}
+			if decodeErr := json.NewDecoder(connection).Decode(&request); decodeErr != nil {
+				_ = connection.Close()
+				herdrDone <- decodeErr
+				return
+			}
+			herdrRequests <- herdrRequest{Method: request.Method, Params: request.Params}
+			var result any
+			switch request.Method {
+			case "session.snapshot":
+				result = map[string]any{"snapshot": map[string]any{"version": "0.8.2", "protocol": 20}}
+			case "server.reload_config":
+				result = map[string]any{"status": "applied", "diagnostics": []string{}}
+			case "workspace.create":
+				result = map[string]any{
+					"workspace": map[string]any{"workspace_id": "w-new"},
+					"root_pane": map[string]any{"pane_id": "w-new:p1", "workspace_id": "w-new", "tab_id": "w-new:t1", "terminal_id": "term-root", "agent_status": "idle", "revision": 1},
+				}
+			case "plugin.pane.open":
+				result = map[string]any{"plugin_pane": map[string]any{
+					"plugin_id": "pika-go", "entrypoint": "symphony",
+					"pane": map[string]any{"pane_id": "w-new:p2", "workspace_id": "w-new", "tab_id": "w-new:t1", "terminal_id": "term-daemon", "agent_status": "working", "revision": 1},
+				}}
+			case "tab.rename":
+				result = map[string]any{"tab": map[string]any{"tab_id": "w-new:t1", "workspace_id": "w-new", "label": request.Params["label"]}}
+			case "pane.rename":
+				result = map[string]any{"pane": map[string]any{"pane_id": request.Params["pane_id"], "workspace_id": "w-new", "tab_id": "w-new:t1", "label": request.Params["label"]}}
+			case "workspace.focus":
+				result = map[string]any{"workspace": map[string]any{"workspace_id": "w-new"}}
+			case "tab.focus":
+				result = map[string]any{"tab": map[string]any{"tab_id": "w-new:t1", "workspace_id": "w-new"}}
+			case "pane.focus":
+				result = map[string]any{"pane": map[string]any{"pane_id": "w-new:p1", "workspace_id": "w-new", "tab_id": "w-new:t1"}}
+			case "pane.send_input":
+				result = map[string]any{"pane": map[string]any{"pane_id": "w-new:p1", "workspace_id": "w-new", "tab_id": "w-new:t1"}}
+			default:
+				_ = json.NewEncoder(connection).Encode(map[string]any{"id": request.ID, "error": map[string]any{"code": "unexpected_method", "message": request.Method}})
+				_ = connection.Close()
+				continue
+			}
+			_ = json.NewEncoder(connection).Encode(map[string]any{"id": request.ID, "result": result})
+			_ = connection.Close()
+		}
+	}()
+
+	pikaSocket, err := instance.SocketForHerdrWorkspace(herdrSocket, "w-new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(pikaSocket), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(pikaSocket)
+	pikaListener, err := net.Listen("unix", pikaSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = pikaListener.Close()
+		_ = os.Remove(pikaSocket)
+	})
+	initRequests := make(chan protocol.InitRequest, 1)
+	pikaMux := http.NewServeMux()
+	pikaMux.HandleFunc("GET /v1/health", func(response http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(response).Encode(protocol.Health{Status: "ok", Version: "test", ProtocolVersion: protocol.Version})
+	})
+	pikaMux.HandleFunc("GET /v1/init/options", func(response http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(response).Encode(protocol.InitOptionsResponse{ConfigurationExists: true})
+	})
+	pikaMux.HandleFunc("POST /v1/init", func(response http.ResponseWriter, request *http.Request) {
+		var input protocol.InitRequest
+		if decodeErr := json.NewDecoder(request.Body).Decode(&input); decodeErr != nil {
+			http.Error(response, decodeErr.Error(), http.StatusBadRequest)
+			return
+		}
+		initRequests <- input
+		_ = json.NewEncoder(response).Encode(symphony.Receipt{ID: "receipt-1", RequestID: input.RequestID, Command: "init", Revision: 1})
+	})
+	pikaServer := &http.Server{Handler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set(protocol.VersionHeader, fmt.Sprint(protocol.Version))
+		pikaMux.ServeHTTP(response, request)
+	})}
+	pikaDone := make(chan error, 1)
+	go func() { pikaDone <- pikaServer.Serve(pikaListener) }()
+	t.Cleanup(func() { _ = pikaServer.Close() })
+
+	repository := t.TempDir()
+	resolvedRepository, err := filepath.EvalSymlinks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_SOCKET_PATH", herdrSocket)
+	t.Setenv("HERDR_PANE_ID", "w-origin:p1")
+	herdrConfig := filepath.Join(socketDir, "config.toml")
+	if err := os.WriteFile(herdrConfig, []byte("[session]\n# resume_agents_on_restore = true\n\n[remote]\nconnect_timeout_seconds = 10\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_CONFIG_PATH", herdrConfig)
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"kick-off", "--repository", repository}, strings.NewReader("yes\n"), &stdout, &stderr); code != 0 {
+		t.Fatalf("kick-off exit = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("kick-off stderr = %q", stderr.String())
+	}
+	for _, want := range []string{"May Pika-Go update it and reload Herdr now? [y/N]", "Updated Herdr configuration and reloaded the server.", "Creating Herdr workspace", "Waiting for the daemon", "Initialization command started", "Workspace:   w-new", "Init pane:   w-new:p1"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("kick-off stdout is missing %q:\n%s", want, stdout.String())
+		}
+	}
+
+	requests := make(map[string]map[string]any)
+	var paneRenames []map[string]any
+	var requestOrder []string
+	for range 11 {
+		request := <-herdrRequests
+		requestOrder = append(requestOrder, request.Method)
+		requests[request.Method] = request.Params
+		if request.Method == "pane.rename" {
+			paneRenames = append(paneRenames, request.Params)
+		}
+	}
+	if len(requestOrder) < 3 || requestOrder[0] != "session.snapshot" || requestOrder[1] != "server.reload_config" || requestOrder[2] != "workspace.create" {
+		t.Fatalf("Herdr request order = %v", requestOrder)
+	}
+	configured, err := os.ReadFile(herdrConfig)
+	if err != nil || !strings.Contains(string(configured), "[session]\n# resume_agents_on_restore = true\nresume_agents_on_restore = false\n\n[remote]") {
+		t.Fatalf("configured Herdr file=%q err=%v", configured, err)
+	}
+	if requests["workspace.create"]["cwd"] != resolvedRepository || requests["workspace.create"]["focus"] != false {
+		t.Fatalf("workspace.create params = %+v", requests["workspace.create"])
+	}
+	if requests["tab.rename"]["tab_id"] != "w-new:t1" || requests["tab.rename"]["label"] != "Optimization" {
+		t.Fatalf("tab.rename params = %+v", requests["tab.rename"])
+	}
+	if len(paneRenames) != 2 || paneRenames[0]["pane_id"] != "w-new:p1" || paneRenames[0]["label"] != "Setup" ||
+		paneRenames[1]["pane_id"] != "w-new:p2" || paneRenames[1]["label"] != "Daemon" {
+		t.Fatalf("pane.rename params = %+v", paneRenames)
+	}
+	pluginParams := requests["plugin.pane.open"]
+	if pluginParams["plugin_id"] != "pika-go" || pluginParams["entrypoint"] != "symphony" || pluginParams["target_pane_id"] != "w-new:p1" || pluginParams["focus"] != false {
+		t.Fatalf("plugin.pane.open params = %+v", pluginParams)
+	}
+	if cwd, present := pluginParams["cwd"]; present {
+		t.Fatalf("plugin.pane.open cwd = %v; daemon pane must inherit the plugin root", cwd)
+	}
+	if requests["workspace.focus"]["workspace_id"] != "w-new" {
+		t.Fatalf("workspace.focus params = %+v", requests["workspace.focus"])
+	}
+	if requests["tab.focus"]["tab_id"] != "w-new:t1" {
+		t.Fatalf("tab.focus params = %+v", requests["tab.focus"])
+	}
+	if requests["pane.focus"]["pane_id"] != "w-new:p1" {
+		t.Fatalf("pane.focus params = %+v", requests["pane.focus"])
+	}
+	initPaneParams := requests["pane.send_input"]
+	if initPaneParams["pane_id"] != "w-new:p1" || !strings.Contains(fmt.Sprint(initPaneParams["text"]), " init ") ||
+		!strings.Contains(fmt.Sprint(initPaneParams["text"]), resolvedRepository) {
+		t.Fatalf("pane.send_input params = %+v", initPaneParams)
+	}
+	keys, ok := initPaneParams["keys"].([]any)
+	if !ok || len(keys) != 1 || keys[0] != "enter" {
+		t.Fatalf("pane.send_input keys = %#v", initPaneParams["keys"])
+	}
+	select {
+	case initialized := <-initRequests:
+		t.Fatalf("kick-off initialized from its calling process instead of the new pane: %+v", initialized)
+	default:
 	}
 }
 
@@ -484,9 +805,19 @@ func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T)
 	root := t.TempDir()
 	codexHome := filepath.Join(root, "codex-home")
 	t.Setenv("CODEX_HOME", codexHome)
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	modelsCache := `{"models":[
+		{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]},
+		{"slug":"gpt-5.6-terra","display_name":"GPT-5.6-Terra","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]}
+	]}`
+	if err := os.WriteFile(filepath.Join(codexHome, "models_cache.json"), []byte(modelsCache), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/echo")
 	cursorExecutable := filepath.Join(root, "cursor-agent")
-	if err := os.WriteFile(cursorExecutable, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.25-3e8eec8; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+	if err := os.WriteFile(cursorExecutable, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.25-3e8eec8; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nif [ \"$1\" = --list-models ]; then printf 'Available models\\n\\nauto - Auto (default)\\ngpt-5.6-sol-low - GPT-5.6 Sol Low\\ngpt-5.6-sol-medium - GPT-5.6 Sol Medium\\ngpt-5.6-sol-high - GPT-5.6 Sol High\\ngpt-5.6-sol-xhigh - GPT-5.6 Sol Extra High\\ngpt-5.6-sol-max - GPT-5.6 Sol Max\\ngpt-5.6-terra-low - GPT-5.6 Terra Low\\ngpt-5.6-terra-medium - GPT-5.6 Terra Medium\\ngpt-5.6-terra-high - GPT-5.6 Terra High\\n'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PIKA_GO_CURSOR_EXECUTABLE", cursorExecutable)
@@ -511,11 +842,11 @@ func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T)
 	}()
 	waitForHealth(t, socketPath, &daemonStderr)
 	input := strings.Join([]string{
-		"cursor", "", "", "", "y",
-		"codex", "", "",
-		"cursor", "", "max", `["--force","--approve-mcps"]`, "n",
-		"codex", "", "",
-		"cursor", "", "", "", "n",
+		"99", "2", "", "", "y",
+		"1", "", "",
+		"2", "2", "5", `["--force","--approve-mcps"]`, "n",
+		"1", "", "",
+		"2", "", "", "n",
 	}, "\n") + "\n"
 	var stdout, stderr bytes.Buffer
 	if code := cli.Run(context.Background(), []string{"init", "--socket", socketPath, "--repository", repository}, strings.NewReader(input), &stdout, &stderr); code != 0 {
@@ -538,9 +869,15 @@ func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if baseline.Kind != "cursor" || !slices.Contains(baseline.Args, "--trust") || iteration.Kind != "cursor" || iteration.ReasoningEffort != "max" ||
-		followUp.Kind != "cursor" || verification.Kind != "codex" {
+	if baseline.Kind != "cursor" || baseline.Model != "auto" || baseline.ReasoningEffort != "" || !slices.Contains(baseline.Args, "--trust") ||
+		iteration.Kind != "cursor" || iteration.Model != "gpt-5.6-sol" || iteration.ReasoningEffort != "max" ||
+		followUp.Kind != "cursor" || followUp.Model != "auto" || followUp.ReasoningEffort != "" || verification.Kind != "codex" {
 		t.Fatalf("baseline=%+v verification=%+v iteration=%+v follow_up=%+v", baseline, verification, iteration, followUp)
+	}
+	for _, want := range []string{"  backend:\n    1) codex\n    2) cursor", "  Select backend [1]:", "  model:\n    1) auto-routing (default)\n    2) gpt-5.6-sol", "  model:\n    1) default\n    2) GPT-5.6-Sol (gpt-5.6-sol)", "  reasoning effort: provider default", "  reasoning effort:\n    1) low", "  Select model [1]:", "  Select model [2]:", "  Select reasoning effort [3]:", "Enter a number from 1 to 2."} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("interactive init output is missing %q:\n%s", want, stdout.String())
+		}
 	}
 	cancel()
 	if code := <-done; code != 0 {

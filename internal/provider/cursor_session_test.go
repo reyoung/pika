@@ -97,6 +97,49 @@ func TestCursorPrepareSessionCreatesPrivateStateAndShellSafeLaunch(t *testing.T)
 	}
 }
 
+func TestCursorPrepareSessionUsesAutoRoutingWithoutReasoningEffort(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	realCursor := filepath.Join(root, "real-cursor-agent")
+	if err := os.WriteFile(realCursor, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pikaExecutable := filepath.Join(root, "pika-go")
+	if err := os.WriteFile(pikaExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := provider.NewCursorAdapter(provider.CursorOptions{
+		Executable: realCursor, RuntimeRoot: filepath.Join(root, "runtime"),
+		InstanceBin: filepath.Join(root, "runtime", "bin"), PikaExecutable: pikaExecutable,
+	})
+	launch, err := adapter.PrepareSession(context.Background(), provider.SessionActivation{
+		AgentSessionID: "auto-session", Repository: filepath.Join(root, "repo"),
+		Configuration: provider.AgentConfiguration{Kind: "cursor", Model: "auto"},
+		SystemPrompt:  []byte("system prompt"), InitialPrompt: "start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Environment["PIKA_CURSOR_MODEL"] != "auto" || launch.Environment["PIKA_AGENT_MODEL"] != "auto" {
+		t.Fatalf("auto-routing environment = %+v", launch.Environment)
+	}
+	if _, present := launch.Environment["PIKA_AGENT_REASONING_EFFORT"]; present {
+		t.Fatalf("auto-routing unexpectedly set reasoning effort: %+v", launch.Environment)
+	}
+	command := exec.Command(filepath.Join(root, "runtime", "bin", "cursor-agent"))
+	command.Env = os.Environ()
+	for key, value := range launch.Environment {
+		command.Env = append(command.Env, key+"="+value)
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run Cursor wrapper: %v: %s", err, output)
+	}
+	if !strings.Contains(string(output), "--model\nauto\n") {
+		t.Fatalf("auto-routing argv:\n%s", output)
+	}
+}
+
 func TestRealCursorDiscoversInstalledPikaMCP(t *testing.T) {
 	if os.Getenv("PIKA_GO_REAL_CURSOR_PLUGIN_DISCOVERY") != "1" {
 		t.Skip("set PIKA_GO_REAL_CURSOR_PLUGIN_DISCOVERY=1 to test the installed Cursor CLI")

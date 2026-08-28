@@ -28,9 +28,7 @@ func ResolveSocket(explicit string) (string, error) {
 	if herdrSocket == "" || !ok || workspaceID == "" {
 		return "", errors.New("socket is undiscoverable: pass --socket, set PIKA_GO_SOCKET, or run inside a Herdr pane")
 	}
-
-	digest := sha256.Sum256([]byte(herdrSocket + "\x00" + workspaceID))
-	return SocketForInstance(hex.EncodeToString(digest[:6]))
+	return SocketForHerdrWorkspace(herdrSocket, workspaceID)
 }
 
 // ResolveSocketContext first asks Herdr for the current Workspace's published
@@ -63,6 +61,19 @@ func SocketForInstance(instanceID string) (string, error) {
 		return "", err
 	}
 	return filepath.Join("/tmp", "pika-go-"+strconv.Itoa(os.Getuid()), instanceID+".sock"), nil
+}
+
+// SocketForHerdrWorkspace returns the deterministic bootstrap socket used by
+// the daemon before it can publish its durable instance ID into Herdr.
+func SocketForHerdrWorkspace(herdrSocket, workspaceID string) (string, error) {
+	if herdrSocket == "" {
+		return "", errors.New("Herdr socket path is required")
+	}
+	if workspaceID == "" {
+		return "", errors.New("Herdr workspace ID is required")
+	}
+	digest := sha256.Sum256([]byte(herdrSocket + "\x00" + workspaceID))
+	return SocketForInstance(hex.EncodeToString(digest[:6]))
 }
 
 func validateSocketPath(path string) (string, error) {

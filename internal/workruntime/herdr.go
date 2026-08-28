@@ -91,6 +91,18 @@ func (r *HerdrRuntime) Start(ctx context.Context, spec StartSpec) (Observation, 
 		}
 		paneID = pane.PaneID
 	}
+	paneLabel := spec.PaneLabel
+	shortID := shortPaneID(paneID)
+	if paneLabel == "" {
+		paneLabel = shortID
+	} else if spec.PaneLabelNeedsID && shortID != "" {
+		paneLabel += " · " + shortID
+	}
+	if paneLabel != "" {
+		if err := r.Runtime.RenamePane(ctx, paneID, paneLabel); err != nil {
+			return Observation{}, fmt.Errorf("name agent pane %s: %w", paneID, err)
+		}
+	}
 	cleanup, err := r.prepareEnvironment(ctx, paneID, spec.Environment)
 	if err != nil {
 		return Observation{}, err
@@ -106,6 +118,21 @@ func (r *HerdrRuntime) Start(ctx context.Context, spec StartSpec) (Observation, 
 	}
 	observation := observationFromAgent(agent)
 	return observation, nil
+}
+
+func shortPaneID(paneID string) string {
+	if separator := strings.LastIndexByte(paneID, ':'); separator >= 0 {
+		paneID = paneID[separator+1:]
+	}
+	if len(paneID) < 2 || paneID[0] != 'p' {
+		return ""
+	}
+	for _, character := range paneID[1:] {
+		if character < '0' || character > '9' {
+			return ""
+		}
+	}
+	return paneID
 }
 
 var environmentName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)

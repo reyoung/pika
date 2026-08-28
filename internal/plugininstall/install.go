@@ -20,7 +20,7 @@ platforms = ["linux", "macos"]
 
 [[panes]]
 id = "symphony"
-title = "Pika-Go Symphony"
+title = "Daemon"
 description = "Run the Pika-Go orchestration daemon"
 placement = "split"
 command = ["./pika-go", "daemon"]

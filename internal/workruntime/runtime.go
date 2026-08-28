@@ -29,13 +29,15 @@ type Snapshot struct {
 }
 
 type StartSpec struct {
-	AgentName       string
-	AgentKind       string
-	Repository      string
-	PreferredPaneID string
-	Environment     map[string]string
-	StartupTimeout  time.Duration
-	ReturnOnLaunch  bool
+	AgentName        string
+	AgentKind        string
+	Repository       string
+	PreferredPaneID  string
+	PaneLabel        string
+	PaneLabelNeedsID bool
+	Environment      map[string]string
+	StartupTimeout   time.Duration
+	ReturnOnLaunch   bool
 }
 
 type Preparation struct {
@@ -254,13 +256,15 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		}
 	}
 	observation, err := s.Runtime.Start(ctx, StartSpec{
-		AgentName:       session.AgentName,
-		AgentKind:       session.AgentKind,
-		Repository:      work.Repository,
-		PreferredPaneID: payload.PreferredPaneID,
-		Environment:     preparation.Environment,
-		StartupTimeout:  preparation.StartupTimeout,
-		ReturnOnLaunch:  preparation.ReturnOnLaunch,
+		AgentName:        session.AgentName,
+		AgentKind:        session.AgentKind,
+		Repository:       work.Repository,
+		PreferredPaneID:  payload.PreferredPaneID,
+		PaneLabel:        workPaneLabel(work),
+		PaneLabelNeedsID: work.Work.Role == symphony.RoleIteration,
+		Environment:      preparation.Environment,
+		StartupTimeout:   preparation.StartupTimeout,
+		ReturnOnLaunch:   preparation.ReturnOnLaunch,
 	})
 	if err != nil {
 		return fmt.Errorf("start agent session %s: %w", session.ID, err)
@@ -274,6 +278,32 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		}
 	}
 	return nil
+}
+
+func workPaneLabel(work symphony.RuntimeWork) string {
+	withBaselineNumber := func(label string) string {
+		if work.BaselineNumber > 1 {
+			return fmt.Sprintf("%s %d", label, work.BaselineNumber)
+		}
+		return label
+	}
+	switch work.Work.Role {
+	case symphony.RoleBaselineDraft:
+		return withBaselineNumber("Baseline")
+	case symphony.RoleBaselineVerification:
+		return withBaselineNumber("Verify")
+	case symphony.RoleIteration:
+		if work.Work.IterationRound > 0 {
+			return fmt.Sprintf("Iteration R%d", work.Work.IterationRound)
+		}
+		return "Iteration"
+	case symphony.RoleIntegration:
+		return "Integration"
+	case symphony.RoleFollowUp:
+		return "Follow-up"
+	default:
+		return ""
+	}
 }
 
 func promptProvider(ctx context.Context, runtime Runtime, target, message, providerKind string) error {

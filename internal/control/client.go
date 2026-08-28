@@ -70,7 +70,7 @@ func Init(ctx context.Context, socketPath string, request protocol.InitRequest) 
 
 func InitOptions(ctx context.Context, socketPath string) (protocol.InitOptionsResponse, error) {
 	var response protocol.InitOptionsResponse
-	if err := doJSON(ctx, socketPath, http.MethodGet, "/v1/init/options", nil, &response); err != nil {
+	if err := doJSONWithTimeout(ctx, socketPath, http.MethodGet, "/v1/init/options", nil, &response, 8*time.Second); err != nil {
 		return protocol.InitOptionsResponse{}, err
 	}
 	return response, nil

@@ -39,7 +39,7 @@ Initial endpoints:
 | --- | --- |
 | `GET /v1/health` | daemon liveness and protocol version |
 | `GET /v1/status` | Optimization, active Work, queue, pane, session, and drain view |
-| `GET /v1/init/options` | report whether configuration exists and probe each registered provider without writing state |
+| `GET /v1/init/options` | report whether configuration exists and return the selectable backend/model/effort catalog from successfully probed providers without writing state |
 | `POST /v1/backups` | create and validate a new online SQLite snapshot at an absolute path |
 | `POST /v1/init` | initialize and bind the caller pane |
 | `POST /v1/baseline-drafts` | explicitly start a fresh Baseline Draft from an allowed paused state |
