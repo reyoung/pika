@@ -73,8 +73,9 @@ func TestCursorPrepareSessionCreatesPrivateStateAndShellSafeLaunch(t *testing.T)
 	}
 	wantArgs := []string{
 		"--force", "--header", "X-Test: $(touch should-not-run)",
+		"--yolo",
 		"--workspace", filepath.Join(root, "repo with spaces"),
-		"--model", "gpt-5.6-sol-high", "--sandbox", "enabled", "start the work safely",
+		"--model", "gpt-5.6-sol-high", "start the work safely",
 	}
 	if strings.TrimSpace(string(output)) != strings.Join(wantArgs, "\n") {
 		t.Fatalf("argv:\n%s\nwant:\n%s", output, strings.Join(wantArgs, "\n"))

@@ -212,7 +212,8 @@ func renderWrapper(codexExecutable string) string {
 		"if [ \"${PIKA_CODEX_BYPASS_HOOK_TRUST:-}\" = 1 ]; then\n" +
 		"  set -- --dangerously-bypass-hook-trust \"$@\"\n" +
 		"fi\n" +
-		"set -- --ask-for-approval never \"$@\"\n" +
+		"# Pika Agents are unattended optimization workers; --yolo is the default sandbox policy.\n" +
+		"set -- --yolo \"$@\"\n" +
 		"set -- --profile " + ProfileName + " \"$@\"\n" +
 		"exec " + shellQuote(codexExecutable) + " \"$@\"\n"
 }

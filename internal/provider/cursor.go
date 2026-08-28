@@ -256,10 +256,15 @@ func renderCursorWrapper(cursorExecutable string) string {
 		"  case \"$pika_arg\" in --resume|--resume=*|--continue|resume|ls) echo 'pika-go: native Cursor resume is disabled' >&2; exit 64;; esac\n" +
 		"done\n" +
 		": \"${PIKA_CURSOR_ARGS_FILE:?}\" \"${PIKA_CURSOR_WORKSPACE:?}\" \"${PIKA_CURSOR_MODEL:?}\" \"${PIKA_CURSOR_INITIAL_PROMPT:?}\"\n" +
+		"pika_cursor_sandbox_policy=\n" +
 		"while IFS= read -r pika_arg || [ -n \"$pika_arg\" ]; do\n" +
+		"  case \"$pika_arg\" in --yolo|--sandbox|--sandbox=*) pika_cursor_sandbox_policy=explicit;; esac\n" +
 		"  set -- \"$@\" \"$pika_arg\"\n" +
 		"done < \"$PIKA_CURSOR_ARGS_FILE\"\n" +
-		"set -- \"$@\" --workspace \"$PIKA_CURSOR_WORKSPACE\" --model \"$PIKA_CURSOR_MODEL\" --sandbox enabled \"$PIKA_CURSOR_INITIAL_PROMPT\"\n" +
+		"if [ -z \"$pika_cursor_sandbox_policy\" ]; then\n" +
+		"  set -- \"$@\" --yolo\n" +
+		"fi\n" +
+		"set -- \"$@\" --workspace \"$PIKA_CURSOR_WORKSPACE\" --model \"$PIKA_CURSOR_MODEL\" \"$PIKA_CURSOR_INITIAL_PROMPT\"\n" +
 		"exec " + shellQuote(cursorExecutable) + " \"$@\"\n"
 }
 

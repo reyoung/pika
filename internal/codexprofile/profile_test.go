@@ -119,7 +119,7 @@ func TestInstallCreatesOwnedOverlayAndInstanceWrapper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run wrapper: %v", err)
 	}
-	for _, want := range []string{"--profile\n" + codexprofile.ProfileName, "--ask-for-approval\nnever", "--dangerously-bypass-hook-trust", "--model\ngpt-test", `model_reasoning_effort="xhigh"`, `developer_instructions="role prompt\\ncontext"`, "initial prompt"} {
+	for _, want := range []string{"--profile\n" + codexprofile.ProfileName, "--yolo", "--dangerously-bypass-hook-trust", "--model\ngpt-test", `model_reasoning_effort="xhigh"`, `developer_instructions="role prompt\\ncontext"`, "initial prompt"} {
 		if !strings.Contains(string(output), want) {
 			t.Fatalf("wrapper args missing %q: %q", want, output)
 		}
