@@ -9,12 +9,21 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/reyoung/pika-go/internal/daemonupdate"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
+	"github.com/reyoung/pika-go/internal/workbench"
 )
+
+type Workbench interface {
+	Version(context.Context) (workbench.Version, error)
+	Snapshot(context.Context, int) (workbench.Snapshot, error)
+	Node(context.Context, string, string) (workbench.NodeDetail, error)
+	Artifact(context.Context, string) (workbench.Artifact, error)
+}
 
 type Config struct {
 	SocketPath              string
@@ -38,6 +47,7 @@ type Config struct {
 	UpdateAccepted          chan struct{}
 	BinaryDigest            string
 	Ready                   func() bool
+	Workbench               Workbench
 }
 
 var ErrHandoff = errors.New("daemon update handoff requested")
@@ -314,6 +324,65 @@ func Serve(ctx context.Context, cfg Config) error {
 				w.WriteHeader(http.StatusNoContent)
 			})
 		}
+	}
+	if cfg.Workbench != nil {
+		mux.HandleFunc("GET /v1/workbench/version", func(w http.ResponseWriter, request *http.Request) {
+			version, err := cfg.Workbench.Version(request.Context())
+			if err != nil {
+				writeAPIError(w, http.StatusServiceUnavailable, "workbench_unavailable", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, version)
+		})
+		mux.HandleFunc("GET /v1/workbench/snapshot", func(w http.ResponseWriter, request *http.Request) {
+			limit := 0
+			if raw := request.URL.Query().Get("terminal_attempt_limit"); raw != "" {
+				parsed, err := strconv.Atoi(raw)
+				if err != nil || parsed < workbench.MinLimit || parsed > workbench.MaxLimit {
+					writeAPIError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("terminal_attempt_limit must be between %d and %d", workbench.MinLimit, workbench.MaxLimit))
+					return
+				}
+				limit = parsed
+			}
+			snapshot, err := cfg.Workbench.Snapshot(request.Context(), limit)
+			if err != nil {
+				writeAPIError(w, http.StatusServiceUnavailable, "workbench_unavailable", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, snapshot)
+		})
+		mux.HandleFunc("GET /v1/workbench/nodes/{kind}/{id}", func(w http.ResponseWriter, request *http.Request) {
+			detail, err := cfg.Workbench.Node(request.Context(), request.PathValue("kind"), request.PathValue("id"))
+			if errors.Is(err, os.ErrNotExist) {
+				writeAPIError(w, http.StatusNotFound, "not_found", "Workbench node was not found")
+				return
+			}
+			if err != nil {
+				writeAPIError(w, http.StatusServiceUnavailable, "workbench_unavailable", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, detail)
+		})
+		mux.HandleFunc("GET /v1/workbench/artifacts/{artifact_id}", func(w http.ResponseWriter, request *http.Request) {
+			artifact, err := cfg.Workbench.Artifact(request.Context(), request.PathValue("artifact_id"))
+			if errors.Is(err, os.ErrNotExist) {
+				writeAPIError(w, http.StatusNotFound, "not_found", "artifact was not found")
+				return
+			}
+			if err != nil {
+				writeAPIError(w, http.StatusConflict, "artifact_changed", err.Error())
+				return
+			}
+			if artifact.Previewable && request.URL.Query().Get("download") != "1" {
+				writeJSON(w, http.StatusOK, map[string]any{"metadata": artifact.Metadata, "content_type": artifact.ContentType, "previewable": true, "content": string(artifact.Content)})
+				return
+			}
+			w.Header().Set("Content-Type", artifact.ContentType)
+			w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, filepath.Base(artifact.Metadata.RelativePath)))
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(artifact.Content)
+		})
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		w.Header().Set(protocol.VersionHeader, fmt.Sprintf("%d", protocol.Version))

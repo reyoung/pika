@@ -985,7 +985,8 @@ func (e *Engine) applySubmitBaselineDefinition(ctx context.Context, tx *sql.Tx, 
 		return Receipt{}, domainError(CodeInvalidTransition, "work is not an active baseline draft")
 	}
 	var baselineStatus BaselineStatus
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM baseline_revisions WHERE id = ?`, baselineID).Scan(&baselineStatus); err != nil {
+	var measurementContractVersion sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT status, measurement_contract_version FROM baseline_revisions WHERE id = ?`, baselineID).Scan(&baselineStatus, &measurementContractVersion); err != nil {
 		return Receipt{}, fmt.Errorf("read baseline revision: %w", err)
 	}
 	if baselineStatus != BaselineDrafting {
@@ -994,11 +995,26 @@ func (e *Engine) applySubmitBaselineDefinition(ctx context.Context, tx *sql.Tx, 
 	if err := benchmarkintegrity.ValidateDefinition(command.Definition); err != nil {
 		return Receipt{}, domainError(CodeInvalidCommand, "invalid benchmark integrity contract: "+err.Error())
 	}
+	var measurementDefinition benchmarkintegrity.MeasurementDefinition
+	if measurementContractVersion.Valid {
+		if measurementContractVersion.Int64 != benchmarkintegrity.MeasurementSchemaVersion {
+			return Receipt{}, domainError(CodeStateCorrupt, "unsupported Baseline measurement contract version")
+		}
+		measurementDefinition, err = benchmarkintegrity.ParseFrozenMeasurementDefinition(command.Definition)
+		if err != nil {
+			return Receipt{}, domainError(CodeInvalidCommand, "invalid benchmark measurement contract: "+err.Error())
+		}
+	}
 
 	receiptID := e.newID()
 	now := e.timestamp()
 	nextRevision := optimization.Revision + 1
 	digest := sha256.Sum256(command.Definition)
+	if measurementContractVersion.Valid {
+		if err := persistMeasurementDefinition(ctx, tx, baselineID, measurementDefinition); err != nil {
+			return Receipt{}, err
+		}
+	}
 	if optimization.Status == OptimizationDraining {
 		eventID := e.newID()
 		closeEffectID := e.newID()
@@ -1108,8 +1124,9 @@ func (e *Engine) applyFinishBaselineVerification(ctx context.Context, tx *sql.Tx
 	var baselineNumber int64
 	var baselineStatus BaselineStatus
 	var baselineRepositorySHA sql.NullString
+	var measurementContractVersion sql.NullInt64
 	var baselineDefinition []byte
-	if err := tx.QueryRowContext(ctx, `SELECT number, status, repository_sha, definition_json FROM baseline_revisions WHERE id = ?`, baselineID).Scan(&baselineNumber, &baselineStatus, &baselineRepositorySHA, &baselineDefinition); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT number, status, repository_sha, definition_json, measurement_contract_version FROM baseline_revisions WHERE id = ?`, baselineID).Scan(&baselineNumber, &baselineStatus, &baselineRepositorySHA, &baselineDefinition, &measurementContractVersion); err != nil {
 		return Receipt{}, fmt.Errorf("read baseline revision: %w", err)
 	}
 	if baselineStatus != BaselineVerifying {
@@ -1121,6 +1138,17 @@ func (e *Engine) applyFinishBaselineVerification(ctx context.Context, tx *sql.Tx
 	if command.Decision == VerificationAccepted {
 		if err := benchmarkintegrity.ValidateEvidence(baselineDefinition, command.Evidence); err != nil {
 			return Receipt{}, domainError(CodeInvalidCommand, "invalid benchmark integrity evidence: "+err.Error())
+		}
+	}
+	var baselineMeasurements benchmarkintegrity.MeasurementSet
+	if command.Decision == VerificationAccepted && measurementContractVersion.Valid {
+		measurementDefinition, parseErr := benchmarkintegrity.ParseFrozenMeasurementDefinition(baselineDefinition)
+		if parseErr != nil {
+			return Receipt{}, domainError(CodeStateCorrupt, "stored benchmark measurement contract is invalid: "+parseErr.Error())
+		}
+		baselineMeasurements, parseErr = benchmarkintegrity.ParseBaselineMeasurements(measurementDefinition, command.Evidence)
+		if parseErr != nil {
+			return Receipt{}, domainError(CodeInvalidCommand, "invalid Development Baseline measurements: "+parseErr.Error())
 		}
 	}
 
@@ -1141,6 +1169,11 @@ func (e *Engine) applyFinishBaselineVerification(ctx context.Context, tx *sql.Tx
 	if _, err := tx.ExecContext(ctx, `UPDATE baseline_revisions SET status = ?, completed_at = ? WHERE id = ?`, command.Decision, now, baselineID); err != nil {
 		return Receipt{}, fmt.Errorf("complete baseline revision: %w", err)
 	}
+	if accepted && measurementContractVersion.Valid {
+		if err := persistBaselineMeasurementSet(ctx, tx, baselineID, command.WorkID, now, baselineMeasurements); err != nil {
+			return Receipt{}, err
+		}
+	}
 
 	resultValues := map[string]string{"baseline_revision_id": baselineID, "decision": string(command.Decision)}
 	eventValues := map[string]string{"baseline_revision_id": baselineID, "verification_work_id": command.WorkID, "decision": string(command.Decision)}
@@ -1153,7 +1186,7 @@ func (e *Engine) applyFinishBaselineVerification(ctx context.Context, tx *sql.Tx
 		successorWorkID := e.newID()
 		startEffectID := e.newID()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_revisions
-            (id, optimization_id, number, status, predecessor_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			(id, optimization_id, number, status, predecessor_id, created_at, measurement_contract_version) VALUES (?, ?, ?, ?, ?, ?, 1)`,
 			successorID, optimization.ID, baselineNumber+1, BaselineDrafting, baselineID, now); err != nil {
 			return Receipt{}, fmt.Errorf("create successor baseline revision: %w", err)
 		}
@@ -1256,7 +1289,7 @@ func (e *Engine) applyBackOff(ctx context.Context, tx *sql.Tx, command BackOff) 
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_revisions
-        (id, optimization_id, number, status, predecessor_id, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		(id, optimization_id, number, status, predecessor_id, created_at, measurement_contract_version) VALUES (?, ?, ?, ?, ?, ?, 1)`,
 		successorID, optimization.ID, baselineNumber+1, BaselineDrafting, baselineID, now); err != nil {
 		return Receipt{}, fmt.Errorf("create back-off successor baseline: %w", err)
 	}
@@ -1494,7 +1527,7 @@ func (e *Engine) applyInit(ctx context.Context, tx *sql.Tx, command Init) (Recei
 		return Receipt{}, fmt.Errorf("create optimization: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_revisions
-        (id, optimization_id, number, status, created_at) VALUES (?, ?, 1, ?, ?)`, baselineID, command.OptimizationID, BaselineDrafting, now); err != nil {
+		(id, optimization_id, number, status, created_at, measurement_contract_version) VALUES (?, ?, 1, ?, ?, 1)`, baselineID, command.OptimizationID, BaselineDrafting, now); err != nil {
 		return Receipt{}, fmt.Errorf("create baseline revision: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO works
@@ -1553,7 +1586,7 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return View{}, fmt.Errorf("read latest Scheduler control cycle: %w", err)
 	}
-	baselineRows, err := e.db.QueryContext(ctx, `SELECT b.id, b.number, b.status, b.definition_json, b.repository_sha, b.predecessor_id,
+	baselineRows, err := e.db.QueryContext(ctx, `SELECT b.id, b.number, b.status, b.definition_json, b.repository_sha, b.predecessor_id, b.measurement_contract_version,
 		v.failure_kind, v.reason, v.requested_changes, v.evidence_json
 		FROM baseline_revisions b LEFT JOIN baseline_verifications v ON v.baseline_revision_id = b.id
 		WHERE b.optimization_id = ? ORDER BY b.number`, view.Optimization.ID)
@@ -1564,8 +1597,9 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		var baseline BaselineView
 		var definition []byte
 		var repositorySHA, predecessor, failureKind, failureReason, requestedChanges sql.NullString
+		var measurementContractVersion sql.NullInt64
 		var evidence []byte
-		if err := baselineRows.Scan(&baseline.ID, &baseline.Number, &baseline.Status, &definition, &repositorySHA, &predecessor,
+		if err := baselineRows.Scan(&baseline.ID, &baseline.Number, &baseline.Status, &definition, &repositorySHA, &predecessor, &measurementContractVersion,
 			&failureKind, &failureReason, &requestedChanges, &evidence); err != nil {
 			_ = baselineRows.Close()
 			return View{}, fmt.Errorf("scan baseline: %w", err)
@@ -1577,6 +1611,7 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		baseline.FailureReason = failureReason.String
 		baseline.RequestedChanges = requestedChanges.String
 		baseline.VerificationEvidence = evidence
+		baseline.MeasurementContractVersion = measurementContractVersion.Int64
 		view.Baselines = append(view.Baselines, baseline)
 	}
 	if err := baselineRows.Close(); err != nil {
@@ -1626,14 +1661,28 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	if err := sessionRows.Close(); err != nil {
 		return View{}, fmt.Errorf("close Agent Session rows: %w", err)
 	}
-	best := BestView{}
-	var sourceAttempt sql.NullString
-	if err := e.db.QueryRowContext(ctx, `SELECT id, sequence, commit_sha, source_attempt_id FROM best_revisions
-		WHERE optimization_id = ? ORDER BY sequence DESC LIMIT 1`, view.Optimization.ID).Scan(&best.ID, &best.Sequence, &best.CommitSHA, &sourceAttempt); err == nil {
-		best.SourceAttemptID = sourceAttempt.String
+	bestRows, err := e.db.QueryContext(ctx, `SELECT id, sequence, commit_sha, source_attempt_id, evidence_json FROM best_revisions
+		WHERE optimization_id = ? ORDER BY sequence`, view.Optimization.ID)
+	if err != nil {
+		return View{}, fmt.Errorf("read Best spine: %w", err)
+	}
+	for bestRows.Next() {
+		var best BestView
+		var sourceAttempt sql.NullString
+		var evidence []byte
+		if err := bestRows.Scan(&best.ID, &best.Sequence, &best.CommitSHA, &sourceAttempt, &evidence); err != nil {
+			_ = bestRows.Close()
+			return View{}, fmt.Errorf("scan Best spine: %w", err)
+		}
+		best.SourceAttemptID, best.Evidence = sourceAttempt.String, evidence
+		view.Bests = append(view.Bests, best)
+	}
+	if err := bestRows.Close(); err != nil {
+		return View{}, fmt.Errorf("close Best spine: %w", err)
+	}
+	if len(view.Bests) != 0 {
+		best := view.Bests[len(view.Bests)-1]
 		view.Best = &best
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return View{}, fmt.Errorf("read current best: %w", err)
 	}
 	attemptRows, err := e.db.QueryContext(ctx, `SELECT id, slot_index, status, base_best_sequence, base_sha,
 		current_iteration_round, candidate_sha, summary, failure_reason, history_limit FROM attempts WHERE optimization_id = ? ORDER BY created_at, id`, view.Optimization.ID)
@@ -1655,17 +1704,17 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		return View{}, fmt.Errorf("close attempt rows: %w", err)
 	}
 	integrationRows, err := e.db.QueryContext(ctx, `SELECT sequence, fifo_position, id, attempt_id, iteration_round, status,
-		candidate_sha, expected_best_sha, intent_id, regression_cases_json FROM integrations ORDER BY sequence`)
+		candidate_sha, expected_best_sha, intent_id, regression_cases_json, validation_json, result_json FROM integrations ORDER BY sequence`)
 	if err != nil {
 		return View{}, fmt.Errorf("read integrations: %w", err)
 	}
 	for integrationRows.Next() {
 		var integration IntegrationView
 		var intentID sql.NullString
-		var regressionCases []byte
+		var regressionCases, validation, result []byte
 		if err := integrationRows.Scan(&integration.Sequence, &integration.FIFOPosition, &integration.ID, &integration.AttemptID,
 			&integration.IterationRound, &integration.Status, &integration.CandidateSHA,
-			&integration.ExpectedBestSHA, &intentID, &regressionCases); err != nil {
+			&integration.ExpectedBestSHA, &intentID, &regressionCases, &validation, &result); err != nil {
 			_ = integrationRows.Close()
 			return View{}, fmt.Errorf("scan integration: %w", err)
 		}
@@ -1676,6 +1725,7 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 				return View{}, domainError(CodeStateCorrupt, "Integration has invalid Regression Case history")
 			}
 		}
+		integration.Validation, integration.Result = validation, result
 		view.Integrations = append(view.Integrations, integration)
 	}
 	if err := integrationRows.Close(); err != nil {

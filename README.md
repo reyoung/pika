@@ -29,6 +29,14 @@ pika-go resume
 
 Pause freezes new Session starts and Follow-up clocks and interrupts active Agent turns. Resume sends `继续` to surviving pending-Work Sessions before releasing held scheduling. `pika-go status --json` reports durable Scheduler state and the latest per-Session control results.
 
+Attach the read-only lineage Workbench to the current Workspace daemon:
+
+```bash
+pika-go webui --workspace /path/to/kernel-pika-workspace
+```
+
+The WebUI listens on `0.0.0.0:8080` by default and prints a URL whose fragment contains the bearer token. The browser imports that token into `sessionStorage` and immediately removes it from the address bar. The token is stored at `runtime/webui/token`; use `--rotate-token` only when an explicit rotation is required. The sidecar exposes Baseline, Attempt/Round, Integration, Best, runtime observations, structured benchmark measurements, and registered artifacts. It has no Scheduler or lifecycle mutation API.
+
 The Workspace is the resume point for the complete autotune process:
 
 ```text
@@ -81,6 +89,8 @@ make real-cursor-integration  # opt-in; consumes model quota
 make real-mixed-provider-integration  # opt-in; consumes both providers' quota
 make real-pause-resume-integration  # opt-in; full Codex/Cursor/mixed gates with Scheduler control
 ```
+
+`make verify` also installs, lints, type-checks, unit-tests, builds, and runs the Playwright matrix for the embedded React WebUI before the Go vet and race gates.
 
 `make install` compiles the native `pika-go` binary into the plugin root and copies the CLI into `/usr/local/bin` by default. Override `PREFIX` to choose another installation prefix, or set `PREFIX=` to only build the plugin-root binary.
 

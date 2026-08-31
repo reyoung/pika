@@ -3,13 +3,32 @@ package benchmarkintegrity
 // DefinitionSchema returns the discoverable JSON Schema for the versioned
 // benchmark_integrity object. Workload-specific outer fields remain allowed.
 func DefinitionSchema() map[string]any {
-	return envelopeSchema("benchmark_integrity", definitionContractSchema())
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"benchmark_integrity":    definitionContractSchema(),
+			"benchmark_measurements": measurementDefinitionSchema(),
+		},
+		// The terminal transaction enforces benchmark_measurements for v1
+		// Baseline Revisions. Keeping it optional in the static tool catalog is
+		// required so grandfathered in-flight Revisions can still finish.
+		"required":             []string{"benchmark_integrity"},
+		"additionalProperties": true,
+	}
 }
 
 // EvidenceSchema returns the discoverable evidence shape. Runtime validation
 // applies the exact Full Case Set or Iteration Case Snapshot cardinality.
 func EvidenceSchema() map[string]any {
-	return envelopeSchema("benchmark_integrity", evidenceContractSchema())
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"benchmark_integrity":    evidenceContractSchema(),
+			"benchmark_measurements": measurementBaselineSchema(),
+		},
+		"required":             []string{"benchmark_integrity"},
+		"additionalProperties": true,
+	}
 }
 
 // IntegrationSchema returns the Integration validation schema, including the
@@ -18,12 +37,63 @@ func IntegrationSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"benchmark_integrity": evidenceContractSchema(),
-			"performance_claim":   performanceClaimSchema(),
+			"benchmark_integrity":    evidenceContractSchema(),
+			"benchmark_measurements": measurementComparisonSchema(),
+			"performance_claim":      performanceClaimSchema(),
 		},
-		"required":             []string{"benchmark_integrity", "performance_claim"},
+		"required": []string{"benchmark_integrity"},
+		"anyOf": []any{
+			map[string]any{"required": []string{"benchmark_measurements"}},
+			map[string]any{"required": []string{"performance_claim"}},
+		},
 		"additionalProperties": true,
 	}
+}
+
+func measurementDefinitionSchema() map[string]any {
+	caseSchema := strictObject(map[string]any{
+		"case_id": map[string]any{"type": "string", "minLength": 1},
+		"weight":  map[string]any{"type": "number", "exclusiveMinimum": 0},
+	}, "case_id", "weight")
+	metricSchema := strictObject(map[string]any{
+		"id":               map[string]any{"type": "string", "minLength": 1},
+		"label":            map[string]any{"type": "string", "minLength": 1},
+		"unit":             map[string]any{"type": "string", "minLength": 1},
+		"role":             map[string]any{"enum": []string{MetricRolePrimary, MetricRoleGuard, MetricRoleInformational}},
+		"direction":        map[string]any{"enum": []string{LowerIsBetter, HigherIsBetter}},
+		"sample_statistic": map[string]any{"type": "string", "minLength": 1},
+		"aggregation":      map[string]any{"enum": []string{WeightedGeomeanOfRatios, RatioOfWeightedArithmeticMeans}},
+	}, "id", "label", "unit", "role", "direction", "sample_statistic", "aggregation")
+	return strictObject(map[string]any{
+		"schema_version": map[string]any{"type": "integer", "const": MeasurementSchemaVersion},
+		"cases":          map[string]any{"type": "array", "minItems": 1, "items": caseSchema},
+		"metrics":        map[string]any{"type": "array", "minItems": 1, "items": metricSchema},
+	}, "schema_version", "cases", "metrics")
+}
+
+func measurementBaselineSchema() map[string]any {
+	caseSchema := strictObject(map[string]any{
+		"case_id": map[string]any{"type": "string", "minLength": 1},
+		"values":  map[string]any{"type": "object", "minProperties": 1, "additionalProperties": map[string]any{"type": "number", "exclusiveMinimum": 0}},
+	}, "case_id", "values")
+	return strictObject(map[string]any{
+		"schema_version": map[string]any{"type": "integer", "const": MeasurementSchemaVersion},
+		"baseline":       map[string]any{"type": "array", "minItems": 1, "items": caseSchema},
+	}, "schema_version", "baseline")
+}
+
+func measurementComparisonSchema() map[string]any {
+	values := map[string]any{"type": "object", "minProperties": 1, "additionalProperties": map[string]any{"type": "number", "exclusiveMinimum": 0}}
+	caseSchema := strictObject(map[string]any{
+		"case_id":   map[string]any{"type": "string", "minLength": 1},
+		"reference": values,
+		"candidate": values,
+	}, "case_id", "reference", "candidate")
+	return strictObject(map[string]any{
+		"schema_version":     map[string]any{"type": "integer", "const": MeasurementSchemaVersion},
+		"comparisons":        map[string]any{"type": "array", "minItems": 1, "items": caseSchema},
+		"independent_retest": performanceClaimSchema()["properties"].(map[string]any)["independent_retest"],
+	}, "schema_version", "comparisons")
 }
 
 func envelopeSchema(field string, schema map[string]any) map[string]any {

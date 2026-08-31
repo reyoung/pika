@@ -39,6 +39,8 @@ import (
 	"github.com/reyoung/pika-go/internal/scheduler"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/toolapp"
+	webuiapp "github.com/reyoung/pika-go/internal/webui"
+	"github.com/reyoung/pika-go/internal/workbench"
 	"github.com/reyoung/pika-go/internal/workruntime"
 )
 
@@ -78,6 +80,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runUpdate(ctx, args[1:], stdout, stderr)
 	case "daemon":
 		return runDaemon(ctx, args[1:], stderr)
+	case "webui":
+		return runWebUI(ctx, args[1:], stdout, stderr)
 	case "status":
 		return runStatus(ctx, args[1:], stdout, stderr)
 	case "init":
@@ -137,6 +141,92 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		_, _ = fmt.Fprintf(stderr, "unknown command %q\n", args[0])
 		printUsage(stderr)
 		return 2
+	}
+}
+
+func runWebUI(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newCommandFlagSet("webui", stderr)
+	workspacePath := flags.String("workspace", "", "Optimization Workspace `PATH`")
+	listenAddress := flags.String("listen", "0.0.0.0:8080", "HTTP listen `HOST:PORT`")
+	rotateToken := flags.Bool("rotate-token", false, "Rotate the persistent bearer token before serving")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
+	}
+	if flags.NArg() != 0 {
+		_, _ = fmt.Fprintln(stderr, "webui: unexpected positional arguments")
+		return 2
+	}
+	var workspace optimizationworkspace.Workspace
+	var err error
+	if *workspacePath == "" {
+		workspace, err = optimizationworkspace.Discover("")
+	} else {
+		workspace, err = optimizationworkspace.Open(*workspacePath)
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "webui: %v\n", err)
+		return 2
+	}
+	binding, err := workspace.ReadHerdrBinding()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "webui: %v\n", err)
+		return 1
+	}
+	if _, err := control.Health(ctx, binding.DaemonSocket); err != nil {
+		_, _ = fmt.Fprintf(stderr, "webui: daemon is unavailable: %v\n", err)
+		return 1
+	}
+	token, tokenPath, err := webuiapp.EnsureToken(workspace.RuntimeRoot, *rotateToken)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "webui: prepare token: %v\n", err)
+		return 1
+	}
+	handler, err := webuiapp.NewHandler(binding.DaemonSocket, token)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "webui: prepare server: %v\n", err)
+		return 1
+	}
+	listener, err := net.Listen("tcp", *listenAddress)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "webui: listen on %s: %v\n", *listenAddress, err)
+		return 1
+	}
+	defer listener.Close()
+	webuiRuntime := filepath.Join(workspace.RuntimeRoot, "webui")
+	pidPath := filepath.Join(webuiRuntime, "pid")
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		_, _ = fmt.Fprintf(stderr, "webui: write PID: %v\n", err)
+		return 1
+	}
+	defer os.Remove(pidPath)
+	host := listener.Addr().String()
+	if tcpAddress, ok := listener.Addr().(*net.TCPAddr); ok && (tcpAddress.IP.IsUnspecified() || tcpAddress.IP.String() == "::") {
+		host = net.JoinHostPort("localhost", strconv.Itoa(tcpAddress.Port))
+	}
+	_, _ = fmt.Fprintf(stdout, "Pika-Go WebUI: http://%s/\nBearer token: %s\n", host, tokenPath)
+	_, _ = fmt.Fprintf(stderr, "webui: serving read-only Workbench for %s on %s\n", workspace.Root, listener.Addr())
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_, _ = fmt.Fprintf(stderr, "webui: shutdown: %v\n", err)
+			return 1
+		}
+		if err := <-done; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			_, _ = fmt.Fprintf(stderr, "webui: serve: %v\n", err)
+			return 1
+		}
+		return 0
+	case err := <-done:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			_, _ = fmt.Fprintf(stderr, "webui: serve: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 }
 
@@ -363,6 +453,8 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	var mcpHandler http.Handler
 	var applyGitIntent func(context.Context, string, string) (string, error)
 	var schedulerControl func(context.Context, symphony.Command) (protocol.SchedulerControlResponse, error)
+	var workbenchService *workbench.Service
+	var observeRuntime workbench.RuntimeSnapshot
 	if paths.DatabasePath != "" {
 		worktreeRoot := paths.WorktreeRoot
 		runtimeRoot := paths.RuntimeRoot
@@ -512,6 +604,12 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			return 1
 		}
 		symphonyService = engine
+		workbenchService = workbench.New(engine, func(observeCtx context.Context) (workruntime.Snapshot, error) {
+			if observeRuntime == nil {
+				return workruntime.Snapshot{}, nil
+			}
+			return observeRuntime(observeCtx)
+		})
 		codexHome := os.Getenv("CODEX_HOME")
 		if codexHome == "" {
 			if userHome, homeErr := os.UserHomeDir(); homeErr == nil {
@@ -648,6 +746,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		if herdrSocket != "" && symphonyPane != "" {
 			client := herdr.NewClient(herdrSocket)
 			runtimeAdapter := workruntime.NewHerdrRuntime(client, symphonyPane)
+			observeRuntime = runtimeAdapter.Snapshot
 			runtimeAdapter.OnEvent = func(eventCtx context.Context, event herdr.Event) error {
 				if event.Kind != "pane.updated" {
 					return nil
@@ -988,7 +1087,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		}
 	}
 	writeDaemonLog(stderr, "info", "daemon.starting", nil, map[string]any{"instance_id": paths.InstanceID, "protocol_version": protocol.Version, "version": Version})
-	serveErr := daemon.Serve(ctx, daemon.Config{SocketPath: paths.SocketPath, Listener: listener, Version: Version, InstanceID: paths.InstanceID, Symphony: symphonyService, PrepareInit: prepareInit, InitOptions: initOptions, RecordInitFailure: recordInitFailure, AfterListen: afterListen, AfterCommit: afterCommit, MCPHandler: mcpHandler, ApplyGitIntent: applyGitIntent, IngestProviderEvent: ingestProviderEvent, IngestProviderHookEvent: ingestProviderHookEvent, Backup: backup, DrainReady: drainReady, SchedulerControl: schedulerControl, PrepareUpdate: prepareUpdate, UpdateAccepted: updateAccepted, BinaryDigest: binaryDigest, Ready: generationReady.Load})
+	serveErr := daemon.Serve(ctx, daemon.Config{SocketPath: paths.SocketPath, Listener: listener, Version: Version, InstanceID: paths.InstanceID, Symphony: symphonyService, PrepareInit: prepareInit, InitOptions: initOptions, RecordInitFailure: recordInitFailure, AfterListen: afterListen, AfterCommit: afterCommit, MCPHandler: mcpHandler, ApplyGitIntent: applyGitIntent, IngestProviderEvent: ingestProviderEvent, IngestProviderHookEvent: ingestProviderHookEvent, Backup: backup, DrainReady: drainReady, SchedulerControl: schedulerControl, PrepareUpdate: prepareUpdate, UpdateAccepted: updateAccepted, BinaryDigest: binaryDigest, Ready: generationReady.Load, Workbench: workbenchService})
 	if errors.Is(serveErr, daemon.ErrHandoff) {
 		removeSocket = false
 		cancelRuntime()

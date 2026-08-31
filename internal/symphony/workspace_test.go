@@ -46,3 +46,29 @@ func TestWorkspaceIdentityAndGitWorktreeRegistryAreDurable(t *testing.T) {
 		t.Fatalf("worktree records = %+v", records)
 	}
 }
+
+func TestWorkRepositoryResolvesDurableBaseWorktree(t *testing.T) {
+	ctx := context.Background()
+	engine, err := Open(ctx, filepath.Join(t.TempDir(), "pika.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if _, err := engine.Apply(ctx, Init{Meta: CommandMeta{RequestID: "init"}, OptimizationID: "optimization", Repository: "/source"}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := engine.Inspect(ctx, Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.UpsertGitWorktree(ctx, GitWorktreeRecord{Role: "base", Branch: "pika/id/base", Repository: "/workspace/repo", HeadSHA: strings.Repeat("a", 40), State: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := engine.WorkRepository(ctx, view.Works[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repository != "/workspace/repo" {
+		t.Fatalf("Work repository = %q", repository)
+	}
+}

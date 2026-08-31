@@ -2,6 +2,9 @@ package symphony
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,5 +257,145 @@ func TestBackupCreatesConsistentSQLiteSnapshotWithoutStoppingWriter(t *testing.T
 	}
 	if err := engine.Backup(ctx, destination); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("backup overwrote existing artifact: %v", err)
+	}
+}
+
+func TestSchemaV20UpgradeAndFailedMigrationRollbackPreserveLegacyState(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	backupPath := filepath.Join(root, "verified-v19.db")
+	createDatabaseThroughMigration(t, backupPath, 19)
+
+	legacy, err := sql.Open("sqlite", backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `
+		INSERT INTO optimizations(id, status, revision, repository, created_at, updated_at)
+		VALUES ('optimization', 'drafting_baseline', 7, '/repo', 'now', 'now');
+		INSERT INTO baseline_revisions(id, optimization_id, number, status, created_at)
+		VALUES ('legacy-baseline', 'optimization', 1, 'drafting', 'now')`); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(backupPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	failedPath := filepath.Join(root, "failed-candidate.db")
+	copyFileForTest(t, backupPath, failedPath)
+	failed, err := sql.Open("sqlite", failedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := failed.ExecContext(ctx, `CREATE TABLE benchmark_metric_definitions(conflict TEXT)`); err != nil {
+		_ = failed.Close()
+		t.Fatal(err)
+	}
+	if err := failed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(ctx, failedPath, Options{}); err == nil || !strings.Contains(err.Error(), "apply schema migration 20") {
+		t.Fatalf("candidate migration error = %v", err)
+	}
+
+	failed, err = sql.Open("sqlite", failedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer failed.Close()
+	var version int
+	if err := failed.QueryRowContext(ctx, `SELECT MAX(version) FROM migrations`).Scan(&version); err != nil || version != 19 {
+		t.Fatalf("failed candidate schema version = %d, err=%v", version, err)
+	}
+	rows, err := failed.QueryContext(ctx, `PRAGMA table_info(baseline_revisions)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasMeasurementColumn := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		hasMeasurementColumn = hasMeasurementColumn || name == "measurement_contract_version"
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if hasMeasurementColumn {
+		t.Fatal("failed migration did not roll back ALTER TABLE")
+	}
+
+	restoredPath := filepath.Join(root, "restored.db")
+	copyFileForTest(t, backupPath, restoredPath)
+	restored, err := Open(ctx, restoredPath, Options{})
+	if err != nil {
+		t.Fatalf("restore verified backup and migrate: %v", err)
+	}
+	defer restored.Close()
+	var contractVersion sql.NullInt64
+	if err := restored.db.QueryRowContext(ctx, `SELECT measurement_contract_version FROM baseline_revisions WHERE id = 'legacy-baseline'`).Scan(&contractVersion); err != nil {
+		t.Fatal(err)
+	}
+	if contractVersion.Valid {
+		t.Fatalf("legacy revision was heuristically backfilled: %+v", contractVersion)
+	}
+	var quickCheck string
+	if err := restored.db.QueryRowContext(ctx, `PRAGMA quick_check(1)`).Scan(&quickCheck); err != nil || quickCheck != "ok" {
+		t.Fatalf("restored database quick_check = %q, err=%v", quickCheck, err)
+	}
+}
+
+func createDatabaseThroughMigration(t *testing.T, path string, through int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE migrations (
+		version INTEGER PRIMARY KEY,
+		checksum TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range schemaMigrations {
+		if migration.version > through {
+			break
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(migration.sql); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("apply fixture migration %d: %v", migration.version, err)
+		}
+		digest := sha256.Sum256([]byte(migration.sql))
+		if _, err := tx.Exec(`INSERT INTO migrations(version, checksum, applied_at) VALUES (?, ?, 'fixture')`, migration.version, hex.EncodeToString(digest[:])); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func copyFileForTest(t *testing.T, source, destination string) {
+	t.Helper()
+	contents, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, contents, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

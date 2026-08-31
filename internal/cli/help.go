@@ -92,6 +92,12 @@ var publicCommandHelp = map[string]commandHelp{
 		summary:  "Run the long-lived orchestration daemon",
 		details:  "Normally started for you by `pika-go kick-off` or the Herdr plugin pane.",
 	},
+	"webui": {
+		synopsis: "webui [--workspace PATH] [--listen HOST:PORT] [--rotate-token]",
+		summary:  "Serve the read-only lineage Workbench",
+		details:  "Attaches to the current Workspace daemon. The browser API exposes only Workbench GET endpoints and never pause, resume, cancel, back-off, or shutdown.",
+		examples: []string{"pika-go webui", "pika-go webui --workspace /path/to/workspace --listen 0.0.0.0:8080"},
+	},
 	"mcp-proxy": {
 		synopsis: "mcp-proxy [options]",
 		summary:  "Bridge stdio MCP traffic to the daemon",
@@ -194,7 +200,8 @@ Workflow commands:
   cancel-work      Cancel one pending or running work item
 
 Operations:
-  update           Hot-update the current Workspace daemon
+	webui           Serve the read-only lineage Workbench
+	update           Hot-update the current Workspace daemon
   shutdown         Gracefully drain and stop the daemon
   backup           Create a validated SQLite backup
   edit-instruction Edit a role's user-owned instruction overlay

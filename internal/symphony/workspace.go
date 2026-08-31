@@ -103,3 +103,38 @@ func (e *Engine) GitWorktrees(ctx context.Context) ([]GitWorktreeRecord, error) 
 	}
 	return records, nil
 }
+
+// WorkRepository resolves the durable Git worktree in which a Work's
+// registered artifacts were created. The optimization source repository is
+// deliberately not a fallback: artifact paths are scoped to Pika-owned
+// worktrees and must never turn into arbitrary source-tree browsing.
+func (e *Engine) WorkRepository(ctx context.Context, workID string) (string, error) {
+	var role WorkRole
+	var attemptID, followUpRequestID sql.NullString
+	var iterationRound sql.NullInt64
+	if err := e.db.QueryRowContext(ctx, `SELECT role, attempt_id, iteration_round, followup_request_id FROM works WHERE id = ?`, workID).
+		Scan(&role, &attemptID, &iterationRound, &followUpRequestID); errors.Is(err, sql.ErrNoRows) {
+		return "", domainError(CodeWorkNotFound, "work was not found")
+	} else if err != nil {
+		return "", fmt.Errorf("read Work repository identity: %w", err)
+	}
+	if role == RoleFollowUp {
+		var targetWorkID string
+		if err := e.db.QueryRowContext(ctx, `SELECT target_work_id FROM followup_requests WHERE id = ?`, followUpRequestID.String).Scan(&targetWorkID); err != nil {
+			return "", fmt.Errorf("read Follow-up target Work: %w", err)
+		}
+		return e.WorkRepository(ctx, targetWorkID)
+	}
+	worktreeRole, worktreeAttemptID, worktreeRound := "base", "", int64(0)
+	if role == RoleIteration || role == RoleIntegration {
+		worktreeRole, worktreeAttemptID, worktreeRound = "attempt", attemptID.String, iterationRound.Int64
+	}
+	var repository string
+	if err := e.db.QueryRowContext(ctx, `SELECT repository FROM git_worktrees WHERE role = ? AND attempt_id = ? AND iteration_round = ?`,
+		worktreeRole, worktreeAttemptID, worktreeRound).Scan(&repository); errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("Work repository is unavailable for %s", workID)
+	} else if err != nil {
+		return "", fmt.Errorf("read Work repository: %w", err)
+	}
+	return repository, nil
+}

@@ -2,4 +2,7 @@
 /pika-go-hot
 /fake-agent
 /dist/
+/webui/node_modules/
+/webui/test-results/
+/webui/playwright-report/
 *.sock

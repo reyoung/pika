@@ -245,18 +245,35 @@ func benchmarkDefinition(caseIDs []string) json.RawMessage {
 		"deferred_compact_host_transfer": true, "kernel_timing_excludes_integrity": true,
 		"end_to_end_timing_includes_integrity": true,
 	}
-	contents, _ := json.Marshal(map[string]any{"target": "kernel", "benchmark_integrity": contract})
+	measurementCases := make([]map[string]any, 0, len(caseIDs))
+	for _, caseID := range caseIDs {
+		measurementCases = append(measurementCases, map[string]any{"case_id": caseID, "weight": 1})
+	}
+	measurements := map[string]any{
+		"schema_version": 1,
+		"cases":          measurementCases,
+		"metrics": []map[string]any{{
+			"id": "latency", "label": "Latency", "unit": "us", "role": "primary",
+			"direction": "lower_is_better", "sample_statistic": "median", "aggregation": "weighted_geomean_of_ratios",
+		}},
+	}
+	contents, _ := json.Marshal(map[string]any{"target": "kernel", "benchmark_integrity": contract, "benchmark_measurements": measurements})
 	return contents
 }
 
 func benchmarkEvidence(caseIDs []string) json.RawMessage {
 	cases := make([]map[string]any, 0, len(caseIDs))
+	baseline := make([]map[string]any, 0, len(caseIDs))
 	for _, caseID := range caseIDs {
 		cases = append(cases, map[string]any{"case_id": caseID, "warmup_invocations": 0, "measured_invocations": 1,
 			"input_restores": 1, "checked_invocations": 1, "mismatches": 0, "nonfinite": 0,
 			"canonical_input_mutations": 0, "tolerance_passed": true})
+		baseline = append(baseline, map[string]any{"case_id": caseID, "values": map[string]float64{"latency": 100}})
 	}
-	contents, _ := json.Marshal(map[string]any{"benchmark_integrity": map[string]any{"schema_version": 1, "cases": cases}})
+	contents, _ := json.Marshal(map[string]any{
+		"benchmark_integrity":    map[string]any{"schema_version": 1, "cases": cases},
+		"benchmark_measurements": map[string]any{"schema_version": 1, "baseline": baseline},
+	})
 	return contents
 }
 

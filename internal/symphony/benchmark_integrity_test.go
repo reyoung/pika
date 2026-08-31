@@ -2,7 +2,9 @@ package symphony_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,6 +16,107 @@ func validBaselineDefinition() json.RawMessage { return testcontract.Definition(
 func validBenchmarkEvidence() json.RawMessage  { return testcontract.Evidence() }
 func validIntegrationValidation() json.RawMessage {
 	return testcontract.Validation()
+}
+
+func TestLegacyBaselineRevisionRemainsGrandfathered(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "pika.db")
+	engine, err := symphony.Open(ctx, path, symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Apply(ctx, symphony.Init{Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: "optimization", Repository: "/repo"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `UPDATE baseline_revisions SET measurement_contract_version = NULL`); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	engine, err = symphony.Open(ctx, path, symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Baseline.MeasurementContractVersion != 0 {
+		t.Fatalf("legacy contract version = %d", view.Baseline.MeasurementContractVersion)
+	}
+	legacyOnly := json.RawMessage(`{"target":"kernel","benchmark_integrity":{"schema_version":1,"case_ids":["case-1"],"benchmark_repeats":1,"warmup_invocations_per_repeat":0,"measured_invocations_per_repeat":1,"canonical_inputs_device_resident":true,"canonical_inputs_candidate_visible":false,"oracle_outputs_device_resident":true,"oracle_outputs_immutable":true,"working_tensor_addresses_stable":true,"restore_inputs_before_every_invocation":true,"check_outputs_after_every_invocation":true,"device_side_validation":true,"deferred_compact_host_transfer":true,"kernel_timing_excludes_integrity":true,"end_to_end_timing_includes_integrity":true}}`)
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "legacy-submit"}, WorkID: view.Works[0].ID, Definition: legacyOnly}); err != nil {
+		t.Fatalf("grandfathered Definition rejected: %v", err)
+	}
+}
+
+func TestTerminalTransactionsPersistNormalizedMeasurements(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	engine := acceptedOptimization(t, ctx)
+	records, err := engine.WorkbenchRecords(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records.Metrics) != 1 || len(records.CaseWeights) != 1 || len(records.MeasurementSets) != 1 || len(records.CaseValues) != 1 {
+		t.Fatalf("Development Baseline records = %+v", records)
+	}
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	iteration := pendingWorksByRole(view, symphony.RoleIteration)[0]
+	if _, err := engine.Apply(ctx, symphony.FinishIteration{Meta: symphony.CommandMeta{RequestID: "candidate"}, WorkID: iteration.ID, Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-sha", Summary: "candidate", Evidence: validBenchmarkEvidence()}); err != nil {
+		t.Fatal(err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	integration := pendingWorkByRole(t, view, symphony.RoleIntegration)
+	if _, err := engine.Apply(ctx, symphony.PrepareBestUpdate{Meta: symphony.CommandMeta{RequestID: "prepare"}, WorkID: integration.ID, Validation: validIntegrationValidation()}); err != nil {
+		t.Fatal(err)
+	}
+	records, err = engine.WorkbenchRecords(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records.MeasurementSets) != 3 || len(records.CaseValues) != 3 || len(records.Comparisons) != 2 {
+		t.Fatalf("Integration measurement records = %+v", records)
+	}
+}
+
+func TestNewBaselineRevisionRequiresMeasurementContract(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	engine, before := draftState(t, ctx)
+	if before.Baseline.MeasurementContractVersion != 1 {
+		t.Fatalf("measurement contract version = %d, want 1", before.Baseline.MeasurementContractVersion)
+	}
+	legacyOnly := json.RawMessage(`{"target":"kernel","benchmark_integrity":{"schema_version":1,"case_ids":["case-1"],"benchmark_repeats":1,"warmup_invocations_per_repeat":0,"measured_invocations_per_repeat":1,"canonical_inputs_device_resident":true,"canonical_inputs_candidate_visible":false,"oracle_outputs_device_resident":true,"oracle_outputs_immutable":true,"working_tensor_addresses_stable":true,"restore_inputs_before_every_invocation":true,"check_outputs_after_every_invocation":true,"device_side_validation":true,"deferred_compact_host_transfer":true,"kernel_timing_excludes_integrity":true,"end_to_end_timing_includes_integrity":true}}`)
+	_, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
+		Meta: symphony.CommandMeta{RequestID: "missing-measurements"}, WorkID: before.Works[0].ID, Definition: legacyOnly,
+	})
+	assertDomainCode(t, err, symphony.CodeInvalidCommand)
+	after, inspectErr := engine.Inspect(ctx, symphony.Status{})
+	if inspectErr != nil {
+		t.Fatal(inspectErr)
+	}
+	if after.Optimization.Revision != before.Optimization.Revision {
+		t.Fatalf("invalid measurement contract advanced revision from %d to %d", before.Optimization.Revision, after.Optimization.Revision)
+	}
 }
 
 func TestBaselineDefinitionIntegrityFailureDoesNotAdvanceState(t *testing.T) {
@@ -63,7 +166,7 @@ func TestAcceptedBaselineRejectsUncheckedBenchmarkInvocation(t *testing.T) {
 	}
 }
 
-func TestPrepareBestUpdateRejectsTenXWithoutIndependentRetest(t *testing.T) {
+func TestPrepareBestUpdateRejectsComputedTenXWithoutIndependentRetest(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -88,7 +191,7 @@ func TestPrepareBestUpdateRejectsTenXWithoutIndependentRetest(t *testing.T) {
 		t.Fatal(err)
 	}
 	integration := pendingWorkByRole(t, queued, symphony.RoleIntegration)
-	withoutRetest := strings.Replace(string(validIntegrationValidation()), `"max_case_speedup":1.1`, `"max_case_speedup":10`, 1)
+	withoutRetest := strings.Replace(string(validIntegrationValidation()), `"candidate":{"latency":100}`, `"candidate":{"latency":11}`, 1)
 	_, err = engine.Apply(ctx, symphony.PrepareBestUpdate{
 		Meta:       symphony.CommandMeta{RequestID: "prepare-ten-x"},
 		WorkID:     integration.ID,

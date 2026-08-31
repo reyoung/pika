@@ -268,16 +268,17 @@ type IterationCaseSetView struct {
 }
 
 type BaselineView struct {
-	ID                   string          `json:"id"`
-	Number               int64           `json:"number"`
-	Status               BaselineStatus  `json:"status"`
-	Definition           json.RawMessage `json:"definition,omitempty"`
-	RepositorySHA        string          `json:"repository_sha,omitempty"`
-	PredecessorID        string          `json:"predecessor_id,omitempty"`
-	FailureKind          string          `json:"failure_kind,omitempty"`
-	FailureReason        string          `json:"failure_reason,omitempty"`
-	RequestedChanges     string          `json:"requested_changes,omitempty"`
-	VerificationEvidence json.RawMessage `json:"verification_evidence,omitempty"`
+	ID                         string          `json:"id"`
+	Number                     int64           `json:"number"`
+	Status                     BaselineStatus  `json:"status"`
+	Definition                 json.RawMessage `json:"definition,omitempty"`
+	RepositorySHA              string          `json:"repository_sha,omitempty"`
+	PredecessorID              string          `json:"predecessor_id,omitempty"`
+	FailureKind                string          `json:"failure_kind,omitempty"`
+	FailureReason              string          `json:"failure_reason,omitempty"`
+	RequestedChanges           string          `json:"requested_changes,omitempty"`
+	VerificationEvidence       json.RawMessage `json:"verification_evidence,omitempty"`
+	MeasurementContractVersion int64           `json:"measurement_contract_version,omitempty"`
 }
 
 type WorkView struct {
@@ -307,10 +308,11 @@ type AttemptView struct {
 }
 
 type BestView struct {
-	ID              string `json:"id"`
-	Sequence        int64  `json:"sequence"`
-	CommitSHA       string `json:"commit_sha"`
-	SourceAttemptID string `json:"source_attempt_id,omitempty"`
+	ID              string          `json:"id"`
+	Sequence        int64           `json:"sequence"`
+	CommitSHA       string          `json:"commit_sha"`
+	SourceAttemptID string          `json:"source_attempt_id,omitempty"`
+	Evidence        json.RawMessage `json:"evidence,omitempty"`
 }
 
 type IntegrationView struct {
@@ -324,6 +326,8 @@ type IntegrationView struct {
 	ExpectedBestSHA string           `json:"expected_best_sha"`
 	IntentID        string           `json:"intent_id,omitempty"`
 	RegressionCases []RegressionCase `json:"regression_cases,omitempty"`
+	Validation      json.RawMessage  `json:"validation,omitempty"`
+	Result          json.RawMessage  `json:"result,omitempty"`
 }
 
 type IterationRoundView struct {
@@ -585,6 +589,7 @@ type View struct {
 	Integrations       []IntegrationView     `json:"integrations"`
 	IterationRounds    []IterationRoundView  `json:"iteration_rounds"`
 	Best               *BestView             `json:"best,omitempty"`
+	Bests              []BestView            `json:"bests,omitempty"`
 	IterationCaseSet   *IterationCaseSetView `json:"iteration_case_set,omitempty"`
 	FollowUps          []FollowUpView        `json:"follow_ups,omitempty"`
 	PaneActivityNotice string                `json:"pane_activity_notice,omitempty"`
@@ -600,6 +605,65 @@ type StorageView struct {
 	PageSize           int64 `json:"page_size"`
 	ProviderEventBytes int64 `json:"provider_event_bytes"`
 	ToolPayloadBytes   int64 `json:"tool_payload_bytes"`
+}
+
+type BenchmarkMetricDefinitionView struct {
+	BaselineRevisionID string `json:"baseline_revision_id"`
+	MetricID           string `json:"metric_id"`
+	Label              string `json:"label"`
+	Unit               string `json:"unit"`
+	Role               string `json:"role"`
+	Direction          string `json:"direction"`
+	SampleStatistic    string `json:"sample_statistic"`
+	Aggregation        string `json:"aggregation"`
+}
+
+type BenchmarkCaseWeightView struct {
+	BaselineRevisionID string  `json:"baseline_revision_id"`
+	CaseID             string  `json:"case_id"`
+	Weight             float64 `json:"weight"`
+	Ordinal            int64   `json:"ordinal"`
+}
+
+type BenchmarkMeasurementSetView struct {
+	ID                 string `json:"id"`
+	BaselineRevisionID string `json:"baseline_revision_id"`
+	WorkID             string `json:"work_id,omitempty"`
+	IntegrationID      string `json:"integration_id,omitempty"`
+	BestSequence       *int64 `json:"best_sequence,omitempty"`
+	Kind               string `json:"kind"`
+	CreatedAt          string `json:"created_at"`
+}
+
+type BenchmarkCaseValueView struct {
+	MeasurementSetID string  `json:"measurement_set_id"`
+	CaseID           string  `json:"case_id"`
+	MetricID         string  `json:"metric_id"`
+	Value            float64 `json:"value"`
+}
+
+type BenchmarkComparisonView struct {
+	IntegrationID      string   `json:"integration_id"`
+	CaseID             string   `json:"case_id,omitempty"`
+	MetricID           string   `json:"metric_id"`
+	ReferenceValue     *float64 `json:"reference_value,omitempty"`
+	CandidateValue     *float64 `json:"candidate_value,omitempty"`
+	Speedup            float64  `json:"speedup"`
+	Regression         bool     `json:"regression"`
+	RegressionFraction float64  `json:"regression_fraction"`
+	AggregateSpeedup   *float64 `json:"aggregate_speedup,omitempty"`
+	MaxCaseSpeedup     *float64 `json:"max_case_speedup,omitempty"`
+	MaxCaseID          string   `json:"max_case_id,omitempty"`
+}
+
+type WorkbenchRecords struct {
+	Metrics             []BenchmarkMetricDefinitionView `json:"metrics"`
+	CaseWeights         []BenchmarkCaseWeightView       `json:"case_weights"`
+	MeasurementSets     []BenchmarkMeasurementSetView   `json:"measurement_sets"`
+	CaseValues          []BenchmarkCaseValueView        `json:"case_values"`
+	Comparisons         []BenchmarkComparisonView       `json:"comparisons"`
+	Artifacts           []EvidenceArtifact              `json:"artifacts"`
+	MeasurementSequence int64                           `json:"measurement_sequence"`
 }
 
 type ErrorCode string

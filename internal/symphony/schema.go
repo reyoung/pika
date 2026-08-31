@@ -8,7 +8,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 19
+const schemaVersion = 20
 
 func CurrentSchemaVersion() int { return schemaVersion }
 
@@ -615,6 +615,65 @@ CREATE TABLE iteration_round_cases (
 );
 `
 
+const schemaV20 = `
+ALTER TABLE baseline_revisions ADD COLUMN measurement_contract_version INTEGER CHECK(measurement_contract_version = 1);
+
+CREATE TABLE benchmark_metric_definitions (
+    baseline_revision_id TEXT NOT NULL REFERENCES baseline_revisions(id),
+    metric_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('primary', 'guard', 'informational')),
+    direction TEXT NOT NULL CHECK(direction IN ('lower_is_better', 'higher_is_better')),
+    sample_statistic TEXT NOT NULL,
+    aggregation TEXT NOT NULL CHECK(aggregation IN ('weighted_geomean_of_ratios', 'ratio_of_weighted_arithmetic_means')),
+    PRIMARY KEY(baseline_revision_id, metric_id)
+);
+CREATE UNIQUE INDEX benchmark_metric_one_primary
+    ON benchmark_metric_definitions(baseline_revision_id)
+    WHERE role = 'primary';
+
+CREATE TABLE benchmark_case_weights (
+    baseline_revision_id TEXT NOT NULL REFERENCES baseline_revisions(id),
+    case_id TEXT NOT NULL,
+    weight REAL NOT NULL CHECK(weight > 0),
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    PRIMARY KEY(baseline_revision_id, case_id),
+    UNIQUE(baseline_revision_id, ordinal)
+);
+
+CREATE TABLE benchmark_measurement_sets (
+    id TEXT PRIMARY KEY,
+    baseline_revision_id TEXT NOT NULL REFERENCES baseline_revisions(id),
+    work_id TEXT REFERENCES works(id),
+    integration_id TEXT REFERENCES integrations(id),
+    best_sequence INTEGER,
+    kind TEXT NOT NULL CHECK(kind IN ('development_baseline', 'reference', 'candidate')),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE benchmark_case_values (
+    measurement_set_id TEXT NOT NULL REFERENCES benchmark_measurement_sets(id),
+    case_id TEXT NOT NULL,
+    metric_id TEXT NOT NULL,
+    value REAL NOT NULL CHECK(value > 0),
+    PRIMARY KEY(measurement_set_id, case_id, metric_id)
+);
+CREATE TABLE benchmark_derived_comparisons (
+    integration_id TEXT NOT NULL REFERENCES integrations(id),
+    case_id TEXT NOT NULL DEFAULT '',
+    metric_id TEXT NOT NULL,
+    reference_value REAL,
+    candidate_value REAL,
+    speedup REAL NOT NULL CHECK(speedup > 0),
+    regression INTEGER NOT NULL CHECK(regression IN (0, 1)),
+    regression_fraction REAL NOT NULL CHECK(regression_fraction >= 0),
+    aggregate_speedup REAL,
+    max_case_speedup REAL,
+    max_case_id TEXT,
+    PRIMARY KEY(integration_id, case_id, metric_id)
+);
+`
+
 var schemaMigrations = []struct {
 	version int
 	sql     string
@@ -638,6 +697,7 @@ var schemaMigrations = []struct {
 	{version: 17, sql: schemaV17},
 	{version: 18, sql: schemaV18},
 	{version: 19, sql: schemaV19},
+	{version: 20, sql: schemaV20},
 }
 
 func migrate(ctx context.Context, db *sql.DB, now string) error {

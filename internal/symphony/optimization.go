@@ -347,21 +347,35 @@ func (e *Engine) applyPrepareBestUpdate(ctx context.Context, tx *sql.Tx, command
 	if err != nil {
 		return Receipt{}, err
 	}
-	var integrationID, attemptID, candidateSHA, expectedBestSHA string
+	var integrationID, attemptID, baselineID, candidateSHA, expectedBestSHA string
 	var baselineDefinition []byte
+	var measurementContractVersion sql.NullInt64
 	var role WorkRole
 	var status WorkStatus
-	if err := tx.QueryRowContext(ctx, `SELECT w.integration_id, w.attempt_id, w.role, w.status, i.candidate_sha, i.expected_best_sha, b.definition_json
+	if err := tx.QueryRowContext(ctx, `SELECT w.integration_id, w.attempt_id, w.baseline_revision_id, w.role, w.status, i.candidate_sha, i.expected_best_sha, b.definition_json, b.measurement_contract_version
 		FROM works w
 		JOIN integrations i ON i.id = w.integration_id
 		JOIN baseline_revisions b ON b.id = w.baseline_revision_id
-		WHERE w.id = ?`, command.WorkID).Scan(&integrationID, &attemptID, &role, &status, &candidateSHA, &expectedBestSHA, &baselineDefinition); err != nil {
+		WHERE w.id = ?`, command.WorkID).Scan(&integrationID, &attemptID, &baselineID, &role, &status, &candidateSHA, &expectedBestSHA, &baselineDefinition, &measurementContractVersion); err != nil {
 		return Receipt{}, domainError(CodeInvalidTransition, "integration work is not active")
 	}
 	if role != RoleIntegration || status != WorkPending {
 		return Receipt{}, domainError(CodeInvalidTransition, "work is not an active integration")
 	}
-	if err := benchmarkintegrity.ValidateIntegration(baselineDefinition, command.Validation); err != nil {
+	var measurementComparison benchmarkintegrity.MeasurementComparison
+	if measurementContractVersion.Valid {
+		if err := benchmarkintegrity.ValidateEvidence(baselineDefinition, command.Validation); err != nil {
+			return Receipt{}, domainError(CodeInvalidCommand, "invalid integration correctness evidence: "+err.Error())
+		}
+		measurementDefinition, err := benchmarkintegrity.ParseFrozenMeasurementDefinition(baselineDefinition)
+		if err != nil {
+			return Receipt{}, domainError(CodeStateCorrupt, "stored benchmark measurement contract is invalid: "+err.Error())
+		}
+		measurementComparison, err = benchmarkintegrity.ParseMeasurementComparison(measurementDefinition, command.Validation)
+		if err != nil {
+			return Receipt{}, domainError(CodeInvalidCommand, "invalid integration measurements: "+err.Error())
+		}
+	} else if err := benchmarkintegrity.ValidateIntegration(baselineDefinition, command.Validation); err != nil {
 		return Receipt{}, domainError(CodeInvalidCommand, "invalid integration validation: "+err.Error())
 	}
 	var bestSHA string
@@ -380,6 +394,11 @@ func (e *Engine) applyPrepareBestUpdate(ctx context.Context, tx *sql.Tx, command
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE integrations SET status = 'best_update_prepared', intent_id = ?, validation_json = ? WHERE id = ? AND status = 'running'`, intentID, []byte(command.Validation), integrationID); err != nil {
 		return Receipt{}, err
+	}
+	if measurementContractVersion.Valid {
+		if err := persistIntegrationMeasurements(ctx, tx, baselineID, command.WorkID, integrationID, now, measurementComparison); err != nil {
+			return Receipt{}, err
+		}
 	}
 	nextRevision := optimization.Revision + 1
 	if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET revision = ?, updated_at = ? WHERE id = ?`, nextRevision, now, optimization.ID); err != nil {
@@ -436,6 +455,9 @@ func (e *Engine) applyFinishIntegration(ctx context.Context, tx *sql.Tx, command
 		if _, err := tx.ExecContext(ctx, `INSERT INTO best_revisions
 			(id, optimization_id, sequence, commit_sha, source_attempt_id, evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			e.newID(), optimization.ID, bestSequence+1, command.AppliedSHA, attemptID, nullableBytes(command.Result), now); err != nil {
+			return Receipt{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE benchmark_measurement_sets SET best_sequence = ? WHERE integration_id = ? AND kind = 'candidate'`, bestSequence+1, integrationID); err != nil {
 			return Receipt{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE git_intents SET state = 'applied', applied_at = ? WHERE integration_id = ?`, now, integrationID); err != nil {

@@ -44,10 +44,11 @@
     "baseline": {"type": "object", "additionalProperties": false, "required": ["id", "number", "status"], "properties": {
       "id": {"type": "string"}, "number": {"type": "integer"}, "status": {"type": "string"}, "definition": {},
       "repository_sha": {"type": "string"}, "predecessor_id": {"type": "string"}, "failure_kind": {"type": "string"},
-      "failure_reason": {"type": "string"}, "requested_changes": {"type": "string"}, "verification_evidence": {}
+      "failure_reason": {"type": "string"}, "requested_changes": {"type": "string"}, "verification_evidence": {},
+      "measurement_contract_version": {"type": "integer", "minimum": 1}
     }},
     "best": {"type": "object", "additionalProperties": false, "required": ["id", "sequence", "commit_sha"], "properties": {
-      "id": {"type": "string"}, "sequence": {"type": "integer"}, "commit_sha": {"type": "string"}, "source_attempt_id": {"type": "string"}
+      "id": {"type": "string"}, "sequence": {"type": "integer"}, "commit_sha": {"type": "string"}, "source_attempt_id": {"type": "string"}, "evidence": {}
     }},
     "attempt": {"type": "object", "additionalProperties": false, "required": ["id", "slot_index", "status", "base_best_sequence", "base_sha", "current_iteration_round", "history_limit"], "properties": {
       "id": {"type": "string"}, "slot_index": {"type": "integer"}, "status": {"type": "string"}, "base_best_sequence": {"type": "integer"},

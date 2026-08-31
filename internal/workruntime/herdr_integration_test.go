@@ -527,7 +527,14 @@ func TestDaemonProcessCrashAtDispatchingOutboxReconcilesWithoutDuplicateAgent(t 
 		recoveredSession, recoveredBinding = session, binding
 		return session.Status == symphony.AgentSessionRunning && binding.TerminalID != "" && (oldSessionID == "" || session.ID != oldSessionID)
 	})
-	replacement, err := herdr.NewRuntime(client).GetAgent(ctx, recoveredBinding.PaneID)
+	var replacement herdr.Agent
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		replacement, err = herdr.NewRuntime(client).GetAgent(ctx, recoveredBinding.PaneID)
+		if err == nil && replacement.InteractiveReady {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	if err != nil || !replacement.InteractiveReady {
 		t.Fatalf("recovered outbox Agent is not ready: session=%+v binding=%+v agent=%+v err=%v", recoveredSession, recoveredBinding, replacement, err)
 	}
@@ -1356,7 +1363,12 @@ func initializeFixtureRepository(t *testing.T, repository string) {
 }
 
 func fixtureConfiguration(repository string) *string {
-	contents := configuration.RenderDefaults(repository)
+	agents := configuration.DefaultAgents()
+	iteration := agents["iteration"]
+	contents, err := configuration.RenderConfiguration(repository, agents, iteration, iteration, iteration, iteration)
+	if err != nil {
+		panic(err)
+	}
 	return &contents
 }
 

@@ -356,7 +356,16 @@ func (s Sink) deliverFollowUp(ctx context.Context, effect symphony.RuntimeEffect
 	if !found || targetBinding.PaneID != paneID {
 		return errors.New("Follow-up target Agent Session changed before delivery")
 	}
-	if err := promptProvider(ctx, s.Runtime, paneID, payload.Message, targetSession.AgentKind); err != nil {
+	deliveryCtx, cancelDelivery := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelDelivery()
+	observation, err := waitForDeliveryAgent(deliveryCtx, s.Runtime, targetSession.AgentName, targetBinding.TerminalID, paneID)
+	if err != nil {
+		if markErr := s.Store.FinishFollowUpDelivery(ctx, payload.RequestID, false); markErr != nil {
+			return fmt.Errorf("wait to deliver Follow-up: %v; mark delivery unknown: %w", err, markErr)
+		}
+		return nil
+	}
+	if err := promptProvider(ctx, s.Runtime, observation.PaneID, payload.Message, targetSession.AgentKind); err != nil {
 		if markErr := s.Store.FinishFollowUpDelivery(ctx, payload.RequestID, false); markErr != nil {
 			return fmt.Errorf("deliver Follow-up: %v; mark delivery unknown: %w", err, markErr)
 		}
@@ -365,6 +374,40 @@ func (s Sink) deliverFollowUp(ctx context.Context, effect symphony.RuntimeEffect
 		return nil
 	}
 	return s.Store.FinishFollowUpDelivery(ctx, payload.RequestID, true)
+}
+
+// waitForDeliveryAgent bridges the brief gap between durable Session binding
+// and Herdr reporting an interactive provider. A Stop hook can schedule a
+// Follow-up during that gap; treating the transient unknown state as a
+// definitive delivery outcome would strand the request as delivery_unknown.
+func waitForDeliveryAgent(ctx context.Context, runtime Runtime, agentName, terminalID, fallbackPaneID string) (Observation, error) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	first := true
+	for {
+		snapshot, err := runtime.Snapshot(ctx)
+		if err == nil {
+			if observation, found := findObservation(snapshot, agentName, terminalID); found {
+				switch strings.ToLower(observation.Status) {
+				case "idle", "blocked":
+					return observation, nil
+				case "done", "exited":
+					return Observation{}, errors.New("Follow-up target Agent exited before delivery")
+				}
+			} else if first {
+				// Adapters that do not mirror agents still support direct pane
+				// prompting; preserve that capability instead of inventing a
+				// readiness requirement they cannot observe.
+				return Observation{AgentName: agentName, PaneID: fallbackPaneID, TerminalID: terminalID}, nil
+			}
+		}
+		first = false
+		select {
+		case <-ctx.Done():
+			return Observation{}, fmt.Errorf("wait for Follow-up target Agent readiness: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {

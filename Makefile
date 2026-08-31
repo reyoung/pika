@@ -1,12 +1,26 @@
 GO ?= go
+NPM ?= npm
 VERSION ?= dev
 LDFLAGS := -s -w -X main.version=$(VERSION)
 PREFIX ?= /usr/local
 DESTDIR ?=
 
-.PHONY: build hot-update-candidate install fake-agent test-driver test verify herdr-integration crash-integration real-codex-integration real-cursor-integration real-codex-hot-reload-integration real-cursor-hot-reload-integration real-mixed-provider-integration real-pause-resume-integration dist clean
+.PHONY: build webui-install webui-build webui-verify hot-update-candidate install fake-agent test-driver test verify herdr-integration crash-integration real-codex-integration real-cursor-integration real-codex-hot-reload-integration real-cursor-hot-reload-integration real-mixed-provider-integration real-pause-resume-integration dist clean
 
-build:
+webui-install:
+	cd webui && $(NPM) ci
+
+webui-build: webui-install
+	cd webui && $(NPM) run build
+
+webui-verify: webui-install
+	cd webui && $(NPM) run lint
+	cd webui && $(NPM) run typecheck
+	cd webui && $(NPM) run test
+	cd webui && $(NPM) run e2e
+	cd webui && $(NPM) run build
+
+build: webui-build
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o pika-go ./cmd/pika-go
 
 hot-update-candidate:
@@ -33,7 +47,7 @@ test:
 hot-update-integration:
 	$(GO) test -tags=integration ./internal/cli -run '^TestHotUpdate(HandsOffLiveSocketToNewProcess|RollsBackAcrossActivationCheckpoints)$$' -count=1 -v
 
-verify:
+verify: webui-verify
 	test -z "$$(gofmt -l cmd internal)"
 	$(GO) vet ./...
 	$(GO) test -race ./...
@@ -62,7 +76,7 @@ real-mixed-provider-integration: build
 real-pause-resume-integration: build
 	PIKA_GO_REAL_CODEX_INTEGRATION=1 PIKA_GO_REAL_CURSOR_INTEGRATION=1 PIKA_GO_REAL_MIXED_PROVIDER_INTEGRATION=1 PIKA_GO_BIN="$(CURDIR)/pika-go" $(GO) test ./internal/workruntime -run '^TestReal(CodexCompletesDisposableOptimization|CursorCompletesDisposableOptimization|MixedProviderCompletesBothAlternatingMatrices)$$' -v -count=1 -timeout 90m
 
-dist: clean
+dist: clean webui-build
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o dist/pika-go_darwin_arm64/pika-go ./cmd/pika-go
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o dist/pika-go_darwin_amd64/pika-go ./cmd/pika-go
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o dist/pika-go_linux_arm64/pika-go ./cmd/pika-go
