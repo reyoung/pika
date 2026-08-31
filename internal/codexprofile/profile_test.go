@@ -171,6 +171,37 @@ func TestInstallRefusesProfileOwnedByAnotherProduct(t *testing.T) {
 	}
 }
 
+func TestInstallAcceptsOwnedProfileWhenCodexPrependsSettings(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	codexHome := filepath.Join(root, "codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	profilePath := filepath.Join(codexHome, codexprofile.ProfileName+".config.toml")
+	prior := "service_tier = \"default\"\n" + codexprofile.OwnershipMarker + "\n\n[features]\nhooks = true\n"
+	if err := os.WriteFile(profilePath, []byte(prior), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := codexprofile.Install(codexprofile.Options{
+		CodexHome:       codexHome,
+		InstanceBin:     filepath.Join(root, "bin"),
+		PikaExecutable:  "/bin/echo",
+		CodexExecutable: "/bin/sh",
+	}); err != nil {
+		t.Fatalf("install profile still owned by pika-go: %v", err)
+	}
+
+	profile, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(profile), codexprofile.OwnershipMarker+"\n") {
+		t.Fatalf("profile was not rewritten as managed: %q", profile)
+	}
+}
+
 func TestInstallRollbackRestoresPreviousOwnedProfileAndWrapper(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

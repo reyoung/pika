@@ -60,7 +60,7 @@ func Install(options Options) (func() error, error) {
 	if err != nil {
 		return nil, err
 	}
-	if profileBefore.existed && !strings.HasPrefix(string(profileBefore.content), OwnershipMarker+"\n") {
+	if profileBefore.existed && !isOwnedProfile(profileBefore.content) {
 		return nil, fmt.Errorf("reserved Codex profile %s is not owned by pika-go", profilePath)
 	}
 	wrapperBefore, err := inspect(wrapperPath)
@@ -85,6 +85,17 @@ func Install(options Options) (func() error, error) {
 		}
 		return errors.Join(restoreErrors...)
 	}, nil
+}
+
+// isOwnedProfile accepts the exact standalone ownership comment even when
+// Codex has prepended its own profile settings, such as service_tier.
+func isOwnedProfile(contents []byte) bool {
+	for _, line := range strings.Split(string(contents), "\n") {
+		if strings.TrimSuffix(line, "\r") == OwnershipMarker {
+			return true
+		}
+	}
+	return false
 }
 
 func validateOptions(options Options) error {
