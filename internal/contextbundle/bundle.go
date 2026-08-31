@@ -17,7 +17,7 @@ import (
 	"github.com/reyoung/pika-go/internal/symphony"
 )
 
-const SchemaVersion int64 = 2
+const SchemaVersion int64 = 3
 
 //go:embed schemas/*.json
 var schemaFiles embed.FS
@@ -55,9 +55,10 @@ type AttemptHistory struct {
 }
 
 type IterationContext struct {
-	HistoryLimit           int64            `json:"history_limit"`
-	RecentTerminalAttempts []AttemptHistory `json:"recent_terminal_attempts"`
-	PreviousRound          *RoundHistory    `json:"previous_round,omitempty"`
+	HistoryLimit           int64                         `json:"history_limit"`
+	RequiredCaseSet        symphony.IterationCaseSetView `json:"required_case_set"`
+	RecentTerminalAttempts []AttemptHistory              `json:"recent_terminal_attempts"`
+	PreviousRound          *RoundHistory                 `json:"previous_round,omitempty"`
 }
 
 type RoundHistory struct {
@@ -67,20 +68,21 @@ type RoundHistory struct {
 }
 
 type Document struct {
-	SchemaVersion     int64                         `json:"schema_version"`
-	Session           symphony.AgentSession         `json:"session"`
-	Optimization      symphony.OptimizationView     `json:"optimization"`
-	Baseline          *symphony.BaselineView        `json:"baseline,omitempty"`
-	Best              *symphony.BestView            `json:"best,omitempty"`
-	Attempts          []symphony.AttemptView        `json:"attempts"`
-	IterationRounds   []symphony.IterationRoundView `json:"iteration_rounds"`
-	Integrations      []symphony.IntegrationView    `json:"integrations"`
-	BackOffs          []symphony.BackOffView        `json:"back_offs"`
-	Work              symphony.RuntimeWork          `json:"work"`
-	GeneratorWork     symphony.WorkView             `json:"generator_work"`
-	TerminalOperation string                        `json:"terminal_operation"`
-	Messages          FileReference                 `json:"messages"`
-	Iteration         *IterationContext             `json:"iteration_context,omitempty"`
+	SchemaVersion     int64                          `json:"schema_version"`
+	Session           symphony.AgentSession          `json:"session"`
+	Optimization      symphony.OptimizationView      `json:"optimization"`
+	Baseline          *symphony.BaselineView         `json:"baseline,omitempty"`
+	Best              *symphony.BestView             `json:"best,omitempty"`
+	IterationCaseSet  *symphony.IterationCaseSetView `json:"iteration_case_set,omitempty"`
+	Attempts          []symphony.AttemptView         `json:"attempts"`
+	IterationRounds   []symphony.IterationRoundView  `json:"iteration_rounds"`
+	Integrations      []symphony.IntegrationView     `json:"integrations"`
+	BackOffs          []symphony.BackOffView         `json:"back_offs"`
+	Work              symphony.RuntimeWork           `json:"work"`
+	GeneratorWork     symphony.WorkView              `json:"generator_work"`
+	TerminalOperation string                         `json:"terminal_operation"`
+	Messages          FileReference                  `json:"messages"`
+	Iteration         *IterationContext              `json:"iteration_context,omitempty"`
 }
 
 type SummaryRecord struct {
@@ -147,7 +149,7 @@ func (m Materializer) Materialize(ctx context.Context, session symphony.AgentSes
 	messagesDigest := digest(messages)
 	document := Document{
 		SchemaVersion: SchemaVersion, Session: projection.Session, Optimization: projection.View.Optimization,
-		Baseline: projection.View.Baseline, Best: projection.View.Best,
+		Baseline: projection.View.Baseline, Best: projection.View.Best, IterationCaseSet: projection.View.IterationCaseSet,
 		Attempts: nonNil(projection.View.Attempts), IterationRounds: nonNil(projection.View.IterationRounds),
 		Integrations: nonNil(projection.View.Integrations), BackOffs: nonNil(projection.View.BackOffs),
 		Work: projection.TargetWork, GeneratorWork: projection.GeneratorWork,
@@ -156,7 +158,11 @@ func (m Materializer) Materialize(ctx context.Context, session symphony.AgentSes
 	}
 	files := map[string][]byte{messagesRelative: messages}
 	if projection.TargetWork.Work.Role == symphony.RoleIteration {
-		document.Iteration = &IterationContext{HistoryLimit: projection.TargetWork.IterationHistoryLimit, RecentTerminalAttempts: []AttemptHistory{}}
+		if projection.TargetWork.IterationCaseSet == nil {
+			return Bundle{}, errors.New("Iteration Work has no frozen Iteration Case Snapshot")
+		}
+		document.Iteration = &IterationContext{HistoryLimit: projection.TargetWork.IterationHistoryLimit,
+			RequiredCaseSet: *projection.TargetWork.IterationCaseSet, RecentTerminalAttempts: []AttemptHistory{}}
 		if projection.PreviousRound != nil {
 			previousRecords := recordsFor(projection.PreviousRound.Journal)
 			previousMessages, err := encodeJSONL(previousRecords)
@@ -313,7 +319,7 @@ func writeFile(path string, contents []byte) error {
 }
 
 func (m Materializer) verifyStored(snapshot symphony.ContextSnapshot) (Bundle, error) {
-	if snapshot.SchemaVersion != SchemaVersion || filepath.Clean(snapshot.ContextRelativePath) != filepath.Join(snapshot.AgentSessionID, "context.json") ||
+	if (snapshot.SchemaVersion < 2 || snapshot.SchemaVersion > SchemaVersion) || filepath.Clean(snapshot.ContextRelativePath) != filepath.Join(snapshot.AgentSessionID, "context.json") ||
 		filepath.Clean(snapshot.MessagesRelativePath) != filepath.Join(snapshot.AgentSessionID, "messages.jsonl") {
 		return Bundle{}, errors.New("stored Context Snapshot has an unsupported contract")
 	}

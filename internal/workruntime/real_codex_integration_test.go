@@ -20,6 +20,7 @@ import (
 	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
+	workruntime "github.com/reyoung/pika-go/internal/workruntime"
 )
 
 const realProviderStallBudget = 2 * time.Minute
@@ -214,6 +215,7 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 	}); err != nil {
 		t.Fatalf("initialize disposable Optimization: %v", err)
 	}
+	promptInitialRealProviderBaseline(t, testCtx, client, pikaSocket, daemon, &serverOutput)
 	if !spec.simple {
 		exerciseRealSchedulerPauseResume(t, testCtx, stateRoot, client, pikaSocket, spec.requestTag)
 	}
@@ -326,6 +328,41 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 		t.Fatalf("incomplete real-Codex journal: provider_sessions=%d tool_events=%d", len(providerSessionIDs), toolEvents)
 	}
 	t.Logf("real Codex release matrix advanced Best to sequence %d with %d provider sessions and %d observable tool events", view.Best.Sequence, len(providerSessionIDs), toolEvents)
+}
+
+func promptInitialRealProviderBaseline(t *testing.T, ctx context.Context, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) {
+	t.Helper()
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		view, err := control.Status(ctx, socketPath)
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		for index := len(view.AgentSessions) - 1; index >= 0; index-- {
+			session := view.AgentSessions[index]
+			if session.Role != symphony.RoleBaselineDraft || session.Status != symphony.AgentSessionRunning {
+				continue
+			}
+			snapshot, snapshotErr := client.Snapshot(ctx)
+			if snapshotErr != nil {
+				break
+			}
+			for _, agent := range snapshot.Agents {
+				if agent.Name == nil || *agent.Name != session.AgentName || agent.PaneID == "" {
+					continue
+				}
+				runtime := workruntime.NewHerdrRuntime(client, agent.PaneID)
+				message := "请读取仓库 README.md，并按其中给出的 target、case set、correctness oracle、benchmark protocol 和 stop condition 完成 Baseline Definition。"
+				if err := runtime.PromptForProvider(ctx, agent.PaneID, message, session.AgentKind); err != nil {
+					t.Fatalf("send operator Baseline configuration: %v; %s", err, diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
+				}
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("first Baseline Agent did not become ready for operator input: %s", diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
 }
 
 func exerciseRealSchedulerPauseResume(t *testing.T, ctx context.Context, stateRoot string, client *herdr.Client, socketPath, requestTag string) {
@@ -577,15 +614,14 @@ func startRealCodexDaemon(t *testing.T, pikaBinary, socketPath string, workspace
 	}
 	process.command = exec.Command(pikaBinary, arguments...)
 	process.command.Env = replacedEnvironment(map[string]string{
-		"HERDR_SOCKET_PATH":            herdrSocket,
-		"HERDR_CONFIG_PATH":            filepath.Join(filepath.Dir(herdrSocket), "config.toml"),
-		"HERDR_PANE_ID":                symphonyPane,
-		"HERDR_ENV":                    "1",
-		"CODEX_HOME":                   codexHome,
-		"PIKA_GO_CODEX_EXECUTABLE":     codexBinary,
-		"PIKA_GO_CURSOR_EXECUTABLE":    cursorBinary,
-		"PIKA_CODEX_BYPASS_HOOK_TRUST": "1",
-		"PIKA_GO_FOLLOWUP_INACTIVITY":  "500ms",
+		"HERDR_SOCKET_PATH":           herdrSocket,
+		"HERDR_CONFIG_PATH":           filepath.Join(filepath.Dir(herdrSocket), "config.toml"),
+		"HERDR_PANE_ID":               symphonyPane,
+		"HERDR_ENV":                   "1",
+		"CODEX_HOME":                  codexHome,
+		"PIKA_GO_CODEX_EXECUTABLE":    codexBinary,
+		"PIKA_GO_CURSOR_EXECUTABLE":   cursorBinary,
+		"PIKA_GO_FOLLOWUP_INACTIVITY": "500ms",
 	})
 	process.command.Stdout, process.command.Stderr = &process.output, &process.output
 	if err := process.command.Start(); err != nil {

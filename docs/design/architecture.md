@@ -163,7 +163,7 @@ The daemon:
 2. Validate the Source Repository identity and initialize `pika.toml`, SQLite domain state, empty instruction overlays, and provider overlays inside the Workspace.
 3. Send the caller Pane ID to the daemon.
 4. Exit, returning that pane to its shell prompt.
-5. The daemon waits until Herdr reports an available shell and starts a fresh Baseline Agent in the same pane.
+5. The daemon waits until Herdr reports an available shell and starts a fresh Baseline Agent in the same pane without injecting a User Turn. The operator supplies the Baseline target, case set, oracle, measurement protocol, and stop condition directly in that pane.
 
 Initialization is atomic from the user's point of view. If any required step fails, Pika records diagnostics, removes partial instance bindings where safe, and exits the instance instead of leaving a half-configured Optimization.
 
@@ -182,6 +182,8 @@ Integration --terminal MCP--> Best decision, then more Iteration
 ```
 
 Normal stages auto-chain. There is no separate Web review gate. During Baseline Draft the user reviews and steers directly in the pane; submission of the Baseline Definition is the explicit handoff to independent verification.
+
+Baseline acceptance deterministically seeds an ordered Iteration Case Set with `min(10, Full Case Set size)` Cases by SHA-256 of Case ID. Every Iteration Round freezes the current set before its Work is launched, so recovery and in-flight execution never observe later changes. A rejected Integration may rank all case-specific gate regressions; the same transaction appends at most three previously unseen Cases before future Work is projected. The Optimization-level set is versioned and monotonic, while Baseline Verification and Integration continue to require the complete Full Case Set.
 
 Concurrency:
 
@@ -213,7 +215,7 @@ Pika does not proxy steering. The user types directly into the Codex/OpenCode/Cu
 
 ### Agent activation
 
-Before starting a Session, the daemon materializes its Context Bundle and renders three frozen layers: the binary-owned Role System Prompt; exact bundle paths, digests, and complete versioned JSON Schemas; and the non-empty user instruction overlay. Codex receives that value as `developer_instructions` through the instance wrapper. Cursor stores it in private per-Session state and returns it as `sessionStart.additional_context`; Cursor's frozen layer also bootstraps the environment-scoped `pika_go` MCP namespace. The Cursor kickoff is a positional initial prompt; later Herdr prompt injection is reserved for human/Follow-up messages and is not used to emulate a System Prompt.
+Before starting a Session, the daemon materializes its Context Bundle and renders three frozen layers: the binary-owned Role System Prompt; exact bundle paths, digests, and complete versioned JSON Schemas; and the non-empty user instruction overlay. Codex receives that value as `developer_instructions` through the instance wrapper. Cursor stores it in private per-Session state and returns it as `sessionStart.additional_context`; Cursor's frozen layer also bootstraps the environment-scoped `pika_go` MCP namespace. Cursor uses a positional initial prompt for automatically kicked-off Work. The first Baseline Draft deliberately has no initial User Turn for either provider; later Herdr prompt injection is reserved for operator/Follow-up messages and is not used to emulate a System Prompt.
 
 ### Back-off
 

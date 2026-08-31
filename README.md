@@ -18,6 +18,8 @@ pika-go kick-off
 
 `kick-off` first verifies that Herdr native Agent restore is disabled. If the required setting is missing, it asks before atomically updating the Herdr configuration and reloading the server; declining leaves the file untouched and creates no workspace. It then creates a durable sibling directory named `<repository>-pika-workspace`, creates a Pika-owned base linked worktree at `repo/`, and launches a replaceable Herdr workspace with the durable Workspace as its cwd. The daemon, `pika-go init`, and every Agent therefore run outside the user's source checkout.
 
+On a new Optimization, the first Baseline Draft Agent starts with its frozen Role and Context Bundle but no injected User Turn. Describe the target, cases, correctness oracle, benchmark protocol, and stop condition in that pane; subsequent recovery and execution Roles retain automatic kickoff prompts.
+
 Pause and continue the Scheduler without replacing current Work or Agent Sessions:
 
 ```bash
@@ -46,7 +48,7 @@ kernel-pika-workspace/
   herdr/binding.json    current replaceable Herdr layout binding
 ```
 
-Each Agent reads its Context Bundle before acting. `messages.jsonl` spans all observed Sessions for the relevant Work and preserves complete normalized messages, shell/tool inputs and outputs, and MCP receipts; provider-specific raw hook events remain in SQLite and are not duplicated. A later Iteration Round receives the immediately preceding Round's full history for recovery while running in its own branch and Git worktree. Iteration bundles also expose the frozen N most-recent terminal Attempt summaries and digest-addressed detail files for selective reading. Retrying one Agent Session verifies and reuses byte-identical files, while a replacement Session receives a new reviewable snapshot.
+Each Agent reads its Context Bundle before acting. `messages.jsonl` spans all observed Sessions for the relevant Work and preserves complete normalized messages, shell/tool inputs and outputs, and MCP receipts; provider-specific raw hook events remain in SQLite and are not duplicated. A later Iteration Round receives the immediately preceding Round's full history for recovery while running in its own branch and Git worktree. Iteration bundles also expose the frozen N most-recent terminal Attempt summaries and digest-addressed detail files for selective reading. Context v3 includes the Round-frozen Iteration Case Snapshot: an accepted Baseline deterministically seeds at most 10 Cases, and rejected Integrations may append at most 3 previously unseen ranked Regression Cases for future Rounds. Retrying one Agent Session verifies and reuses byte-identical files, while a replacement Session receives a new reviewable snapshot.
 
 Run `pika-go open /path/to/kernel-pika-workspace`, or run `pika-go kick-off` anywhere inside it, to open existing durable state. Existing configuration is reused and init is not repeated. A Workspace is intentionally not relocatable because it records the absolute source repository and Git common-directory filesystem identity.
 
@@ -61,6 +63,13 @@ pika-go open /absolute/path/to/workspace
 ```
 
 Import preserves the legacy SQLite history, configuration, instructions, artifacts, linked worktrees, and source/Attempt HEAD, index, staged, unstaged, and untracked state. The legacy checkout is left in place.
+
+An already-Optimizing workspace created before Iteration Case Sets were introduced is deliberately not assigned Cases automatically. Stop its daemon and initialize exactly `min(10, Full Case Set size)` Cases explicitly:
+
+```bash
+pika-go workspace migrate-iteration-cases --workspace /absolute/path/to/workspace \
+  --case-id case-a --case-id case-b
+```
 
 ## Build and verify
 

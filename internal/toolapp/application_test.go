@@ -280,7 +280,7 @@ func TestIterationAndIntegrationToolsVerifyGitBeforeAdvancingBest(t *testing.T) 
 	if candidateSHA == "" || !commitValue.Clean {
 		t.Fatalf("commit result = %+v", commitValue)
 	}
-	if _, err := app.Invoke(ctx, iterationGrant.Token, toolapp.Call{Name: "finish_iteration", Arguments: json.RawMessage(`{"idempotency_key":"finish-iteration","outcome":"candidate","candidate_sha":"` + candidateSHA + `","summary":"faster","evidence":{"verified":true}}`)}); err != nil {
+	if _, err := app.Invoke(ctx, iterationGrant.Token, toolapp.Call{Name: "finish_iteration", Arguments: json.RawMessage(`{"idempotency_key":"finish-iteration","outcome":"candidate","candidate_sha":"` + candidateSHA + `","summary":"faster","evidence":` + string(testcontract.Evidence()) + `}`)}); err != nil {
 		t.Fatalf("finish Iteration: %v", err)
 	}
 

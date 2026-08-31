@@ -166,8 +166,16 @@ type FinishIntegration struct {
 	WorkID          string             `json:"work_id"`
 	Outcome         IntegrationOutcome `json:"outcome"`
 	Result          json.RawMessage    `json:"result"`
+	RegressionCases []RegressionCase   `json:"regression_cases,omitempty"`
 	ObservedBestSHA string             `json:"observed_best_sha,omitempty"`
 	AppliedSHA      string             `json:"applied_sha,omitempty"`
+}
+
+type RegressionCase struct {
+	CaseID   string          `json:"case_id"`
+	Kind     string          `json:"kind"`
+	Summary  string          `json:"summary"`
+	Evidence json.RawMessage `json:"evidence"`
 }
 
 func (FinishIntegration) commandName() string        { return "finish_integration" }
@@ -254,6 +262,11 @@ type OptimizationView struct {
 	IterationHistoryLimit int64              `json:"iteration_history_limit"`
 }
 
+type IterationCaseSetView struct {
+	Version int64    `json:"version"`
+	CaseIDs []string `json:"case_ids"`
+}
+
 type BaselineView struct {
 	ID                   string          `json:"id"`
 	Number               int64           `json:"number"`
@@ -301,24 +314,27 @@ type BestView struct {
 }
 
 type IntegrationView struct {
-	Sequence        int64  `json:"sequence"`
-	FIFOPosition    int64  `json:"fifo_position"`
-	ID              string `json:"id"`
-	AttemptID       string `json:"attempt_id"`
-	IterationRound  int64  `json:"iteration_round"`
-	Status          string `json:"status"`
-	CandidateSHA    string `json:"candidate_sha"`
-	ExpectedBestSHA string `json:"expected_best_sha"`
-	IntentID        string `json:"intent_id,omitempty"`
+	Sequence        int64            `json:"sequence"`
+	FIFOPosition    int64            `json:"fifo_position"`
+	ID              string           `json:"id"`
+	AttemptID       string           `json:"attempt_id"`
+	IterationRound  int64            `json:"iteration_round"`
+	Status          string           `json:"status"`
+	CandidateSHA    string           `json:"candidate_sha"`
+	ExpectedBestSHA string           `json:"expected_best_sha"`
+	IntentID        string           `json:"intent_id,omitempty"`
+	RegressionCases []RegressionCase `json:"regression_cases,omitempty"`
 }
 
 type IterationRoundView struct {
-	AttemptID      string `json:"attempt_id"`
-	Round          int64  `json:"round"`
-	Kind           string `json:"kind"`
-	BaseSHA        string `json:"base_sha"`
-	Status         string `json:"status"`
-	BackOffMessage string `json:"back_off_message,omitempty"`
+	AttemptID               string          `json:"attempt_id"`
+	Round                   int64           `json:"round"`
+	Kind                    string          `json:"kind"`
+	BaseSHA                 string          `json:"base_sha"`
+	Status                  string          `json:"status"`
+	BackOffMessage          string          `json:"back_off_message,omitempty"`
+	IterationCaseSetVersion int64           `json:"iteration_case_set_version"`
+	Evidence                json.RawMessage `json:"evidence,omitempty"`
 }
 
 type GitIntentView struct {
@@ -458,40 +474,41 @@ type PaneBinding struct {
 }
 
 type RuntimeWork struct {
-	Work                            WorkView           `json:"work"`
-	Repository                      string             `json:"repository"`
-	OptimizationRepository          string             `json:"optimization_repository"`
-	OptimizationID                  string             `json:"optimization_id"`
-	OptimizationStatus              OptimizationStatus `json:"optimization_status"`
-	OptimizationRevision            int64              `json:"optimization_revision"`
-	BaselineNumber                  int64              `json:"baseline_number"`
-	BaselineStatus                  BaselineStatus     `json:"baseline_status"`
-	BaselineDefinitionSHA256        string             `json:"baseline_definition_sha256,omitempty"`
-	BaselineRepositorySHA           string             `json:"baseline_repository_sha,omitempty"`
-	PredecessorBaselineID           string             `json:"predecessor_baseline_id,omitempty"`
-	PredecessorFailureKind          string             `json:"predecessor_failure_kind,omitempty"`
-	PredecessorFailureReason        string             `json:"predecessor_failure_reason,omitempty"`
-	PredecessorRequestedChanges     string             `json:"predecessor_requested_changes,omitempty"`
-	PredecessorVerificationEvidence json.RawMessage    `json:"predecessor_verification_evidence,omitempty"`
-	BaseSHA                         string             `json:"base_sha,omitempty"`
-	CandidateSHA                    string             `json:"candidate_sha,omitempty"`
-	IterationKind                   string             `json:"iteration_kind,omitempty"`
-	BackOffMessage                  string             `json:"back_off_message,omitempty"`
-	BestSHA                         string             `json:"best_sha,omitempty"`
-	BestSequence                    int64              `json:"best_sequence,omitempty"`
-	ExpectedBestSHA                 string             `json:"expected_best_sha,omitempty"`
-	IntegrationFIFOPosition         int64              `json:"integration_fifo_position,omitempty"`
-	IntegrationStatus               string             `json:"integration_status,omitempty"`
-	GitIntentID                     string             `json:"git_intent_id,omitempty"`
-	GitIntentState                  string             `json:"git_intent_state,omitempty"`
-	FollowUpTargetWorkID            string             `json:"followup_target_work_id,omitempty"`
-	FollowUpTargetRole              WorkRole           `json:"followup_target_role,omitempty"`
-	FollowUpSequence                int64              `json:"followup_sequence,omitempty"`
-	FollowUpDueAt                   string             `json:"followup_due_at,omitempty"`
-	FollowUpMaxMessages             int64              `json:"followup_max_messages,omitempty"`
-	FollowUpGeneratorMax            int64              `json:"followup_generator_max_attempts,omitempty"`
-	FollowUpGeneratorTry            int64              `json:"followup_generator_attempt,omitempty"`
-	IterationHistoryLimit           int64              `json:"iteration_history_limit,omitempty"`
+	Work                            WorkView              `json:"work"`
+	Repository                      string                `json:"repository"`
+	OptimizationRepository          string                `json:"optimization_repository"`
+	OptimizationID                  string                `json:"optimization_id"`
+	OptimizationStatus              OptimizationStatus    `json:"optimization_status"`
+	OptimizationRevision            int64                 `json:"optimization_revision"`
+	BaselineNumber                  int64                 `json:"baseline_number"`
+	BaselineStatus                  BaselineStatus        `json:"baseline_status"`
+	BaselineDefinitionSHA256        string                `json:"baseline_definition_sha256,omitempty"`
+	BaselineRepositorySHA           string                `json:"baseline_repository_sha,omitempty"`
+	PredecessorBaselineID           string                `json:"predecessor_baseline_id,omitempty"`
+	PredecessorFailureKind          string                `json:"predecessor_failure_kind,omitempty"`
+	PredecessorFailureReason        string                `json:"predecessor_failure_reason,omitempty"`
+	PredecessorRequestedChanges     string                `json:"predecessor_requested_changes,omitempty"`
+	PredecessorVerificationEvidence json.RawMessage       `json:"predecessor_verification_evidence,omitempty"`
+	BaseSHA                         string                `json:"base_sha,omitempty"`
+	CandidateSHA                    string                `json:"candidate_sha,omitempty"`
+	IterationKind                   string                `json:"iteration_kind,omitempty"`
+	BackOffMessage                  string                `json:"back_off_message,omitempty"`
+	BestSHA                         string                `json:"best_sha,omitempty"`
+	BestSequence                    int64                 `json:"best_sequence,omitempty"`
+	ExpectedBestSHA                 string                `json:"expected_best_sha,omitempty"`
+	IntegrationFIFOPosition         int64                 `json:"integration_fifo_position,omitempty"`
+	IntegrationStatus               string                `json:"integration_status,omitempty"`
+	GitIntentID                     string                `json:"git_intent_id,omitempty"`
+	GitIntentState                  string                `json:"git_intent_state,omitempty"`
+	FollowUpTargetWorkID            string                `json:"followup_target_work_id,omitempty"`
+	FollowUpTargetRole              WorkRole              `json:"followup_target_role,omitempty"`
+	FollowUpSequence                int64                 `json:"followup_sequence,omitempty"`
+	FollowUpDueAt                   string                `json:"followup_due_at,omitempty"`
+	FollowUpMaxMessages             int64                 `json:"followup_max_messages,omitempty"`
+	FollowUpGeneratorMax            int64                 `json:"followup_generator_max_attempts,omitempty"`
+	FollowUpGeneratorTry            int64                 `json:"followup_generator_attempt,omitempty"`
+	IterationHistoryLimit           int64                 `json:"iteration_history_limit,omitempty"`
+	IterationCaseSet                *IterationCaseSetView `json:"iteration_case_set,omitempty"`
 }
 
 type ActiveAgentSession struct {
@@ -556,22 +573,23 @@ type RoundHistoryProjection struct {
 }
 
 type View struct {
-	Optimization       OptimizationView     `json:"optimization"`
-	Scheduler          SchedulerView        `json:"scheduler"`
-	Baseline           *BaselineView        `json:"baseline,omitempty"`
-	Baselines          []BaselineView       `json:"baselines"`
-	Works              []WorkView           `json:"works"`
-	AgentSessions      []AgentSession       `json:"agent_sessions,omitempty"`
-	BackOffs           []BackOffView        `json:"back_offs"`
-	Attempts           []AttemptView        `json:"attempts"`
-	Integrations       []IntegrationView    `json:"integrations"`
-	IterationRounds    []IterationRoundView `json:"iteration_rounds"`
-	Best               *BestView            `json:"best,omitempty"`
-	FollowUps          []FollowUpView       `json:"follow_ups,omitempty"`
-	PaneActivityNotice string               `json:"pane_activity_notice,omitempty"`
-	DomainEventCount   int64                `json:"domain_event_count"`
-	PendingEffectCount int64                `json:"pending_effect_count"`
-	Storage            StorageView          `json:"storage"`
+	Optimization       OptimizationView      `json:"optimization"`
+	Scheduler          SchedulerView         `json:"scheduler"`
+	Baseline           *BaselineView         `json:"baseline,omitempty"`
+	Baselines          []BaselineView        `json:"baselines"`
+	Works              []WorkView            `json:"works"`
+	AgentSessions      []AgentSession        `json:"agent_sessions,omitempty"`
+	BackOffs           []BackOffView         `json:"back_offs"`
+	Attempts           []AttemptView         `json:"attempts"`
+	Integrations       []IntegrationView     `json:"integrations"`
+	IterationRounds    []IterationRoundView  `json:"iteration_rounds"`
+	Best               *BestView             `json:"best,omitempty"`
+	IterationCaseSet   *IterationCaseSetView `json:"iteration_case_set,omitempty"`
+	FollowUps          []FollowUpView        `json:"follow_ups,omitempty"`
+	PaneActivityNotice string                `json:"pane_activity_notice,omitempty"`
+	DomainEventCount   int64                 `json:"domain_event_count"`
+	PendingEffectCount int64                 `json:"pending_effect_count"`
+	Storage            StorageView           `json:"storage"`
 }
 
 type StorageView struct {

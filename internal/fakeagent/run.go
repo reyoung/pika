@@ -199,7 +199,7 @@ func runOptimizationIteration(ctx context.Context, output io.Writer) {
 		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), commitResponse)
 		return
 	}
-	call := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"finish_iteration","arguments":{"idempotency_key":"fake-iteration-%s","outcome":"candidate","candidate_sha":"%s","summary":"fake improvement round %s","evidence":{"scenario":"optimization"}}}}`, os.Getenv("PIKA_SESSION_ID"), sha, round)
+	call := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"finish_iteration","arguments":{"idempotency_key":"fake-iteration-%s","outcome":"candidate","candidate_sha":"%s","summary":"fake improvement round %s","evidence":%s}}}`, os.Getenv("PIKA_SESSION_ID"), sha, round, testcontract.Evidence())
 	if response, err := callMCPUntilActive(ctx, call); err != nil {
 		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), response)
 	}

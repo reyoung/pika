@@ -23,6 +23,11 @@ func TestContextProjectionSelectsFrozenRecentTerminalAttemptHistory(t *testing.T
 		t.Fatal(err)
 	}
 	baselineID := view.Baseline.ID
+	if _, err := engine.db.ExecContext(ctx, `UPDATE optimizations SET iteration_case_set_version = 1 WHERE id = 'optimization';
+		INSERT INTO iteration_cases(optimization_id, case_id, ordinal, added_in_version, source, created_at)
+		VALUES ('optimization', 'case-1', 0, 1, 'seed', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := engine.db.ExecContext(ctx, `INSERT INTO best_revisions(id, optimization_id, sequence, commit_sha, created_at) VALUES ('best', 'optimization', 0, 'base', '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
@@ -51,9 +56,11 @@ func TestContextProjectionSelectsFrozenRecentTerminalAttemptHistory(t *testing.T
 		}
 	}
 	if _, err := engine.db.ExecContext(ctx, `INSERT INTO iteration_rounds
-		(id, attempt_id, round, kind, base_sha, status, created_at, finished_at)
-		VALUES ('previous-round', 'current', 1, 'initial', 'base', 'candidate', '2026-01-01T00:00:01Z', '2026-01-01T00:00:02Z'),
-		       ('current-round', 'current', 2, 'stale_best', 'base', 'running', '2026-01-01T00:00:06Z', NULL)`); err != nil {
+		(id, attempt_id, round, kind, base_sha, status, iteration_case_set_version, created_at, finished_at)
+		VALUES ('previous-round', 'current', 1, 'initial', 'base', 'candidate', 1, '2026-01-01T00:00:01Z', '2026-01-01T00:00:02Z'),
+		       ('current-round', 'current', 2, 'stale_best', 'base', 'running', 1, '2026-01-01T00:00:06Z', NULL);
+		INSERT INTO iteration_round_cases(attempt_id, round, ordinal, case_id)
+		VALUES ('current', 1, 0, 'case-1'), ('current', 2, 0, 'case-1')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.db.ExecContext(ctx, `INSERT INTO works

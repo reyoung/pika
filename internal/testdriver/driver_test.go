@@ -247,7 +247,7 @@ func TestKillAtStopsProcessAfterGitIntentCommitBeforeDomainFinish(t *testing.T) 
 	candidateSHA := strings.TrimSpace(runGit(t, round.Repository, "rev-parse", "HEAD"))
 	if _, err := engine.Apply(ctx, symphony.FinishIteration{
 		Meta: symphony.CommandMeta{RequestID: "finish-iteration"}, WorkID: iteration.ID,
-		Outcome: symphony.IterationCandidate, CandidateSHA: candidateSHA, Summary: "faster",
+		Outcome: symphony.IterationCandidate, CandidateSHA: candidateSHA, Summary: "faster", Evidence: testcontract.Evidence(),
 	}); err != nil {
 		t.Fatal(err)
 	}

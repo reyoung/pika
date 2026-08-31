@@ -68,6 +68,7 @@ func TestIterationsQueueFIFOAndBestAdvanceRefreshesStaleCandidates(t *testing.T)
 			Outcome:      symphony.IterationCandidate,
 			CandidateSHA: "candidate-" + string(rune('a'+sequence)),
 			Summary:      "improved candidate",
+			Evidence:     validBenchmarkEvidence(),
 		}); err != nil {
 			t.Fatalf("finish iteration %d: %v", sequence, err)
 		}
@@ -158,7 +159,7 @@ func TestIterationsQueueFIFOAndBestAdvanceRefreshesStaleCandidates(t *testing.T)
 	queuePosition := after.Integrations[1].FIFOPosition
 	if _, err := engine.Apply(ctx, symphony.FinishIteration{
 		Meta: symphony.CommandMeta{RequestID: "finish-refreshed"}, WorkID: refreshedWork.ID,
-		Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-b2", Summary: "remeasured on new Best",
+		Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-b2", Summary: "remeasured on new Best", Evidence: validBenchmarkEvidence(),
 	}); err != nil {
 		t.Fatalf("finish refreshed iteration: %v", err)
 	}
@@ -217,7 +218,7 @@ func TestIntegrationBackOffPreservesRoundAndQueuesRefresh(t *testing.T) {
 	iteration := pendingWorksByRole(before, symphony.RoleIteration)[0]
 	if _, err := engine.Apply(ctx, symphony.FinishIteration{
 		Meta: symphony.CommandMeta{RequestID: "candidate"}, WorkID: iteration.ID,
-		Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-sha", Summary: "faster",
+		Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-sha", Summary: "faster", Evidence: validBenchmarkEvidence(),
 	}); err != nil {
 		t.Fatalf("finish iteration: %v", err)
 	}

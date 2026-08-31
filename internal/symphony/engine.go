@@ -26,6 +26,9 @@ type Options struct {
 	FollowUpPolicies   map[WorkRole]FollowUpPolicy
 	ApplyCheckpoint    func(ApplyCheckpoint, string) error
 	Providers          *provider.Registry
+	// AllowIterationCaseMigration opens a legacy Optimizing workspace only for
+	// the explicit offline Iteration Case migration command.
+	AllowIterationCaseMigration bool
 }
 
 type ApplyCheckpoint string
@@ -100,7 +103,7 @@ func Open(ctx context.Context, path string, options Options) (*Engine, error) {
 	if quickCheck != "ok" {
 		return closeOnError(fmt.Errorf("validate sqlite database: %s", quickCheck))
 	}
-	if err := validateOnlineState(ctx, db); err != nil {
+	if err := validateOnlineState(ctx, db, options.AllowIterationCaseMigration); err != nil {
 		return closeOnError(err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
@@ -538,6 +541,17 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 			ORDER BY sequence DESC LIMIT 1`, workID).Scan(&runtimeWork.BestSequence, &runtimeWork.BestSHA); err != nil {
 			return RuntimeWork{}, fmt.Errorf("read runtime Best: %w", err)
 		}
+		var caseSet IterationCaseSetView
+		var err error
+		if runtimeWork.Work.Role == RoleIteration {
+			caseSet, err = roundIterationCaseSet(ctx, e.db, runtimeWork.Work.AttemptID, runtimeWork.Work.IterationRound)
+		} else {
+			caseSet, err = currentIterationCaseSet(ctx, e.db, runtimeWork.OptimizationID)
+		}
+		if err != nil {
+			return RuntimeWork{}, err
+		}
+		runtimeWork.IterationCaseSet = &caseSet
 	}
 	if runtimeWork.Work.Role == RoleFollowUp {
 		if err := e.db.QueryRowContext(ctx, `SELECT target_work_id, target_role, request_sequence, due_at,
@@ -556,6 +570,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		runtimeWork.BaseSHA, runtimeWork.CandidateSHA = target.BaseSHA, target.CandidateSHA
 		runtimeWork.IterationKind, runtimeWork.BackOffMessage = target.IterationKind, target.BackOffMessage
 		runtimeWork.IterationHistoryLimit = target.IterationHistoryLimit
+		runtimeWork.IterationCaseSet = target.IterationCaseSet
 		runtimeWork.BestSHA, runtimeWork.BestSequence = target.BestSHA, target.BestSequence
 		runtimeWork.ExpectedBestSHA = target.ExpectedBestSHA
 		runtimeWork.IntegrationFIFOPosition, runtimeWork.IntegrationStatus = target.IntegrationFIFOPosition, target.IntegrationStatus
@@ -1507,17 +1522,25 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	}
 	var view View
 	var schedulerPausedAt sql.NullString
+	var iterationCaseSetVersion sql.NullInt64
 	if err := e.db.QueryRowContext(ctx, `SELECT id, status, revision, repository, iteration_concurrency, max_pending_attempts,
-		iteration_history_limit, scheduler_status, scheduler_paused_at, scheduler_epoch FROM optimizations LIMIT 1`).Scan(
+		iteration_history_limit, scheduler_status, scheduler_paused_at, scheduler_epoch, iteration_case_set_version FROM optimizations LIMIT 1`).Scan(
 		&view.Optimization.ID, &view.Optimization.Status, &view.Optimization.Revision, &view.Optimization.Repository,
 		&view.Optimization.IterationConcurrency, &view.Optimization.MaxPendingAttempts, &view.Optimization.IterationHistoryLimit,
-		&view.Scheduler.Status, &schedulerPausedAt, &view.Scheduler.Epoch,
+		&view.Scheduler.Status, &schedulerPausedAt, &view.Scheduler.Epoch, &iterationCaseSetVersion,
 	); errors.Is(err, sql.ErrNoRows) {
 		return View{}, domainError(CodeNotInitialized, "optimization is not initialized")
 	} else if err != nil {
 		return View{}, fmt.Errorf("read optimization: %w", err)
 	}
 	view.Scheduler.PausedAt = schedulerPausedAt.String
+	if iterationCaseSetVersion.Valid {
+		caseSet, err := currentIterationCaseSet(ctx, e.db, view.Optimization.ID)
+		if err != nil {
+			return View{}, err
+		}
+		view.IterationCaseSet = &caseSet
+	}
 	var latestCycleID string
 	if err := e.db.QueryRowContext(ctx, `SELECT id FROM scheduler_control_cycles
 		WHERE optimization_id = ? ORDER BY epoch DESC LIMIT 1`, view.Optimization.ID).Scan(&latestCycleID); err == nil {
@@ -1631,26 +1654,34 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		return View{}, fmt.Errorf("close attempt rows: %w", err)
 	}
 	integrationRows, err := e.db.QueryContext(ctx, `SELECT sequence, fifo_position, id, attempt_id, iteration_round, status,
-		candidate_sha, expected_best_sha, intent_id FROM integrations ORDER BY sequence`)
+		candidate_sha, expected_best_sha, intent_id, regression_cases_json FROM integrations ORDER BY sequence`)
 	if err != nil {
 		return View{}, fmt.Errorf("read integrations: %w", err)
 	}
 	for integrationRows.Next() {
 		var integration IntegrationView
 		var intentID sql.NullString
+		var regressionCases []byte
 		if err := integrationRows.Scan(&integration.Sequence, &integration.FIFOPosition, &integration.ID, &integration.AttemptID,
 			&integration.IterationRound, &integration.Status, &integration.CandidateSHA,
-			&integration.ExpectedBestSHA, &intentID); err != nil {
+			&integration.ExpectedBestSHA, &intentID, &regressionCases); err != nil {
 			_ = integrationRows.Close()
 			return View{}, fmt.Errorf("scan integration: %w", err)
 		}
 		integration.IntentID = intentID.String
+		if len(regressionCases) != 0 {
+			if err := json.Unmarshal(regressionCases, &integration.RegressionCases); err != nil {
+				_ = integrationRows.Close()
+				return View{}, domainError(CodeStateCorrupt, "Integration has invalid Regression Case history")
+			}
+		}
 		view.Integrations = append(view.Integrations, integration)
 	}
 	if err := integrationRows.Close(); err != nil {
 		return View{}, fmt.Errorf("close integration rows: %w", err)
 	}
-	roundRows, err := e.db.QueryContext(ctx, `SELECT r.attempt_id, r.round, r.kind, r.base_sha, r.status, r.back_off_message
+	roundRows, err := e.db.QueryContext(ctx, `SELECT r.attempt_id, r.round, r.kind, r.base_sha, r.status, r.back_off_message,
+		r.iteration_case_set_version, r.evidence_json
 		FROM iteration_rounds r JOIN attempts a ON a.id = r.attempt_id
 		WHERE a.optimization_id = ? ORDER BY r.created_at, r.id`, view.Optimization.ID)
 	if err != nil {
@@ -1659,11 +1690,15 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	for roundRows.Next() {
 		var round IterationRoundView
 		var message sql.NullString
-		if err := roundRows.Scan(&round.AttemptID, &round.Round, &round.Kind, &round.BaseSHA, &round.Status, &message); err != nil {
+		var version sql.NullInt64
+		var evidence []byte
+		if err := roundRows.Scan(&round.AttemptID, &round.Round, &round.Kind, &round.BaseSHA, &round.Status, &message, &version, &evidence); err != nil {
 			_ = roundRows.Close()
 			return View{}, fmt.Errorf("scan iteration round: %w", err)
 		}
 		round.BackOffMessage = message.String
+		round.IterationCaseSetVersion = version.Int64
+		round.Evidence = evidence
 		view.IterationRounds = append(view.IterationRounds, round)
 	}
 	if err := roundRows.Close(); err != nil {
@@ -1753,7 +1788,7 @@ func prepareDatabasePath(path string) error {
 	return nil
 }
 
-func validateOnlineState(ctx context.Context, db *sql.DB) error {
+func validateOnlineState(ctx context.Context, db *sql.DB, allowIterationCaseMigration bool) error {
 	var optimizationCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM optimizations`).Scan(&optimizationCount); err != nil {
 		return fmt.Errorf("validate optimization singleton: %w", err)
@@ -1768,6 +1803,30 @@ func validateOnlineState(ctx context.Context, db *sql.DB) error {
 	}
 	if invalidCount != 0 {
 		return domainError(CodeStateCorrupt, "optimization has an invalid status or revision")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM optimizations o
+		WHERE o.iteration_case_set_version IS NULL AND EXISTS (SELECT 1 FROM attempts a WHERE a.optimization_id = o.id)`).Scan(&invalidCount); err != nil {
+		return fmt.Errorf("validate Iteration Case Set migration state: %w", err)
+	}
+	if invalidCount != 0 && !allowIterationCaseMigration {
+		return fmt.Errorf("workspace requires explicit offline migration: stop the daemon and run pika-go workspace migrate-iteration-cases --workspace PATH --case-id ID ...")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM optimizations o WHERE
+		(o.iteration_case_set_version IS NOT NULL AND o.iteration_case_set_version < 1)
+		OR (o.iteration_case_set_version IS NOT NULL AND NOT EXISTS (SELECT 1 FROM iteration_cases c WHERE c.optimization_id = o.id))
+		OR EXISTS (SELECT 1 FROM iteration_cases c WHERE c.optimization_id = o.id AND c.added_in_version > o.iteration_case_set_version)`).Scan(&invalidCount); err != nil {
+		return fmt.Errorf("validate Iteration Case Set: %w", err)
+	}
+	if invalidCount != 0 {
+		return domainError(CodeStateCorrupt, "Optimization has an invalid Iteration Case Set")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM optimizations o WHERE EXISTS (
+		SELECT 1 FROM iteration_cases c WHERE c.optimization_id = o.id
+		GROUP BY c.optimization_id HAVING MIN(c.ordinal) != 0 OR MAX(c.ordinal) + 1 != COUNT(*))`).Scan(&invalidCount); err != nil {
+		return fmt.Errorf("validate Iteration Case ordering: %w", err)
+	}
+	if invalidCount != 0 {
+		return domainError(CodeStateCorrupt, "Iteration Case Set ordering is not contiguous")
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM optimizations
 		WHERE scheduler_status NOT IN ('running', 'paused') OR scheduler_epoch < 0
@@ -1822,6 +1881,31 @@ func validateOnlineState(ctx context.Context, db *sql.DB) error {
 	}
 	if invalidCount != 0 {
 		return domainError(CodeStateCorrupt, "Iteration Round has an invalid status or round")
+	}
+	if !allowIterationCaseMigration {
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM iteration_rounds r
+			WHERE r.iteration_case_set_version IS NULL
+			OR NOT EXISTS (SELECT 1 FROM iteration_round_cases c WHERE c.attempt_id = r.attempt_id AND c.round = r.round)`).Scan(&invalidCount); err != nil {
+			return fmt.Errorf("validate Iteration Case Snapshots: %w", err)
+		}
+		if invalidCount != 0 {
+			return domainError(CodeStateCorrupt, "Iteration Round has no frozen Iteration Case Snapshot")
+		}
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM iteration_rounds r
+			JOIN attempts a ON a.id = r.attempt_id JOIN optimizations o ON o.id = a.optimization_id
+			WHERE r.iteration_case_set_version < 0 OR r.iteration_case_set_version > o.iteration_case_set_version
+			OR (r.iteration_case_set_version > 0 AND (
+				(SELECT COUNT(*) FROM iteration_round_cases rc WHERE rc.attempt_id = r.attempt_id AND rc.round = r.round)
+				!= (SELECT COUNT(*) FROM iteration_cases c WHERE c.optimization_id = o.id AND c.added_in_version <= r.iteration_case_set_version)
+				OR EXISTS (SELECT 1 FROM iteration_round_cases rc LEFT JOIN iteration_cases c
+					ON c.optimization_id = o.id AND c.case_id = rc.case_id
+					WHERE rc.attempt_id = r.attempt_id AND rc.round = r.round
+					AND (c.case_id IS NULL OR c.added_in_version > r.iteration_case_set_version))))`).Scan(&invalidCount); err != nil {
+			return fmt.Errorf("validate frozen Iteration Case Snapshot membership: %w", err)
+		}
+		if invalidCount != 0 {
+			return domainError(CodeStateCorrupt, "Iteration Round has an inconsistent Iteration Case Snapshot")
+		}
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM integrations
 		WHERE status NOT IN ('queued', 'running', 'best_update_prepared', 'accepted', 'rejected', 'stale', 'backed_off', 'refreshed', 'cancelled')

@@ -216,7 +216,7 @@ func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent)
 	siblingSession, _, _, _ := engine.CurrentAgentSession(ctx, iterations[1].ID)
 	if _, err := engine.Apply(ctx, symphony.FinishIteration{
 		Meta: symphony.CommandMeta{RequestID: "candidate"}, WorkID: iterations[0].ID,
-		Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-sha", Summary: "faster",
+		Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-sha", Summary: "faster", Evidence: testcontract.Evidence(),
 	}); err != nil {
 		t.Fatal(err)
 	}

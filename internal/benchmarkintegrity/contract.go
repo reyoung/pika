@@ -83,7 +83,46 @@ func ValidateEvidence(definition, evidence json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("definition: %w", err)
 	}
-	return validateEvidence(contract, evidence)
+	return validateEvidence(contract, contract.CaseIDs, evidence)
+}
+
+// FullCaseIDs returns a defensive copy of the frozen Full Case Set.
+func FullCaseIDs(definition json.RawMessage) ([]string, error) {
+	contract, err := parseDefinition(definition)
+	if err != nil {
+		return nil, fmt.Errorf("definition: %w", err)
+	}
+	return append([]string(nil), contract.CaseIDs...), nil
+}
+
+// ValidateIterationEvidence proves that candidate evidence covers exactly the
+// Iteration Case Snapshot assigned to its Round.
+func ValidateIterationEvidence(definition json.RawMessage, requiredCaseIDs []string, evidence json.RawMessage) error {
+	contract, err := parseDefinition(definition)
+	if err != nil {
+		return fmt.Errorf("definition: %w", err)
+	}
+	full := make(map[string]struct{}, len(contract.CaseIDs))
+	for _, caseID := range contract.CaseIDs {
+		full[caseID] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(requiredCaseIDs))
+	for index, caseID := range requiredCaseIDs {
+		if caseID == "" {
+			return fmt.Errorf("required Iteration Case Snapshot[%d] must be non-empty", index)
+		}
+		if _, ok := full[caseID]; !ok {
+			return fmt.Errorf("required Iteration Case %q is not in the frozen Full Case Set", caseID)
+		}
+		if _, ok := seen[caseID]; ok {
+			return fmt.Errorf("required Iteration Case Snapshot contains duplicate %q", caseID)
+		}
+		seen[caseID] = struct{}{}
+	}
+	if len(requiredCaseIDs) == 0 {
+		return fmt.Errorf("required Iteration Case Snapshot must be non-empty")
+	}
+	return validateEvidence(contract, requiredCaseIDs, evidence)
 }
 
 // ValidateIntegration applies the evidence contract and escalates primary or
@@ -93,7 +132,7 @@ func ValidateIntegration(definition, validation json.RawMessage) error {
 	if err != nil {
 		return fmt.Errorf("definition: %w", err)
 	}
-	if err := validateEvidence(contract, validation); err != nil {
+	if err := validateEvidence(contract, contract.CaseIDs, validation); err != nil {
 		return err
 	}
 	var claim performanceClaim
@@ -187,7 +226,7 @@ func parseDefinition(raw json.RawMessage) (definitionContract, error) {
 	return contract, nil
 }
 
-func validateEvidence(contract definitionContract, raw json.RawMessage) error {
+func validateEvidence(contract definitionContract, requiredCaseIDs []string, raw json.RawMessage) error {
 	var evidence evidenceContract
 	if err := decodeField(raw, "benchmark_integrity", &evidence); err != nil {
 		return err
@@ -195,15 +234,15 @@ func validateEvidence(contract definitionContract, raw json.RawMessage) error {
 	if evidence.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("benchmark_integrity.schema_version must be %d", SchemaVersion)
 	}
-	if len(evidence.Cases) != len(contract.CaseIDs) {
-		return fmt.Errorf("benchmark_integrity.cases must cover exactly %d frozen cases", len(contract.CaseIDs))
+	if len(evidence.Cases) != len(requiredCaseIDs) {
+		return fmt.Errorf("benchmark_integrity.cases must cover exactly %d required cases", len(requiredCaseIDs))
 	}
 	warmups, measured, invocations, err := expectedCounts(contract)
 	if err != nil {
 		return err
 	}
-	wanted := make(map[string]struct{}, len(contract.CaseIDs))
-	for _, caseID := range contract.CaseIDs {
+	wanted := make(map[string]struct{}, len(requiredCaseIDs))
+	for _, caseID := range requiredCaseIDs {
 		wanted[caseID] = struct{}{}
 	}
 	seen := make(map[string]struct{}, len(evidence.Cases))

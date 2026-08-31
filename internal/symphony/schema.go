@@ -8,7 +8,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 18
+const schemaVersion = 19
 
 func CurrentSchemaVersion() int { return schemaVersion }
 
@@ -586,6 +586,35 @@ ALTER TABLE optimizations ADD COLUMN iteration_history_limit INTEGER NOT NULL DE
 ALTER TABLE attempts ADD COLUMN history_limit INTEGER NOT NULL DEFAULT 20 CHECK(history_limit >= 0);
 `
 
+const schemaV19 = `
+ALTER TABLE optimizations ADD COLUMN iteration_case_set_version INTEGER;
+ALTER TABLE iteration_rounds ADD COLUMN iteration_case_set_version INTEGER;
+ALTER TABLE iteration_rounds ADD COLUMN evidence_json BLOB;
+ALTER TABLE integrations ADD COLUMN regression_cases_json BLOB;
+
+CREATE TABLE iteration_cases (
+    optimization_id TEXT NOT NULL REFERENCES optimizations(id),
+    case_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    added_in_version INTEGER NOT NULL CHECK(added_in_version >= 1),
+    source TEXT NOT NULL CHECK(source IN ('seed', 'integration_regression', 'manual_migration')),
+    source_integration_id TEXT REFERENCES integrations(id),
+    source_rank INTEGER,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(optimization_id, case_id),
+    UNIQUE(optimization_id, ordinal)
+);
+CREATE TABLE iteration_round_cases (
+    attempt_id TEXT NOT NULL,
+    round INTEGER NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    case_id TEXT NOT NULL,
+    PRIMARY KEY(attempt_id, round, case_id),
+    UNIQUE(attempt_id, round, ordinal),
+    FOREIGN KEY(attempt_id, round) REFERENCES iteration_rounds(attempt_id, round)
+);
+`
+
 var schemaMigrations = []struct {
 	version int
 	sql     string
@@ -608,6 +637,7 @@ var schemaMigrations = []struct {
 	{version: 16, sql: schemaV16},
 	{version: 17, sql: schemaV17},
 	{version: 18, sql: schemaV18},
+	{version: 19, sql: schemaV19},
 }
 
 func migrate(ctx context.Context, db *sql.DB, now string) error {

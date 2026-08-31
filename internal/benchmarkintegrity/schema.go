@@ -6,7 +6,8 @@ func DefinitionSchema() map[string]any {
 	return envelopeSchema("benchmark_integrity", definitionContractSchema())
 }
 
-// EvidenceSchema returns the accepted Baseline Verification evidence schema.
+// EvidenceSchema returns the discoverable evidence shape. Runtime validation
+// applies the exact Full Case Set or Iteration Case Snapshot cardinality.
 func EvidenceSchema() map[string]any {
 	return envelopeSchema("benchmark_integrity", evidenceContractSchema())
 }

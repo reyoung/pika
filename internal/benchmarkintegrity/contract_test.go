@@ -82,6 +82,26 @@ func TestEvidenceRequiresEveryBenchmarkInvocationToBeChecked(t *testing.T) {
 	}
 }
 
+func TestIterationEvidenceCoversExactlyRoundSnapshot(t *testing.T) {
+	t.Parallel()
+
+	caseAOnly := strings.Replace(validEvidence, `,
+      {"case_id":"case-b","warmup_invocations":50,"measured_invocations":500,"input_restores":550,"checked_invocations":550,"mismatches":0,"nonfinite":0,"canonical_input_mutations":0,"tolerance_passed":true}`, "", 1)
+	if err := benchmarkintegrity.ValidateIterationEvidence(json.RawMessage(validDefinition), []string{"case-a"}, json.RawMessage(caseAOnly)); err != nil {
+		t.Fatalf("ValidateIterationEvidence(snapshot) = %v", err)
+	}
+	if err := benchmarkintegrity.ValidateIterationEvidence(json.RawMessage(validDefinition), []string{"case-a"}, json.RawMessage(validEvidence)); err == nil || !strings.Contains(err.Error(), "exactly 1") {
+		t.Fatalf("ValidateIterationEvidence(extra case) = %v, want exact coverage error", err)
+	}
+	if err := benchmarkintegrity.ValidateIterationEvidence(json.RawMessage(validDefinition), []string{"missing"}, json.RawMessage(caseAOnly)); err == nil || !strings.Contains(err.Error(), "Full Case Set") {
+		t.Fatalf("ValidateIterationEvidence(invalid snapshot) = %v, want Full Case Set error", err)
+	}
+	got, err := benchmarkintegrity.FullCaseIDs(json.RawMessage(validDefinition))
+	if err != nil || len(got) != 2 || got[0] != "case-a" || got[1] != "case-b" {
+		t.Fatalf("FullCaseIDs = %v, %v", got, err)
+	}
+}
+
 func TestIntegrationValidationEscalatesTenXClaims(t *testing.T) {
 	t.Parallel()
 

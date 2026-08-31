@@ -265,7 +265,7 @@ func integrationReadyEngine(t *testing.T, ctx context.Context, path string, chec
 	iteration := pendingWorksByRole(view, symphony.RoleIteration)[0]
 	if _, err := engine.Apply(ctx, symphony.FinishIteration{
 		Meta: symphony.CommandMeta{RequestID: "finish-iteration"}, WorkID: iteration.ID,
-		Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-sha", Summary: "faster",
+		Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-sha", Summary: "faster", Evidence: validBenchmarkEvidence(),
 	}); err != nil {
 		t.Fatal(err)
 	}

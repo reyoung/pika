@@ -6,13 +6,17 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 
+	"github.com/reyoung/pika-go/internal/instance"
 	"github.com/reyoung/pika-go/internal/legacymigration"
+	"github.com/reyoung/pika-go/internal/optimizationworkspace"
+	"github.com/reyoung/pika-go/internal/symphony"
 )
 
 func runWorkspace(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "workspace: expected legacy-list or import")
+		_, _ = fmt.Fprintln(stderr, "workspace: expected legacy-list, import, or migrate-iteration-cases")
 		return 2
 	}
 	switch args[0] {
@@ -20,10 +24,66 @@ func runWorkspace(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return runWorkspaceLegacyList(ctx, args[1:], stdout, stderr)
 	case "import":
 		return runWorkspaceImport(ctx, args[1:], stdout, stderr)
+	case "migrate-iteration-cases":
+		return runWorkspaceMigrateIterationCases(ctx, args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "workspace: unknown subcommand %q\n", args[0])
 		return 2
 	}
+}
+
+type repeatedStrings []string
+
+func (values *repeatedStrings) String() string { return strings.Join(*values, ",") }
+func (values *repeatedStrings) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
+
+func runWorkspaceMigrateIterationCases(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newCommandFlagSet("workspace migrate-iteration-cases", stderr)
+	workspaceRoot := flags.String("workspace", "", "Optimization Workspace `PATH`")
+	jsonOutput := flags.Bool("json", false, "Print JSON")
+	var caseIDs repeatedStrings
+	flags.Var(&caseIDs, "case-id", "Initial Iteration Case `ID` (repeat exactly once per selected Case)")
+	if ok, code := parseCommandFlags(flags, args); !ok {
+		return code
+	}
+	if flags.NArg() != 0 || *workspaceRoot == "" || len(caseIDs) == 0 {
+		_, _ = fmt.Fprintln(stderr, "workspace migrate-iteration-cases: --workspace PATH and repeated --case-id ID are required")
+		return 2
+	}
+	workspace, err := optimizationworkspace.Open(*workspaceRoot)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: open Workspace: %v\n", err)
+		return 2
+	}
+	lock, err := instance.AcquireLock(workspace.LockPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: the daemon must be stopped: %v\n", err)
+		return 1
+	}
+	defer lock.Close()
+	engine, err := symphony.Open(ctx, workspace.DatabasePath, symphony.Options{AllowIterationCaseMigration: true})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: open state: %v\n", err)
+		return 1
+	}
+	defer engine.Close()
+	result, err := engine.MigrateIterationCases(ctx, []string(caseIDs))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: %v\n", err)
+		return 1
+	}
+	if *jsonOutput {
+		if err := json.NewEncoder(stdout).Encode(result); err != nil {
+			_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: encode output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	_, _ = fmt.Fprintf(stdout, "Initialized Iteration Case Set v%d with %d Cases in %s\n", result.Version, len(result.CaseIDs), workspace.Root)
+	return 0
 }
 
 func runWorkspaceLegacyList(ctx context.Context, args []string, stdout, stderr io.Writer) int {

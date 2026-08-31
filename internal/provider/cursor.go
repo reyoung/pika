@@ -121,9 +121,6 @@ func (adapter CursorAdapter) PrepareSession(_ context.Context, activation Sessio
 	if len(activation.SystemPrompt) == 0 {
 		return Launch{}, errors.New("frozen System Prompt is required")
 	}
-	if strings.TrimSpace(activation.InitialPrompt) == "" {
-		return Launch{}, errors.New("Cursor initial prompt is required")
-	}
 	if activation.AgentSessionID == "" || filepath.Base(activation.AgentSessionID) != activation.AgentSessionID || activation.AgentSessionID == "." {
 		return Launch{}, errors.New("safe Pika Agent Session identity is required")
 	}
@@ -172,10 +169,13 @@ func (adapter CursorAdapter) PrepareSession(_ context.Context, activation Sessio
 	environment["PIKA_CURSOR_MODEL"] = parameterizedModel
 	environment["PIKA_CURSOR_WORKSPACE"] = activation.Repository
 	environment["PIKA_CURSOR_ARGS_FILE"] = filepath.Join(sessionDir, "cursor.args")
-	environment["PIKA_CURSOR_INITIAL_PROMPT"] = activation.InitialPrompt
+	handlesInitialPrompt := activation.InitialPrompt != ""
+	if handlesInitialPrompt {
+		environment["PIKA_CURSOR_INITIAL_PROMPT"] = activation.InitialPrompt
+	}
 	environment["PIKA_CURSOR_SYSTEM_PROMPT_PATH"] = filepath.Join(sessionDir, "system-prompt.md")
 	environment["PIKA_GO_EXECUTABLE"] = adapter.options.PikaExecutable
-	return Launch{AgentKind: "cursor", Environment: environment, EphemeralPath: sessionDir, StartupTimeout: 2 * time.Minute, HandlesInitialPrompt: true, ReturnOnLaunch: true, Cleanup: func() error {
+	return Launch{AgentKind: "cursor", Environment: environment, EphemeralPath: sessionDir, StartupTimeout: 2 * time.Minute, HandlesInitialPrompt: handlesInitialPrompt, ReturnOnLaunch: handlesInitialPrompt, Cleanup: func() error {
 		return CleanupCursorSession(adapter.options.RuntimeRoot, activation.AgentSessionID)
 	}}, nil
 }
@@ -257,7 +257,7 @@ func renderCursorWrapper(cursorExecutable string) string {
 		"for pika_arg in \"$@\"; do\n" +
 		"  case \"$pika_arg\" in --resume|--resume=*|--continue|resume|ls) echo 'pika-go: native Cursor resume is disabled' >&2; exit 64;; esac\n" +
 		"done\n" +
-		": \"${PIKA_CURSOR_ARGS_FILE:?}\" \"${PIKA_CURSOR_WORKSPACE:?}\" \"${PIKA_CURSOR_MODEL:?}\" \"${PIKA_CURSOR_INITIAL_PROMPT:?}\"\n" +
+		": \"${PIKA_CURSOR_ARGS_FILE:?}\" \"${PIKA_CURSOR_WORKSPACE:?}\" \"${PIKA_CURSOR_MODEL:?}\"\n" +
 		"pika_cursor_sandbox_policy=\n" +
 		"while IFS= read -r pika_arg || [ -n \"$pika_arg\" ]; do\n" +
 		"  case \"$pika_arg\" in --yolo|--sandbox|--sandbox=*) pika_cursor_sandbox_policy=explicit;; esac\n" +
@@ -266,7 +266,10 @@ func renderCursorWrapper(cursorExecutable string) string {
 		"if [ -z \"$pika_cursor_sandbox_policy\" ]; then\n" +
 		"  set -- \"$@\" --yolo\n" +
 		"fi\n" +
-		"set -- \"$@\" --workspace \"$PIKA_CURSOR_WORKSPACE\" --model \"$PIKA_CURSOR_MODEL\" \"$PIKA_CURSOR_INITIAL_PROMPT\"\n" +
+		"set -- \"$@\" --workspace \"$PIKA_CURSOR_WORKSPACE\" --model \"$PIKA_CURSOR_MODEL\"\n" +
+		"if [ -n \"${PIKA_CURSOR_INITIAL_PROMPT:-}\" ]; then\n" +
+		"  set -- \"$@\" \"$PIKA_CURSOR_INITIAL_PROMPT\"\n" +
+		"fi\n" +
 		"exec " + shellQuote(cursorExecutable) + " \"$@\"\n"
 }
 

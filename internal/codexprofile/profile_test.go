@@ -114,7 +114,7 @@ func TestInstallCreatesOwnedOverlayAndInstanceWrapper(t *testing.T) {
 		t.Fatalf("wrapper mode = %v, err = %v", info, err)
 	}
 	command := exec.Command(filepath.Join(instanceBin, "codex"))
-	command.Env = append(os.Environ(), "PIKA_AGENT_MODEL=gpt-test", "PIKA_AGENT_REASONING_EFFORT=xhigh", `PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML="role prompt\\ncontext"`, "PIKA_CODEX_INITIAL_PROMPT=initial prompt", "PIKA_CODEX_BYPASS_HOOK_TRUST=1")
+	command.Env = append(os.Environ(), "PIKA_AGENT_MODEL=gpt-test", "PIKA_AGENT_REASONING_EFFORT=xhigh", `PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML="role prompt\\ncontext"`, "PIKA_CODEX_INITIAL_PROMPT=initial prompt")
 	output, err := command.Output()
 	if err != nil {
 		t.Fatalf("run wrapper: %v", err)

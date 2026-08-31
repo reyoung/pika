@@ -37,10 +37,10 @@ var publicCommandHelp = map[string]commandHelp{
 		summary:  "Resume Agent scheduling and continue active Agent Sessions",
 	},
 	"workspace": {
-		synopsis: "workspace legacy-list [options]\n  pika-go workspace import --instance ID --workspace PATH [options]",
-		summary:  "Discover or explicitly import pre-Workspace Pika-Go instances",
-		details:  "Import requires the legacy daemon to be stopped. It copies configuration, SQLite state, artifacts, and linked worktrees without modifying the legacy checkout.",
-		examples: []string{"pika-go workspace legacy-list", "pika-go workspace import --instance 8d76435fbf94 --workspace ../kernel-pika-workspace"},
+		synopsis: "workspace legacy-list [options]\n  pika-go workspace import --instance ID --workspace PATH [options]\n  pika-go workspace migrate-iteration-cases --workspace PATH --case-id ID ...",
+		summary:  "Inspect or explicitly migrate Optimization Workspaces",
+		details:  "Import and Iteration Case migration require the daemon to be stopped. Iteration Case migration is required only for legacy Optimizing workspaces and accepts exactly min(10, Full Case Set size) unique case IDs.",
+		examples: []string{"pika-go workspace legacy-list", "pika-go workspace import --instance 8d76435fbf94 --workspace ../kernel-pika-workspace", "pika-go workspace migrate-iteration-cases --workspace ../kernel-pika-workspace --case-id case-a --case-id case-b"},
 	},
 	"status": {
 		synopsis: "status [options]",

@@ -209,9 +209,8 @@ func renderWrapper(codexExecutable string) string {
 		"if [ -n \"${PIKA_AGENT_MODEL:-}\" ]; then\n" +
 		"  set -- --model \"${PIKA_AGENT_MODEL}\" \"$@\"\n" +
 		"fi\n" +
-		"if [ \"${PIKA_CODEX_BYPASS_HOOK_TRUST:-}\" = 1 ]; then\n" +
-		"  set -- --dangerously-bypass-hook-trust \"$@\"\n" +
-		"fi\n" +
+		"# Pika owns and vets the managed automation hooks used by these Sessions.\n" +
+		"set -- --dangerously-bypass-hook-trust \"$@\"\n" +
 		"# Pika Agents are unattended optimization workers; --yolo is the default sandbox policy.\n" +
 		"set -- --yolo \"$@\"\n" +
 		"set -- --profile " + ProfileName + " \"$@\"\n" +

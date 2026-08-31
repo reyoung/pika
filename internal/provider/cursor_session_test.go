@@ -98,6 +98,47 @@ func TestCursorPrepareSessionCreatesPrivateStateAndShellSafeLaunch(t *testing.T)
 	}
 }
 
+func TestCursorPrepareSessionCanWaitForOperatorPrompt(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	realCursor := filepath.Join(root, "real-cursor-agent")
+	if err := os.WriteFile(realCursor, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pikaExecutable := filepath.Join(root, "pika-go")
+	if err := os.WriteFile(pikaExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := provider.NewCursorAdapter(provider.CursorOptions{
+		Executable: realCursor, RuntimeRoot: filepath.Join(root, "runtime"),
+		InstanceBin: filepath.Join(root, "runtime", "bin"), PikaExecutable: pikaExecutable,
+	})
+	launch, err := adapter.PrepareSession(context.Background(), provider.SessionActivation{
+		AgentSessionID: "operator-session", Repository: filepath.Join(root, "repo"),
+		Configuration: provider.AgentConfiguration{Kind: "cursor", Model: "auto"},
+		SystemPrompt:  []byte("system prompt"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.HandlesInitialPrompt || launch.ReturnOnLaunch || launch.Environment["PIKA_CURSOR_INITIAL_PROMPT"] != "" {
+		t.Fatalf("operator-driven launch = %+v", launch)
+	}
+	command := exec.Command(filepath.Join(root, "runtime", "bin", "cursor-agent"))
+	command.Env = os.Environ()
+	for key, value := range launch.Environment {
+		command.Env = append(command.Env, key+"="+value)
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run Cursor wrapper without initial prompt: %v: %s", err, output)
+	}
+	want := strings.Join([]string{"--yolo", "--workspace", filepath.Join(root, "repo"), "--model", "auto"}, "\n")
+	if strings.TrimSpace(string(output)) != want {
+		t.Fatalf("argv:\n%s\nwant:\n%s", output, want)
+	}
+}
+
 func TestCursorPrepareSessionUsesAutoRoutingWithoutReasoningEffort(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

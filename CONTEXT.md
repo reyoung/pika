@@ -28,6 +28,10 @@ _Avoid_: Baseline commit, Definition SHA, Development Baseline
 The independent evaluation of one Baseline Revision that either accepts it or requests a new revision.
 _Avoid_: Review, smoke test
 
+**Full Case Set**:
+The Baseline-frozen universe of benchmark Case identities that Baseline Verification and Integration must cover exactly.
+_Avoid_: Iteration cases, sampled cases
+
 **Best**:
 The currently accepted implementation and evidence against which new Attempts are evaluated.
 _Avoid_: Latest, winner
@@ -42,9 +46,21 @@ _Avoid_: Agent session, pane, trial run
 One execution of an Attempt against a particular Best and Baseline Revision. A stale result or Back-off creates another round without rewriting earlier history.
 _Avoid_: Retry, resumed session
 
+**Iteration Case Set**:
+The Optimization-level ordered, monotonic subset of the Full Case Set used to bound Iteration cost; it starts with at most ten deterministically sampled Cases and may only grow.
+_Avoid_: Full Case Set, validation cases
+
+**Iteration Case Snapshot**:
+The immutable copy of the Iteration Case Set assigned to one Iteration Round when that Round is created.
+_Avoid_: Live case set, mutable selection
+
 **Integration**:
 The serialized evaluation that decides whether an Attempt may update Best.
 _Avoid_: Merge, verification
+
+**Regression Case**:
+A member of the Full Case Set for which a rejected Integration supplies case-specific evidence of a correctness or performance violation of the frozen gates.
+_Avoid_: Infrastructure failure, measurement noise
 
 **Work**:
 A durable unit of optimization activity assigned one Role and completed only by that Role's terminal operation.

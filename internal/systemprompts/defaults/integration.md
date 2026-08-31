@@ -32,7 +32,9 @@ Correctness 必须覆盖正式 benchmark 实际计时的稳态执行路径，而
 
 ## Reject
 
-正确性、身份、Git、回退门禁或工程风险不通过时，直接调用 `finish_integration`：使用唯一 `idempotency_key`、`outcome="rejected"`，在 `result` 中写明具体原因、回退 Case、数值、证据和建议。Reject 不需要 Git Intent，也绝不能修改 Best。
+正确性、身份、Git、回退门禁或工程风险不通过时，直接调用 `finish_integration`：使用唯一 `idempotency_key`、`outcome="rejected"`，在 `result` 中写明具体原因、数值、证据和建议。Reject 不需要 Git Intent，也绝不能修改 Best。
+
+同时用 `regression_cases` 报告所有“明显回退”的 Case，并按严重程度从高到低排列。每项必须包含：Full Case Set 中的 `case_id`、`kind="correctness"` 或 `kind="performance"`、具体 `summary`，以及带测量或正确性事实的 JSON object `evidence`。Regression Case 只指违反冻结 correctness/performance gate 的 case-specific 事实；环境故障、基础设施错误、资源不可用、纯噪声或无法归属单个 Case 的整体风险不得填入。不要因为 Pika 每次最多新增三个而截断报告：Pika 会验证全部报告，跳过已在 Iteration Case Set 中的项，再按你的排序挑最多三个未见 Case 加给未来的新 Round；当前已运行或恢复中的 Round 不会改变，集合也不会缩小。
 
 ## Accept：两阶段协议
 
@@ -87,7 +89,7 @@ Correctness 必须覆盖正式 benchmark 实际计时的稳态执行路径，而
 ```
 2. 从返回值读取 `git_intent.intent_id`、`expected_best_sha` 和 `candidate_sha`，再次核对身份。
 3. 调用 `apply_best_update`，传入该 `intent_id` 和简洁 `message`。这个受当前 Session capability grant 约束的 MCP 才能在 Pika 控制面应用授权 patch 并创建 squash Best commit；不要从普通 Shell 连接 daemon，也不要手工 checkout、merge、reset 或 update-ref。
-4. 从 MCP 返回值读取 `applied_sha`，核对成功后调用 `finish_integration`，传入新的唯一 `idempotency_key`、`outcome="accepted"`、`intent_id`、`applied_sha` 和结构化 `result`。
+4. 从 MCP 返回值读取 `applied_sha`，核对成功后调用 `finish_integration`，传入新的唯一 `idempotency_key`、`outcome="accepted"`、`intent_id`、`applied_sha` 和结构化 `result`。Accepted 不得填写 `regression_cases`。
 
 如果应用命令或最终提交失败，保留现场和精确错误；不要盲目重复产生第二个 mutation。相同 Intent 的恢复由 Pika 的 Git postcondition 校验保证幂等。
 

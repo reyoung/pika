@@ -259,7 +259,7 @@ func TestGracefulShutdownWaitsForRealHerdrAgentTerminalMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent := waitForNamedAgent(t, ctx, client, "")
-	waitForPaneText(t, ctx, client, agent.PaneID, "FAKE_AGENT_PROMPT")
+	assertPaneLacksText(t, ctx, client, agent.PaneID, "FAKE_AGENT_PROMPT")
 	if _, err := control.Shutdown(ctx, pikaSocket, protocol.ShutdownRequest{Mutation: protocol.Mutation{RequestID: "shutdown"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestDaemonProcessCrashReplacesRunningHerdrAgentAndRecoversWork(t *testing.T
 	if _, err := herdr.NewRuntime(client).GetAgent(ctx, oldAgent.PaneID); err == nil {
 		t.Fatalf("old Agent still owns pane %s after recovery", oldAgent.PaneID)
 	}
-	waitForPaneText(t, ctx, client, replacement.PaneID, "FAKE_AGENT_PROMPT")
+	assertPaneLacksText(t, ctx, client, replacement.PaneID, "FAKE_AGENT_PROMPT")
 	if _, err := control.Shutdown(ctx, pikaSocket, protocol.ShutdownRequest{Mutation: protocol.Mutation{RequestID: "shutdown"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,7 @@ func TestDaemonProcessCrashAtDispatchingOutboxReconcilesWithoutDuplicateAgent(t 
 	if pikaAgents != 1 {
 		t.Fatalf("recovered outbox has %d Pika Agents, want 1: %+v", pikaAgents, snapshot.Agents)
 	}
-	waitForPaneText(t, ctx, client, replacement.PaneID, "FAKE_AGENT_PROMPT")
+	assertPaneLacksText(t, ctx, client, replacement.PaneID, "FAKE_AGENT_PROMPT")
 	if _, err := control.Shutdown(ctx, pikaSocket, protocol.ShutdownRequest{Mutation: protocol.Mutation{RequestID: "shutdown"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -643,6 +643,7 @@ func TestDaemonProcessCrashAfterTerminalCommitRecoversSingleSuccessor(t *testing
 		draftSession = session
 		return session.Status == symphony.AgentSessionRunning && binding.TerminalID != ""
 	})
+	promptInitialBaselineFixture(t, ctx, client)
 	terminalRequestID := "fake-baseline-submit-" + draftSession.ID
 	var crashStdout, crashStderr bytes.Buffer
 	if code := testdriver.Run(ctx, []string{
@@ -777,6 +778,7 @@ func TestDaemonProcessCrashAfterBestGitCommitRecoversIntegrationOnce(t *testing.
 	}); err != nil {
 		t.Fatal(err)
 	}
+	promptInitialBaselineFixture(t, ctx, client)
 	if code := <-driverDone; code != 0 {
 		t.Fatalf("Git crash driver exit=%d stdout=%q stderr=%q daemon=%s Herdr=%s", code, crashStdout.String(), crashStderr.String(), daemon.output.String(), serverOutput.String())
 	}
@@ -924,6 +926,7 @@ func TestBaselineAcceptedEndToEndThroughMCP(t *testing.T) {
 	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository)}); err != nil {
 		t.Fatalf("init: %v", err)
 	}
+	promptInitialBaselineFixture(t, ctx, client)
 	deadline := time.Now().Add(15 * time.Second)
 	var view symphony.View
 	for time.Now().Before(deadline) {
@@ -1033,6 +1036,7 @@ func TestFollowUpThroughRealHerdr(t *testing.T) {
 	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository)}); err != nil {
 		t.Fatal(err)
 	}
+	promptInitialBaselineFixture(t, ctx, client)
 	var target symphony.WorkView
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -1070,6 +1074,7 @@ func TestFollowUpThroughRealHerdr(t *testing.T) {
 	if targetSession.ID == "" {
 		t.Fatal("target Agent Session did not bind")
 	}
+	waitForHerdrAgentStatus(t, ctx, client, targetSession.AgentName, "idle")
 	hook := json.RawMessage(`{"session_id":"fake-provider-session","turn_id":"fake-stopped-turn","hook_event_name":"Stop","last_assistant_message":"waiting for guidance"}`)
 	if err := control.IngestProviderEvent(ctx, pikaSocket, "codex", protocol.ProviderEventRequest{AgentSessionID: targetSession.ID, Event: hook}); err != nil {
 		t.Fatal(err)
@@ -1155,6 +1160,7 @@ func TestRejectedBaselineCreatesFreshDraftSession(t *testing.T) {
 	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository)}); err != nil {
 		t.Fatalf("init: %v", err)
 	}
+	promptInitialBaselineFixture(t, ctx, client)
 	deadline := time.Now().Add(15 * time.Second)
 	var view symphony.View
 	for time.Now().Before(deadline) {
@@ -1230,6 +1236,7 @@ func TestOptimizationFIFOThroughRealHerdr(t *testing.T) {
 	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository)}); err != nil {
 		t.Fatalf("init: %v", err)
 	}
+	promptInitialBaselineFixture(t, ctx, client)
 	deadline := time.Now().Add(100 * time.Second)
 	var view symphony.View
 	for time.Now().Before(deadline) {
@@ -1523,6 +1530,31 @@ func waitForNamedAgent(t *testing.T, ctx context.Context, client *herdr.Client, 
 	}
 	t.Fatal("managed agent did not appear")
 	return herdr.Agent{}
+}
+
+func promptInitialBaselineFixture(t *testing.T, ctx context.Context, client *herdr.Client) herdr.Agent {
+	t.Helper()
+	agent := waitForNamedAgent(t, ctx, client, "")
+	if _, err := herdr.NewRuntime(client).Prompt(ctx, agent.PaneID, "operator baseline configuration"); err != nil {
+		t.Fatalf("prompt initial Baseline fixture: %v", err)
+	}
+	waitForPaneText(t, ctx, client, agent.PaneID, "FAKE_AGENT_PROMPT")
+	return agent
+}
+
+func assertPaneLacksText(t *testing.T, ctx context.Context, client *herdr.Client, paneID, text string) {
+	t.Helper()
+	var result struct {
+		Read struct {
+			Text string `json:"text"`
+		} `json:"read"`
+	}
+	if err := client.Call(ctx, "pane.read", map[string]any{"pane_id": paneID, "source": "recent", "lines": 100, "format": "text"}, &result); err != nil {
+		t.Fatalf("read pane %s: %v", paneID, err)
+	}
+	if strings.Contains(result.Read.Text, text) {
+		t.Fatalf("pane %s unexpectedly contained %q: text=%q", paneID, text, result.Read.Text)
+	}
 }
 
 func waitForHerdrAgentStatus(t *testing.T, ctx context.Context, client *herdr.Client, target, want string) {

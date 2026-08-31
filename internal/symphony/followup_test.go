@@ -292,7 +292,7 @@ func TestIntegrationFollowUpExhaustionRejectsWithoutAdvancingBest(t *testing.T) 
 	iteration := pendingWorksByRole(before, symphony.RoleIteration)[0]
 	if _, err := engine.Apply(ctx, symphony.FinishIteration{
 		Meta: symphony.CommandMeta{RequestID: "candidate-for-exhaustion"}, WorkID: iteration.ID,
-		Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-sha", Summary: "candidate awaiting Integration",
+		Outcome: symphony.IterationCandidate, CandidateSHA: "candidate-sha", Summary: "candidate awaiting Integration", Evidence: validBenchmarkEvidence(),
 	}); err != nil {
 		t.Fatal(err)
 	}

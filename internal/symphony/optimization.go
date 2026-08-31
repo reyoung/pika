@@ -18,6 +18,9 @@ func (e *Engine) seedOptimization(ctx context.Context, tx *sql.Tx, optimizationI
 		(id, optimization_id, sequence, commit_sha, created_at) VALUES (?, ?, 0, ?, ?)`, e.newID(), optimizationID, bestSHA, now); err != nil {
 		return fmt.Errorf("create initial best revision: %w", err)
 	}
+	if err := seedIterationCaseSet(ctx, tx, optimizationID, baselineID, now); err != nil {
+		return err
+	}
 	var concurrency int
 	if err := tx.QueryRowContext(ctx, `SELECT iteration_concurrency FROM optimizations WHERE id = ?`, optimizationID).Scan(&concurrency); err != nil {
 		return fmt.Errorf("read iteration concurrency: %w", err)
@@ -46,6 +49,9 @@ func (e *Engine) createIterationAttempt(ctx context.Context, tx *sql.Tx, optimiz
 		VALUES (?, ?, 1, ?, ?, 'running', ?, ?)`, roundID, attemptID, kind, bestSHA, nullable(backOffMessage), now); err != nil {
 		return fmt.Errorf("create iteration round: %w", err)
 	}
+	if err := snapshotIterationCaseSet(ctx, tx, optimizationID, attemptID, 1); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO works
 		(id, optimization_id, baseline_revision_id, role, status, generation, attempt_id, iteration_round, created_at)
 		VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?)`, workID, optimizationID, baselineID, RoleIteration, WorkPending, attemptID, now); err != nil {
@@ -60,6 +66,9 @@ func (e *Engine) applyFinishIteration(ctx context.Context, tx *sql.Tx, command F
 	}
 	if command.Outcome == IterationCandidate && command.CandidateSHA == "" {
 		return Receipt{}, domainError(CodeInvalidCommand, "candidate outcome requires candidate_sha")
+	}
+	if len(command.Evidence) != 0 && !json.Valid(command.Evidence) {
+		return Receipt{}, domainError(CodeInvalidCommand, "iteration evidence must be valid JSON")
 	}
 	optimization, err := readOptimization(ctx, tx)
 	if err != nil {
@@ -80,11 +89,27 @@ func (e *Engine) applyFinishIteration(ctx context.Context, tx *sql.Tx, command F
 	if role != RoleIteration || workStatus != WorkPending {
 		return Receipt{}, domainError(CodeInvalidTransition, "work is not an active iteration")
 	}
+	if command.Outcome == IterationCandidate {
+		if len(command.Evidence) == 0 {
+			return Receipt{}, domainError(CodeInvalidCommand, "candidate outcome requires evidence for its Iteration Case Snapshot")
+		}
+		caseSet, err := roundIterationCaseSet(ctx, tx, attemptID, round)
+		if err != nil {
+			return Receipt{}, err
+		}
+		var definition []byte
+		if err := tx.QueryRowContext(ctx, `SELECT definition_json FROM baseline_revisions WHERE id = ?`, baselineID).Scan(&definition); err != nil {
+			return Receipt{}, fmt.Errorf("read Baseline Definition for Iteration evidence: %w", err)
+		}
+		if err := benchmarkintegrity.ValidateIterationEvidence(definition, caseSet.CaseIDs, command.Evidence); err != nil {
+			return Receipt{}, domainError(CodeInvalidCommand, "invalid candidate Iteration evidence: "+err.Error())
+		}
+	}
 	now, receiptID := e.timestamp(), e.newID()
 	if _, err := tx.ExecContext(ctx, `UPDATE works SET status = ?, finished_at = ? WHERE id = ?`, WorkCompleted, now, command.WorkID); err != nil {
 		return Receipt{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE iteration_rounds SET status = ?, finished_at = ? WHERE attempt_id = ? AND round = ?`, command.Outcome, now, attemptID, round); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE iteration_rounds SET status = ?, evidence_json = ?, finished_at = ? WHERE attempt_id = ? AND round = ?`, command.Outcome, nullableBytes(command.Evidence), now, attemptID, round); err != nil {
 		return Receipt{}, err
 	}
 	if command.Outcome == IterationCandidate {
@@ -263,6 +288,9 @@ func (e *Engine) refreshStaleAttempt(ctx context.Context, tx *sql.Tx, optimizati
 		(id, attempt_id, round, kind, base_sha, status, back_off_message, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`, e.newID(), attemptID, round, kind, bestSHA, nullable(message), now); err != nil {
 		return err
 	}
+	if err := snapshotIterationCaseSet(ctx, tx, optimizationID, attemptID, round); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -370,6 +398,12 @@ func (e *Engine) applyFinishIntegration(ctx context.Context, tx *sql.Tx, command
 	if len(command.Result) != 0 && !json.Valid(command.Result) {
 		return Receipt{}, domainError(CodeInvalidCommand, "integration result must be valid JSON")
 	}
+	if command.Outcome != IntegrationRejected && len(command.RegressionCases) != 0 {
+		return Receipt{}, domainError(CodeInvalidCommand, "regression_cases are allowed only for a rejected Integration")
+	}
+	if err := validateRegressionCases(command.RegressionCases); err != nil {
+		return Receipt{}, err
+	}
 	optimization, err := readOptimization(ctx, tx)
 	if err != nil {
 		return Receipt{}, err
@@ -386,6 +420,11 @@ func (e *Engine) applyFinishIntegration(ctx context.Context, tx *sql.Tx, command
 		return Receipt{}, domainError(CodeInvalidTransition, "work is not active integration")
 	}
 	now, receiptID := e.timestamp(), e.newID()
+	iterationCaseSet, err := currentIterationCaseSet(ctx, tx, optimization.ID)
+	if err != nil {
+		return Receipt{}, err
+	}
+	var addedIterationCaseIDs []string
 	if command.Outcome == IntegrationAccepted {
 		if integrationStatus != "best_update_prepared" || command.ObservedBestSHA != expectedBestSHA || command.AppliedSHA == "" {
 			return Receipt{}, domainError(CodeInvalidTransition, "accepted integration does not satisfy the prepared Git intent")
@@ -406,6 +445,18 @@ func (e *Engine) applyFinishIntegration(ctx context.Context, tx *sql.Tx, command
 			return Receipt{}, err
 		}
 	} else if command.Outcome == IntegrationRejected {
+		var definition []byte
+		if err := tx.QueryRowContext(ctx, `SELECT definition_json FROM baseline_revisions WHERE id = ?`, baselineID).Scan(&definition); err != nil {
+			return Receipt{}, fmt.Errorf("read Baseline Definition for Regression Cases: %w", err)
+		}
+		fullCaseIDs, err := benchmarkintegrity.FullCaseIDs(definition)
+		if err != nil {
+			return Receipt{}, domainError(CodeStateCorrupt, "invalid accepted Baseline Definition: "+err.Error())
+		}
+		iterationCaseSet, addedIterationCaseIDs, err = appendIterationCases(ctx, tx, optimization.ID, integrationID, command.RegressionCases, fullCaseIDs, now)
+		if err != nil {
+			return Receipt{}, err
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE attempts SET status = 'rejected', failure_reason = 'integration_rejected', updated_at = ? WHERE id = ?`, now, attemptID); err != nil {
 			return Receipt{}, err
 		}
@@ -419,7 +470,7 @@ func (e *Engine) applyFinishIntegration(ctx context.Context, tx *sql.Tx, command
 			return Receipt{}, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE integrations SET status = ?, result_json = ?, finished_at = ? WHERE id = ?`, command.Outcome, nullableBytes(command.Result), now, integrationID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE integrations SET status = ?, result_json = ?, regression_cases_json = ?, finished_at = ? WHERE id = ?`, command.Outcome, nullableBytes(command.Result), nullableBytes(mustJSON(command.RegressionCases)), now, integrationID); err != nil {
 		return Receipt{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE works SET status = ?, finished_at = ? WHERE id = ?`, WorkCompleted, now, command.WorkID); err != nil {
@@ -440,7 +491,12 @@ func (e *Engine) applyFinishIntegration(ctx context.Context, tx *sql.Tx, command
 	if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET revision = ?, updated_at = ? WHERE id = ?`, nextRevision, now, optimization.ID); err != nil {
 		return Receipt{}, err
 	}
-	payload := mustJSON(map[string]any{"attempt_id": attemptID, "integration_id": integrationID, "outcome": command.Outcome})
+	payload := mustJSON(map[string]any{
+		"attempt_id": attemptID, "integration_id": integrationID, "outcome": command.Outcome,
+		"iteration_case_set_version": iterationCaseSet.Version,
+		"iteration_case_count":       len(iterationCaseSet.CaseIDs),
+		"added_iteration_case_ids":   addedIterationCaseIDs,
+	})
 	if err := insertEvent(ctx, tx, e.newID(), optimization.ID, nextRevision, "integration.finished", payload, now); err != nil {
 		return Receipt{}, err
 	}

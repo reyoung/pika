@@ -406,11 +406,12 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			return Invocation{}, forbidden("agent session is not active yet")
 		}
 		var input struct {
-			IdempotencyKey string                      `json:"idempotency_key"`
-			Outcome        symphony.IntegrationOutcome `json:"outcome"`
-			IntentID       string                      `json:"intent_id"`
-			AppliedSHA     string                      `json:"applied_sha"`
-			Result         json.RawMessage             `json:"result"`
+			IdempotencyKey  string                      `json:"idempotency_key"`
+			Outcome         symphony.IntegrationOutcome `json:"outcome"`
+			IntentID        string                      `json:"intent_id"`
+			AppliedSHA      string                      `json:"applied_sha"`
+			Result          json.RawMessage             `json:"result"`
+			RegressionCases []symphony.RegressionCase   `json:"regression_cases"`
 		}
 		if err := decodeArguments(call.Arguments, &input); err != nil {
 			return Invocation{}, err
@@ -440,7 +441,8 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			observedBest = stored.ExpectedBestSHA
 		}
 		command := symphony.FinishIntegration{Meta: symphony.CommandMeta{RequestID: input.IdempotencyKey}, WorkID: grant.WorkID,
-			Outcome: input.Outcome, Result: input.Result, ObservedBestSHA: observedBest, AppliedSHA: input.AppliedSHA}
+			Outcome: input.Outcome, Result: input.Result, RegressionCases: input.RegressionCases,
+			ObservedBestSHA: observedBest, AppliedSHA: input.AppliedSHA}
 		receipt, err := a.applyTerminal(ctx, grant, command)
 		if err != nil {
 			return Invocation{}, err
@@ -542,6 +544,23 @@ func toolByName(name string) (Tool, bool) {
 		requiredFields := append([]string{}, required...)
 		return map[string]any{"type": "object", "properties": properties, "required": requiredFields, "additionalProperties": false}
 	}
+	finishIterationSchema := object(map[string]any{
+		"idempotency_key": map[string]any{"type": "string", "minLength": 1},
+		"outcome":         map[string]any{"type": "string", "enum": []string{"candidate", "rejected"}},
+		"candidate_sha":   map[string]any{"type": "string"},
+		"summary":         map[string]any{"type": "string", "minLength": 1},
+		"evidence":        map[string]any{"type": "object"},
+	}, "idempotency_key", "outcome", "summary")
+	finishIterationSchema["allOf"] = []any{map[string]any{
+		"if":   map[string]any{"properties": map[string]any{"outcome": map[string]any{"const": "candidate"}}},
+		"then": map[string]any{"required": []string{"candidate_sha", "evidence"}, "properties": map[string]any{"evidence": benchmarkintegrity.EvidenceSchema()}},
+	}}
+	regressionCaseSchema := object(map[string]any{
+		"case_id":  map[string]any{"type": "string", "minLength": 1},
+		"kind":     map[string]any{"type": "string", "enum": []string{"correctness", "performance"}},
+		"summary":  map[string]any{"type": "string", "minLength": 1},
+		"evidence": map[string]any{"type": "object"},
+	}, "case_id", "kind", "summary", "evidence")
 	tools := map[string]Tool{
 		"submit_baseline_definition": {
 			Name: "submit_baseline_definition", Description: "Submit the immutable Baseline definition and complete this Work. The daemon requires benchmark_integrity schema_version 1.",
@@ -574,13 +593,8 @@ func toolByName(name string) (Tool, bool) {
 			}, "idempotency_key", "decision"),
 		},
 		"finish_iteration": {
-			Name: "finish_iteration", Description: "Submit a verified candidate or reject this Iteration Attempt.",
-			InputSchema: object(map[string]any{
-				"idempotency_key": map[string]any{"type": "string", "minLength": 1},
-				"outcome":         map[string]any{"type": "string", "enum": []string{"candidate", "rejected"}},
-				"candidate_sha":   map[string]any{"type": "string"}, "summary": map[string]any{"type": "string", "minLength": 1},
-				"evidence": map[string]any{},
-			}, "idempotency_key", "outcome", "summary"),
+			Name: "finish_iteration", Description: "Submit a verified candidate or reject this Iteration Attempt. Candidate evidence must exactly cover the Round-frozen Iteration Case Snapshot; rejected evidence may be incomplete.",
+			InputSchema: finishIterationSchema,
 		},
 		"prepare_best_update": {
 			Name: "prepare_best_update", Description: "Validate Integration evidence and issue a bounded Git intent. Requires benchmark_integrity and performance_claim schema_version 1; >=10x claims require independent_retest.",
@@ -594,10 +608,11 @@ func toolByName(name string) (Tool, bool) {
 			}, "intent_id"),
 		},
 		"finish_integration": {
-			Name: "finish_integration", Description: "Complete Integration after verified Git postconditions, or reject it.",
+			Name: "finish_integration", Description: "Complete Integration after verified Git postconditions, or reject it. On rejection, report every obvious case-specific correctness/performance regression in descending severity; Pika appends at most three previously unseen Cases for future Iteration Rounds.",
 			InputSchema: object(map[string]any{
 				"idempotency_key": map[string]any{"type": "string", "minLength": 1}, "outcome": map[string]any{"type": "string", "enum": []string{"accepted", "rejected"}},
 				"intent_id": map[string]any{"type": "string"}, "applied_sha": map[string]any{"type": "string"}, "result": map[string]any{},
+				"regression_cases": map[string]any{"type": "array", "items": regressionCaseSchema},
 			}, "idempotency_key", "outcome"),
 		},
 		"submit_followup_message": {

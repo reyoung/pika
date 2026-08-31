@@ -185,6 +185,13 @@ func agentConfigRole(role symphony.WorkRole) string {
 }
 
 func kickoffPrompt(work symphony.RuntimeWork) string {
+	// The first Baseline Draft is the operator's entry point into a new
+	// Optimization. Leave its User Turn empty so the operator can describe the
+	// target, cases, oracle, and measurement protocol before the Agent acts.
+	// Recovery drafts and successor Baselines remain autonomous.
+	if work.Work.Role == symphony.RoleBaselineDraft && work.BaselineNumber == 1 && work.Work.Generation == 1 {
+		return ""
+	}
 	return fmt.Sprintf("开始 Pika Work `%s`。先按 System Prompt 完整读取并核对只读 Context Bundle，再开始工作；完成时必须调用 `%s`。",
 		work.Work.ID, terminalOperation(work.Work.Role))
 }

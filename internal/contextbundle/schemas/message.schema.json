@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://pika-go.local/schemas/message-v2.json",
+  "$id": "https://pika-go.local/schemas/message-v3.json",
   "title": "Pika Session Context Message Record",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "sequence", "turn", "tools", "tool_supplements"],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "sequence": {"type": "integer", "minimum": 1},
     "turn": {"$ref": "#/$defs/turn"},
     "tools": {"type": "array", "items": {"$ref": "#/$defs/tool"}},

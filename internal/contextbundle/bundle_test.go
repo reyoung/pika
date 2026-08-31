@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -156,13 +157,15 @@ func TestMaterializeFreezesRecentAttemptSummariesAndDetailedHistory(t *testing.T
 	store := &staticContextStore{projection: symphony.ContextProjection{
 		Session: session,
 		View: symphony.View{Optimization: symphony.OptimizationView{ID: "optimization", Status: symphony.OptimizationOptimizing, Revision: 1,
-			Repository: "/repo", IterationConcurrency: 1, MaxPendingAttempts: 1, IterationHistoryLimit: 2}},
+			Repository: "/repo", IterationConcurrency: 1, MaxPendingAttempts: 1, IterationHistoryLimit: 2},
+			IterationCaseSet: &symphony.IterationCaseSetView{Version: 1, CaseIDs: []string{"case-1"}}},
 		TargetWork: symphony.RuntimeWork{Work: symphony.WorkView{ID: "current-work", Role: symphony.RoleIteration, AttemptID: "current", IterationRound: 2},
-			OptimizationID: "optimization", OptimizationRepository: "/repo", Repository: "/attempt", IterationHistoryLimit: 2},
+			OptimizationID: "optimization", OptimizationRepository: "/repo", Repository: "/attempt", IterationHistoryLimit: 2,
+			IterationCaseSet: &symphony.IterationCaseSetView{Version: 1, CaseIDs: []string{"case-1"}}},
 		GeneratorWork: symphony.WorkView{ID: "current-work", Role: symphony.RoleIteration, AttemptID: "current", IterationRound: 2},
 		PreviousRound: &symphony.RoundHistoryProjection{
 			Work:    symphony.WorkView{ID: "previous-work", Role: symphony.RoleIteration, Status: symphony.WorkCompleted, AttemptID: "current", IterationRound: 1},
-			Round:   symphony.IterationRoundView{AttemptID: "current", Round: 1, Kind: "initial", BaseSHA: "base", Status: "candidate"},
+			Round:   symphony.IterationRoundView{AttemptID: "current", Round: 1, Kind: "initial", BaseSHA: "base", Status: "candidate", IterationCaseSetVersion: 1},
 			Journal: symphony.ConversationJournalView{Turns: []symphony.ConversationTurnView{{ID: "previous-turn", Provider: "codex", AgentSessionID: "previous-session", ProviderSessionID: "native-previous", ProviderTurnID: "previous", Status: "completed", StartedAt: "2026-01-01T00:00:00Z", AssistantMessage: "complete previous round"}}},
 		},
 		AttemptHistories: []symphony.AttemptHistoryProjection{
@@ -186,6 +189,9 @@ func TestMaterializeFreezesRecentAttemptSummariesAndDetailedHistory(t *testing.T
 	}
 	if document.Iteration == nil || document.Iteration.HistoryLimit != 2 || len(document.Iteration.RecentTerminalAttempts) != 2 {
 		t.Fatalf("iteration context = %+v", document.Iteration)
+	}
+	if document.Iteration.RequiredCaseSet.Version != 1 || !slices.Equal(document.Iteration.RequiredCaseSet.CaseIDs, []string{"case-1"}) {
+		t.Fatalf("required Iteration Case Snapshot = %+v", document.Iteration.RequiredCaseSet)
 	}
 	if document.Iteration.PreviousRound == nil || document.Iteration.PreviousRound.Messages.Records != 1 {
 		t.Fatalf("previous Round context = %+v", document.Iteration.PreviousRound)

@@ -79,6 +79,7 @@ func TestPrepareBestUpdateRejectsTenXWithoutIndependentRetest(t *testing.T) {
 		Outcome:      symphony.IterationCandidate,
 		CandidateSHA: "ten-x-sha",
 		Summary:      "claims ten times faster",
+		Evidence:     validBenchmarkEvidence(),
 	}); err != nil {
 		t.Fatal(err)
 	}

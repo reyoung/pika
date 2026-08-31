@@ -45,8 +45,8 @@ func TestPreparationFreezesInstructionForOneSession(t *testing.T) {
 	if !strings.Contains(first.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], "你是 Pika 的 Baseline Draft Agent") {
 		t.Fatalf("immutable Role System Prompt was not delivered through Codex developer instructions: %+v", first.Environment)
 	}
-	if first.Prompt != "" || !strings.Contains(first.Environment["PIKA_CODEX_INITIAL_PROMPT"], "开始 Pika Work") || !first.ReturnOnLaunch {
-		t.Fatalf("Codex initial prompt was not made launch-durable: %+v", first)
+	if first.Prompt != "" || first.Environment["PIKA_CODEX_INITIAL_PROMPT"] != "" || first.ReturnOnLaunch {
+		t.Fatalf("first Baseline Draft did not wait for operator input: %+v", first)
 	}
 	if strings.Contains(first.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], "用户追加 Instructions") {
 		t.Fatalf("empty default instruction created an overlay: %s", first.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"])
@@ -103,6 +103,9 @@ func TestPreparationFreezesInstructionForOneSession(t *testing.T) {
 		!strings.Contains(fresh.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], "## 用户追加 Instructions") ||
 		!strings.Contains(fresh.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"], "changed after session creation") {
 		t.Fatalf("fresh session did not combine immutable System Prompt and current user instructions: %s", fresh.Environment["PIKA_CODEX_DEVELOPER_INSTRUCTIONS_TOML"])
+	}
+	if fresh.Prompt != "" || !strings.Contains(fresh.Environment["PIKA_CODEX_INITIAL_PROMPT"], "开始 Pika Work") || !fresh.ReturnOnLaunch {
+		t.Fatalf("recovery Baseline Draft did not retain autonomous kickoff: %+v", fresh)
 	}
 	if fresh.Environment["PIKA_CONTEXT_PATH"] == contextPath {
 		t.Fatal("fresh Agent Session reused the previous Session Context Bundle path")

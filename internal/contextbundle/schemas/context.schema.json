@@ -1,16 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://pika-go.local/schemas/context-v2.json",
+  "$id": "https://pika-go.local/schemas/context-v3.json",
   "title": "Pika Agent Session Context",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "session", "optimization", "attempts", "iteration_rounds", "integrations", "back_offs", "work", "generator_work", "terminal_operation", "messages"],
   "properties": {
-    "schema_version": {"const": 2},
+    "schema_version": {"const": 3},
     "session": {"$ref": "#/$defs/session"},
     "optimization": {"$ref": "#/$defs/optimization"},
     "baseline": {"$ref": "#/$defs/baseline"},
     "best": {"$ref": "#/$defs/best"},
+    "iteration_case_set": {"$ref": "#/$defs/iteration_case_set"},
     "attempts": {"type": "array", "items": {"$ref": "#/$defs/attempt"}},
     "iteration_rounds": {"type": "array", "items": {"$ref": "#/$defs/round"}},
     "integrations": {"type": "array", "items": {"$ref": "#/$defs/integration"}},
@@ -21,9 +22,10 @@
     "messages": {"$ref": "#/$defs/file"},
     "iteration_context": {
       "type": "object", "additionalProperties": false,
-      "required": ["history_limit", "recent_terminal_attempts"],
+      "required": ["history_limit", "required_case_set", "recent_terminal_attempts"],
       "properties": {
         "history_limit": {"type": "integer", "minimum": 0},
+        "required_case_set": {"$ref": "#/$defs/iteration_case_set"},
         "recent_terminal_attempts": {"type": "array", "items": {"$ref": "#/$defs/attempt_history"}},
         "previous_round": {"$ref": "#/$defs/round_history"}
       }
@@ -52,14 +54,16 @@
       "base_sha": {"type": "string"}, "current_iteration_round": {"type": "integer"}, "candidate_sha": {"type": "string"},
       "summary": {"type": "string"}, "failure_reason": {"type": "string"}, "history_limit": {"type": "integer", "minimum": 0}
     }},
-    "round": {"type": "object", "additionalProperties": false, "required": ["attempt_id", "round", "kind", "base_sha", "status"], "properties": {
+    "round": {"type": "object", "additionalProperties": false, "required": ["attempt_id", "round", "kind", "base_sha", "status", "iteration_case_set_version"], "properties": {
       "attempt_id": {"type": "string"}, "round": {"type": "integer"}, "kind": {"type": "string"}, "base_sha": {"type": "string"},
-      "status": {"type": "string"}, "back_off_message": {"type": "string"}
+      "status": {"type": "string"}, "back_off_message": {"type": "string"},
+      "iteration_case_set_version": {"type": "integer", "minimum": 0}, "evidence": {}
     }},
     "integration": {"type": "object", "additionalProperties": false, "required": ["sequence", "fifo_position", "id", "attempt_id", "iteration_round", "status", "candidate_sha", "expected_best_sha"], "properties": {
       "sequence": {"type": "integer"}, "fifo_position": {"type": "integer"}, "id": {"type": "string"}, "attempt_id": {"type": "string"},
       "iteration_round": {"type": "integer"}, "status": {"type": "string"}, "candidate_sha": {"type": "string"},
-      "expected_best_sha": {"type": "string"}, "intent_id": {"type": "string"}
+      "expected_best_sha": {"type": "string"}, "intent_id": {"type": "string"},
+      "regression_cases": {"type": "array", "items": {"$ref": "#/$defs/regression_case"}}
     }},
     "back_off": {"type": "object", "additionalProperties": false, "required": ["id", "source_work_id", "successor_baseline_revision_id", "message"], "properties": {
       "id": {"type": "string"}, "source_work_id": {"type": "string"}, "successor_baseline_revision_id": {"type": "string"}, "message": {"type": "string"}
@@ -81,7 +85,16 @@
       "git_intent_state": {"type": "string"}, "followup_target_work_id": {"type": "string"}, "followup_target_role": {"type": "string"},
       "followup_sequence": {"type": "integer"}, "followup_due_at": {"type": "string"}, "followup_max_messages": {"type": "integer"},
       "followup_generator_max_attempts": {"type": "integer"}, "followup_generator_attempt": {"type": "integer"},
-      "iteration_history_limit": {"type": "integer", "minimum": 0}
+      "iteration_history_limit": {"type": "integer", "minimum": 0},
+      "iteration_case_set": {"$ref": "#/$defs/iteration_case_set"}
+    }},
+    "iteration_case_set": {"type": "object", "additionalProperties": false, "required": ["version", "case_ids"], "properties": {
+      "version": {"type": "integer", "minimum": 1},
+      "case_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+    }},
+    "regression_case": {"type": "object", "additionalProperties": false, "required": ["case_id", "kind", "summary", "evidence"], "properties": {
+      "case_id": {"type": "string", "minLength": 1}, "kind": {"enum": ["correctness", "performance"]},
+      "summary": {"type": "string", "minLength": 1}, "evidence": {"type": "object"}
     }},
     "attempt_history": {"type": "object", "additionalProperties": false, "required": ["attempt", "messages", "summary"], "properties": {
       "attempt": {"$ref": "#/$defs/attempt"}, "messages": {"$ref": "#/$defs/file"}, "summary": {"$ref": "#/$defs/file"}
