@@ -41,7 +41,7 @@ Pika-Go is a Herdr plugin for long-running automatic optimization. A visible `pi
 3. Herdr owns runtime observation; Pika and terminal MCP own domain state.
 4. Every recovery starts a fresh Agent Session, even if Herdr or a provider exposes a native session ID.
 5. Roles, System Prompts, and scheduling are static. Users append optional Markdown instructions with `$EDITOR` and use declared `back-off` transitions when the workflow must move earlier.
-6. Baseline, Baseline Verification, and Integration are single-concurrency; Iteration concurrency is configurable; Integration is FIFO.
+6. Baseline, Baseline Verification, and Integration are single-concurrency; Iteration has one concurrent slot per independently configured Agent entry; Integration is FIFO.
 7. Follow-up is a dedicated Role with one Agent Configuration, multiple target-specific System Prompts, and matching user instruction overlays.
 8. Codex hooks capture session/turn/message/tool data. All observable shell and tool output is kept in SQLite.
 9. Follow-up inactivity defaults to five minutes and is reset from best-effort Herdr pane activity. `pane.updated` is deliberately accepted despite not being a strict human-input signal.

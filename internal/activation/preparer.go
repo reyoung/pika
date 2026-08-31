@@ -66,7 +66,7 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 		registry = provider.DefaultRegistry()
 	}
 	if p.AgentConfigPath != "" {
-		configured, err := configuration.LoadAgentWithRegistry(p.AgentConfigPath, agentConfigRole(session.Role), registry)
+		configured, err := configuration.LoadAgentForWorkWithRegistry(p.AgentConfigPath, agentConfigRole(session.Role), work.IterationSlotIndex, registry)
 		if err != nil {
 			return workruntime.Preparation{}, fmt.Errorf("load Agent configuration for %s: %w", session.Role, err)
 		}

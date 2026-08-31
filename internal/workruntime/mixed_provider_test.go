@@ -61,20 +61,33 @@ func (r *matrixRuntime) Close(_ context.Context, pane string) error {
 
 func TestMixedProviderRoleMatricesPreserveLifecycleAndIsolation(t *testing.T) {
 	matrices := []struct {
-		name   string
-		agents map[string]configuration.Agent
+		name           string
+		agents         map[string]configuration.Agent
+		iterationKinds []string
 	}{
 		{name: "cursor-codex-cursor-codex-cursor", agents: matrixAgents("cursor", "codex", "cursor", "codex", "cursor")},
 		{name: "codex-cursor-codex-cursor-codex", agents: matrixAgents("codex", "cursor", "codex", "cursor", "codex")},
+		{name: "independent-codex-cursor-iteration-slots", agents: matrixAgents("codex", "codex", "codex", "codex", "codex"), iterationKinds: []string{"codex", "cursor"}},
 	}
 	for _, matrix := range matrices {
 		t.Run(matrix.name, func(t *testing.T) {
-			runMixedProviderMatrix(t, matrix.agents)
+			iterationAgents := make([]configuration.Agent, 2)
+			for index := range iterationAgents {
+				iterationAgents[index] = matrix.agents["iteration"]
+			}
+			for index, kind := range matrix.iterationKinds {
+				iterationAgents[index].Kind = kind
+				iterationAgents[index].Args = nil
+				if kind == "cursor" {
+					iterationAgents[index].Args = []string{"--force", "--approve-mcps"}
+				}
+			}
+			runMixedProviderMatrix(t, matrix.agents, iterationAgents)
 		})
 	}
 }
 
-func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent) {
+func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent, iterationAgents []configuration.Agent) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
@@ -101,11 +114,11 @@ func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent)
 	t.Cleanup(func() { _ = engine.Close() })
 	if _, err := engine.Apply(ctx, symphony.Init{
 		Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: "optimization", Repository: "/repo",
-		IterationConcurrency: 2, MaxPendingAttempts: 4,
+		IterationConcurrency: int64(len(iterationAgents)), MaxPendingAttempts: 4,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	configContents, err := configuration.RenderConfiguration("/repo", agents)
+	configContents, err := configuration.RenderConfiguration("/repo", agents, iterationAgents...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,10 +217,18 @@ func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent)
 	}
 	for _, iteration := range iterations {
 		session, _, found, err := engine.CurrentAgentSession(ctx, iteration.ID)
-		if err != nil || !found || session.AgentKind != agents["iteration"].Kind {
+		runtimeWork, workErr := engine.RuntimeWork(ctx, iteration.ID)
+		if workErr != nil {
+			t.Fatal(workErr)
+		}
+		wantAgent := iterationAgents[runtimeWork.IterationSlotIndex]
+		if err != nil || !found || session.AgentKind != wantAgent.Kind {
 			t.Fatalf("Iteration Session=%+v found=%v err=%v", session, found, err)
 		}
 		start := startForSession(t, runtime.starts, session.ID)
+		if start.Environment["PIKA_AGENT_MODEL"] != wantAgent.Model {
+			t.Fatalf("Iteration slot %d model=%q want=%q", runtimeWork.IterationSlotIndex, start.Environment["PIKA_AGENT_MODEL"], wantAgent.Model)
+		}
 		wantTabLabel := fmt.Sprintf("Iteration R%d · %.8s", iteration.IterationRound, iteration.AttemptID)
 		if !start.DedicatedTab || start.TabLabel != wantTabLabel {
 			t.Fatalf("Iteration launch does not request a dedicated tab: %+v", start)
@@ -230,7 +251,13 @@ func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent)
 		t.Fatal(err)
 	}
 	dispatch()
-	assertLastStartKind(t, runtime, agents["iteration"].Kind)
+	view, _ = engine.Inspect(ctx, symphony.Status{})
+	backedOff := matrixPendingWorkForAttempt(t, view, symphony.RoleIteration, integration.AttemptID)
+	backedOffRuntime, err := engine.RuntimeWork(ctx, backedOff.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertLastStartKind(t, runtime, iterationAgents[backedOffRuntime.IterationSlotIndex].Kind)
 
 	currentSibling, _, found, err := engine.CurrentAgentSession(ctx, iterations[1].ID)
 	if err != nil || !found || currentSibling.ID != siblingSession.ID {
@@ -242,7 +269,11 @@ func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent)
 	}
 	dispatch()
 	recovered, _, found, err := engine.CurrentAgentSession(ctx, iterations[1].ID)
-	if err != nil || !found || recovered.ID == currentSibling.ID || recovered.AgentKind != agents["iteration"].Kind {
+	siblingRuntime, runtimeErr := engine.RuntimeWork(ctx, iterations[1].ID)
+	if runtimeErr != nil {
+		t.Fatal(runtimeErr)
+	}
+	if err != nil || !found || recovered.ID == currentSibling.ID || recovered.AgentKind != iterationAgents[siblingRuntime.IterationSlotIndex].Kind {
 		t.Fatalf("fresh configured-provider recovery=%+v found=%v err=%v", recovered, found, err)
 	}
 	view, _ = engine.Inspect(ctx, symphony.Status{})
@@ -274,6 +305,17 @@ func runMixedProviderMatrix(t *testing.T, agents map[string]configuration.Agent)
 		t.Fatalf("graceful shutdown closed active Agents: before=%d after=%d", closedBeforeShutdown, len(runtime.closed))
 	}
 	assertLaunchIsolation(t, runtime.starts)
+}
+
+func matrixPendingWorkForAttempt(t *testing.T, view symphony.View, role symphony.WorkRole, attemptID string) symphony.WorkView {
+	t.Helper()
+	for _, work := range matrixPendingWorks(t, view, role) {
+		if work.AttemptID == attemptID {
+			return work
+		}
+	}
+	t.Fatalf("pending %s Work for Attempt %s not found", role, attemptID)
+	return symphony.WorkView{}
 }
 
 func matrixAgents(baseline, verification, iteration, integration, followUp string) map[string]configuration.Agent {

@@ -402,6 +402,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		}
 		var followUpInactivity time.Duration
 		var followUpPolicies map[symphony.WorkRole]symphony.FollowUpPolicy
+		var configuredIterationAgentCount int64
 		if _, statErr := os.Stat(instanceConfigPath); statErr == nil {
 			followUpConfig, configErr := configuration.LoadFollowUp(instanceConfigPath)
 			if configErr != nil {
@@ -410,6 +411,12 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			}
 			followUpInactivity = followUpConfig.PaneIdleTimeout
 			followUpPolicies = symphonyFollowUpPolicies(followUpConfig)
+			iterationAgents, configErr := configuration.LoadIterationAgentsWithRegistry(instanceConfigPath, providerRegistry)
+			if configErr != nil {
+				writeDaemonLog(stderr, "error", "configuration.load_failed", configErr, nil)
+				return 1
+			}
+			configuredIterationAgentCount = int64(len(iterationAgents))
 			if configErr := configuration.ProbeConfiguredProviders(ctx, instanceConfigPath, providerRegistry, map[string]string{"codex": codexExecutable, "cursor": cursorExecutable}); configErr != nil {
 				writeDaemonLog(stderr, "error", "provider.preflight_failed", configErr, nil)
 				return 1
@@ -450,6 +457,22 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				_ = engine.Close()
 			}
 		}()
+		if configuredIterationAgentCount != 0 {
+			if handoffCandidate {
+				view, inspectErr := engine.Inspect(ctx, symphony.Status{})
+				if inspectErr != nil {
+					writeDaemonLog(stderr, "error", "configuration.iteration_agents_failed", inspectErr, nil)
+					return 1
+				}
+				if view.Optimization.ID != "" && view.Optimization.IterationConcurrency != configuredIterationAgentCount {
+					writeDaemonLog(stderr, "error", "configuration.iteration_agents_failed", errors.New("Iteration Agent count changes require a cold daemon restart"), nil)
+					return 1
+				}
+			} else if reconfigureErr := engine.ReconfigureIterationAgents(ctx, configuredIterationAgentCount); reconfigureErr != nil {
+				writeDaemonLog(stderr, "error", "configuration.iteration_agents_failed", reconfigureErr, nil)
+				return 1
+			}
+		}
 		if paths.Workspace != nil {
 			identity := paths.Workspace.Identity
 			if err := engine.EnsureWorkspaceIdentity(ctx, symphony.WorkspaceIdentity{
@@ -542,6 +565,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				return daemon.PreparedInit{}, prepareErr
 			}
 			schedulerConfig, configErr := configuration.LoadScheduler(instanceConfigPath)
+			var iterationAgents []configuration.Agent
+			if configErr == nil {
+				iterationAgents, configErr = configuration.LoadIterationAgentsWithRegistry(instanceConfigPath, providerRegistry)
+			}
 			var contextConfig configuration.Context
 			if configErr == nil {
 				contextConfig, configErr = configuration.LoadContext(instanceConfigPath)
@@ -550,7 +577,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			if configErr == nil {
 				followUpConfig, configErr = configuration.LoadFollowUp(instanceConfigPath)
 			}
-			for _, role := range []string{"baseline", "baseline_verify", "iteration", "integration", "follow_up"} {
+			for _, role := range []string{"baseline", "baseline_verify", "integration", "follow_up"} {
 				if configErr != nil {
 					break
 				}
@@ -572,7 +599,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				}
 				return daemon.PreparedInit{}, fmt.Errorf("configure instance: %w", configErr)
 			}
-			return daemon.PreparedInit{Rollback: rollback, IterationConcurrency: schedulerConfig.IterationConcurrency, MaxPendingAttempts: schedulerConfig.MaxPendingAttempts, IterationHistoryLimit: contextConfig.IterationHistoryLimit}, nil
+			return daemon.PreparedInit{Rollback: rollback, IterationConcurrency: int64(len(iterationAgents)), MaxPendingAttempts: schedulerConfig.MaxPendingAttempts, IterationHistoryLimit: contextConfig.IterationHistoryLimit}, nil
 		}
 		initOptions = func(optionsCtx context.Context) (protocol.InitOptionsResponse, error) {
 			_, statErr := os.Stat(instanceConfigPath)
@@ -1433,79 +1460,102 @@ func promptAgentConfiguration(input io.Reader, output io.Writer, repository stri
 	}
 	agents := configuration.DefaultAgents()
 	registry := provider.DefaultRegistry()
+	var iterationAgents []configuration.Agent
 	for _, role := range configuration.AgentRoleOrder {
-		defaults := agents[role]
-		_, _ = fmt.Fprintf(output, "\nConfigure agents.%s\n", role)
-		kind, err := promptList(reader, output, "  backend", defaults.Kind, providerChoices)
-		if err != nil {
-			return "", err
-		}
-		providerOption := available[kind]
-		modelChoices := make([]promptChoice, 0, len(providerOption.Models))
-		for _, model := range providerOption.Models {
-			label := model.ID
-			if model.Default {
-				label = model.DisplayName
-				if label == "" {
-					label = "default"
-				}
-				if label != "default" {
-					label += " (default)"
-				}
-			} else if model.DisplayName != "" && model.DisplayName != model.ID {
-				label = fmt.Sprintf("%s (%s)", model.DisplayName, model.ID)
+		iterationNumber := 1
+		for {
+			defaults := agents[role]
+			heading := "agents." + role
+			if role == "iteration" {
+				heading = fmt.Sprintf("agents.iteration[%d]", iterationNumber)
 			}
-			modelChoices = append(modelChoices, promptChoice{Value: model.ID, Label: label})
-		}
-		defaultModel := defaults.Model
-		if defaults.Kind != kind || !modelOptionExists(providerOption.Models, defaultModel) {
-			defaultModel = providerDefaultModel(providerOption.Models)
-		}
-		model, err := promptList(reader, output, "  model", defaultModel, modelChoices)
-		if err != nil {
-			return "", err
-		}
-		var efforts []string
-		for _, option := range providerOption.Models {
-			if option.ID == model {
-				efforts = option.ReasoningEfforts
+			_, _ = fmt.Fprintf(output, "\nConfigure %s\n", heading)
+			kind, err := promptList(reader, output, "  backend", defaults.Kind, providerChoices)
+			if err != nil {
+				return "", err
+			}
+			providerOption := available[kind]
+			modelChoices := make([]promptChoice, 0, len(providerOption.Models))
+			for _, model := range providerOption.Models {
+				label := model.ID
+				if model.Default {
+					label = model.DisplayName
+					if label == "" {
+						label = "default"
+					}
+					if label != "default" {
+						label += " (default)"
+					}
+				} else if model.DisplayName != "" && model.DisplayName != model.ID {
+					label = fmt.Sprintf("%s (%s)", model.DisplayName, model.ID)
+				}
+				modelChoices = append(modelChoices, promptChoice{Value: model.ID, Label: label})
+			}
+			defaultModel := defaults.Model
+			if defaults.Kind != kind || !modelOptionExists(providerOption.Models, defaultModel) {
+				defaultModel = providerDefaultModel(providerOption.Models)
+			}
+			model, err := promptList(reader, output, "  model", defaultModel, modelChoices)
+			if err != nil {
+				return "", err
+			}
+			var efforts []string
+			for _, option := range providerOption.Models {
+				if option.ID == model {
+					efforts = option.ReasoningEfforts
+					break
+				}
+			}
+			effort := ""
+			if len(efforts) == 0 {
+				_, _ = fmt.Fprintln(output, "  reasoning effort: provider default")
+			} else {
+				effortChoices := make([]promptChoice, 0, len(efforts))
+				for _, availableEffort := range efforts {
+					effortChoices = append(effortChoices, promptChoice{Value: availableEffort, Label: availableEffort})
+				}
+				defaultEffort := defaults.ReasoningEffort
+				if defaults.Kind != kind || defaults.Model != model || !choiceExists(effortChoices, defaultEffort) {
+					defaultEffort = efforts[0]
+				}
+				effort, err = promptList(reader, output, "  reasoning effort", defaultEffort, effortChoices)
+				if err != nil {
+					return "", err
+				}
+			}
+			agent := configuration.Agent{Kind: kind, Model: model, ReasoningEffort: effort}
+			if kind == "cursor" {
+				agent.Args, err = promptCursorArgs(reader, output)
+				if err != nil {
+					return "", err
+				}
+			}
+			adapter, err := registry.Resolve(kind)
+			if err != nil {
+				return "", err
+			}
+			if err := adapter.Validate(agent); err != nil {
+				return "", fmt.Errorf("%s: %w", heading, err)
+			}
+			agents[role] = agent
+			if role != "iteration" {
 				break
 			}
-		}
-		effort := ""
-		if len(efforts) == 0 {
-			_, _ = fmt.Fprintln(output, "  reasoning effort: provider default")
-		} else {
-			effortChoices := make([]promptChoice, 0, len(efforts))
-			for _, availableEffort := range efforts {
-				effortChoices = append(effortChoices, promptChoice{Value: availableEffort, Label: availableEffort})
-			}
-			defaultEffort := defaults.ReasoningEffort
-			if defaults.Kind != kind || defaults.Model != model || !choiceExists(effortChoices, defaultEffort) {
-				defaultEffort = efforts[0]
-			}
-			effort, err = promptList(reader, output, "  reasoning effort", defaultEffort, effortChoices)
+			iterationAgents = append(iterationAgents, agent)
+			more, err := promptList(reader, output, "  configure another Iteration Agent", "no", []promptChoice{
+				{Value: "no", Label: "No"},
+				{Value: "yes", Label: "Yes"},
+			})
 			if err != nil {
 				return "", err
 			}
-		}
-		agent := configuration.Agent{Kind: kind, Model: model, ReasoningEffort: effort}
-		if kind == "cursor" {
-			agent.Args, err = promptCursorArgs(reader, output)
-			if err != nil {
-				return "", err
+			if more == "no" {
+				break
 			}
+			iterationNumber++
 		}
-		adapter, err := registry.Resolve(kind)
-		if err != nil {
-			return "", err
-		}
-		if err := adapter.Validate(agent); err != nil {
-			return "", fmt.Errorf("agents.%s: %w", role, err)
-		}
-		agents[role] = agent
 	}
-	return configuration.RenderConfiguration(repository, agents)
+	return configuration.RenderConfiguration(repository, agents, iterationAgents...)
 }
 
 func promptCursorArgs(reader *bufio.Reader, output io.Writer) ([]string, error) {

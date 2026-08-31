@@ -45,6 +45,9 @@ func TestInitCreatesBaselineDraftAtomically(t *testing.T) {
 	if view.Optimization.Revision != 1 {
 		t.Fatalf("optimization revision = %d", view.Optimization.Revision)
 	}
+	if view.Optimization.IterationConcurrency != 1 {
+		t.Fatalf("default Iteration Agent count = %d, want 1", view.Optimization.IterationConcurrency)
+	}
 	if view.Baseline == nil || view.Baseline.Number != 1 || view.Baseline.Status != symphony.BaselineDrafting {
 		t.Fatalf("baseline = %+v", view.Baseline)
 	}
@@ -340,9 +343,10 @@ func openSubmittedBaseline(t *testing.T, ctx context.Context) *symphony.Engine {
 	}
 	t.Cleanup(func() { _ = engine.Close() })
 	if _, err := engine.Apply(ctx, symphony.Init{
-		Meta:           symphony.CommandMeta{RequestID: "init"},
-		OptimizationID: "optimization-1",
-		Repository:     "/workspace/repository",
+		Meta:                 symphony.CommandMeta{RequestID: "init"},
+		OptimizationID:       "optimization-1",
+		Repository:           "/workspace/repository",
+		IterationConcurrency: 4,
 	}); err != nil {
 		t.Fatalf("init: %v", err)
 	}

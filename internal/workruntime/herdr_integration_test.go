@@ -1370,11 +1370,15 @@ func configureTestScheduler(t *testing.T, ctx context.Context, repository, state
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(configRoot, "instances", "integration-instance", "config.toml")
-	contents, err := os.ReadFile(configPath)
+	agents := configuration.DefaultAgents()
+	iterationAgents := make([]configuration.Agent, concurrency)
+	for index := range iterationAgents {
+		iterationAgents[index] = agents["iteration"]
+	}
+	configured, err := configuration.RenderConfiguration(repository, agents, iterationAgents...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	configured := strings.Replace(string(contents), "iteration_concurrency = 4", "iteration_concurrency = "+strconv.Itoa(concurrency), 1)
 	configured = strings.Replace(configured, "max_pending_attempts = 8", "max_pending_attempts = "+strconv.Itoa(maxPending), 1)
 	if err := os.WriteFile(configPath, []byte(configured), 0o600); err != nil {
 		t.Fatal(err)

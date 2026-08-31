@@ -189,7 +189,7 @@ Concurrency:
 
 - Baseline Draft: 1
 - Baseline Verification: 1
-- Iteration: configurable `N`, one pane per active Work
+- Iteration: one durable slot per ordered `[[agents.iteration]]` entry, one pane per active Work; every slot may select its own backend/model/effort/args
 - Integration: 1, strict FIFO
 - Follow-up generation: one shared Agent Configuration; queue/concurrency is independently bounded
 

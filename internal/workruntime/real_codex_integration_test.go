@@ -526,15 +526,21 @@ func configureRealProviderInstance(t *testing.T, ctx context.Context, workspace 
 		}
 		configuredAgents[role] = agent
 	}
-	configured, err := configuration.RenderConfiguration(repository, configuredAgents)
+	iterationCount := 2
+	if simple {
+		iterationCount = 1
+	}
+	iterationAgents := make([]configuration.Agent, iterationCount)
+	for index := range iterationAgents {
+		iterationAgents[index] = configuredAgents["iteration"]
+	}
+	configured, err := configuration.RenderConfiguration(repository, configuredAgents, iterationAgents...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	configured = strings.Replace(configured, "iteration_concurrency = 4", "iteration_concurrency = 2", 1)
 	configured = strings.Replace(configured, "max_pending_attempts = 8", "max_pending_attempts = 2", 1)
 	configured = strings.Replace(configured, "pane_idle_timeout = \"5m\"", "pane_idle_timeout = \"10m\"", 1)
 	if simple {
-		configured = strings.Replace(configured, "iteration_concurrency = 2", "iteration_concurrency = 1", 1)
 		configured = strings.Replace(configured, "max_pending_attempts = 2", "max_pending_attempts = 1", 1)
 	}
 	initializer := configuration.Initializer{

@@ -885,11 +885,11 @@ func TestCLIInitAndStatusPersistThroughDaemon(t *testing.T) {
 		t.Fatalf("prepare user configuration: %v", err)
 	}
 	configPath := filepath.Join(configDir, "instances", "instance-1", "config.toml")
-	configContents, err := os.ReadFile(configPath)
+	defaultAgents := configuration.DefaultAgents()
+	customConfig, err := configuration.RenderConfiguration(resolvedRepository, defaultAgents, defaultAgents["iteration"], defaultAgents["iteration"])
 	if err != nil {
 		t.Fatal(err)
 	}
-	customConfig := strings.Replace(string(configContents), "iteration_concurrency = 4", "iteration_concurrency = 2", 1)
 	customConfig = strings.Replace(customConfig, "max_pending_attempts = 8", "max_pending_attempts = 6", 1)
 	if err := os.WriteFile(configPath, []byte(customConfig), 0o600); err != nil {
 		t.Fatal(err)
@@ -1089,6 +1089,7 @@ func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T)
 		"99", "2", "", "9", "", "", "2",
 		"1", "", "",
 		"2", "2", "5", "2", "2", "1",
+		"2", "1", "2", "", "1",
 		"1", "", "",
 		"2", "", "3", "1", "1",
 	}, "\n") + "\n"
@@ -1101,10 +1102,11 @@ func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	iteration, err := configuration.LoadAgent(configPath, "iteration")
+	iterationAgents, err := configuration.LoadIterationAgents(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	iteration := iterationAgents[0]
 	followUp, err := configuration.LoadAgent(configPath, "follow_up")
 	if err != nil {
 		t.Fatal(err)
@@ -1115,10 +1117,11 @@ func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T)
 	}
 	if baseline.Kind != "cursor" || baseline.Model != "auto" || baseline.ReasoningEffort != "" || !slices.Equal(baseline.Args, []string{"--force", "--approve-mcps", "--trust"}) ||
 		iteration.Kind != "cursor" || iteration.Model != "gpt-5.6-sol" || iteration.ReasoningEffort != "max" || !slices.Equal(iteration.Args, []string{"--auto-review"}) ||
+		len(iterationAgents) != 2 || iterationAgents[1].Kind != "codex" ||
 		followUp.Kind != "cursor" || followUp.Model != "auto" || followUp.ReasoningEffort != "" || !slices.Equal(followUp.Args, []string{"--approve-mcps"}) || verification.Kind != "codex" {
-		t.Fatalf("baseline=%+v verification=%+v iteration=%+v follow_up=%+v", baseline, verification, iteration, followUp)
+		t.Fatalf("baseline=%+v verification=%+v iterations=%+v follow_up=%+v", baseline, verification, iterationAgents, followUp)
 	}
-	for _, want := range []string{"  backend:\n    1) codex\n    2) cursor", "  Select backend [1]:", "  model:\n    1) auto-routing (default)\n    2) gpt-5.6-sol", "  model:\n    1) default\n    2) GPT-5.6-Sol (gpt-5.6-sol)", "  reasoning effort: provider default", "  reasoning effort:\n    1) low", "  Cursor command approval:\n    1) Allow commands automatically", "  Cursor MCP approval:\n    1) Approve configured MCP servers automatically", "  Cursor workspace trust:\n    1) Keep the current workspace trust setting", "  Select model [1]:", "  Select model [2]:", "  Select reasoning effort [3]:", "Enter a number from 1 to 2.", "Enter a number from 1 to 3."} {
+	for _, want := range []string{"Configure agents.iteration[1]", "Configure agents.iteration[2]", "  configure another Iteration Agent:\n    1) No\n    2) Yes", "  backend:\n    1) codex\n    2) cursor", "  Select backend [1]:", "  model:\n    1) auto-routing (default)\n    2) gpt-5.6-sol", "  model:\n    1) default\n    2) GPT-5.6-Sol (gpt-5.6-sol)", "  reasoning effort: provider default", "  reasoning effort:\n    1) low", "  Cursor command approval:\n    1) Allow commands automatically", "  Cursor MCP approval:\n    1) Approve configured MCP servers automatically", "  Cursor workspace trust:\n    1) Keep the current workspace trust setting", "  Select model [1]:", "  Select model [2]:", "  Select reasoning effort [3]:", "Enter a number from 1 to 2.", "Enter a number from 1 to 3."} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("interactive init output is missing %q:\n%s", want, stdout.String())
 		}

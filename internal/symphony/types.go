@@ -491,6 +491,7 @@ type RuntimeWork struct {
 	PredecessorVerificationEvidence json.RawMessage       `json:"predecessor_verification_evidence,omitempty"`
 	BaseSHA                         string                `json:"base_sha,omitempty"`
 	CandidateSHA                    string                `json:"candidate_sha,omitempty"`
+	IterationSlotIndex              int64                 `json:"iteration_slot_index,omitempty"`
 	IterationKind                   string                `json:"iteration_kind,omitempty"`
 	BackOffMessage                  string                `json:"back_off_message,omitempty"`
 	BestSHA                         string                `json:"best_sha,omitempty"`

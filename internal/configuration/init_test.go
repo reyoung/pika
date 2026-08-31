@@ -163,7 +163,7 @@ func TestPrepareInitPreservesExistingUserConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contents = []byte(strings.Replace(string(contents), "iteration_concurrency = 4", "iteration_concurrency = 2", 1))
+	contents = []byte(strings.Replace(string(contents), "history_limit = 20", "history_limit = 7", 1))
 	if err := os.WriteFile(configPath, contents, 0o600); err != nil {
 		t.Fatal(err)
 	}

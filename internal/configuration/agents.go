@@ -16,7 +16,9 @@ import (
 type Agent = provider.AgentConfiguration
 
 type Scheduler struct {
-	IterationConcurrency int64 `json:"iteration_concurrency"`
+	// IterationConcurrency is non-zero only for the legacy configuration shape.
+	// New configurations derive concurrency from the ordered Iteration Agent list.
+	IterationConcurrency int64 `json:"iteration_concurrency,omitempty"`
 	MaxPendingAttempts   int64 `json:"max_pending_attempts"`
 }
 
@@ -183,12 +185,16 @@ func LoadScheduler(path string) (Scheduler, error) {
 	if err := scanner.Err(); err != nil {
 		return Scheduler{}, fmt.Errorf("read instance configuration: %w", err)
 	}
-	if len(values) != 2 {
-		return Scheduler{}, errors.New("scheduler requires iteration_concurrency and max_pending_attempts")
+	if len(values) == 0 || values["max_pending_attempts"] == "" {
+		return Scheduler{}, errors.New("scheduler requires max_pending_attempts")
 	}
-	concurrency, err := positiveInt(values["iteration_concurrency"], "scheduler.iteration_concurrency")
-	if err != nil {
-		return Scheduler{}, err
+	var concurrency int64
+	if encoded, legacy := values["iteration_concurrency"]; legacy {
+		var err error
+		concurrency, err = positiveInt(encoded, "scheduler.iteration_concurrency")
+		if err != nil {
+			return Scheduler{}, err
+		}
 	}
 	maxPending, err := positiveInt(values["max_pending_attempts"], "scheduler.max_pending_attempts")
 	if err != nil {
@@ -363,75 +369,227 @@ func LoadAgent(path, role string) (Agent, error) {
 }
 
 func LoadAgentWithRegistry(path, role string, providers *provider.Registry) (Agent, error) {
-	if path == "" || role == "" {
-		return Agent{}, errors.New("configuration path and role are required")
+	agents, err := LoadAgentsWithRegistry(path, role, providers)
+	if err != nil {
+		return Agent{}, err
 	}
-	if providers == nil {
-		return Agent{}, errors.New("provider registry is required")
+	return agents[0], nil
+}
+
+// LoadIterationAgents returns the ordered Iteration Agent list. Its length is
+// the configured Iteration concurrency and each index is a durable scheduler
+// slot. A legacy singleton plus iteration_concurrency expands to repeated,
+// identical entries so existing workspaces retain their behavior.
+func LoadIterationAgents(path string) ([]Agent, error) {
+	return LoadIterationAgentsWithRegistry(path, provider.DefaultRegistry())
+}
+
+func LoadIterationAgentsWithRegistry(path string, providers *provider.Registry) ([]Agent, error) {
+	agents, array, err := loadAgentSections(path, "iteration", providers)
+	if err != nil {
+		return nil, err
 	}
+	legacyConcurrency, err := loadLegacyIterationConcurrency(path)
+	if err != nil {
+		return nil, err
+	}
+	if array {
+		if legacyConcurrency != 0 {
+			return nil, errors.New("scheduler.iteration_concurrency cannot be combined with [[agents.iteration]]; the Iteration Agent count is the concurrency")
+		}
+		return agents, nil
+	}
+	if legacyConcurrency <= 1 {
+		return agents, nil
+	}
+	expanded := make([]Agent, legacyConcurrency)
+	for index := range expanded {
+		expanded[index] = agents[0]
+		expanded[index].Args = append([]string(nil), agents[0].Args...)
+	}
+	return expanded, nil
+}
+
+func loadLegacyIterationConcurrency(path string) (int64, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return Agent{}, fmt.Errorf("open instance configuration: %w", err)
+		return 0, fmt.Errorf("open instance configuration: %w", err)
 	}
 	defer file.Close()
-	targetSection := "agents." + role
 	section := ""
-	values := map[string]string{}
-	var args []string
+	var encoded string
 	scanner := bufio.NewScanner(file)
 	for lineNumber := 1; scanner.Scan(); lineNumber++ {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+		if parsed, _, header := parseSectionHeader(line); header {
+			section = parsed
 			continue
 		}
-		if section != targetSection {
+		if section != "scheduler" {
+			continue
+		}
+		key, value, found := strings.Cut(line, "=")
+		if !found || strings.TrimSpace(key) != "iteration_concurrency" {
+			continue
+		}
+		if encoded != "" {
+			return 0, errors.New("duplicate scheduler field \"iteration_concurrency\"")
+		}
+		encoded = strings.TrimSpace(strings.SplitN(value, "#", 2)[0])
+		if encoded == "" {
+			return 0, fmt.Errorf("invalid scheduler.iteration_concurrency on line %d", lineNumber)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, fmt.Errorf("read instance configuration: %w", err)
+	}
+	if encoded == "" {
+		return 0, nil
+	}
+	return positiveInt(encoded, "scheduler.iteration_concurrency")
+}
+
+func LoadAgentForWork(path, role string, iterationSlot int64) (Agent, error) {
+	return LoadAgentForWorkWithRegistry(path, role, iterationSlot, provider.DefaultRegistry())
+}
+
+// LoadAgentForWork is the configuration seam used by runtime activation. For
+// Iteration Work it selects the Agent bound to the Attempt's durable slot;
+// static Roles always have exactly one Agent.
+func LoadAgentForWorkWithRegistry(path, role string, iterationSlot int64, providers *provider.Registry) (Agent, error) {
+	agents, err := LoadAgentsWithRegistry(path, role, providers)
+	if err != nil {
+		return Agent{}, err
+	}
+	index := int64(0)
+	if role == "iteration" {
+		index = iterationSlot
+	}
+	if index < 0 || index >= int64(len(agents)) {
+		return Agent{}, fmt.Errorf("Iteration Agent slot %d is out of range for %d configured Agents", index, len(agents))
+	}
+	return agents[index], nil
+}
+
+func LoadAgentsWithRegistry(path, role string, providers *provider.Registry) ([]Agent, error) {
+	if role == "iteration" {
+		return LoadIterationAgentsWithRegistry(path, providers)
+	}
+	agents, _, err := loadAgentSections(path, role, providers)
+	return agents, err
+}
+
+type parsedAgentSection struct {
+	values map[string]string
+	args   []string
+}
+
+func loadAgentSections(path, role string, providers *provider.Registry) ([]Agent, bool, error) {
+	if path == "" || role == "" {
+		return nil, false, errors.New("configuration path and role are required")
+	}
+	if providers == nil {
+		return nil, false, errors.New("provider registry is required")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("open instance configuration: %w", err)
+	}
+	defer file.Close()
+	targetSection := "agents." + role
+	current := -1
+	arrayStyle := false
+	styleSet := false
+	var sections []parsedAgentSection
+	scanner := bufio.NewScanner(file)
+	for lineNumber := 1; scanner.Scan(); lineNumber++ {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if section, array, header := parseSectionHeader(line); header {
+			current = -1
+			if section != targetSection {
+				continue
+			}
+			if styleSet && arrayStyle != array {
+				return nil, false, fmt.Errorf("cannot mix [%s] and [[%s]]", targetSection, targetSection)
+			}
+			if !array && len(sections) != 0 {
+				return nil, false, fmt.Errorf("duplicate [%s] configuration", targetSection)
+			}
+			styleSet, arrayStyle = true, array
+			sections = append(sections, parsedAgentSection{values: map[string]string{}})
+			current = len(sections) - 1
+			continue
+		}
+		if current < 0 {
 			continue
 		}
 		key, encoded, found := strings.Cut(line, "=")
 		if !found {
-			return Agent{}, fmt.Errorf("invalid %s entry on line %d", targetSection, lineNumber)
+			return nil, false, fmt.Errorf("invalid %s entry on line %d", targetSection, lineNumber)
 		}
 		key = strings.TrimSpace(key)
 		if key != "kind" && key != "model" && key != "reasoning_effort" && key != "args" {
-			return Agent{}, fmt.Errorf("unknown %s field %q", targetSection, key)
+			return nil, false, fmt.Errorf("unknown %s field %q", targetSection, key)
 		}
-		if _, duplicate := values[key]; duplicate {
-			return Agent{}, fmt.Errorf("duplicate %s field %q", targetSection, key)
+		if _, duplicate := sections[current].values[key]; duplicate {
+			return nil, false, fmt.Errorf("duplicate %s field %q", targetSection, key)
 		}
 		encoded = strings.TrimSpace(strings.SplitN(encoded, "#", 2)[0])
 		if key == "args" {
-			args, err = parseQuotedStringArray(encoded)
+			sections[current].args, err = parseQuotedStringArray(encoded)
 			if err != nil {
-				return Agent{}, fmt.Errorf("%s.args must be an array of quoted strings: %w", targetSection, err)
+				return nil, false, fmt.Errorf("%s.args must be an array of quoted strings: %w", targetSection, err)
 			}
-			values[key] = encoded
+			sections[current].values[key] = encoded
 			continue
 		}
 		value, err := strconv.Unquote(encoded)
 		if err != nil {
-			return Agent{}, fmt.Errorf("%s.%s must be a quoted string", targetSection, key)
+			return nil, false, fmt.Errorf("%s.%s must be a quoted string", targetSection, key)
 		}
-		values[key] = value
+		sections[current].values[key] = value
 	}
 	if err := scanner.Err(); err != nil {
-		return Agent{}, fmt.Errorf("read instance configuration: %w", err)
+		return nil, false, fmt.Errorf("read instance configuration: %w", err)
 	}
-	config := Agent{Kind: values["kind"], Model: values["model"], ReasoningEffort: values["reasoning_effort"], Args: args}
-	if config.Kind == "" && config.Model == "" && config.ReasoningEffort == "" {
-		return Agent{}, fmt.Errorf("missing [%s] configuration", targetSection)
+	if len(sections) == 0 {
+		return nil, false, fmt.Errorf("missing [%s] configuration", targetSection)
 	}
-	adapter, err := providers.Resolve(config.Kind)
-	if err != nil {
-		return Agent{}, fmt.Errorf("%w for role %s", err, role)
+	agents := make([]Agent, 0, len(sections))
+	for index, section := range sections {
+		config := Agent{Kind: section.values["kind"], Model: section.values["model"], ReasoningEffort: section.values["reasoning_effort"], Args: section.args}
+		if config.Kind == "" && config.Model == "" && config.ReasoningEffort == "" {
+			return nil, false, fmt.Errorf("empty Agent configuration for role %s at index %d", role, index)
+		}
+		adapter, err := providers.Resolve(config.Kind)
+		if err != nil {
+			return nil, false, fmt.Errorf("%w for role %s", err, role)
+		}
+		if err := adapter.Validate(config); err != nil {
+			return nil, false, fmt.Errorf("invalid Agent configuration for role %s at index %d: %w", role, index, err)
+		}
+		agents = append(agents, config)
 	}
-	if err := adapter.Validate(config); err != nil {
-		return Agent{}, fmt.Errorf("invalid Agent configuration for role %s: %w", role, err)
+	if role != "iteration" && (arrayStyle || len(agents) != 1) {
+		return nil, false, fmt.Errorf("role %s requires exactly one [%s] configuration", role, targetSection)
 	}
-	return config, nil
+	return agents, arrayStyle, nil
+}
+
+func parseSectionHeader(line string) (string, bool, bool) {
+	if strings.HasPrefix(line, "[[") && strings.HasSuffix(line, "]]") {
+		return strings.TrimSpace(line[2 : len(line)-2]), true, true
+	}
+	if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+		return strings.TrimSpace(line[1 : len(line)-1]), false, true
+	}
+	return "", false, false
 }
 
 func parseQuotedStringArray(encoded string) ([]string, error) {

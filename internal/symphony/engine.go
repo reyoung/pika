@@ -472,12 +472,12 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 	var attemptID, integrationID, parentWorkID, followUpRequestID, baseSHA, candidateSHA, iterationKind, backOffMessage sql.NullString
 	var expectedBestSHA, integrationStatus, gitIntentID, gitIntentState sql.NullString
 	var predecessorBaselineID, baselineRepositorySHA sql.NullString
-	var iterationRound, fifoPosition, historyLimit sql.NullInt64
+	var iterationRound, fifoPosition, historyLimit, iterationSlotIndex sql.NullInt64
 	var baselineDefinition []byte
 	err := e.db.QueryRowContext(ctx, `SELECT w.id, w.baseline_revision_id, w.role, w.status, w.generation,
 		w.attempt_id, w.iteration_round, w.integration_id, w.parent_work_id, w.followup_request_id,
 		o.id, o.status, o.revision, o.repository, b.number, b.status, b.definition_json, b.repository_sha, b.predecessor_id,
-		a.base_sha, a.candidate_sha, a.history_limit, r.kind, r.back_off_message,
+		a.base_sha, a.candidate_sha, a.slot_index, a.history_limit, r.kind, r.back_off_message,
 		i.expected_best_sha, i.fifo_position, i.status, g.id, g.state
 		FROM works w JOIN optimizations o ON o.id = w.optimization_id
 		JOIN baseline_revisions b ON b.id = w.baseline_revision_id
@@ -490,7 +490,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		&runtimeWork.Work.Status, &runtimeWork.Work.Generation, &attemptID, &iterationRound, &integrationID, &parentWorkID, &followUpRequestID,
 		&runtimeWork.OptimizationID, &runtimeWork.OptimizationStatus, &runtimeWork.OptimizationRevision, &runtimeWork.Repository,
 		&runtimeWork.BaselineNumber, &runtimeWork.BaselineStatus, &baselineDefinition, &baselineRepositorySHA, &predecessorBaselineID,
-		&baseSHA, &candidateSHA, &historyLimit, &iterationKind, &backOffMessage,
+		&baseSHA, &candidateSHA, &iterationSlotIndex, &historyLimit, &iterationKind, &backOffMessage,
 		&expectedBestSHA, &fifoPosition, &integrationStatus, &gitIntentID, &gitIntentState,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -507,6 +507,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 	runtimeWork.Work.FollowUpRequestID = followUpRequestID.String
 	runtimeWork.BaseSHA = baseSHA.String
 	runtimeWork.CandidateSHA = candidateSHA.String
+	runtimeWork.IterationSlotIndex = iterationSlotIndex.Int64
 	runtimeWork.IterationHistoryLimit = historyLimit.Int64
 	runtimeWork.IterationKind = iterationKind.String
 	runtimeWork.BackOffMessage = backOffMessage.String
@@ -1462,7 +1463,7 @@ func (e *Engine) applyInit(ctx context.Context, tx *sql.Tx, command Init) (Recei
 		return Receipt{}, domainError(CodeInvalidCommand, "scheduler limits must be positive")
 	}
 	if command.IterationConcurrency == 0 {
-		command.IterationConcurrency = 4
+		command.IterationConcurrency = 1
 	}
 	if command.MaxPendingAttempts == 0 {
 		command.MaxPendingAttempts = 8
@@ -1945,7 +1946,9 @@ func validateOnlineState(ctx context.Context, db *sql.DB, allowIterationCaseMigr
 		return domainError(CodeStateCorrupt, "more than one Integration is active")
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM optimizations o
-		WHERE (SELECT COUNT(*) FROM attempts a WHERE a.optimization_id = o.id AND a.status = 'iterating') > o.iteration_concurrency`).Scan(&invalidCount); err != nil {
+		WHERE (SELECT COUNT(*) FROM attempts a WHERE a.optimization_id = o.id AND a.status = 'iterating') > o.iteration_concurrency
+		OR EXISTS (SELECT 1 FROM attempts a WHERE a.optimization_id = o.id AND a.status = 'iterating'
+			AND (a.slot_index < 0 OR a.slot_index >= o.iteration_concurrency))`).Scan(&invalidCount); err != nil {
 		return fmt.Errorf("validate Iteration concurrency: %w", err)
 	}
 	if invalidCount != 0 {

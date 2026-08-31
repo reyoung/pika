@@ -394,7 +394,7 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		if providers == nil {
 			providers = provider.DefaultRegistry()
 		}
-		configured, err := configuration.LoadAgentWithRegistry(s.AgentConfigPath, agentConfigRole(work.Work.Role), providers)
+		configured, err := configuration.LoadAgentForWorkWithRegistry(s.AgentConfigPath, agentConfigRole(work.Work.Role), work.IterationSlotIndex, providers)
 		if err != nil {
 			return fmt.Errorf("load Agent configuration for %s: %w", work.Work.Role, err)
 		}

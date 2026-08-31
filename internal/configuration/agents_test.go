@@ -3,11 +3,106 @@ package configuration_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/reyoung/pika-go/internal/configuration"
 )
+
+func TestLoadIterationAgentsUsesOrderedArrayAsConcurrency(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := `[scheduler]
+max_pending_attempts = 8
+
+[[agents.iteration]]
+kind = "codex"
+model = "gpt-codex"
+reasoning_effort = "high"
+
+[[agents.iteration]]
+kind = "cursor"
+model = "gpt-cursor-1"
+reasoning_effort = "high"
+args = ["--force"]
+
+[[agents.iteration]]
+kind = "cursor"
+model = "gpt-cursor-2"
+reasoning_effort = "max"
+args = ["--auto-review"]
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := configuration.LoadIterationAgents(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 3 || agents[0].Kind != "codex" || agents[1].Kind != "cursor" || agents[2].Model != "gpt-cursor-2" {
+		t.Fatalf("iteration agents = %+v", agents)
+	}
+	selected, err := configuration.LoadAgentForWork(path, "iteration", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Kind != "cursor" || selected.Model != "gpt-cursor-1" {
+		t.Fatalf("slot 1 Agent = %+v", selected)
+	}
+	if _, err := configuration.LoadAgentForWork(path, "iteration", 3); err == nil {
+		t.Fatal("out-of-range iteration slot was accepted")
+	}
+}
+
+func TestLoadIterationAgentsExpandsLegacySingletonConcurrency(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := `[scheduler]
+iteration_concurrency = 2
+max_pending_attempts = 8
+
+[agents.iteration]
+kind = "codex"
+model = "gpt-legacy"
+reasoning_effort = "high"
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := configuration.LoadIterationAgents(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 2 || agents[0].Kind != agents[1].Kind || agents[0].Model != agents[1].Model || agents[0].Model != "gpt-legacy" {
+		t.Fatalf("legacy iteration agents = %+v", agents)
+	}
+}
+
+func TestRenderedConfigurationDerivesConcurrencyFromOneIterationAgent(t *testing.T) {
+	t.Parallel()
+	contents, err := configuration.RenderConfiguration("/repo", configuration.DefaultAgents())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(contents, "iteration_concurrency") {
+		t.Fatalf("rendered configuration still has independent concurrency:\n%s", contents)
+	}
+	if strings.Count(contents, "[[agents.iteration]]") != 1 {
+		t.Fatalf("rendered configuration does not contain one Iteration Agent:\n%s", contents)
+	}
+	schedulerPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(schedulerPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scheduler, err := configuration.LoadScheduler(schedulerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheduler.IterationConcurrency != 0 || scheduler.MaxPendingAttempts != 8 {
+		t.Fatalf("scheduler = %+v", scheduler)
+	}
+}
 
 func TestLoadAgentReadsStaticRoleConfiguration(t *testing.T) {
 	t.Parallel()

@@ -42,7 +42,6 @@ version = 1
 repository = "/absolute/path/to/repo"
 
 [scheduler]
-iteration_concurrency = 4
 max_pending_attempts = 8
 
 [context.iteration]
@@ -58,7 +57,12 @@ kind = "codex"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 
-[agents.iteration]
+[[agents.iteration]]
+kind = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[[agents.iteration]]
 kind = "cursor"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
@@ -95,15 +99,15 @@ path = "/absolute/path/to/reference"
 description = "Known-correct implementation"
 ```
 
-This example deliberately mixes providers; the shipped `--defaults` configuration remains all-Codex. Cursor accepts reasoning effort `low`, `medium`, `high`, `xhigh`, or `max`; `ultra` is Codex-only. Its explicit provider-default configuration is `model = "auto"` with `reasoning_effort = ""`; init displays that real Cursor model as `auto-routing (default)` and does not ask for an effort. Codex's explicit provider default uses empty model and effort strings, leaving both choices to the Codex CLI configuration. Cursor `args` is an argv array, never a shell string. Pika supplies workspace, Plugin, and model. It defaults unattended Cursor Sessions to `--yolo`; an explicit `--sandbox enabled` in the Role's `args` selects the restricted sandbox instead. Configuration cannot request `--resume`, `--continue`, `--print`, an initial prompt, or disabled sandboxing.
+This example deliberately mixes providers, including independent Codex and Cursor Iteration slots; the shipped `--defaults` configuration contains one Codex `[[agents.iteration]]` entry. The ordered Iteration Agent list is the concurrency: each entry owns one durable scheduler slot, and an Attempt's `slot_index` selects that entry across fresh Session recovery. Cursor accepts reasoning effort `low`, `medium`, `high`, `xhigh`, or `max`; `ultra` is Codex-only. Its explicit provider-default configuration is `model = "auto"` with `reasoning_effort = ""`; init displays that real Cursor model as `auto-routing (default)` and does not ask for an effort. Codex's explicit provider default uses empty model and effort strings, leaving both choices to the Codex CLI configuration. Cursor `args` is an argv array, never a shell string. Pika supplies workspace, Plugin, and model. It defaults unattended Cursor Sessions to `--yolo`; an explicit `--sandbox enabled` in the Role's `args` selects the restricted sandbox instead. Configuration cannot request `--resume`, `--continue`, `--print`, an initial prompt, or disabled sandboxing.
 
 Exact defaults beyond the accepted five-minute inactivity timeout remain implementation choices and are printed by interactive `pika-go init` before commit.
 
-If `pika.toml` already exists, init treats it as user-owned input: it validates version and repository identity, preserves the file byte-for-byte, and rejects invalid scheduler, Context, Follow-up, or Role Agent fields. `iteration_concurrency`, `max_pending_attempts`, and `context.iteration.history_limit` are copied into the durable Optimization during init. Every Attempt freezes the current history limit when it is created; later edits affect only a future Optimization rather than silently changing running work. A limit of `0` disables cross-Attempt history injection.
+If `pika.toml` already exists, init treats it as user-owned input: it validates version and repository identity, preserves the file byte-for-byte, and rejects invalid scheduler, Context, Follow-up, or Role Agent fields. The Iteration Agent list length and `max_pending_attempts` are copied into the durable Optimization during init. A later Iteration list edit applies on the next cold daemon restart; adding entries creates slots, while removing entries atomically cancels active Attempts in removed slots with reason `iteration_agent_removed` before recovery. An old `[agents.iteration]` plus `scheduler.iteration_concurrency = N` remains readable as N identical slots, but new configuration never emits that independent field. Every Attempt freezes the current history limit when it is created; later history-limit edits affect only a future Optimization rather than silently changing running work. A limit of `0` disables cross-Attempt history injection.
 
 ## 3. Static Agent selection
 
-Each core Role has one default Agent Configuration. Follow-up has one shared Agent Configuration even though it has three target-specific System Prompts and three matching user-instruction overlays.
+Baseline, Baseline Verification, and Integration each have one Agent Configuration. Iteration has an ordered non-empty list with one configuration per scheduler slot. Follow-up has one shared Agent Configuration even though it has three target-specific System Prompts and three matching user-instruction overlays.
 
 Commands that create a fresh Session may accept `--agent <configured-name>` as an explicit one-shot override, including Back-off. There is no automatic provider fallback chain. If launch fails, the Work remains recoverable and the error is surfaced.
 
@@ -111,7 +115,7 @@ Pika rejects configuration that enables automatic Follow-up for an Agent adapter
 
 ## 4. Initialization
 
-`pika-go init` performs an interactive flow similar to the old Pika initializer but excludes Web concerns. For a new interactive instance, it asks independently for backend, model, reasoning effort, and Cursor launch permissions for all five static Roles. All of these inputs are numbered lists. The backend list contains only providers that passed daemon probing; Codex model choices come from its visible local model cache, and Cursor choices are derived from the pinned CLI's `--list-models` output. Effort choices are narrowed to the selected model, and arbitrary provider or model IDs are not accepted. Cursor command approval offers automatic allow (`--force`, the unattended default), Cursor auto-review, or interactive approval; MCP approval and persistent workspace trust are separate choices. The default remains `--force --approve-mcps` without changing workspace trust. Raw Cursor argv is available only through a complete `--config` file for advanced use.
+`pika-go init` performs an interactive flow similar to the old Pika initializer but excludes Web concerns. For a new interactive instance, it asks independently for backend, model, reasoning effort, and Cursor launch permissions for each Agent Configuration. After each Iteration Agent is complete, it asks whether to configure another; answering no ends the ordered list, whose length becomes the concurrency. All choices are numbered lists. The backend list contains only providers that passed daemon probing; Codex model choices come from its visible local model cache, and Cursor choices are derived from the pinned CLI's `--list-models` output. Effort choices are narrowed to the selected model, and arbitrary provider or model IDs are not accepted. Cursor command approval offers automatic allow (`--force`, the unattended default), Cursor auto-review, or interactive approval; MCP approval and persistent workspace trust are separate choices. The default remains `--force --approve-mcps` without changing workspace trust. Raw Cursor argv is available only through a complete `--config` file for advanced use.
 
 New non-interactive or `--json` initialization requires exactly one of:
 
@@ -123,9 +127,10 @@ The CLI first reads `GET /v1/init/options`, including each available provider's 
 It configures:
 
 - repository and writable worktree roots;
-- default Agent Configuration for the four core Roles;
+- one Agent Configuration for each non-Iteration core Role;
+- an ordered, non-empty Iteration Agent list whose length is the concurrency;
 - one Follow-up Agent Configuration;
-- Iteration concurrency and queue limits;
+- Iteration queue limits;
 - reference projects;
 - stop conditions and measurement defaults;
 - empty per-Role instruction overlay files;
@@ -193,7 +198,7 @@ Before committing init or configuration edits, validate:
 - all paths are absolute and within allowed roots;
 - Agent kinds resolve through the Provider Adapter registry;
 - referenced executables exist, are authenticated, and report the required exact-compatible capabilities;
-- concurrency and Follow-up counts are bounded positive integers;
+- the Iteration Agent list is non-empty and Follow-up counts are bounded positive integers;
 - duration values parse and are not negative;
 - every static embedded Role System Prompt is non-empty and its matching instruction overlay exists and is readable;
 - Codex profile ownership and hook feature are valid when Codex is referenced;

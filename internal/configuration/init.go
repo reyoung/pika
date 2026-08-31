@@ -34,7 +34,7 @@ type Initializer struct {
 }
 
 const DefaultSummary = `Pika-Go initialization defaults:
-  iteration concurrency: 4
+  iteration agents: 1
   max pending attempts: 8
   follow-up inactivity timeout: 5m
   follow-up generator concurrency: 1
@@ -221,7 +221,7 @@ func probeProviders(ctx context.Context, providers *provider.Registry, kinds []s
 }
 
 // ProbeConfiguredProviders validates one complete persisted configuration and
-// probes exactly the distinct provider kinds referenced by its five Roles.
+// probes exactly the distinct provider kinds referenced by its configured Agents.
 func ProbeConfiguredProviders(ctx context.Context, path string, providers *provider.Registry, executables map[string]string) error {
 	identity, err := LoadIdentity(path)
 	if err != nil {
@@ -279,13 +279,15 @@ func validateConfigurationPath(path, repository string, providers *provider.Regi
 	seen := map[string]bool{}
 	var kinds []string
 	for _, role := range []string{"baseline", "baseline_verify", "iteration", "integration", "follow_up"} {
-		agent, err := LoadAgentWithRegistry(path, role, providers)
+		agents, err := LoadAgentsWithRegistry(path, role, providers)
 		if err != nil {
 			return nil, err
 		}
-		if !seen[agent.Kind] {
-			seen[agent.Kind] = true
-			kinds = append(kinds, agent.Kind)
+		for _, agent := range agents {
+			if !seen[agent.Kind] {
+				seen[agent.Kind] = true
+				kinds = append(kinds, agent.Kind)
+			}
 		}
 	}
 	return kinds, nil
@@ -348,12 +350,24 @@ func DefaultAgents() map[string]Agent {
 	}
 }
 
-func RenderConfiguration(repository string, agents map[string]Agent) (string, error) {
+func RenderConfiguration(repository string, agents map[string]Agent, configuredIterationAgents ...Agent) (string, error) {
 	if repository == "" || !filepath.IsAbs(repository) {
 		return "", errors.New("optimization.repository must be absolute")
 	}
 	registry := provider.DefaultRegistry()
+	iterationAgents := append([]Agent(nil), configuredIterationAgents...)
+	if len(iterationAgents) == 0 {
+		if agent, found := agents["iteration"]; found {
+			iterationAgents = append(iterationAgents, agent)
+		}
+	}
+	if len(iterationAgents) == 0 {
+		return "", errors.New("at least one Iteration Agent configuration is required")
+	}
 	for _, role := range AgentRoleOrder {
+		if role == "iteration" {
+			continue
+		}
 		agent, found := agents[role]
 		if !found {
 			return "", fmt.Errorf("missing Agent configuration for %s", role)
@@ -366,6 +380,15 @@ func RenderConfiguration(repository string, agents map[string]Agent) (string, er
 			return "", fmt.Errorf("validate agents.%s: %w", role, err)
 		}
 	}
+	for index, agent := range iterationAgents {
+		adapter, err := registry.Resolve(agent.Kind)
+		if err != nil {
+			return "", err
+		}
+		if err := adapter.Validate(agent); err != nil {
+			return "", fmt.Errorf("validate agents.iteration[%d]: %w", index, err)
+		}
+	}
 	var builder strings.Builder
 	builder.WriteString(`version = 1
 
@@ -373,16 +396,14 @@ func RenderConfiguration(repository string, agents map[string]Agent) (string, er
 repository = ` + strconv.Quote(repository) + `
 
 [scheduler]
-iteration_concurrency = 4
 max_pending_attempts = 8
 
 [context.iteration]
 history_limit = 20
 
 `)
-	for _, role := range AgentRoleOrder {
-		agent := agents[role]
-		builder.WriteString("[agents." + role + "]\n")
+	writeAgent := func(header string, agent Agent) {
+		builder.WriteString(header + "\n")
 		builder.WriteString("kind = " + strconv.Quote(agent.Kind) + "\n")
 		builder.WriteString("model = " + strconv.Quote(agent.Model) + "\n")
 		builder.WriteString("reasoning_effort = " + strconv.Quote(agent.ReasoningEffort) + "\n")
@@ -397,6 +418,15 @@ history_limit = 20
 			builder.WriteString("]\n")
 		}
 		builder.WriteByte('\n')
+	}
+	for _, role := range AgentRoleOrder {
+		if role == "iteration" {
+			for _, agent := range iterationAgents {
+				writeAgent("[[agents.iteration]]", agent)
+			}
+			continue
+		}
+		writeAgent("[agents."+role+"]", agents[role])
 	}
 	builder.WriteString(`[follow_up]
 pane_idle_timeout = "5m"
