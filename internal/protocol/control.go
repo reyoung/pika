@@ -59,6 +59,20 @@ type ShutdownRequest struct {
 	Mutation
 }
 
+type MaintenancePrepareRequest struct {
+	RequestID    string                `json:"request_id"`
+	ToGeneration MaintenanceGeneration `json:"to_generation"`
+}
+
+type MaintenanceResumeRequest struct {
+	RequestID string `json:"request_id"`
+}
+
+type MaintenanceGeneration struct {
+	Digest  string `json:"digest"`
+	Version string `json:"version,omitempty"`
+}
+
 type SchedulerControlRequest struct {
 	Mutation
 }

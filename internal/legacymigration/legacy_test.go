@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/reyoung/pika-go/internal/configuration"
 	"github.com/reyoung/pika-go/internal/gitworkspace"
 	"github.com/reyoung/pika-go/internal/legacymigration"
+	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
 
@@ -130,6 +132,84 @@ func TestListAndImportPreserveDurableStateAndWorkingTrees(t *testing.T) {
 	}
 	if len(records) != 3 {
 		t.Fatalf("imported worktree records = %+v", records)
+	}
+}
+
+func TestImportRollsBackExclusiveWorkspaceAndRetrySucceeds(t *testing.T) {
+	ctx := context.Background()
+	repository := newRepository(t)
+	roots := legacymigration.Roots{Config: filepath.Join(t.TempDir(), "config"), State: filepath.Join(t.TempDir(), "state")}
+	id := "rollback-import"
+	configDir := filepath.Join(roots.Config, "instances", id)
+	stateDir := filepath.Join(roots.State, "instances", id)
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(configuration.RenderDefaults(repository)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	databasePath := filepath.Join(stateDir, "pika.db")
+	if err := os.WriteFile(databasePath, []byte("not a sqlite database\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot := filepath.Join(t.TempDir(), "workspace")
+	options := legacymigration.ImportOptions{Roots: roots, InstanceID: id, WorkspaceRoot: workspaceRoot}
+	lease, err := optimizationworkspace.AcquireExclusiveMutationLease(ctx, workspaceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writerEntered := make(chan *optimizationworkspace.MutationLease, 1)
+	go func() {
+		writerLease, writerErr := optimizationworkspace.AcquireSharedMutationLease(ctx, workspaceRoot)
+		if writerErr == nil {
+			writerEntered <- writerLease
+		}
+	}()
+	if _, err := legacymigration.ImportWithLease(ctx, options, lease); err == nil {
+		t.Fatal("corrupt legacy database import succeeded")
+	}
+	if _, err := os.Lstat(workspaceRoot); !os.IsNotExist(err) {
+		t.Fatalf("failed import left claimed Workspace: %v", err)
+	}
+	select {
+	case writerLease := <-writerEntered:
+		_ = writerLease.Close()
+		t.Fatal("writer entered before failed import rollback released its exclusive lease")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case writerLease := <-writerEntered:
+		_ = writerLease.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("writer did not enter after failed import rollback and lease release")
+	}
+	if err := os.Remove(databasePath); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := symphony.Open(ctx, databasePath, symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Apply(ctx, symphony.Init{
+		Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: id, Repository: repository,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := legacymigration.Import(ctx, options)
+	if err != nil {
+		t.Fatalf("retry import: %v", err)
+	}
+	if workspace.Root != workspaceRoot {
+		t.Fatalf("retry Workspace root=%s want=%s", workspace.Root, workspaceRoot)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"github.com/reyoung/pika-go/internal/configuration"
+	"github.com/reyoung/pika-go/internal/maintenance"
 	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
@@ -629,6 +630,76 @@ func (s Sink) close(ctx context.Context, effect symphony.RuntimeEffect) error {
 		return err
 	}
 	return s.Store.MarkAgentSessionEnded(ctx, session.ID, symphony.AgentSessionExited)
+}
+
+// RetireMaintenanceTargets closes only the Sessions frozen in the durable
+// maintenance request. Replays validate already-retired targets and never
+// inspect or replace a pending successor Session.
+func (s Sink) RetireMaintenanceTargets(ctx context.Context, targets []maintenance.Target) error {
+	if s.Store == nil {
+		return errors.New("work runtime store is required")
+	}
+	type retirement struct {
+		target  maintenance.Target
+		session symphony.AgentSession
+		binding symphony.PaneBinding
+		active  bool
+	}
+	retirements := make([]retirement, 0, len(targets))
+	for _, target := range targets {
+		work, err := s.Store.RuntimeWork(ctx, target.WorkID)
+		if err != nil {
+			return fmt.Errorf("read frozen Work %s: %w", target.WorkID, err)
+		}
+		if work.Work.Generation != target.WorkGeneration || work.Work.Status != symphony.WorkCompleted {
+			return fmt.Errorf("frozen Work %s is not completed generation %d", target.WorkID, target.WorkGeneration)
+		}
+		session, err := s.Store.ReadAgentSession(ctx, target.SessionID)
+		if err != nil {
+			return fmt.Errorf("read frozen Session %s: %w", target.SessionID, err)
+		}
+		if session.WorkID != target.WorkID || session.Generation != target.WorkGeneration {
+			return fmt.Errorf("frozen Session %s identity does not match Work %s generation %d", target.SessionID, target.WorkID, target.WorkGeneration)
+		}
+		switch session.Status {
+		case symphony.AgentSessionExited:
+			retirements = append(retirements, retirement{target: target, session: session})
+			continue
+		case symphony.AgentSessionStarting, symphony.AgentSessionRunning:
+		case symphony.AgentSessionLost:
+			return fmt.Errorf("frozen Session %s was lost", target.SessionID)
+		default:
+			return fmt.Errorf("frozen Session %s has unexpected status %s", target.SessionID, session.Status)
+		}
+		current, binding, found, err := s.Store.CurrentAgentSession(ctx, target.WorkID)
+		if err != nil {
+			return err
+		}
+		if !found || current.ID != target.SessionID {
+			return fmt.Errorf("frozen Session %s is not the current Session for Work %s", target.SessionID, target.WorkID)
+		}
+		retirements = append(retirements, retirement{target: target, session: session, binding: binding, active: true})
+	}
+	for _, retirement := range retirements {
+		if !retirement.active {
+			continue
+		}
+		if retirement.binding.PaneID != "" {
+			if s.Runtime == nil {
+				return fmt.Errorf("frozen Session %s has a pane but no runtime", retirement.target.SessionID)
+			}
+			if err := s.Runtime.Close(ctx, retirement.binding.PaneID); err != nil {
+				return fmt.Errorf("close frozen Session %s pane %s: %w", retirement.target.SessionID, retirement.binding.PaneID, err)
+			}
+		}
+		if err := cleanupSessionResources(s.ProviderRuntimeRoot, retirement.session); err != nil {
+			return err
+		}
+		if err := s.Store.MarkAgentSessionEnded(ctx, retirement.target.SessionID, symphony.AgentSessionExited); err != nil {
+			return fmt.Errorf("retire frozen Session %s: %w", retirement.target.SessionID, err)
+		}
+	}
+	return nil
 }
 
 func (s Sink) bind(ctx context.Context, sessionID string, observation Observation) error {

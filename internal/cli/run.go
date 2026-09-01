@@ -31,6 +31,7 @@ import (
 	"github.com/reyoung/pika-go/internal/herdr"
 	"github.com/reyoung/pika-go/internal/instance"
 	"github.com/reyoung/pika-go/internal/instructions"
+	"github.com/reyoung/pika-go/internal/maintenance"
 	"github.com/reyoung/pika-go/internal/mcp"
 	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 	"github.com/reyoung/pika-go/internal/outbox"
@@ -86,6 +87,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runInstall(ctx, args[1:], stdin, stdout, stderr)
 	case "update":
 		return runUpdate(ctx, args[1:], stdout, stderr)
+	case "maintenance":
+		return runMaintenance(ctx, args[1:], stdout, stderr)
 	case "daemon":
 		return runDaemon(ctx, args[1:], stderr)
 	case "webui":
@@ -175,6 +178,25 @@ func runWebUI(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		_, _ = fmt.Fprintf(stderr, "webui: %v\n", err)
 		return 2
 	}
+	startupLease, err := optimizationworkspace.AcquireSharedMutationLease(ctx, workspace.Root)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "webui: acquire Workspace mutation lease: %v\n", err)
+		return 1
+	}
+	defer startupLease.Close()
+	var maintenanceStatus maintenance.Status
+	authorizeWorkspace := func() bool {
+		_, status, authorizeErr := authorizeWorkspaceHoldingWebUI(workspace.Root)
+		if authorizeErr != nil {
+			_, _ = fmt.Fprintf(stderr, "webui: maintenance state rejected: %v\n", authorizeErr)
+			return false
+		}
+		maintenanceStatus = status
+		return true
+	}
+	if !authorizeWorkspace() {
+		return 1
+	}
 	binding, err := workspace.ReadHerdrBinding()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "webui: %v\n", err)
@@ -184,7 +206,29 @@ func runWebUI(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		_, _ = fmt.Fprintf(stderr, "webui: daemon is unavailable: %v\n", err)
 		return 1
 	}
-	token, tokenPath, err := webuiapp.EnsureToken(workspace.RuntimeRoot, *rotateToken)
+	if !authorizeWorkspace() {
+		return 1
+	}
+	holdingSafe := maintenanceStatus.State == maintenance.StateHolding
+	if holdingSafe && *rotateToken {
+		_, _ = fmt.Fprintln(stderr, "webui: --rotate-token is forbidden during maintenance Holding")
+		return 1
+	}
+	if holdingSafe {
+		err = workspace.ValidateLayout()
+	} else {
+		err = workspace.EnsureLayout()
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "webui: validate Workspace layout: %v\n", err)
+		return 1
+	}
+	var token, tokenPath string
+	if holdingSafe {
+		token, tokenPath, err = webuiapp.ReadToken(workspace.RuntimeRoot)
+	} else {
+		token, tokenPath, err = webuiapp.EnsureToken(workspace.RuntimeRoot, *rotateToken)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "webui: prepare token: %v\n", err)
 		return 1
@@ -202,11 +246,31 @@ func runWebUI(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	defer listener.Close()
 	webuiRuntime := filepath.Join(workspace.RuntimeRoot, "webui")
 	pidPath := filepath.Join(webuiRuntime, "pid")
+	if !authorizeWorkspace() {
+		return 1
+	}
 	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		_, _ = fmt.Fprintf(stderr, "webui: write PID: %v\n", err)
 		return 1
 	}
-	defer os.Remove(pidPath)
+	defer func() {
+		cleanupLease, leaseErr := optimizationworkspace.AcquireSharedMutationLease(context.Background(), workspace.Root)
+		if leaseErr == nil {
+			if _, authorizeErr := authorizeWorkspaceExecutable(workspace.Root); authorizeErr == nil {
+				if contents, readErr := os.ReadFile(pidPath); readErr == nil &&
+					string(contents) == strconv.Itoa(os.Getpid())+"\n" {
+					_ = os.Remove(pidPath)
+				}
+			}
+		}
+		if cleanupLease != nil {
+			_ = cleanupLease.Close()
+		}
+	}()
+	if err := startupLease.Close(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "webui: release Workspace mutation lease: %v\n", err)
+		return 1
+	}
 	host := listener.Addr().String()
 	if tcpAddress, ok := listener.Addr().(*net.TCPAddr); ok && (tcpAddress.IP.IsUnspecified() || tcpAddress.IP.String() == "::") {
 		host = net.JoinHostPort("localhost", strconv.Itoa(tcpAddress.Port))
@@ -332,6 +396,27 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		_, _ = fmt.Fprintln(stderr, "update: --binary is required")
 		return 2
 	}
+	mutationLease, err := optimizationworkspace.AcquireSharedMutationLease(ctx, workspace.Root)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "update: acquire Workspace mutation lease: %v\n", err)
+		return 1
+	}
+	defer mutationLease.Close()
+	authorizeUpdate := func() bool {
+		_, maintenanceStatus, authorizeErr := authorizeWorkspaceDirectMutation(workspace.Root)
+		if authorizeErr != nil {
+			if maintenanceStatus.State != "" {
+				_, _ = fmt.Fprintf(stderr, "update: hot update is forbidden during maintenance state %s: %v\n", maintenanceStatus.State, authorizeErr)
+			} else {
+				_, _ = fmt.Fprintf(stderr, "update: maintenance generation rejected: %v\n", authorizeErr)
+			}
+			return false
+		}
+		return true
+	}
+	if !authorizeUpdate() {
+		return 1
+	}
 	candidate, err := daemonupdate.Stage(ctx, workspace.Root, *binary)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "update: stage candidate: %v\n", err)
@@ -347,6 +432,9 @@ func runUpdate(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	binding, err := workspace.ReadHerdrBinding()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "update: read running daemon binding: %v\n", err)
+		return 1
+	}
+	if !authorizeUpdate() {
 		return 1
 	}
 	accepted, err := control.Update(ctx, binding.DaemonSocket, candidate)
@@ -406,6 +494,166 @@ func shortDigest(value string) string {
 	return value
 }
 
+func authorizeWorkspaceExecutable(workspaceRoot string) (maintenance.Generation, error) {
+	generation, _, err := authorizeWorkspaceExecutableWithStatus(workspaceRoot)
+	return generation, err
+}
+
+func authorizeWorkspaceDirectMutation(workspaceRoot string) (maintenance.Generation, maintenance.Status, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return maintenance.Generation{}, maintenance.Status{}, err
+	}
+	digest, err := daemonupdate.FileDigest(executable)
+	if err != nil {
+		return maintenance.Generation{}, maintenance.Status{}, err
+	}
+	generation := maintenance.Generation{Digest: digest, Version: Version}
+	status, err := maintenance.AuthorizeDirectMutation(maintenance.NewFileStore(workspaceRoot), generation)
+	return generation, status, err
+}
+
+func authorizeWorkspaceHoldingWebUI(workspaceRoot string) (maintenance.Generation, maintenance.Status, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return maintenance.Generation{}, maintenance.Status{}, err
+	}
+	digest, err := daemonupdate.FileDigest(executable)
+	if err != nil {
+		return maintenance.Generation{}, maintenance.Status{}, err
+	}
+	generation := maintenance.Generation{Digest: digest, Version: Version}
+	status, err := maintenance.AuthorizeHoldingWebUI(maintenance.NewFileStore(workspaceRoot), generation)
+	return generation, status, err
+}
+
+func authorizeWorkspaceExecutableWithStatus(workspaceRoot string) (maintenance.Generation, maintenance.Status, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return maintenance.Generation{}, maintenance.Status{}, fmt.Errorf("resolve current executable: %w", err)
+	}
+	digest, err := daemonupdate.FileDigest(executable)
+	if err != nil {
+		return maintenance.Generation{}, maintenance.Status{}, fmt.Errorf("digest current executable: %w", err)
+	}
+	generation := maintenance.Generation{Digest: digest, Version: Version}
+	status, err := maintenance.AuthorizeGeneration(maintenance.NewFileStore(workspaceRoot), generation)
+	if err != nil {
+		return maintenance.Generation{}, maintenance.Status{}, err
+	}
+	return generation, status, nil
+}
+
+type daemonAuthorizationBarrier struct {
+	reached chan<- struct{}
+	release <-chan struct{}
+}
+
+type daemonAuthorizationBarrierContextKey struct{}
+
+func waitForDaemonAuthorizationBarrier(ctx context.Context) error {
+	barrier, ok := ctx.Value(daemonAuthorizationBarrierContextKey{}).(daemonAuthorizationBarrier)
+	if !ok {
+		return nil
+	}
+	select {
+	case barrier.reached <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-barrier.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type daemonMaintenanceAdmission struct {
+	statusPresent bool
+	status        maintenance.Status
+	active        bool
+	bindingBytes  []byte
+	activeAgents  []symphony.ActiveAgentSession
+	herdrSnapshot func(context.Context) (herdr.Snapshot, error)
+}
+
+func readMaintenanceDaemonAdmission(
+	ctx context.Context,
+	workspace optimizationworkspace.Workspace,
+	socketPath string,
+	store *maintenance.FileStore,
+) (daemonMaintenanceAdmission, error) {
+	status, err := store.Read()
+	if errors.Is(err, os.ErrNotExist) {
+		return daemonMaintenanceAdmission{}, nil
+	}
+	if err != nil {
+		return daemonMaintenanceAdmission{}, err
+	}
+	admission := daemonMaintenanceAdmission{statusPresent: true, status: status}
+	switch status.State {
+	case maintenance.StateQuiescing, maintenance.StateReady, maintenance.StateHolding, maintenance.StateFailed:
+		admission.active = true
+	default:
+		return admission, nil
+	}
+	admission.bindingBytes, err = os.ReadFile(workspace.HerdrBindingPath)
+	if err != nil {
+		return daemonMaintenanceAdmission{}, fmt.Errorf("read frozen Herdr binding bytes: %w", err)
+	}
+	binding, err := workspace.ReadHerdrBinding()
+	if err != nil {
+		return daemonMaintenanceAdmission{}, fmt.Errorf("read frozen Herdr binding: %w", err)
+	}
+	if binding.SocketPath == "" || binding.WorkspaceID == "" || binding.TabID == "" ||
+		binding.ControlPane == "" || binding.DaemonPane == "" || binding.DaemonSocket == "" {
+		return daemonMaintenanceAdmission{}, errors.New("frozen Herdr binding is incomplete")
+	}
+	if os.Getenv("HERDR_SOCKET_PATH") != binding.SocketPath {
+		return daemonMaintenanceAdmission{}, errors.New("HERDR_SOCKET_PATH does not match frozen binding")
+	}
+	if os.Getenv("HERDR_PANE_ID") != binding.DaemonPane {
+		return daemonMaintenanceAdmission{}, errors.New("HERDR_PANE_ID does not match frozen daemon pane")
+	}
+	if filepath.Clean(socketPath) != filepath.Clean(binding.DaemonSocket) {
+		return daemonMaintenanceAdmission{}, errors.New("daemon socket does not match frozen binding")
+	}
+	client := herdr.NewClient(binding.SocketPath)
+	snapshot, err := client.Snapshot(ctx)
+	if err != nil {
+		return daemonMaintenanceAdmission{}, fmt.Errorf("read live Herdr snapshot: %w", err)
+	}
+	if err := validateMaintenanceOpenSnapshot(snapshot, binding, nil); err != nil {
+		return daemonMaintenanceAdmission{}, err
+	}
+	admission.activeAgents, err = symphony.ReadActiveAgentSessions(ctx, workspace.DatabasePath)
+	if err != nil {
+		return daemonMaintenanceAdmission{}, fmt.Errorf("read durable active Agent Sessions: %w", err)
+	}
+	if err := validateMaintenanceActiveSet(status, admission.activeAgents, snapshot); err != nil {
+		return daemonMaintenanceAdmission{}, err
+	}
+	latestBinding, err := os.ReadFile(workspace.HerdrBindingPath)
+	if err != nil || !reflect.DeepEqual(latestBinding, admission.bindingBytes) {
+		return daemonMaintenanceAdmission{}, errors.New("frozen Herdr binding changed during exact admission")
+	}
+	latestStatus, err := store.Read()
+	if err != nil || !reflect.DeepEqual(latestStatus, status) {
+		return daemonMaintenanceAdmission{}, errors.New("maintenance status changed during exact admission")
+	}
+	admission.herdrSnapshot = client.Snapshot
+	return admission, nil
+}
+
+func sameDaemonMaintenanceAdmission(before, after daemonMaintenanceAdmission) bool {
+	return before.statusPresent == after.statusPresent &&
+		before.active == after.active &&
+		reflect.DeepEqual(before.status, after.status) &&
+		reflect.DeepEqual(before.bindingBytes, after.bindingBytes) &&
+		reflect.DeepEqual(before.activeAgents, after.activeAgents)
+}
+
 func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	flags := newCommandFlagSet("daemon", stderr)
 	socketPath := flags.String("socket", "", "Unix socket `PATH`")
@@ -416,9 +664,17 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	handoffListenerFD := flags.Int("handoff-listener-fd", -1, "inherited listener file descriptor")
 	handoffLockFD := flags.Int("handoff-lock-fd", -1, "inherited lock file descriptor")
 	handoffControlFD := flags.Int("handoff-control-fd", -1, "inherited update control file descriptor")
+	resumeCheckpointFlags := addIntegrationResumeCheckpointFlags(flags)
 	if ok, code := parseCommandFlags(flags, args); !ok {
 		return code
 	}
+	var checkpointCleanup func()
+	ctx, checkpointCleanup, err := resumeCheckpointFlags.decorate(ctx)
+	if err != nil {
+		writeDaemonLog(stderr, "error", "maintenance.checkpoint_invalid", err, nil)
+		return 2
+	}
+	defer checkpointCleanup()
 	paths, err := instance.ResolveRuntime(instance.RuntimeOptions{
 		SocketPath: *socketPath, WorkspaceRoot: *workspaceRoot,
 		ConfigRoot: *configDir, StateRoot: *stateDir, InstanceID: *instanceID,
@@ -426,6 +682,23 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	if err != nil {
 		writeDaemonLog(stderr, "error", "runtime.resolve_failed", err, nil)
 		return 2
+	}
+	var startupMutationLease *optimizationworkspace.MutationLease
+	if paths.Workspace != nil {
+		startupMutationLease, err = optimizationworkspace.AcquireSharedMutationLease(ctx, paths.Workspace.Root)
+		if err != nil {
+			writeDaemonLog(stderr, "error", "workspace.mutation_lease_failed", err, nil)
+			return 1
+		}
+		defer startupMutationLease.Close()
+	}
+	var launchGeneration maintenance.Generation
+	if paths.Workspace != nil {
+		launchGeneration, err = authorizeWorkspaceExecutable(paths.Workspace.Root)
+		if err != nil {
+			writeDaemonLog(stderr, "error", "maintenance.generation_rejected", err, nil)
+			return 1
+		}
 	}
 	handoffCandidate := *handoffListenerFD >= 0 || *handoffLockFD >= 0 || *handoffControlFD >= 0
 	var handoffCommitted atomic.Bool
@@ -463,6 +736,27 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	var schedulerControl func(context.Context, symphony.Command) (protocol.SchedulerControlResponse, error)
 	var workbenchService *workbench.Service
 	var observeRuntime workbench.RuntimeSnapshot
+	var maintenanceStore *maintenance.FileStore
+	var maintenanceCoordinator *workruntime.Coordinator
+	var maintenanceHerdrSnapshot func(context.Context) (herdr.Snapshot, error)
+	var daemonMutationGate daemon.MutationGate
+	var resumeRuntime func(context.Context, []maintenance.Target) error
+	var resumePreflight func(context.Context) error
+	maintenanceArbitration := &sync.Mutex{}
+	maintenanceActive := false
+	var preLockMaintenanceAdmission daemonMaintenanceAdmission
+	if paths.Workspace != nil {
+		maintenanceStore = maintenance.NewFileStore(paths.Workspace.Root)
+		preLockMaintenanceAdmission, err = readMaintenanceDaemonAdmission(
+			ctx, *paths.Workspace, paths.SocketPath, maintenanceStore,
+		)
+		if err != nil {
+			writeDaemonLog(stderr, "error", "maintenance.herdr_admission_failed", err, nil)
+			return 1
+		}
+		maintenanceActive = preLockMaintenanceAdmission.active
+		maintenanceHerdrSnapshot = preLockMaintenanceAdmission.herdrSnapshot
+	}
 	if paths.DatabasePath != "" {
 		worktreeRoot := paths.WorktreeRoot
 		runtimeRoot := paths.RuntimeRoot
@@ -514,6 +808,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		var followUpPolicies map[symphony.WorkRole]symphony.FollowUpPolicy
 		var configuredIterationAgentCount int64
 		if _, statErr := os.Stat(instanceConfigPath); statErr == nil {
+			resumePreflight = func(preflightCtx context.Context) error {
+				return configuration.ProbeConfiguredProviders(preflightCtx, instanceConfigPath, providerRegistry,
+					map[string]string{"codex": codexExecutable, "cursor": cursorExecutable}, providerModelRequests)
+			}
 			followUpConfig, configErr := configuration.LoadFollowUp(instanceConfigPath)
 			if configErr != nil {
 				writeDaemonLog(stderr, "error", "configuration.load_failed", configErr, nil)
@@ -527,9 +825,11 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				return 1
 			}
 			configuredIterationAgentCount = int64(len(iterationAgents))
-			if configErr := configuration.ProbeConfiguredProviders(ctx, instanceConfigPath, providerRegistry, map[string]string{"codex": codexExecutable, "cursor": cursorExecutable}, providerModelRequests); configErr != nil {
-				writeDaemonLog(stderr, "error", "provider.preflight_failed", configErr, nil)
-				return 1
+			if !maintenanceActive {
+				if configErr := resumePreflight(ctx); configErr != nil {
+					writeDaemonLog(stderr, "error", "provider.preflight_failed", configErr, nil)
+					return 1
+				}
 			}
 		}
 		if override := os.Getenv("PIKA_GO_FOLLOWUP_INACTIVITY"); override != "" {
@@ -538,6 +838,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				writeDaemonLog(stderr, "error", "configuration.override_invalid", fmt.Errorf("invalid PIKA_GO_FOLLOWUP_INACTIVITY %q", override), nil)
 				return 2
 			}
+		}
+		if err := waitForDaemonAuthorizationBarrier(ctx); err != nil {
+			writeDaemonLog(stderr, "error", "maintenance.authorization_barrier_failed", err, nil)
+			return 1
 		}
 		if handoffCandidate {
 			if err := handoffControl.Send(daemonupdate.MessagePrepared, nil); err != nil {
@@ -557,6 +861,37 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			return 1
 		}
 		defer daemonLock.Close()
+		if paths.Workspace != nil {
+			launchGeneration, err = authorizeWorkspaceExecutable(paths.Workspace.Root)
+			if err != nil {
+				writeDaemonLog(stderr, "error", "maintenance.generation_rejected", err, nil)
+				return 1
+			}
+			postLockAdmission, admissionErr := readMaintenanceDaemonAdmission(
+				ctx, *paths.Workspace, paths.SocketPath, maintenanceStore,
+			)
+			if admissionErr != nil {
+				writeDaemonLog(stderr, "error", "maintenance.herdr_admission_failed", admissionErr, nil)
+				return 1
+			}
+			if !sameDaemonMaintenanceAdmission(preLockMaintenanceAdmission, postLockAdmission) {
+				writeDaemonLog(stderr, "error", "maintenance.admission_changed",
+					errors.New("maintenance state or exact durable/live identity changed while waiting for the instance lock"), nil)
+				return 1
+			}
+			maintenanceActive = postLockAdmission.active
+			maintenanceHerdrSnapshot = postLockAdmission.herdrSnapshot
+			var layoutErr error
+			if maintenanceActive {
+				layoutErr = paths.Workspace.ValidateLayout()
+			} else {
+				layoutErr = paths.Workspace.EnsureLayout()
+			}
+			if layoutErr != nil {
+				writeDaemonLog(stderr, "error", "workspace.layout_failed", layoutErr, nil)
+				return 1
+			}
+		}
 		engine, err = symphony.Open(ctx, paths.DatabasePath, symphony.Options{FollowUpInactivity: followUpInactivity, FollowUpPolicies: followUpPolicies, Providers: providerRegistry})
 		if err != nil {
 			writeDaemonLog(stderr, "error", "database.open_failed", err, map[string]any{"instance_id": paths.InstanceID})
@@ -578,19 +913,18 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 					writeDaemonLog(stderr, "error", "configuration.iteration_agents_failed", errors.New("Iteration Agent count changes require a cold daemon restart"), nil)
 					return 1
 				}
-			} else if reconfigureErr := engine.ReconfigureIterationAgents(ctx, configuredIterationAgentCount); reconfigureErr != nil {
-				writeDaemonLog(stderr, "error", "configuration.iteration_agents_failed", reconfigureErr, nil)
-				return 1
+			} else if !maintenanceActive {
+				if reconfigureErr := engine.ReconfigureIterationAgents(ctx, configuredIterationAgentCount); reconfigureErr != nil {
+					writeDaemonLog(stderr, "error", "configuration.iteration_agents_failed", reconfigureErr, nil)
+					return 1
+				}
 			}
 		}
 		if paths.Workspace != nil {
 			identity := paths.Workspace.Identity
-			if err := engine.EnsureWorkspaceIdentity(ctx, symphony.WorkspaceIdentity{
+			expectedIdentity := symphony.WorkspaceIdentity{
 				ID: identity.ID, Root: identity.Root, SourceRepository: identity.SourceRepository, GitCommonDir: identity.GitCommonDir,
 				GitCommonDirDevice: identity.GitCommonDirDevice, GitCommonDirInode: identity.GitCommonDirInode, InitialSHA: identity.InitialSHA,
-			}); err != nil {
-				writeDaemonLog(stderr, "error", "workspace.database_identity_failed", err, map[string]any{"workspace": paths.Workspace.Root})
-				return 1
 			}
 			baseWorkspace := gitworkspace.Workspace{Repository: assignedRepository, Root: worktreeRoot, Namespace: branchNamespace}
 			baseSHA, headErr := baseWorkspace.SourceHEAD(ctx)
@@ -598,16 +932,31 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				writeDaemonLog(stderr, "error", "workspace.base_failed", headErr, nil)
 				return 1
 			}
-			if err := engine.UpsertGitWorktree(ctx, symphony.GitWorktreeRecord{
+			expectedBase := symphony.GitWorktreeRecord{
 				Role: "base", Branch: paths.Workspace.BaseBranch(), Repository: assignedRepository, HeadSHA: baseSHA, State: "active",
-			}); err != nil {
+			}
+			if maintenanceActive {
+				if err := engine.ValidateWorkspaceIdentity(ctx, expectedIdentity); err != nil {
+					writeDaemonLog(stderr, "error", "workspace.database_identity_failed", err, map[string]any{"workspace": paths.Workspace.Root})
+					return 1
+				}
+				if err := engine.ValidateGitWorktree(ctx, expectedBase); err != nil {
+					writeDaemonLog(stderr, "error", "workspace.registry_failed", err, nil)
+					return 1
+				}
+			} else if err := engine.EnsureWorkspaceIdentity(ctx, expectedIdentity); err != nil {
+				writeDaemonLog(stderr, "error", "workspace.database_identity_failed", err, map[string]any{"workspace": paths.Workspace.Root})
+				return 1
+			} else if err := engine.UpsertGitWorktree(ctx, expectedBase); err != nil {
 				writeDaemonLog(stderr, "error", "workspace.registry_failed", err, nil)
 				return 1
 			}
 		}
-		if err := validateFlowV2Evidence(ctx, engine, paths.EvidenceRoot); err != nil {
-			writeDaemonLog(stderr, "error", "workspace.evidence_failed", err, nil)
-			return 1
+		if !maintenanceActive {
+			if err := validateFlowV2Evidence(ctx, engine, paths.EvidenceRoot); err != nil {
+				writeDaemonLog(stderr, "error", "workspace.evidence_failed", err, nil)
+				return 1
+			}
 		}
 		activeSessions, activeErr := engine.ActiveAgentSessions(ctx)
 		if activeErr != nil {
@@ -621,9 +970,11 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		for _, active := range activeSessions {
 			activeSessionIDs[active.Session.ID] = true
 		}
-		if reconcileErr := provider.ReconcileCursorSessions(runtimeRoot, activeSessionIDs); reconcileErr != nil {
-			writeDaemonLog(stderr, "error", "provider.reconciliation_failed", reconcileErr, nil)
-			return 1
+		if !maintenanceActive {
+			if reconcileErr := provider.ReconcileCursorSessions(runtimeRoot, activeSessionIDs); reconcileErr != nil {
+				writeDaemonLog(stderr, "error", "provider.reconciliation_failed", reconcileErr, nil)
+				return 1
+			}
 		}
 		symphonyService = engine
 		workbenchService = workbench.New(engine, func(observeCtx context.Context) (workruntime.Snapshot, error) {
@@ -651,7 +1002,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			ProviderExecutables:   map[string]string{"codex": codexExecutable, "cursor": cursorExecutable},
 			ProviderModelRequests: providerModelRequests,
 		}
-		if paths.Workspace != nil && !handoffCandidate {
+		if paths.Workspace != nil && !handoffCandidate && !maintenanceActive {
 			if _, statErr := os.Stat(instanceConfigPath); statErr == nil {
 				if _, refreshErr := initializer.Prepare(ctx, paths.Workspace.Identity.SourceRepository); refreshErr != nil {
 					writeDaemonLog(stderr, "error", "provider.integration_refresh_failed", refreshErr, nil)
@@ -668,6 +1019,11 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				configPath, resolveErr := herdr.ResolveConfigPath()
 				if resolveErr != nil {
 					return daemon.PreparedInit{}, resolveErr
+				}
+				if paths.Workspace != nil {
+					if _, authorizeErr := authorizeWorkspaceExecutable(paths.Workspace.Root); authorizeErr != nil {
+						return daemon.PreparedInit{}, fmt.Errorf("maintenance generation rejected before Herdr reload: %w", authorizeErr)
+					}
 				}
 				if freshErr := herdr.RequireFreshSessions(initCtx, herdr.NewClient(herdrSocket), configPath); freshErr != nil {
 					return daemon.PreparedInit{}, fmt.Errorf("require fresh Herdr Agent Sessions: %w", freshErr)
@@ -815,6 +1171,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		symphonyPane := os.Getenv("HERDR_PANE_ID")
 		if herdrSocket != "" && symphonyPane != "" {
 			client := herdr.NewClient(herdrSocket)
+			maintenanceHerdrSnapshot = client.Snapshot
 			runtimeAdapter := workruntime.NewHerdrRuntime(client, symphonyPane)
 			observeRuntime = runtimeAdapter.Snapshot
 			runtimeAdapter.OnEvent = func(eventCtx context.Context, event herdr.Event) error {
@@ -838,9 +1195,11 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				writeDaemonLog(stderr, "error", "herdr.symphony_pane_failed", err, map[string]any{"pane_id": symphonyPane})
 				return 1
 			}
-			if err := herdr.NewRuntime(client).ReportInstance(ctx, pane.WorkspaceID, paths.InstanceID); err != nil {
-				writeDaemonLog(stderr, "error", "herdr.instance_report_failed", err, map[string]any{"workspace_id": pane.WorkspaceID})
-				return 1
+			if !maintenanceActive {
+				if err := herdr.NewRuntime(client).ReportInstance(ctx, pane.WorkspaceID, paths.InstanceID); err != nil {
+					writeDaemonLog(stderr, "error", "herdr.instance_report_failed", err, map[string]any{"workspace_id": pane.WorkspaceID})
+					return 1
+				}
 			}
 			pathEntries := []string{runtimeBin, os.Getenv("PATH")}
 			if prefix := os.Getenv("PIKA_GO_AGENT_PATH_PREFIX"); prefix != "" {
@@ -848,8 +1207,9 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			}
 			activationEnvironment := map[string]string{"PATH": strings.Join(pathEntries, string(os.PathListSeparator))}
 			preparer := activation.Preparer{Store: engine, InstructionRoot: paths.InstructionsRoot, ContextsRoot: paths.ContextsRoot, EvidenceRoot: paths.EvidenceRoot, SocketPath: paths.SocketPath, Environment: activationEnvironment, AgentConfigPath: instanceConfigPath, Providers: providerRegistry}
-			dispatcher := outbox.Dispatcher{Store: engine, Sink: workruntime.Sink{Store: engine, Runtime: runtimeAdapter, AgentKind: "codex", AgentConfigPath: instanceConfigPath, Providers: providerRegistry, ProviderRuntimeRoot: runtimeRoot, RequireProviderCapabilities: true, Preparer: preparer, WorkspacePreparer: gitworkspace.RuntimePreparer{Repository: assignedRepository, Root: worktreeRoot, Namespace: branchNamespace, Recorder: engine, CheckpointInitializer: engine}}}
-			coordinator := workruntime.Coordinator{
+			runtimeSink := workruntime.Sink{Store: engine, Runtime: runtimeAdapter, AgentKind: "codex", AgentConfigPath: instanceConfigPath, Providers: providerRegistry, ProviderRuntimeRoot: runtimeRoot, RequireProviderCapabilities: true, Preparer: preparer, WorkspacePreparer: gitworkspace.RuntimePreparer{Repository: assignedRepository, Root: worktreeRoot, Namespace: branchNamespace, Recorder: engine, CheckpointInitializer: engine}}
+			dispatcher := outbox.Dispatcher{Store: engine, Sink: runtimeSink}
+			coordinator := &workruntime.Coordinator{
 				Reconciler:  workruntime.Reconciler{Store: engine, Runtime: runtimeAdapter, ProviderRuntimeRoot: runtimeRoot},
 				Dispatcher:  dispatcher,
 				EffectStore: engine,
@@ -858,7 +1218,8 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 					writeDaemonLog(stderr, "warn", "herdr.watch_reconnecting", watchErr, nil)
 				},
 			}
-			if !handoffCandidate {
+			maintenanceCoordinator = coordinator
+			if !handoffCandidate && !maintenanceActive {
 				if err := engine.RetireActiveSessionsForRecovery(ctx); err != nil {
 					writeDaemonLog(stderr, "error", "runtime.session_retirement_failed", err, nil)
 					return 1
@@ -872,11 +1233,18 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				}
 			}
 			schedulerController := scheduler.Controller{
-				Store: engine, Dispatcher: dispatcher, Exclusive: &coordinator,
+				Store: engine, Dispatcher: dispatcher, Exclusive: coordinator,
 				After: func() { afterCommit(ctx) },
 			}
 			schedulerControl = schedulerController.Apply
+			var runtimeStartMu sync.Mutex
+			runtimeStarted := false
 			startRuntime := func(listenCtx context.Context) error {
+				runtimeStartMu.Lock()
+				defer runtimeStartMu.Unlock()
+				if runtimeStarted {
+					return nil
+				}
 				if err := coordinator.RecoverAndDispatch(listenCtx); err != nil {
 					return fmt.Errorf("recover runtime after daemon listen: %w", err)
 				}
@@ -904,7 +1272,9 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 						case <-runtimeCtx.Done():
 							return
 						case <-ticker.C:
-							promoted, err := engine.PromoteDueFollowUps(runtimeCtx)
+							promoted, err := coordinator.Promote(func() (bool, error) {
+								return engine.PromoteDueFollowUps(runtimeCtx)
+							})
 							if err != nil {
 								writeDaemonLog(stderr, "error", "follow_up.promotion_failed", err, nil)
 							} else if promoted {
@@ -918,24 +1288,98 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 					defer runtimeWG.Done()
 					_ = coordinator.Run(runtimeCtx)
 				}()
+				runtimeStarted = true
+				return nil
+			}
+			resumeRuntime = func(resumeCtx context.Context, targets []maintenance.Target) error {
+				if resumePreflight != nil {
+					if err := resumePreflight(resumeCtx); err != nil {
+						return err
+					}
+				}
+				terminal, err := (maintenanceDomain{engine: engine, herdrSnapshot: maintenanceHerdrSnapshot}).MaintenanceTargetsTerminal(resumeCtx, targets)
+				if err != nil {
+					return err
+				}
+				if !terminal {
+					return errors.New("frozen maintenance targets are not terminal")
+				}
+				if err := runtimeSink.RetireMaintenanceTargets(resumeCtx, targets); err != nil {
+					return err
+				}
+				if err := startRuntime(resumeCtx); err != nil {
+					return err
+				}
 				return nil
 			}
 			if handoffCandidate {
 				afterHandoffCommit = startRuntime
-			} else {
+			} else if !maintenanceActive {
 				afterListen = startRuntime
 			}
 		} else {
 			dispatcher := outbox.Dispatcher{Store: engine, Sink: &outbox.Recorder{}}
-			if err := engine.RecoverUncertainEffects(ctx); err != nil {
-				writeDaemonLog(stderr, "error", "outbox.recovery_failed", err, nil)
-				return 1
+			coordinator := &workruntime.Coordinator{
+				Reconciler:  workruntime.Reconciler{Store: engine},
+				Dispatcher:  dispatcher,
+				EffectStore: engine,
 			}
-			afterCommit = func(ctx context.Context) { _ = dispatcher.DispatchPending(ctx) }
-			afterCommit(ctx)
+			maintenanceCoordinator = coordinator
+			var runtimeStartMu sync.Mutex
+			runtimeStarted := false
+			startRuntime := func(listenCtx context.Context) error {
+				runtimeStartMu.Lock()
+				defer runtimeStartMu.Unlock()
+				if runtimeStarted {
+					return nil
+				}
+				if err := coordinator.RecoverEffectsAndDispatch(listenCtx); err != nil {
+					return err
+				}
+				runtimeStarted = true
+				return nil
+			}
+			afterCommit = func(dispatchCtx context.Context) {
+				runtimeStartMu.Lock()
+				started := runtimeStarted
+				runtimeStartMu.Unlock()
+				if started {
+					_ = coordinator.RecoverEffectsAndDispatch(dispatchCtx)
+				}
+			}
+			resumeSink := workruntime.Sink{Store: engine}
+			resumeRuntime = func(resumeCtx context.Context, targets []maintenance.Target) error {
+				if resumePreflight != nil {
+					if err := resumePreflight(resumeCtx); err != nil {
+						return err
+					}
+				}
+				terminal, err := (maintenanceDomain{engine: engine, herdrSnapshot: maintenanceHerdrSnapshot}).MaintenanceTargetsTerminal(resumeCtx, targets)
+				if err != nil {
+					return err
+				}
+				if !terminal {
+					return errors.New("frozen maintenance targets are not terminal")
+				}
+				if err := resumeSink.RetireMaintenanceTargets(resumeCtx, targets); err != nil {
+					return err
+				}
+				if err := startRuntime(resumeCtx); err != nil {
+					return err
+				}
+				return nil
+			}
+			if !maintenanceActive {
+				if err := startRuntime(ctx); err != nil {
+					writeDaemonLog(stderr, "error", "outbox.recovery_failed", err, nil)
+					return 1
+				}
+			}
 		}
+		mutationGate := maintenanceMutationGate{arbitration: maintenanceArbitration, store: maintenanceStore, engine: engine}
+		daemonMutationGate = mutationGate
 		mcpHandler = mcp.Handler{Application: toolapp.Application{Store: engine, WorktreeRoot: worktreeRoot, Repository: assignedRepository, BranchNamespace: branchNamespace, WorktreeRecorder: engine,
-			EvidenceRoot: paths.EvidenceRoot}, AfterMutation: func() {
+			EvidenceRoot: paths.EvidenceRoot, AuthorizeInvocation: mutationGate.AuthorizeInvocation}, AfterMutation: func() {
 			if afterCommit != nil {
 				afterCommit(ctx)
 			}
@@ -1023,16 +1467,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		}
 	}()
 
-	binaryDigest := ""
+	binaryDigest := launchGeneration.Digest
 	if paths.Workspace != nil {
 		if handoffCandidate {
 			_, err = daemonupdate.ReadCurrent(paths.Workspace.Root)
-			if err == nil {
-				executable, executableErr := os.Executable()
-				if executableErr == nil {
-					binaryDigest, err = daemonupdate.FileDigest(executable)
-				}
-			}
 		} else {
 			executable, executableErr := os.Executable()
 			if executableErr != nil {
@@ -1051,6 +1489,56 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 
 	var updateMu sync.Mutex
 	var pending *daemonupdate.Handoff
+	var maintenanceProcess *maintenance.Process
+	if paths.Workspace != nil && engine != nil && maintenanceCoordinator != nil {
+		maintenanceProcess = &maintenance.Process{
+			Store: maintenanceStore, Runtime: maintenanceCoordinator,
+			Domain: maintenanceDomain{engine: engine, herdrSnapshot: maintenanceHerdrSnapshot},
+			RequireInitialized: func(checkCtx context.Context) error {
+				_, inspectErr := engine.Inspect(checkCtx, symphony.Status{})
+				return inspectErr
+			},
+			CurrentGeneration: func() (maintenance.Generation, error) {
+				current, currentErr := daemonupdate.ReadCurrent(paths.Workspace.Root)
+				if currentErr != nil {
+					return maintenance.Generation{}, currentErr
+				}
+				return maintenance.Generation{Digest: current.Digest, Version: current.Version}, nil
+			},
+			HotUpdateInProgress: func() bool {
+				updateMu.Lock()
+				defer updateMu.Unlock()
+				return pending != nil || !handoffCommitted.Load()
+			},
+			ResumeRuntime: resumeRuntime,
+			Arbitration:   maintenanceArbitration,
+			StateActivation: func(activationCtx context.Context, activate func() error) error {
+				lease, leaseErr := optimizationworkspace.AcquireExclusiveMutationLease(activationCtx, paths.Workspace.Root)
+				if leaseErr != nil {
+					return leaseErr
+				}
+				defer lease.Close()
+				return activate()
+			},
+		}
+		if maintenanceActive {
+			status, statusErr := maintenanceStore.Read()
+			if statusErr != nil {
+				writeDaemonLog(stderr, "error", "maintenance.recovery_failed", statusErr, nil)
+				return 1
+			}
+			current := maintenance.Generation{Digest: binaryDigest, Version: Version}
+			if status.State == maintenance.StateQuiescing || (status.State == maintenance.StateReady && status.FromGeneration.Digest == binaryDigest) {
+				_, _, statusErr = maintenanceProcess.Recover(ctx)
+			} else {
+				_, _, statusErr = maintenanceProcess.RecoverWithGeneration(ctx, current)
+			}
+			if statusErr != nil {
+				writeDaemonLog(stderr, "error", "maintenance.recovery_failed", statusErr, nil)
+				return 1
+			}
+		}
+	}
 	updateAccepted := make(chan struct{}, 1)
 	successorArgs := []string{"--socket", paths.SocketPath}
 	if paths.Workspace != nil {
@@ -1081,8 +1569,18 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	var prepareUpdate func(context.Context, daemonupdate.Candidate) (daemonupdate.Status, error)
 	if paths.Workspace != nil && daemonLock != nil {
 		prepareUpdate = func(_ context.Context, candidate daemonupdate.Candidate) (daemonupdate.Status, error) {
+			maintenanceArbitration.Lock()
+			defer maintenanceArbitration.Unlock()
 			updateMu.Lock()
 			defer updateMu.Unlock()
+			if maintenanceStore != nil {
+				if status, statusErr := maintenanceStore.Read(); statusErr == nil &&
+					(status.State == maintenance.StateQuiescing || status.State == maintenance.StateReady || status.State == maintenance.StateHolding || status.State == maintenance.StateFailed) {
+					return daemonupdate.Status{}, fmt.Errorf("maintenance %s is %s", status.ID, status.State)
+				} else if statusErr != nil && !errors.Is(statusErr, os.ErrNotExist) {
+					return daemonupdate.Status{}, statusErr
+				}
+			}
 			if !handoffCommitted.Load() {
 				return daemonupdate.Status{}, errors.New("this daemon generation is still activating")
 			}
@@ -1176,8 +1674,18 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			return nil
 		}
 	}
+	var maintenanceService daemon.Maintenance
+	if maintenanceProcess != nil {
+		maintenanceService = maintenanceProcess
+	}
+	if startupMutationLease != nil {
+		if err := startupMutationLease.Close(); err != nil {
+			writeDaemonLog(stderr, "error", "workspace.mutation_lease_release_failed", err, nil)
+			return 1
+		}
+	}
 	writeDaemonLog(stderr, "info", "daemon.starting", nil, map[string]any{"instance_id": paths.InstanceID, "protocol_version": protocol.Version, "version": Version})
-	serveErr := daemon.Serve(ctx, daemon.Config{SocketPath: paths.SocketPath, Listener: listener, Version: Version, InstanceID: paths.InstanceID, Symphony: symphonyService, PrepareInit: prepareInit, InitOptions: initOptions, RecordInitFailure: recordInitFailure, AfterListen: afterListen, AfterCommit: afterCommit, MCPHandler: mcpHandler, ApplyGitIntent: applyGitIntent, IngestProviderEvent: ingestProviderEvent, IngestProviderHookEvent: ingestProviderHookEvent, Backup: backup, DrainReady: drainReady, SchedulerControl: schedulerControl, PrepareUpdate: prepareUpdate, UpdateAccepted: updateAccepted, BinaryDigest: binaryDigest, Ready: generationReady.Load, Workbench: workbenchService})
+	serveErr := daemon.Serve(ctx, daemon.Config{SocketPath: paths.SocketPath, Listener: listener, Version: Version, InstanceID: paths.InstanceID, Symphony: symphonyService, PrepareInit: prepareInit, InitOptions: initOptions, RecordInitFailure: recordInitFailure, AfterListen: afterListen, AfterCommit: afterCommit, MCPHandler: mcpHandler, ApplyGitIntent: applyGitIntent, IngestProviderEvent: ingestProviderEvent, IngestProviderHookEvent: ingestProviderHookEvent, Backup: backup, DrainReady: drainReady, SchedulerControl: schedulerControl, PrepareUpdate: prepareUpdate, UpdateAccepted: updateAccepted, BinaryDigest: binaryDigest, Ready: generationReady.Load, Workbench: workbenchService, Maintenance: maintenanceService, MutationGate: daemonMutationGate})
 	if errors.Is(serveErr, daemon.ErrHandoff) {
 		removeSocket = false
 		cancelRuntime()
@@ -1450,6 +1958,7 @@ func runEditInstruction(ctx context.Context, args []string, stdin io.Reader, std
 		return 2
 	}
 	instructionRoot := ""
+	instructionWorkspace := ""
 	workspaceCandidate := *workspaceRoot
 	if workspaceCandidate == "" {
 		workspaceCandidate = os.Getenv("PIKA_GO_WORKSPACE")
@@ -1461,8 +1970,10 @@ func runEditInstruction(ctx context.Context, args []string, stdin io.Reader, std
 			return 2
 		}
 		instructionRoot = workspace.InstructionsRoot
+		instructionWorkspace = workspace.Root
 	} else if workspace, err := optimizationworkspace.Discover(""); err == nil {
 		instructionRoot = workspace.InstructionsRoot
+		instructionWorkspace = workspace.Root
 	}
 	root := *configRoot
 	if root == "" {
@@ -1491,6 +2002,16 @@ func runEditInstruction(ctx context.Context, args []string, stdin io.Reader, std
 		}
 		instructionRoot = filepath.Join(root, "instances", id, "instructions")
 	}
+	var instructionLease *optimizationworkspace.MutationLease
+	if instructionWorkspace != "" {
+		var err error
+		instructionLease, err = optimizationworkspace.AcquireSharedMutationLease(ctx, instructionWorkspace)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "edit-instruction: acquire Workspace mutation lease: %v\n", err)
+			return 1
+		}
+		defer instructionLease.Close()
+	}
 	path, err := instructions.Path(instructionRoot, flags.Arg(0))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "edit-instruction: %v\n", err)
@@ -1508,6 +2029,12 @@ func runEditInstruction(ctx context.Context, args []string, stdin io.Reader, std
 	if len(parts) == 0 {
 		_, _ = fmt.Fprintln(stderr, "edit-instruction: VISUAL or EDITOR is required")
 		return 2
+	}
+	if instructionWorkspace != "" {
+		if _, _, err := authorizeWorkspaceDirectMutation(instructionWorkspace); err != nil {
+			_, _ = fmt.Fprintf(stderr, "edit-instruction: direct Workspace mutation rejected: %v\n", err)
+			return 1
+		}
 	}
 	command := exec.CommandContext(ctx, parts[0], append(parts[1:], path)...)
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr

@@ -190,6 +190,10 @@ func TestDrainingDraftMayFinishButDoesNotStartVerification(t *testing.T) {
 	if len(after.Works) != 1 || after.Works[0].Status != symphony.WorkCompleted {
 		t.Fatalf("draining draft started successor work: %+v", after.Works)
 	}
+	receipt, found, err := engine.WorkRoleTerminalReceipt(ctx, draft.Works[0].ID, symphony.RoleBaselineDraft)
+	if err != nil || !found || receipt.RequestID != "submit" {
+		t.Fatalf("draining draft terminal receipt: receipt=%+v found=%v err=%v", receipt, found, err)
+	}
 }
 
 func TestDrainReadyRequiresNoPendingWorkActiveSessionOrRuntimeEffect(t *testing.T) {

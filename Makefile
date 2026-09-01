@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 PREFIX ?= /usr/local
 DESTDIR ?=
 
-.PHONY: build webui-install webui-build webui-verify hot-update-candidate install fake-agent test-driver test verify herdr-integration crash-integration real-codex-integration real-cursor-integration real-codex-hot-reload-integration real-cursor-hot-reload-integration real-mixed-provider-integration real-pause-resume-integration dist clean
+.PHONY: build webui-install webui-build webui-verify hot-update-candidate install fake-agent test-driver test verify herdr-integration release-maintenance-integration crash-integration real-codex-integration real-cursor-integration real-codex-hot-reload-integration real-cursor-hot-reload-integration real-mixed-provider-integration real-pause-resume-integration dist clean
 
 webui-install:
 	cd webui && $(NPM) ci
@@ -53,7 +53,13 @@ verify: webui-verify
 	$(GO) test -race ./...
 
 herdr-integration: build fake-agent
-	PIKA_GO_HERDR_INTEGRATION=1 PIKA_GO_FAKE_AGENT_BIN="$(CURDIR)/fake-agent" PIKA_GO_BIN="$(CURDIR)/pika-go" $(GO) test ./internal/herdr ./internal/workruntime -run 'TestRuntimeWithRealHerdrAndFakeAgent|TestDaemonRestartCreatesFreshSessionMoveAndLostPaneReplacement|TestDaemonProcessCrashReplacesRunningHerdrAgentAndRecoversWork|TestDaemonProcessCrashAtDispatchingOutboxReconcilesWithoutDuplicateAgent|TestDaemonProcessCrashAfterTerminalCommitRecoversSingleSuccessor|TestDaemonProcessCrashAfterBestGitCommitRecoversIntegrationOnce|TestGracefulShutdownWaitsForRealHerdrAgentTerminalMCP|TestBaselineAcceptedEndToEndThroughMCP|TestFollowUpThroughRealHerdr|TestRejectedBaselineCreatesFreshDraftSession|TestOptimizationFIFOThroughRealHerdr' -v
+	PIKA_GO_HERDR_INTEGRATION=1 PIKA_GO_FAKE_AGENT_BIN="$(CURDIR)/fake-agent" PIKA_GO_BIN="$(CURDIR)/pika-go" $(GO) test ./internal/herdr ./internal/workruntime -run 'TestRuntimeWithRealHerdrAndFakeAgent|TestDaemonRestartCreatesFreshSessionMoveAndLostPaneReplacement|TestDaemonProcessCrashReplacesRunningHerdrAgentAndRecoversWork|TestDaemonProcessCrashAtDispatchingOutboxReconcilesWithoutDuplicateAgent|TestDaemonProcessCrashAfterTerminalCommitRecoversSingleSuccessor|TestDaemonProcessCrashAfterBestGitCommitRecoversIntegrationOnce|TestGracefulShutdownWaitsForRealHerdrAgentTerminalMCP|TestMaintenancePrepareWaitsForAgentTerminalThenHoldsColdOpen|TestBaselineAcceptedEndToEndThroughMCP|TestFollowUpThroughRealHerdr|TestRejectedBaselineCreatesFreshDraftSession|TestOptimizationFIFOThroughRealHerdr' -v
+
+release-maintenance-integration: fake-agent
+	@test -x "$$PIKA_GO_SCHEMA20_BRIDGE" || (echo "PIKA_GO_SCHEMA20_BRIDGE must name an executable" >&2; exit 2)
+	@test -x "$$PIKA_GO_SCHEMA23_TARGET" || (echo "PIKA_GO_SCHEMA23_TARGET must name an executable" >&2; exit 2)
+	PIKA_GO_HERDR_INTEGRATION=1 PIKA_GO_FAKE_AGENT_BIN="$(CURDIR)/fake-agent" $(GO) test ./internal/workruntime -run '^TestMaintenancePrepareWaitsForAgentTerminalThenHoldsColdOpen$$' -count=1 -v -timeout=3m
+	$(GO) test ./internal/maintenance -run 'TestHoldingResume(CrashAfterRuntimeStartReplaysDurableIntent|RetriesAfterPersistedWriteFailureWithoutDuplicateRuntime)|TestHoldingTakeoverAcceptsTargetAndOriginalFromGenerationOnly' -count=1 -v
 
 crash-integration: build fake-agent
 	PIKA_GO_HERDR_INTEGRATION=1 PIKA_GO_FAKE_AGENT_BIN="$(CURDIR)/fake-agent" PIKA_GO_BIN="$(CURDIR)/pika-go" $(GO) test ./internal/workruntime -run 'TestDaemonProcessCrashReplacesRunningHerdrAgentAndRecoversWork|TestDaemonProcessCrashAtDispatchingOutboxReconcilesWithoutDuplicateAgent|TestDaemonProcessCrashAfterTerminalCommitRecoversSingleSuccessor|TestDaemonProcessCrashAfterBestGitCommitRecoversIntegrationOnce' -v -count=2

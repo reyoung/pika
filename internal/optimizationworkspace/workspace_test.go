@@ -1,7 +1,9 @@
 package optimizationworkspace_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,8 +57,110 @@ func TestCreateOwnsStableIdentityAndBaseLinkedWorktree(t *testing.T) {
 	if reopened.Identity != workspace.Identity {
 		t.Fatalf("reopened identity = %+v, want %+v", reopened.Identity, workspace.Identity)
 	}
-	if _, err := optimizationworkspace.Create(context.Background(), root, repository); err != nil {
-		t.Fatalf("idempotent create: %v", err)
+	manifestBefore, err := os.ReadFile(workspace.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootInfoBefore, err := os.Stat(workspace.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := optimizationworkspace.Create(context.Background(), root, repository); !errors.Is(err, optimizationworkspace.ErrAlreadyExists) {
+		t.Fatalf("second create error: %v", err)
+	}
+	manifestAfter, err := os.ReadFile(workspace.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootInfoAfter, err := os.Stat(workspace.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(manifestBefore, manifestAfter) || rootInfoBefore.Mode() != rootInfoAfter.Mode() {
+		t.Fatal("rejected create mutated existing Workspace")
+	}
+}
+
+func TestOpenAndDiscoverDoNotEnsureLayoutOrPermissions(t *testing.T) {
+	repository := newRepository(t)
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := workspace.EvidenceRoot
+	if err := os.RemoveAll(missing); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(workspace.RuntimeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(workspace.RuntimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := optimizationworkspace.Open(workspace.Root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := optimizationworkspace.Discover(workspace.RuntimeRoot); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(workspace.RuntimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only resolution created missing layout: %v", err)
+	}
+	if before.Mode() != after.Mode() || after.Mode().Perm() != 0o755 {
+		t.Fatalf("read-only resolution changed mode %v to %v", before.Mode(), after.Mode())
+	}
+	if err := workspace.ValidateLayout(); err == nil {
+		t.Fatal("invalid layout was accepted")
+	}
+	if err := workspace.EnsureLayout(); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.ValidateLayout(); err != nil {
+		t.Fatalf("prepared layout is invalid: %v", err)
+	}
+}
+
+func TestCreateForImportIsExclusiveNewAndDoesNotRepairExistingDestination(t *testing.T) {
+	repository := newRepository(t)
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(workspace.EvidenceRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(workspace.RuntimeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifestBefore, err := os.ReadFile(workspace.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modeBefore, err := os.Stat(workspace.RuntimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := optimizationworkspace.CreateForImport(context.Background(), workspace.Root, repository); !errors.Is(err, optimizationworkspace.ErrAlreadyExists) {
+		t.Fatalf("CreateForImport existing error: %v", err)
+	}
+	manifestAfter, err := os.ReadFile(workspace.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modeAfter, err := os.Stat(workspace.RuntimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(manifestBefore, manifestAfter) || modeBefore.Mode() != modeAfter.Mode() {
+		t.Fatal("CreateForImport repaired existing destination")
+	}
+	if _, err := os.Stat(workspace.EvidenceRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("CreateForImport created missing layout: %v", err)
 	}
 }
 

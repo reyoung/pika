@@ -3,24 +3,33 @@ package workruntime_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/reyoung/pika-go/internal/cli"
 	"github.com/reyoung/pika-go/internal/configuration"
 	"github.com/reyoung/pika-go/internal/control"
+	"github.com/reyoung/pika-go/internal/daemonupdate"
 	"github.com/reyoung/pika-go/internal/herdr"
+	"github.com/reyoung/pika-go/internal/maintenance"
+	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/testdriver"
@@ -296,6 +305,1201 @@ func TestGracefulShutdownWaitsForRealHerdrAgentTerminalMCP(t *testing.T) {
 		t.Fatalf("daemon socket remains after drain: %v", err)
 	}
 	_ = client.Call(ctx, "workspace.close", map[string]string{"workspace_id": created.Workspace.WorkspaceID}, nil)
+}
+
+func TestMaintenancePrepareWaitsForAgentTerminalThenHoldsColdOpen(t *testing.T) {
+	if os.Getenv("PIKA_GO_SCHEMA20_BRIDGE") != "" || os.Getenv("PIKA_GO_SCHEMA23_TARGET") != "" {
+		t.Run("target resume crash retry", func(t *testing.T) {
+			runMaintenancePrepareWaitsForAgentTerminalThenHoldsColdOpen(t, false)
+		})
+		t.Run("bridge rollback resume", func(t *testing.T) {
+			runMaintenancePrepareWaitsForAgentTerminalThenHoldsColdOpen(t, true)
+		})
+		return
+	}
+	runMaintenancePrepareWaitsForAgentTerminalThenHoldsColdOpen(t, false)
+}
+
+func runMaintenancePrepareWaitsForAgentTerminalThenHoldsColdOpen(t *testing.T, bridgeRollbackResume bool) {
+	if os.Getenv("PIKA_GO_HERDR_INTEGRATION") != "1" {
+		t.Skip("set PIKA_GO_HERDR_INTEGRATION=1 to run the real Herdr test")
+	}
+	herdrBinary, err := exec.LookPath("herdr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeAgent := os.Getenv("PIKA_GO_FAKE_AGENT_BIN")
+	if fakeAgent == "" || !filepath.IsAbs(fakeAgent) {
+		t.Fatal("PIKA_GO_FAKE_AGENT_BIN must be an absolute path")
+	}
+	root, err := os.MkdirTemp("/tmp", "pika-go-maintenance-int-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	agentFinishGate := filepath.Join(root, "finish-active-agent")
+	resumeCheckpointRoot := filepath.Join(root, "resume-checkpoints")
+	if err := os.Mkdir(resumeCheckpointRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	herdrConfig, herdrState, binDir := configureFakeHerdr(t, root, fakeAgent)
+	serverCtx, stopServer := context.WithCancel(context.Background())
+	server := exec.CommandContext(serverCtx, herdrBinary, "server")
+	serverEnvironment := map[string]string{
+		"XDG_CONFIG_HOME": filepath.Dir(herdrConfig), "XDG_STATE_HOME": herdrState,
+		"PIKA_GO_FAKE_AGENT_BIN": fakeAgent, "PATH": binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"PIKA_GO_FAKE_AGENT_AUTORUN": "baseline-accepted", "PIKA_GO_FAKE_AGENT_AUTORUN_GATE": agentFinishGate,
+		"CODEX_HOME": filepath.Join(root, "codex-home"), "PIKA_GO_CODEX_EXECUTABLE": filepath.Join(binDir, "codex"),
+		"PIKA_GO_INTEGRATION_RESUME_CHECKPOINT_DIR": resumeCheckpointRoot,
+	}
+	if os.Getenv("PIKA_GO_SCHEMA20_BRIDGE") != "" {
+		serverEnvironment["PIKA_GO_FAKE_AGENT_SCHEMA20_BASELINE"] = "1"
+	}
+	server.Env = replacedEnvironment(serverEnvironment)
+	var serverOutput bytes.Buffer
+	server.Stdout, server.Stderr = &serverOutput, &serverOutput
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stopServer(); _ = server.Wait() })
+	herdrSocket := filepath.Join(herdrConfig, "herdr.sock")
+	waitForUnixSocket(t, herdrSocket, &serverOutput)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	client := herdr.NewClient(herdrSocket)
+	var created struct {
+		Workspace herdr.Workspace `json:"workspace"`
+		RootPane  herdr.Pane      `json:"root_pane"`
+	}
+	if err := client.Call(ctx, "workspace.create", map[string]any{"cwd": root, "label": "maintenance-e2e", "focus": false}, &created); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = client.Call(context.Background(), "workspace.close", map[string]string{"workspace_id": created.Workspace.WorkspaceID}, nil)
+	})
+	initPane, err := herdr.NewRuntime(client).SplitPane(ctx, created.RootPane.PaneID, "down", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := filepath.Join(root, "repository")
+	initializeFixtureRepository(t, repository)
+	workspace, err := optimizationworkspace.Create(ctx, filepath.Join(root, "workspace"), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pikaSocket := filepath.Join(root, "pika.sock")
+	daemonPane, err := herdr.NewRuntime(client).SplitPane(ctx, created.RootPane.PaneID, "right", workspace.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.WriteHerdrBinding(optimizationworkspace.HerdrBinding{
+		SocketPath: herdrSocket, WorkspaceID: created.Workspace.WorkspaceID, TabID: created.RootPane.TabID,
+		ControlPane: created.RootPane.PaneID, DaemonPane: daemonPane.PaneID, DaemonSocket: pikaSocket,
+		UpdatedAt: "2026-09-01T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeHerdrIntegrationCodexModelsCache(t, root)
+	repositoryRoot := filepath.Clean(filepath.Join(filepath.Dir(sourcePath(t)), "..", ".."))
+	oldBinary := os.Getenv("PIKA_GO_SCHEMA20_BRIDGE")
+	targetBinary := os.Getenv("PIKA_GO_SCHEMA23_TARGET")
+	crossSchema := oldBinary != "" || targetBinary != ""
+	var oldProbe, targetProbe daemonupdate.Probe
+	if (oldBinary == "") != (targetBinary == "") {
+		t.Fatal("PIKA_GO_SCHEMA20_BRIDGE and PIKA_GO_SCHEMA23_TARGET must be set together")
+	}
+	if crossSchema {
+		oldBinary, targetBinary = filepath.Clean(oldBinary), filepath.Clean(targetBinary)
+		oldProbe = binaryProbe(t, oldBinary)
+		targetProbe = binaryProbe(t, targetBinary)
+		if oldProbe.SQLiteSchema != 20 || oldProbe.ControlProtocol != 2 || oldProbe.HandoffProtocol != 1 || oldProbe.WorkspaceFormat != 1 {
+			t.Fatalf("schema20 bridge probe = %+v", oldProbe)
+		}
+		if targetProbe.SQLiteSchema != 23 || targetProbe.ControlProtocol != 2 || targetProbe.HandoffProtocol != 1 || targetProbe.WorkspaceFormat != 1 {
+			t.Fatalf("schema23 target probe = %+v", targetProbe)
+		}
+	} else {
+		oldBinary = filepath.Join(root, "pika-go-old")
+		targetBinary = filepath.Join(root, "pika-go-target")
+		for _, build := range []struct {
+			path    string
+			version string
+		}{{oldBinary, "maintenance-old"}, {targetBinary, "maintenance-target"}} {
+			command := exec.Command("go", "build", "-trimpath", "-ldflags", "-X main.version="+build.version, "-o", build.path, "./cmd/pika-go")
+			command.Dir = repositoryRoot
+			if output, buildErr := command.CombinedOutput(); buildErr != nil {
+				t.Fatalf("build %s: %v: %s", build.version, buildErr, output)
+			}
+		}
+	}
+	oldDigest, err := daemonupdate.FileDigest(oldBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetDigest, err := daemonupdate.FileDigest(targetBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldDigest == targetDigest {
+		t.Fatal("test daemon generations have identical digests")
+	}
+	if crossSchema {
+		t.Logf("release bridge=%s digest=%s probe=%+v", oldBinary, oldDigest, oldProbe)
+		t.Logf("release target=%s digest=%s probe=%+v", targetBinary, targetDigest, targetProbe)
+	}
+	startWorkspaceDaemon := func(binary string) *daemonProcess {
+		process := &daemonProcess{done: make(chan error, 1), socketPath: pikaSocket}
+		arguments := []string{"daemon", "--socket", pikaSocket, "--workspace", workspace.Root}
+		process.command = exec.Command(binary, arguments...)
+		process.command.Env = replacedEnvironment(map[string]string{
+			"HERDR_SOCKET_PATH": herdrSocket, "HERDR_PANE_ID": created.RootPane.PaneID,
+			"PIKA_GO_AGENT_PATH_PREFIX": binDir, "CODEX_HOME": filepath.Join(root, "codex-home"),
+			"PIKA_GO_CODEX_EXECUTABLE":       filepath.Join(binDir, "codex"),
+			"PIKA_GO_INTEGRATION_EXECUTABLE": binary,
+			"PATH":                           binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		})
+		process.command.Stdout, process.command.Stderr = &process.output, &process.output
+		if startErr := process.command.Start(); startErr != nil {
+			t.Fatalf("start %s: %v", binary, startErr)
+		}
+		go func() { process.done <- process.command.Wait() }()
+		waitForPikaProcessHealth(t, pikaSocket, process)
+		return process
+	}
+	startWorkspaceDaemonViaOpen := func(binary string, checkpoint ...string) *daemonProcess {
+		if len(checkpoint) > 0 {
+			for _, suffix := range []string{".enable", ".reached", ".continue"} {
+				_ = os.Remove(filepath.Join(resumeCheckpointRoot, checkpoint[0]+suffix))
+			}
+			if err := os.WriteFile(filepath.Join(resumeCheckpointRoot, checkpoint[0]+".enable"), []byte(checkpoint[0]+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		openCommand := exec.Command(binary, "open", workspace.Root, "--no-focus")
+		openCommand.Env = replacedEnvironment(map[string]string{
+			"HERDR_SOCKET_PATH": herdrSocket,
+			"HERDR_PANE_ID":     created.RootPane.PaneID,
+			"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		})
+		output, openErr := openCommand.CombinedOutput()
+		if openErr != nil {
+			t.Fatalf("maintenance-aware open with %s: %v\n%s", binary, openErr, output)
+		}
+		health, healthErr := control.Health(ctx, pikaSocket)
+		if healthErr != nil || health.PID < 1 {
+			t.Fatalf("opened daemon health=%+v err=%v output=%s", health, healthErr, output)
+		}
+		process := &daemonProcess{
+			done: make(chan error, 1), socketPath: pikaSocket, pid: health.PID, external: true,
+		}
+		if len(checkpoint) > 0 {
+			process.checkpointDirectory = resumeCheckpointRoot
+			process.checkpointPoint = checkpoint[0]
+		}
+		process.output.Write(output)
+		go func() {
+			for processExists(health.PID) {
+				time.Sleep(20 * time.Millisecond)
+			}
+			process.done <- nil
+		}()
+		return process
+	}
+	assertOpenRejectsExtraAgent := func(checkpoint string) {
+		runtime := herdr.NewRuntime(client)
+		extraPane, splitErr := runtime.SplitPane(ctx, created.RootPane.PaneID, "down", workspace.Root)
+		if splitErr != nil {
+			t.Fatal(splitErr)
+		}
+		t.Cleanup(func() { _ = runtime.ClosePane(context.Background(), extraPane.PaneID) })
+		extraName := "pika-unexpected-" + strings.ReplaceAll(checkpoint, "_", "-")
+		if _, startErr := runtime.Start(ctx, herdr.StartSpec{
+			Name: extraName, Kind: "codex", PaneID: extraPane.PaneID,
+			Arguments: []string{"--scenario", "idle"}, ReturnOnLaunch: true,
+		}); startErr != nil {
+			t.Fatal(startErr)
+		}
+		openCommand := exec.Command(targetBinary, "open", workspace.Root, "--no-focus")
+		openCommand.Env = replacedEnvironment(map[string]string{
+			"HERDR_SOCKET_PATH": herdrSocket,
+			"HERDR_PANE_ID":     created.RootPane.PaneID,
+			"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		})
+		output, openErr := openCommand.CombinedOutput()
+		if openErr == nil {
+			if health, healthErr := control.Health(ctx, pikaSocket); healthErr == nil && health.PID > 0 {
+				_ = syscall.Kill(health.PID, syscall.SIGTERM)
+			}
+			t.Fatalf("maintenance open accepted extra Pika Agent at %s checkpoint: %s", checkpoint, output)
+		}
+		if !strings.Contains(string(output), "live Pika Agent count") {
+			t.Fatalf("maintenance open rejected extra Agent for wrong reason at %s: %v\n%s", checkpoint, openErr, output)
+		}
+		if closeErr := runtime.ClosePane(ctx, extraPane.PaneID); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			present := false
+			for _, observed := range mustHerdrSnapshot(t, ctx, client).Agents {
+				if observed.Name != nil && *observed.Name == extraName {
+					present = true
+				}
+			}
+			if !present {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("extra Pika Agent %s remained after cleanup", extraName)
+	}
+	var daemonProcess *daemonProcess
+	t.Cleanup(func() {
+		if daemonProcess != nil {
+			daemonProcess.killAndWait()
+		}
+	})
+	daemonProcess = startWorkspaceDaemon(oldBinary)
+	assertProcessExecutableDigest(t, daemonProcess.processID(), oldDigest)
+	if _, err := control.Init(ctx, pikaSocket, protocol.InitRequest{
+		Mutation: protocol.Mutation{RequestID: "init"}, Repository: repository, CallerPaneID: initPane.PaneID, ConfigurationTOML: fixtureConfiguration(repository),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agent := waitForNamedAgent(t, ctx, client, "")
+	excludeCommand := exec.Command("git", "-C", workspace.BaseRepository, "rev-parse", "--git-path", "info/exclude")
+	excludeOutput, err := excludeCommand.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	excludePath := strings.TrimSpace(string(excludeOutput))
+	if !filepath.IsAbs(excludePath) {
+		excludePath = filepath.Join(workspace.BaseRepository, excludePath)
+	}
+	exclude, err := os.OpenFile(excludePath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exclude.WriteString("\n.agents/\n"); err != nil {
+		_ = exclude.Close()
+		t.Fatal(err)
+	}
+	if err := exclude.Close(); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := control.MaintenancePrepare(ctx, pikaSocket, protocol.MaintenancePrepareRequest{
+		RequestID: "prepare-1", ToGeneration: protocol.MaintenanceGeneration{Digest: targetDigest, Version: "maintenance-target"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.State != maintenance.StateQuiescing || len(prepared.Targets) != 1 ||
+		prepared.Targets[0].SessionID == "" || prepared.Targets[0].AgentName == "" ||
+		prepared.Targets[0].AgentKind == "" || prepared.Targets[0].WorkspaceID == "" ||
+		prepared.Targets[0].TabID == "" || prepared.Targets[0].PaneID == "" ||
+		prepared.Targets[0].TerminalID == "" {
+		t.Fatalf("prepare did not freeze live identities: %+v", prepared)
+	}
+	select {
+	case exitErr := <-daemonProcess.done:
+		t.Fatalf("daemon exited before frozen Work was terminal: %v", exitErr)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if pikaAgentCount(t, ctx, client) != 1 {
+		t.Fatalf("prepare started a second Agent")
+	}
+	halfOpen, err := net.Dial("unix", pikaSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer halfOpen.Close()
+	if _, err := halfOpen.Write([]byte(
+		"POST /v1/maintenance/prepare HTTP/1.1\r\n" +
+			"Host: pika-go\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{",
+	)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	shutdownStarted := time.Now()
+	if err := os.WriteFile(agentFinishGate, []byte("finish\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case exitErr := <-daemonProcess.done:
+		if exitErr != nil {
+			t.Fatalf("maintenance-ready daemon exit: %v output=%s", exitErr, daemonProcess.output.String())
+		}
+	case <-time.After(10 * time.Second):
+		state, _ := control.MaintenanceStatus(ctx, pikaSocket)
+		view, _ := control.Status(ctx, pikaSocket)
+		var pane json.RawMessage
+		_ = client.Call(ctx, "pane.read", map[string]any{"pane_id": agent.PaneID, "source": "recent", "lines": 100, "format": "text"}, &pane)
+		snapshot, _ := client.Snapshot(ctx)
+		t.Fatalf("daemon did not exit after terminal MCP: frozen=%+v maintenance=%+v works=%+v agents=%s pane=%s daemon=%s",
+			prepared.Targets, state, view.Works, pikaAgentIdentities(snapshot), pane, daemonProcess.output.String())
+	}
+	if elapsed := time.Since(shutdownStarted); elapsed > 4*time.Second {
+		t.Fatalf("external maintenance-ready shutdown exceeded bound: %s", elapsed)
+	}
+	if err := halfOpen.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var closed [1]byte
+	if _, err := halfOpen.Read(closed[:]); err == nil {
+		t.Fatal("half-open external request remained connected after maintenance-ready shutdown")
+	}
+	daemonProcess = nil
+	if _, err := os.Lstat(pikaSocket); !os.IsNotExist(err) {
+		t.Fatalf("socket remained after ready: %v", err)
+	}
+	ready, err := maintenance.NewFileStore(workspace.Root).Read()
+	if err != nil || ready.State != maintenance.StateReady {
+		t.Fatalf("ready state = %+v err=%v", ready, err)
+	}
+	var terminalPane struct {
+		Read struct {
+			Text string `json:"text"`
+		} `json:"read"`
+	}
+	if err := client.Call(ctx, "pane.read", map[string]any{"pane_id": agent.PaneID, "source": "recent", "lines": 100, "format": "text"}, &terminalPane); err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(terminalPane.Read.Text, "FAKE_AGENT_MCP_RESPONSE "); count != 1 ||
+		strings.Contains(terminalPane.Read.Text, "FAKE_AGENT_MCP_ERROR") ||
+		strings.Contains(terminalPane.Read.Text, `"error"`) {
+		t.Fatalf("terminal MCP did not receive exactly one successful response: count=%d pane=%q", count, terminalPane.Read.Text)
+	}
+	committed := inspectMaintenanceCommitRaw(t, workspace.DatabasePath, prepared.Targets[0])
+	if crossSchema && committed.schema != 20 {
+		t.Fatalf("bridge changed schema before cold open: %d", committed.schema)
+	}
+	if crossSchema {
+		t.Logf("bridge ready schema=%d frozen=%+v", committed.schema, prepared.Targets[0])
+	}
+	var holdingBefore durableHoldingSnapshot
+	var herdrBefore herdr.Snapshot
+	var bindingBefore []byte
+	if crossSchema {
+		holdingBefore = captureDurableHoldingSnapshot(t, workspace.DatabasePath)
+		herdrBefore = mustHerdrSnapshot(t, ctx, client)
+		bindingBefore, err = os.ReadFile(workspace.HerdrBindingPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(agentFinishGate); err != nil {
+		t.Fatal(err)
+	}
+
+	var schema20Backup map[string][]byte
+	if crossSchema {
+		schema20Backup = make(map[string][]byte)
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			contents, readErr := os.ReadFile(workspace.DatabasePath + suffix)
+			if readErr == nil {
+				schema20Backup[suffix] = contents
+			} else if !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatal(readErr)
+			}
+		}
+		assertMaintenanceDirectDaemonRejected(t, targetBinary, workspace, pikaSocket, herdrSocket, daemonPane.PaneID)
+	}
+
+	daemonProcess = startWorkspaceDaemonViaOpen(targetBinary)
+	assertProcessExecutableDigest(t, daemonProcess.processID(), targetDigest)
+	holding, err := control.MaintenanceStatus(ctx, pikaSocket)
+	if err != nil || holding.State != maintenance.StateHolding {
+		t.Fatalf("cold holding = %+v err=%v", holding, err)
+	}
+	if crossSchema && sqliteSchemaVersion(t, workspace.DatabasePath) != 23 {
+		t.Fatal("schema23 target did not migrate schema20 database")
+	}
+	if crossSchema {
+		assertSchema23HoldingProjection(t, workspace.DatabasePath)
+		t.Logf("target holding schema=%d holder=%s", sqliteSchemaVersion(t, workspace.DatabasePath), holding.HoldingGeneration.Digest)
+	}
+	holdingMutationSnapshot := captureDurableHoldingSnapshot(t, workspace.DatabasePath)
+	gitHeadBefore := runGitCommand(t, workspace.BaseRepository, "rev-parse", "HEAD")
+	gitStatusBefore := runGitCommand(t, workspace.BaseRepository, "status", "--porcelain=v2", "--untracked-files=all")
+	evidenceBefore := snapshotHoldingTree(t, workspace.EvidenceRoot)
+	for _, mutation := range []struct {
+		path string
+		body string
+	}{
+		{"/v1/baseline-drafts", `{"request_id":"holding-baseline"}`},
+		{"/v1/works/" + prepared.Targets[0].WorkID + "/cancel", `{"request_id":"holding-cancel"}`},
+		{"/v1/git-intents/missing/apply", `{"message":"holding"}`},
+		{"/v1/provider-events/codex", fmt.Sprintf(`{"agent_session_id":%q,"event":{}}`, prepared.Targets[0].SessionID)},
+		{"/v1/scheduler/pause", `{"request_id":"holding-pause"}`},
+		{"/mcp", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`},
+	} {
+		assertHoldingMutationRejected(t, pikaSocket, mutation.path, mutation.body)
+	}
+	assertDurableHoldingSnapshotUnchanged(t, workspace.DatabasePath, holdingMutationSnapshot)
+	if got := runGitCommand(t, workspace.BaseRepository, "rev-parse", "HEAD"); got != gitHeadBefore {
+		t.Fatalf("Holding mutation changed Git HEAD: before=%s after=%s", gitHeadBefore, got)
+	}
+	if got := runGitCommand(t, workspace.BaseRepository, "status", "--porcelain=v2", "--untracked-files=all"); got != gitStatusBefore {
+		t.Fatalf("Holding mutation changed Git state: before=%q after=%q", gitStatusBefore, got)
+	}
+	if after := snapshotHoldingTree(t, workspace.EvidenceRoot); !reflect.DeepEqual(after, evidenceBefore) {
+		t.Fatalf("Holding mutation changed evidence:\nbefore=%v\nafter=%v", evidenceBefore, after)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if pikaAgentCount(t, ctx, client) != 1 {
+		t.Fatalf("holding daemon launched another Agent")
+	}
+	if crossSchema {
+		assertDurableHoldingSnapshotUnchanged(t, workspace.DatabasePath, holdingBefore)
+		assertMaintenanceOpenHerdrSnapshot(t, herdrBefore, mustHerdrSnapshot(t, ctx, client),
+			created.Workspace.WorkspaceID, created.RootPane.TabID, created.RootPane.PaneID, daemonPane.PaneID)
+		if bindingAfter, readErr := os.ReadFile(workspace.HerdrBindingPath); readErr != nil || !bytes.Equal(bindingAfter, bindingBefore) {
+			t.Fatalf("maintenance open changed binding bytes: err=%v\nbefore=%s\nafter=%s", readErr, bindingBefore, bindingAfter)
+		}
+	}
+	if crossSchema {
+		stopDaemonWithSignal(t, daemonProcess, syscall.SIGTERM)
+		daemonProcess = nil
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			if removeErr := os.Remove(workspace.DatabasePath + suffix); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				t.Fatal(removeErr)
+			}
+		}
+		for suffix, contents := range schema20Backup {
+			if err := os.WriteFile(workspace.DatabasePath+suffix, contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if schema := sqliteSchemaVersion(t, workspace.DatabasePath); schema != 20 {
+			t.Fatalf("restored rollback schema = %d", schema)
+		}
+		daemonProcess = startWorkspaceDaemonViaOpen(oldBinary)
+		assertProcessExecutableDigest(t, daemonProcess.processID(), oldDigest)
+		rollbackHolding, statusErr := control.MaintenanceStatus(ctx, pikaSocket)
+		if statusErr != nil || rollbackHolding.State != maintenance.StateHolding ||
+			rollbackHolding.HoldingGeneration.Digest != oldDigest {
+			t.Fatalf("bridge rollback holding = %+v err=%v", rollbackHolding, statusErr)
+		}
+		if schema := sqliteSchemaVersion(t, workspace.DatabasePath); schema != 20 {
+			t.Fatalf("bridge rollback schema = %d", schema)
+		}
+		t.Logf("bridge rollback holding schema=20 holder=%s", rollbackHolding.HoldingGeneration.Digest)
+		if bridgeRollbackResume {
+			if _, resumeErr := control.MaintenanceResume(ctx, pikaSocket, protocol.MaintenanceResumeRequest{RequestID: "bridge-rollback-resume-1"}); resumeErr != nil {
+				t.Fatal(resumeErr)
+			}
+			replacement := waitForNamedAgent(t, ctx, client, agentNameValue(agent))
+			if replacement.TerminalID == agent.TerminalID || pikaAgentCount(t, ctx, client) != 1 {
+				t.Fatalf("bridge rollback resume did not launch one successor: old=%+v replacement=%+v agents=%s",
+					agent, replacement, pikaAgentIdentities(mustHerdrSnapshot(t, ctx, client)))
+			}
+			resumed, resumeErr := control.MaintenanceStatus(ctx, pikaSocket)
+			if resumeErr != nil || resumed.State != maintenance.StateResumed || resumed.ResumeRequestID != "bridge-rollback-resume-1" {
+				t.Fatalf("bridge rollback resume state=%+v err=%v", resumed, resumeErr)
+			}
+			if schema := sqliteSchemaVersion(t, workspace.DatabasePath); schema != 20 {
+				t.Fatalf("bridge resume changed schema = %d", schema)
+			}
+			if err := os.WriteFile(agentFinishGate, []byte("finish\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			waitForPostResumeTerminalProgress(t, workspace.DatabasePath, prepared.Targets[0].WorkID)
+			t.Logf("bridge resume terminal progress schema=20 request=%s successor_terminal=%s", resumed.ResumeRequestID, replacement.TerminalID)
+			daemonProcess.killAndWait()
+			daemonProcess = nil
+			return
+		}
+		stopDaemonWithSignal(t, daemonProcess, syscall.SIGTERM)
+		daemonProcess = startWorkspaceDaemonViaOpen(targetBinary)
+		assertProcessExecutableDigest(t, daemonProcess.processID(), targetDigest)
+		reclaimed, statusErr := control.MaintenanceStatus(ctx, pikaSocket)
+		if statusErr != nil || reclaimed.State != maintenance.StateHolding ||
+			reclaimed.HoldingGeneration.Digest != targetDigest {
+			t.Fatalf("target reclaims rollback holding = %+v err=%v", reclaimed, statusErr)
+		}
+		if schema := sqliteSchemaVersion(t, workspace.DatabasePath); schema != 23 {
+			t.Fatalf("target remigration schema = %d", schema)
+		}
+		t.Logf("target reclaimed holding schema=23 holder=%s", reclaimed.HoldingGeneration.Digest)
+	}
+	if crossSchema {
+		stopDaemonWithSignal(t, daemonProcess, syscall.SIGTERM)
+		daemonProcess = startWorkspaceDaemonViaOpen(targetBinary, "intent_persisted")
+		assertProcessExecutableDigest(t, daemonProcess.processID(), targetDigest)
+		resumeResult := make(chan error, 1)
+		go func() {
+			_, resumeErr := control.MaintenanceResume(context.Background(), pikaSocket, protocol.MaintenanceResumeRequest{RequestID: "resume-crash-1"})
+			resumeResult <- resumeErr
+		}()
+		daemonProcess.waitForResumeCheckpointOrError(t, "intent_persisted", resumeResult)
+		intent, intentErr := maintenance.NewFileStore(workspace.Root).Read()
+		if intentErr != nil || intent.State != maintenance.StateHolding || intent.ResumeRequestID != "resume-crash-1" {
+			t.Fatalf("persisted resume intent=%+v err=%v", intent, intentErr)
+		}
+		t.Logf("target resume checkpoint=%s pid=%d digest=%s schema=%d request=%s",
+			"intent_persisted", daemonProcess.processID(), targetDigest,
+			sqliteSchemaVersion(t, workspace.DatabasePath), intent.ResumeRequestID)
+		daemonProcess.killAndWait()
+		daemonProcess = nil
+		<-resumeResult
+		assertOpenRejectsExtraAgent("intent_persisted")
+
+		daemonProcess = startWorkspaceDaemonViaOpen(targetBinary, "runtime_started")
+		assertProcessExecutableDigest(t, daemonProcess.processID(), targetDigest)
+		resumeResult = make(chan error, 1)
+		go func() {
+			_, resumeErr := control.MaintenanceResume(context.Background(), pikaSocket, protocol.MaintenanceResumeRequest{RequestID: "resume-crash-1"})
+			resumeResult <- resumeErr
+		}()
+		daemonProcess.waitForResumeCheckpointOrError(t, "runtime_started", resumeResult)
+		runtimeStarted, runtimeErr := maintenance.NewFileStore(workspace.Root).Read()
+		if runtimeErr != nil || runtimeStarted.State != maintenance.StateHolding || runtimeStarted.ResumeRequestID != "resume-crash-1" {
+			t.Fatalf("runtime-started resume intent=%+v err=%v", runtimeStarted, runtimeErr)
+		}
+		replacement := waitForNamedAgent(t, ctx, client, agentNameValue(agent))
+		if replacement.TerminalID == agent.TerminalID || pikaAgentCount(t, ctx, client) != 1 {
+			t.Fatalf("runtime-started checkpoint did not have one successor: old=%+v replacement=%+v agents=%s",
+				agent, replacement, pikaAgentIdentities(mustHerdrSnapshot(t, ctx, client)))
+		}
+		t.Logf("target resume checkpoint=%s pid=%d digest=%s schema=%d request=%s successor_terminal=%s",
+			"runtime_started", daemonProcess.processID(), targetDigest,
+			sqliteSchemaVersion(t, workspace.DatabasePath), runtimeStarted.ResumeRequestID, replacement.TerminalID)
+		daemonProcess.killAndWait()
+		daemonProcess = nil
+		<-resumeResult
+		assertOpenRejectsExtraAgent("runtime_started")
+
+		daemonProcess = startWorkspaceDaemonViaOpen(targetBinary)
+		assertProcessExecutableDigest(t, daemonProcess.processID(), targetDigest)
+		resumed, resumeErr := control.MaintenanceResume(ctx, pikaSocket, protocol.MaintenanceResumeRequest{RequestID: "resume-crash-1"})
+		if resumeErr != nil || resumed.State != maintenance.StateResumed || resumed.ResumeRequestID != "resume-crash-1" {
+			t.Fatalf("retried resume state=%+v err=%v", resumed, resumeErr)
+		}
+		assertSingleSuccessorDispatch(t, workspace.DatabasePath, prepared.Targets[0].WorkID)
+		if pikaAgentCount(t, ctx, client) != 1 {
+			t.Fatalf("resume retry launched duplicate Agents: %s", pikaAgentIdentities(mustHerdrSnapshot(t, ctx, client)))
+		}
+		t.Logf("target resume durable state=%s schema=%d request=%s", resumed.State, sqliteSchemaVersion(t, workspace.DatabasePath), resumed.ResumeRequestID)
+		daemonProcess.killAndWait()
+		daemonProcess = nil
+		return
+	}
+	if _, err := control.MaintenanceResume(ctx, pikaSocket, protocol.MaintenanceResumeRequest{RequestID: "resume-1"}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := waitForNamedAgent(t, ctx, client, agentNameValue(agent))
+	if replacement.TerminalID == agent.TerminalID {
+		t.Fatalf("resume reused terminal %s", agent.TerminalID)
+	}
+	if pikaAgentCount(t, ctx, client) != 1 {
+		t.Fatalf("resume launched more than one successor")
+	}
+	daemonProcess.killAndWait()
+	daemonProcess = nil
+}
+
+func assertSchema23HoldingProjection(t *testing.T, databasePath string) {
+	t.Helper()
+	database, err := sql.Open("sqlite", "file:"+databasePath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var legacyFlows, total int
+	if err := database.QueryRow("SELECT COUNT(*) FILTER (WHERE flow_version = 1), COUNT(*) FROM optimizations").Scan(&legacyFlows, &total); err != nil {
+		t.Fatal(err)
+	}
+	if total == 0 || legacyFlows != total {
+		t.Fatalf("schema23 holding changed legacy Optimization flow: flow1=%d total=%d", legacyFlows, total)
+	}
+	for _, table := range []string{
+		"skill_snapshots", "skill_snapshot_entries", "diagnoses", "iteration_experiments",
+		"benchmark_experiment_derived_comparisons", "commit_capability_receipts",
+	} {
+		var count int
+		if err := database.QueryRow(`SELECT COUNT(*) FROM "` + table + `"`).Scan(&count); err != nil {
+			t.Fatalf("read schema23 projection table %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("schema23 holding activated flow-v2 table %s: rows=%d", table, count)
+		}
+	}
+	var indexCount int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM sqlite_schema
+		WHERE type = 'index' AND name = 'evidence_artifacts_work_relative_path'`).Scan(&indexCount); err != nil {
+		t.Fatal(err)
+	}
+	if indexCount != 1 {
+		t.Fatalf("schema23 projection index count=%d", indexCount)
+	}
+}
+
+func assertMaintenanceOpenHerdrSnapshot(t *testing.T, before, after herdr.Snapshot, workspaceID, tabID, controlPaneID, daemonPaneID string) {
+	t.Helper()
+	if !reflect.DeepEqual(before.Workspaces, after.Workspaces) ||
+		!reflect.DeepEqual(before.Tabs, after.Tabs) ||
+		!reflect.DeepEqual(before.Layouts, after.Layouts) {
+		t.Fatalf("maintenance open changed Herdr workspace/tab/layout snapshot:\nbefore=%+v\nafter=%+v", before, after)
+	}
+	if !reflect.DeepEqual(before.Agents, after.Agents) {
+		t.Fatalf("maintenance open changed complete Herdr Agent/session snapshot:\nbefore=%+v\nafter=%+v", before.Agents, after.Agents)
+	}
+	if !reflect.DeepEqual(herdrPaneIdentities(before), herdrPaneIdentities(after)) {
+		t.Fatalf("maintenance open changed complete Herdr pane identity snapshot:\nbefore=%+v\nafter=%+v",
+			herdrPaneIdentities(before), herdrPaneIdentities(after))
+	}
+	for _, paneID := range []string{controlPaneID, daemonPaneID} {
+		beforePane, beforeOK := herdrPaneByID(before, paneID)
+		afterPane, afterOK := herdrPaneByID(after, paneID)
+		if !beforeOK || !afterOK {
+			t.Fatalf("maintenance open lost frozen pane %s: before=%t after=%t", paneID, beforeOK, afterOK)
+		}
+		if beforePane.PaneID != afterPane.PaneID || beforePane.TerminalID != afterPane.TerminalID ||
+			beforePane.WorkspaceID != workspaceID || afterPane.WorkspaceID != workspaceID ||
+			beforePane.TabID != tabID || afterPane.TabID != tabID ||
+			!reflect.DeepEqual(beforePane.Agent, afterPane.Agent) {
+			t.Fatalf("maintenance open drifted frozen pane %s:\nbefore=%+v\nafter=%+v", paneID, beforePane, afterPane)
+		}
+	}
+}
+
+func assertMaintenanceDirectDaemonRejected(
+	t *testing.T,
+	binary string,
+	workspace optimizationworkspace.Workspace,
+	daemonSocket, herdrSocket, daemonPaneID string,
+) {
+	t.Helper()
+	binding, err := workspace.ReadHerdrBinding()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindingBytes, err := os.ReadFile(workspace.HerdrBindingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type directCase struct {
+		name          string
+		socketPath    string
+		environment   map[string]string
+		binding       *optimizationworkspace.HerdrBinding
+		removeBinding bool
+	}
+	wrongSocket := filepath.Join(filepath.Dir(daemonSocket), "wrong.sock")
+	missingControl := binding
+	missingControl.ControlPane = binding.ControlPane + "-missing"
+	missingDaemon := binding
+	missingDaemon.DaemonPane = binding.DaemonPane + "-missing"
+	cases := []directCase{
+		{name: "missing Herdr environment", socketPath: daemonSocket},
+		{name: "mismatched Herdr socket", socketPath: daemonSocket, environment: map[string]string{
+			"HERDR_SOCKET_PATH": herdrSocket + "-wrong", "HERDR_PANE_ID": daemonPaneID,
+		}},
+		{name: "mismatched daemon pane environment", socketPath: daemonSocket, environment: map[string]string{
+			"HERDR_SOCKET_PATH": herdrSocket, "HERDR_PANE_ID": daemonPaneID + "-wrong",
+		}},
+		{name: "mismatched daemon socket argument", socketPath: wrongSocket, environment: map[string]string{
+			"HERDR_SOCKET_PATH": herdrSocket, "HERDR_PANE_ID": daemonPaneID,
+		}},
+		{name: "missing frozen binding", socketPath: daemonSocket, environment: map[string]string{
+			"HERDR_SOCKET_PATH": herdrSocket, "HERDR_PANE_ID": daemonPaneID,
+		}, removeBinding: true},
+		{name: "missing control pane", socketPath: daemonSocket, environment: map[string]string{
+			"HERDR_SOCKET_PATH": herdrSocket, "HERDR_PANE_ID": daemonPaneID,
+		}, binding: &missingControl},
+		{name: "missing daemon pane", socketPath: daemonSocket, environment: map[string]string{
+			"HERDR_SOCKET_PATH": herdrSocket, "HERDR_PANE_ID": missingDaemon.DaemonPane,
+		}, binding: &missingDaemon},
+	}
+	for _, testCase := range cases {
+		t.Run("direct daemon rejects "+testCase.name, func(t *testing.T) {
+			if testCase.removeBinding {
+				if err := os.Remove(workspace.HerdrBindingPath); err != nil {
+					t.Fatal(err)
+				}
+			} else if testCase.binding != nil {
+				if err := workspace.WriteHerdrBinding(*testCase.binding); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Cleanup(func() {
+				if err := os.WriteFile(workspace.HerdrBindingPath, bindingBytes, 0o600); err != nil {
+					t.Error(err)
+				}
+				_ = os.Remove(testCase.socketPath)
+			})
+			commandCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			defer cancel()
+			command := exec.CommandContext(commandCtx, binary, "daemon", "--workspace", workspace.Root, "--socket", testCase.socketPath)
+			command.Env = environmentWithout("HERDR_SOCKET_PATH", "HERDR_PANE_ID")
+			for key, value := range testCase.environment {
+				command.Env = append(command.Env, key+"="+value)
+			}
+			output, commandErr := command.CombinedOutput()
+			if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
+				t.Fatalf("direct daemon bypassed maintenance-aware open validation: %s", output)
+			}
+			if commandErr == nil {
+				t.Fatalf("direct daemon unexpectedly succeeded: %s", output)
+			}
+			if schema := sqliteSchemaVersion(t, workspace.DatabasePath); schema != 20 {
+				t.Fatalf("rejected direct daemon migrated schema to %d: %s", schema, output)
+			}
+			status, statusErr := maintenance.NewFileStore(workspace.Root).Read()
+			if statusErr != nil || status.State != maintenance.StateReady {
+				t.Fatalf("rejected direct daemon changed maintenance state: status=%+v err=%v output=%s", status, statusErr, output)
+			}
+		})
+	}
+}
+
+func environmentWithout(keys ...string) []string {
+	excluded := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		excluded[key] = true
+	}
+	result := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !excluded[key] {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
+type herdrPaneIdentity struct {
+	PaneID        string
+	TerminalID    string
+	WorkspaceID   string
+	TabID         string
+	Agent         *string
+	Tokens        map[string]string
+	ForegroundCWD *string
+}
+
+func herdrPaneIdentities(snapshot herdr.Snapshot) []herdrPaneIdentity {
+	result := make([]herdrPaneIdentity, 0, len(snapshot.Panes))
+	for _, pane := range snapshot.Panes {
+		result = append(result, herdrPaneIdentity{
+			PaneID: pane.PaneID, TerminalID: pane.TerminalID, WorkspaceID: pane.WorkspaceID, TabID: pane.TabID,
+			Agent: pane.Agent, Tokens: pane.Tokens, ForegroundCWD: pane.ForegroundCWD,
+		})
+	}
+	slices.SortFunc(result, func(left, right herdrPaneIdentity) int {
+		return strings.Compare(left.PaneID, right.PaneID)
+	})
+	return result
+}
+
+func herdrPaneByID(snapshot herdr.Snapshot, paneID string) (herdr.Pane, bool) {
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID == paneID {
+			return pane, true
+		}
+	}
+	return herdr.Pane{}, false
+}
+
+func pikaAgentIdentities(snapshot herdr.Snapshot) string {
+	var identities []string
+	for _, agent := range snapshot.Agents {
+		if agent.Name != nil && strings.HasPrefix(*agent.Name, "pika-") {
+			identities = append(identities, fmt.Sprintf("%s:%s:%s", *agent.Name, agent.PaneID, agent.TerminalID))
+		}
+	}
+	return strings.Join(identities, ",")
+}
+
+func pikaAgents(t *testing.T, ctx context.Context, client *herdr.Client) []herdr.Agent {
+	t.Helper()
+	snapshot := mustHerdrSnapshot(t, ctx, client)
+	var result []herdr.Agent
+	for _, agent := range snapshot.Agents {
+		if agent.Name != nil && strings.HasPrefix(*agent.Name, "pika-") {
+			result = append(result, agent)
+		}
+	}
+	slices.SortFunc(result, func(left, right herdr.Agent) int {
+		return strings.Compare(left.TerminalID, right.TerminalID)
+	})
+	return result
+}
+
+func mustHerdrSnapshot(t *testing.T, ctx context.Context, client *herdr.Client) herdr.Snapshot {
+	t.Helper()
+	snapshot, err := client.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func waitForPostResumeTerminalProgress(t *testing.T, databasePath, frozenWorkID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		database, err := sql.Open("sqlite", "file:"+databasePath+"?mode=ro")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var verificationWorks, verificationSessions, terminalEvents int
+		queryErr := database.QueryRow(`SELECT
+			(SELECT COUNT(*) FROM works WHERE role = 'baseline_verification' AND status = 'completed' AND id <> ?),
+			(SELECT COUNT(*) FROM agent_sessions s JOIN works w ON w.id = s.work_id WHERE w.role = 'baseline_verification'),
+			(SELECT COUNT(*) FROM domain_events WHERE event_type = 'baseline.verification_finished')`, frozenWorkID).
+			Scan(&verificationWorks, &verificationSessions, &terminalEvents)
+		_ = database.Close()
+		if queryErr == nil && verificationWorks == 1 && verificationSessions == 1 && terminalEvents == 1 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("resumed bridge did not produce singular terminal successor progress")
+}
+
+func assertSingleSuccessorDispatch(t *testing.T, databasePath, frozenWorkID string) {
+	t.Helper()
+	database, err := sql.Open("sqlite", "file:"+databasePath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var works, sessions, starts int
+	if err := database.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM works WHERE role = 'baseline_verification' AND id <> ?),
+		(SELECT COUNT(*) FROM agent_sessions s JOIN works w ON w.id = s.work_id WHERE w.role = 'baseline_verification' AND w.id <> ?),
+		(SELECT COUNT(*) FROM runtime_outbox o JOIN works w ON json_extract(o.payload_json, '$.work_id') = w.id
+			WHERE o.effect_type = 'work.start_requested' AND w.role = 'baseline_verification' AND w.id <> ?)`,
+		frozenWorkID, frozenWorkID, frozenWorkID).Scan(&works, &sessions, &starts); err != nil {
+		t.Fatal(err)
+	}
+	if works != 1 || sessions != 1 || starts != 1 {
+		t.Fatalf("resume retry duplicated successor: works=%d sessions=%d start_effects=%d", works, sessions, starts)
+	}
+}
+
+type durableTableSnapshot struct {
+	Columns []string
+	Rows    [][]string
+}
+
+type durableHoldingSnapshot map[string]durableTableSnapshot
+
+func captureDurableHoldingSnapshot(t *testing.T, databasePath string) durableHoldingSnapshot {
+	t.Helper()
+	database, err := sql.Open("sqlite", "file:"+databasePath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	result := durableHoldingSnapshot{}
+	rows, err := database.Query(`SELECT name FROM sqlite_schema
+		WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'migrations'
+		ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		tables = append(tables, table)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"baseline_revisions", "baseline_verifications", "operation_receipts"} {
+		if !slices.Contains(tables, required) {
+			t.Fatalf("schema20 holding snapshot omitted required table %s: %v", required, tables)
+		}
+	}
+	for _, table := range tables {
+		result[table] = readDurableTableSnapshot(t, database, table, nil)
+	}
+	return result
+}
+
+func assertDurableHoldingSnapshotUnchanged(t *testing.T, databasePath string, before durableHoldingSnapshot) {
+	t.Helper()
+	database, err := sql.Open("sqlite", "file:"+databasePath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for table, expected := range before {
+		actual := readDurableTableSnapshot(t, database, table, expected.Columns)
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("holding mutated durable %s state:\nbefore=%+v\nafter=%+v", table, expected, actual)
+		}
+	}
+}
+
+func assertHoldingMutationRejected(t *testing.T, socketPath, path, body string) {
+	t.Helper()
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+	}}
+	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+	defer transport.CloseIdleConnections()
+	request, err := http.NewRequest(http.MethodPost, "http://pika"+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("Holding mutation %s: %v", path, err)
+	}
+	defer response.Body.Close()
+	responseBody, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusConflict || !bytes.Contains(responseBody, []byte("maintenance_mutation_rejected")) {
+		t.Fatalf("Holding mutation %s status=%d body=%s", path, response.StatusCode, responseBody)
+	}
+}
+
+func snapshotHoldingTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	result := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		value := info.Mode().String()
+		if entry.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			value += "\x00" + target
+		} else if !entry.IsDir() {
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			value += "\x00" + string(contents)
+		}
+		result[relative] = value
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func readDurableTableSnapshot(t *testing.T, database *sql.DB, table string, columns []string) durableTableSnapshot {
+	t.Helper()
+	quoteIdentifier := func(value string) string {
+		return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+	}
+	if len(columns) == 0 {
+		rows, err := database.Query("PRAGMA table_info(" + quoteIdentifier(table) + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var sequence, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue any
+			if err := rows.Scan(&sequence, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				_ = rows.Close()
+				t.Fatal(err)
+			}
+			columns = append(columns, name)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quoted := make([]string, len(columns))
+	for index, column := range columns {
+		quoted[index] = quoteIdentifier(column)
+	}
+	rows, err := database.Query("SELECT " + strings.Join(quoted, ",") + " FROM " + quoteIdentifier(table) + " ORDER BY rowid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	result := durableTableSnapshot{Columns: slices.Clone(columns)}
+	for rows.Next() {
+		values := make([]any, len(columns))
+		destinations := make([]any, len(columns))
+		for index := range values {
+			destinations[index] = &values[index]
+		}
+		if err := rows.Scan(destinations...); err != nil {
+			t.Fatal(err)
+		}
+		encoded := make([]string, len(values))
+		for index, value := range values {
+			switch typed := value.(type) {
+			case nil:
+				encoded[index] = "null"
+			case []byte:
+				encoded[index] = fmt.Sprintf("bytes:%x", typed)
+			default:
+				encoded[index] = fmt.Sprintf("%T:%v", typed, typed)
+			}
+		}
+		result.Rows = append(result.Rows, encoded)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+type rawMaintenanceCommit struct {
+	schema int
+}
+
+func inspectMaintenanceCommitRaw(t *testing.T, databasePath string, target maintenance.Target) rawMaintenanceCommit {
+	t.Helper()
+	database, err := sql.Open("sqlite", "file:"+databasePath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var result rawMaintenanceCommit
+	if err := database.QueryRow("SELECT MAX(version) FROM migrations").Scan(&result.schema); err != nil {
+		t.Fatal(err)
+	}
+	var workStatus string
+	var workGeneration int64
+	if err := database.QueryRow("SELECT status, generation FROM works WHERE id = ?", target.WorkID).Scan(&workStatus, &workGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if workStatus != string(symphony.WorkCompleted) || workGeneration != target.WorkGeneration {
+		t.Fatalf("frozen Work terminal identity changed: status=%s generation=%d target=%+v", workStatus, workGeneration, target)
+	}
+	var sessionWorkID, sessionStatus string
+	var sessionGeneration int64
+	if err := database.QueryRow("SELECT work_id, generation, status FROM agent_sessions WHERE id = ?", target.SessionID).
+		Scan(&sessionWorkID, &sessionGeneration, &sessionStatus); err != nil {
+		t.Fatal(err)
+	}
+	if sessionWorkID != target.WorkID || sessionGeneration != target.WorkGeneration || sessionStatus == string(symphony.AgentSessionLost) {
+		t.Fatalf("frozen Session identity changed: work=%s generation=%d status=%s target=%+v", sessionWorkID, sessionGeneration, sessionStatus, target)
+	}
+	var works, sessions, events int
+	if err := database.QueryRow("SELECT COUNT(*) FROM works").Scan(&works); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM agent_sessions WHERE work_id = ? AND generation = ?", target.WorkID, target.WorkGeneration).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM domain_events").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	var terminalPayload []byte
+	if err := database.QueryRow(`SELECT e.payload_json
+		FROM operation_receipts r JOIN domain_events e ON e.revision = r.revision
+		WHERE r.command_type = 'submit_baseline_definition' AND e.event_type = 'baseline.submitted'`).
+		Scan(&terminalPayload); err != nil {
+		t.Fatalf("read frozen terminal receipt/event: %v", err)
+	}
+	var terminalEvent map[string]any
+	if err := json.Unmarshal(terminalPayload, &terminalEvent); err != nil {
+		t.Fatal(err)
+	}
+	if works != 2 || sessions != 1 || events != 2 || terminalEvent["draft_work_id"] != target.WorkID {
+		t.Fatalf("terminal mutation was not singular or frozen: works=%d sessions=%d events=%d payload=%v", works, sessions, events, terminalEvent)
+	}
+	return result
+}
+
+func sqliteSchemaVersion(t *testing.T, databasePath string) int {
+	t.Helper()
+	database, err := sql.Open("sqlite", "file:"+databasePath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var version int
+	if err := database.QueryRow("SELECT MAX(version) FROM migrations").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	return version
+}
+
+func binaryProbe(t *testing.T, binary string) daemonupdate.Probe {
+	t.Helper()
+	output, err := exec.Command(binary, "update-probe").Output()
+	if err != nil {
+		t.Fatalf("probe %s: %v", binary, err)
+	}
+	var probe daemonupdate.Probe
+	if err := json.Unmarshal(output, &probe); err != nil {
+		t.Fatalf("decode probe %s: %v", binary, err)
+	}
+	return probe
+}
+
+func stopDaemonWithSignal(t *testing.T, process *daemonProcess, signal os.Signal) {
+	t.Helper()
+	owner, err := os.FindProcess(process.processID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Signal(signal); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-process.done:
+		if err != nil {
+			t.Fatalf("daemon signal exit: %v output=%s", err, process.output.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("daemon did not stop after %v", signal)
+	}
+}
+
+func sourcePath(t *testing.T) string {
+	t.Helper()
+	_, path, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	return path
+}
+
+func assertProcessExecutableDigest(t *testing.T, pid int, want string) {
+	t.Helper()
+	got, err := daemonupdate.FileDigest(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	if err != nil {
+		t.Fatalf("hash /proc/%d/exe: %v", pid, err)
+	}
+	if got != want {
+		t.Fatalf("/proc/%d/exe digest = %s, want %s", pid, got, want)
+	}
+	t.Logf("/proc/%d/exe digest=%s", pid, got)
+}
+
+func pikaAgentCount(t *testing.T, ctx context.Context, client *herdr.Client) int {
+	t.Helper()
+	snapshot, err := client.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, agent := range snapshot.Agents {
+		if agent.Name != nil && strings.HasPrefix(*agent.Name, "pika-") {
+			count++
+		}
+	}
+	return count
 }
 
 func TestDaemonProcessCrashReplacesRunningHerdrAgentAndRecoversWork(t *testing.T) {
@@ -1455,10 +2659,14 @@ func startTestDaemon(t *testing.T, socketPath, stateRoot, configRoot string) fun
 }
 
 type daemonProcess struct {
-	command    *exec.Cmd
-	done       chan error
-	output     bytes.Buffer
-	socketPath string
+	command             *exec.Cmd
+	done                chan error
+	output              bytes.Buffer
+	socketPath          string
+	pid                 int
+	external            bool
+	checkpointDirectory string
+	checkpointPoint     string
 }
 
 func startDaemonProcess(t *testing.T, pikaBinary, socketPath, stateRoot, configRoot, herdrSocket, symphonyPane, binDir string) *daemonProcess {
@@ -1516,13 +2724,71 @@ func (process *daemonProcess) killAndWait() {
 				_ = owner.Kill()
 			}
 		}
-	} else if process.command.ProcessState == nil {
+	} else if process.command != nil && process.command.ProcessState == nil {
 		_ = process.command.Process.Kill()
 	}
 	select {
 	case <-process.done:
 	case <-time.After(5 * time.Second):
 	}
+	if process.checkpointDirectory != "" && process.checkpointPoint != "" {
+		for _, suffix := range []string{".enable", ".reached", ".continue"} {
+			_ = os.Remove(filepath.Join(process.checkpointDirectory, process.checkpointPoint+suffix))
+		}
+	}
+}
+
+func (process *daemonProcess) processID() int {
+	if process.pid > 0 {
+		return process.pid
+	}
+	return process.command.Process.Pid
+}
+
+func processExists(pid int) bool {
+	return pid > 0 && syscall.Kill(pid, 0) == nil
+}
+
+func (process *daemonProcess) waitForResumeCheckpoint(t *testing.T, point string) {
+	t.Helper()
+	if process.checkpointDirectory == "" || process.checkpointPoint != point {
+		t.Fatal("daemon has no matching resume checkpoint")
+	}
+	reached := filepath.Join(process.checkpointDirectory, point+".reached")
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if contents, err := os.ReadFile(reached); err == nil {
+			if strings.TrimSpace(string(contents)) != point {
+				t.Fatalf("resume checkpoint = %q, want %q", strings.TrimSpace(string(contents)), point)
+			}
+			return
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("wait for resume checkpoint %s: %v output=%s", point, err, process.output.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for resume checkpoint %s output=%s", point, process.output.String())
+}
+
+func (process *daemonProcess) waitForResumeCheckpointOrError(t *testing.T, point string, result <-chan error) {
+	t.Helper()
+	if process.checkpointDirectory == "" || process.checkpointPoint != point {
+		t.Fatal("daemon has no matching resume checkpoint")
+	}
+	reached := filepath.Join(process.checkpointDirectory, point+".reached")
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(reached); err == nil {
+			return
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("resume failed before checkpoint %s: %v output=%s", point, err, process.output.String())
+		default:
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for resume checkpoint %s output=%s", point, process.output.String())
 }
 
 func waitForPikaProcessHealth(t *testing.T, socketPath string, process *daemonProcess) {

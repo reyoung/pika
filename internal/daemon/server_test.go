@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/reyoung/pika-go/internal/control"
 	"github.com/reyoung/pika-go/internal/daemon"
 	"github.com/reyoung/pika-go/internal/daemonupdate"
+	"github.com/reyoung/pika-go/internal/maintenance"
+	"github.com/reyoung/pika-go/internal/protocol"
 )
 
 func TestAfterListenCanReachDaemonBeforeStartupEffectsRun(t *testing.T) {
@@ -63,6 +66,156 @@ func TestAfterListenCanReachDaemonBeforeStartupEffectsRun(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("daemon did not stop")
+	}
+}
+
+func TestMaintenanceReadyKeepsSocketUntilTerminalMCPResponseCompletes(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "pika-daemon-maintenance-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(directory, "pika.sock")
+	releaseResponse := make(chan struct{})
+	requestStarted := make(chan struct{})
+	process := &fakeMaintenance{}
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Serve(context.Background(), daemon.Config{
+			SocketPath: socketPath, Version: "test", Maintenance: process,
+			MCPHandler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				close(requestStarted)
+				process.ready.Store(true)
+				<-releaseResponse
+				w.WriteHeader(http.StatusOK)
+			}),
+		})
+	}()
+	waitForHealth(t, socketPath)
+	if _, err := control.MaintenancePrepare(context.Background(), socketPath, protocol.MaintenancePrepareRequest{
+		RequestID: "prepare-1", ToGeneration: protocol.MaintenanceGeneration{Digest: "target"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requestDone := make(chan error, 1)
+	go func() {
+		request, _ := http.NewRequest(http.MethodPost, "http://pika-go/mcp", nil)
+		client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
+		}}}
+		response, requestErr := client.Do(request)
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		requestDone <- requestErr
+	}()
+	<-requestStarted
+	select {
+	case err := <-done:
+		t.Fatalf("daemon exited before terminal MCP response: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	if _, err := os.Lstat(socketPath); err != nil {
+		t.Fatalf("socket disappeared before terminal response: %v", err)
+	}
+	close(releaseResponse)
+	if err := <-requestDone; err != nil {
+		t.Fatalf("terminal MCP response failed: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("maintenance-ready daemon did not exit")
+	}
+}
+
+func TestMaintenanceReadyForceClosesHalfOpenRequestWithinBound(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "pika-daemon-maintenance-half-open-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	socketPath := filepath.Join(directory, "pika.sock")
+	process := &fakeMaintenance{}
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Serve(context.Background(), daemon.Config{
+			SocketPath: socketPath, Version: "test", Maintenance: process,
+		})
+	}()
+	waitForHealth(t, socketPath)
+	connection, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, err := connection.Write([]byte(
+		"POST /v1/maintenance/prepare HTTP/1.1\r\n" +
+			"Host: pika-go\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{",
+	)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	process.ready.Store(true)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("maintenance-ready daemon did not force-close half-open request")
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("maintenance-ready daemon left socket behind: %v", err)
+	}
+	status, ready, err := process.Poll(context.Background())
+	if err != nil || !ready || status.State != maintenance.StateReady {
+		t.Fatalf("maintenance state was not preserved as Ready: status=%+v ready=%t err=%v", status, ready, err)
+	}
+}
+
+type fakeMaintenance struct {
+	ready atomic.Bool
+}
+
+func (f *fakeMaintenance) Prepare(context.Context, maintenance.PrepareRequest) (maintenance.Status, error) {
+	return maintenance.Status{ID: "maintenance-1", RequestID: "prepare-1", State: maintenance.StateQuiescing}, nil
+}
+
+func (f *fakeMaintenance) Status() (maintenance.Status, error) {
+	return maintenance.Status{ID: "maintenance-1", RequestID: "prepare-1", State: maintenance.StateQuiescing}, nil
+}
+
+func (f *fakeMaintenance) Resume(context.Context, maintenance.ResumeRequest) (maintenance.Status, error) {
+	return maintenance.Status{ID: "maintenance-1", RequestID: "prepare-1", State: maintenance.StateResumed}, nil
+}
+
+func (f *fakeMaintenance) Poll(context.Context) (maintenance.Status, bool, error) {
+	if f.ready.Load() {
+		return maintenance.Status{ID: "maintenance-1", RequestID: "prepare-1", State: maintenance.StateReady}, true, nil
+	}
+	return maintenance.Status{ID: "maintenance-1", RequestID: "prepare-1", State: maintenance.StateQuiescing}, false, nil
+}
+
+func waitForHealth(t *testing.T, socketPath string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for {
+		if _, err := control.Health(ctx, socketPath); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("daemon did not become healthy")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

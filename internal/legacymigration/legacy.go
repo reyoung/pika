@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/reyoung/pika-go/internal/configuration"
 	"github.com/reyoung/pika-go/internal/instance"
@@ -96,7 +97,23 @@ type ImportOptions struct {
 	WorkspaceRoot string
 }
 
-func Import(ctx context.Context, options ImportOptions) (optimizationworkspace.Workspace, error) {
+func Import(ctx context.Context, options ImportOptions) (result optimizationworkspace.Workspace, resultErr error) {
+	return importWithLeaseAfterCreate(ctx, options, nil, nil)
+}
+
+func ImportWithLease(ctx context.Context, options ImportOptions, lease *optimizationworkspace.MutationLease) (result optimizationworkspace.Workspace, resultErr error) {
+	if lease == nil {
+		return optimizationworkspace.Workspace{}, errors.New("exclusive Workspace mutation lease is required")
+	}
+	return importWithLeaseAfterCreate(ctx, options, lease, nil)
+}
+
+func importWithLeaseAfterCreate(
+	ctx context.Context,
+	options ImportOptions,
+	suppliedLease *optimizationworkspace.MutationLease,
+	afterCreate func(optimizationworkspace.Workspace),
+) (result optimizationworkspace.Workspace, resultErr error) {
 	if err := validateRoots(options.Roots); err != nil {
 		return optimizationworkspace.Workspace{}, err
 	}
@@ -120,10 +137,36 @@ func Import(ctx context.Context, options ImportOptions) (optimizationworkspace.W
 		return optimizationworkspace.Workspace{}, fmt.Errorf("legacy instance must be stopped before import: %w", err)
 	}
 	defer lock.Close()
+	mutationLease := suppliedLease
+	ownsLease := false
+	if mutationLease == nil {
+		mutationLease, err = optimizationworkspace.AcquireExclusiveMutationLease(ctx, options.WorkspaceRoot)
+		if err != nil {
+			return optimizationworkspace.Workspace{}, fmt.Errorf("acquire import mutation lease: %w", err)
+		}
+		ownsLease = true
+	}
+	if ownsLease {
+		defer mutationLease.Close()
+	}
 
-	workspace, err := optimizationworkspace.CreateForImport(ctx, options.WorkspaceRoot, identity.Repository)
+	workspace, err := optimizationworkspace.CreateForImportWithLease(ctx, options.WorkspaceRoot, identity.Repository, mutationLease)
 	if err != nil {
 		return optimizationworkspace.Workspace{}, err
+	}
+	imported := false
+	defer func() {
+		if imported {
+			return
+		}
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if rollbackErr := workspace.RollbackExclusiveCreateWithLease(rollbackCtx, mutationLease); rollbackErr != nil {
+			resultErr = fmt.Errorf("%v; rollback failed import: %w", resultErr, rollbackErr)
+		}
+	}()
+	if afterCreate != nil {
+		afterCreate(workspace)
 	}
 	if err := ensureImportProvenance(workspace, options.InstanceID, configPath, databasePath); err != nil {
 		return optimizationworkspace.Workspace{}, err
@@ -185,6 +228,7 @@ func Import(ctx context.Context, options ImportOptions) (optimizationworkspace.W
 	if err := engine.RetireActiveSessionsForRecovery(ctx); err != nil {
 		return optimizationworkspace.Workspace{}, fmt.Errorf("retire imported Agent Sessions: %w", err)
 	}
+	imported = true
 	return workspace, nil
 }
 

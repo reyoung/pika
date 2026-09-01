@@ -12,8 +12,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const (
@@ -24,6 +26,7 @@ const (
 )
 
 var (
+	ErrAlreadyExists   = errors.New("Optimization Workspace already exists")
 	workspaceIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	shaPattern         = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
@@ -115,6 +118,10 @@ func Create(ctx context.Context, root, repository string) (Workspace, error) {
 	return create(ctx, root, repository, true)
 }
 
+func CreateWithLease(ctx context.Context, root, repository string, lease *MutationLease) (Workspace, error) {
+	return createWithLeaseAfterClaim(ctx, root, repository, true, lease, nil)
+}
+
 // CreateForImport creates a Workspace for an explicitly stopped legacy
 // instance. Unlike normal creation, the source checkout may be dirty because
 // ImportWorkingTree will reproduce that exact state in the new base worktree.
@@ -122,7 +129,38 @@ func CreateForImport(ctx context.Context, root, repository string) (Workspace, e
 	return create(ctx, root, repository, false)
 }
 
-func create(ctx context.Context, root, repository string, requireClean bool) (Workspace, error) {
+func CreateForImportWithLease(ctx context.Context, root, repository string, lease *MutationLease) (Workspace, error) {
+	return createWithLeaseAfterClaim(ctx, root, repository, false, lease, nil)
+}
+
+func create(ctx context.Context, root, repository string, requireClean bool) (result Workspace, resultErr error) {
+	return createWithLeaseAfterClaim(ctx, root, repository, requireClean, nil, nil)
+}
+
+func createWithAfterClaim(ctx context.Context, root, repository string, requireClean bool, afterClaim func(Workspace) error) (result Workspace, resultErr error) {
+	return createWithLeaseAfterClaim(ctx, root, repository, requireClean, nil, afterClaim)
+}
+
+func createWithLeaseAfterClaim(ctx context.Context, root, repository string, requireClean bool, suppliedLease *MutationLease, afterClaim func(Workspace) error) (result Workspace, resultErr error) {
+	return createWithLeaseAfterClaimOps(ctx, root, repository, requireClean, suppliedLease, afterClaim, createClaimOps{
+		chmod: os.Chmod,
+		lstat: os.Lstat,
+	})
+}
+
+type createClaimOps struct {
+	chmod func(string, os.FileMode) error
+	lstat func(string) (os.FileInfo, error)
+}
+
+func createWithLeaseAfterClaimOps(
+	ctx context.Context,
+	root, repository string,
+	requireClean bool,
+	suppliedLease *MutationLease,
+	afterClaim func(Workspace) error,
+	claimOps createClaimOps,
+) (result Workspace, resultErr error) {
 	if root == "" || repository == "" {
 		return Workspace{}, errors.New("Workspace root and source repository are required")
 	}
@@ -130,26 +168,11 @@ func create(ctx context.Context, root, repository string, requireClean bool) (Wo
 	if err != nil {
 		return Workspace{}, fmt.Errorf("resolve Workspace root: %w", err)
 	}
-	if _, err := os.Stat(filepath.Join(absoluteRoot, ManifestName)); err == nil {
-		workspace, openErr := Open(absoluteRoot)
-		if openErr != nil {
-			return Workspace{}, openErr
-		}
-		resolvedRepository, _, _, _, validateErr := inspectRepository(ctx, repository, false)
-		if validateErr != nil {
-			return Workspace{}, validateErr
-		}
-		if workspace.Identity.SourceRepository != resolvedRepository {
-			return Workspace{}, fmt.Errorf("Workspace source repository is %s, not %s", workspace.Identity.SourceRepository, resolvedRepository)
-		}
-		if err := workspace.EnsureBase(ctx); err != nil {
-			return Workspace{}, err
-		}
-		return workspace, nil
+	if _, err := os.Lstat(absoluteRoot); err == nil {
+		return Workspace{}, fmt.Errorf("%w: %s", ErrAlreadyExists, absoluteRoot)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return Workspace{}, fmt.Errorf("inspect Workspace marker: %w", err)
+		return Workspace{}, fmt.Errorf("inspect Workspace destination: %w", err)
 	}
-
 	resolvedRepository, commonDir, device, inode, err := inspectRepository(ctx, repository, requireClean)
 	if err != nil {
 		return Workspace{}, err
@@ -159,17 +182,6 @@ func create(ctx context.Context, root, repository string, requireClean bool) (Wo
 	}
 	if pathWithin(commonDir, absoluteRoot) || pathWithin(absoluteRoot, commonDir) {
 		return Workspace{}, errors.New("Optimization Workspace must not overlap the Git common directory")
-	}
-	if entries, readErr := os.ReadDir(absoluteRoot); readErr == nil && len(entries) != 0 {
-		return Workspace{}, fmt.Errorf("Workspace destination is not empty: %s", absoluteRoot)
-	} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return Workspace{}, fmt.Errorf("inspect Workspace destination: %w", readErr)
-	}
-	if err := os.MkdirAll(absoluteRoot, 0o700); err != nil {
-		return Workspace{}, fmt.Errorf("create Workspace root: %w", err)
-	}
-	if err := os.Chmod(absoluteRoot, 0o700); err != nil {
-		return Workspace{}, fmt.Errorf("protect Workspace root: %w", err)
 	}
 	id, err := newID()
 	if err != nil {
@@ -185,17 +197,191 @@ func create(ctx context.Context, root, repository string, requireClean bool) (Wo
 		InitialSHA: initialSHA, Phase: "initializing",
 	}
 	workspace := fromIdentity(identity)
+	namespaceRefs, err := git(ctx, resolvedRepository, "for-each-ref", "--format=%(refname)", "refs/heads/"+workspace.BranchNamespace()+"/")
+	if err != nil {
+		return Workspace{}, fmt.Errorf("inspect Workspace branch namespace: %w", err)
+	}
+	if strings.TrimSpace(namespaceRefs) != "" {
+		return Workspace{}, errors.New("generated Workspace branch namespace already exists")
+	}
+	lease := suppliedLease
+	ownsLease := false
+	if lease == nil {
+		lease, err = AcquireExclusiveMutationLease(ctx, absoluteRoot)
+		if err != nil {
+			return Workspace{}, err
+		}
+		ownsLease = true
+	} else if !lease.ownsExclusive(absoluteRoot) {
+		return Workspace{}, errors.New("exclusive Workspace mutation lease is required for creation")
+	}
+	if ownsLease {
+		defer lease.Close()
+	}
+	if _, err := os.Lstat(absoluteRoot); err == nil {
+		return Workspace{}, fmt.Errorf("%w: %s", ErrAlreadyExists, absoluteRoot)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return Workspace{}, fmt.Errorf("inspect Workspace destination: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(absoluteRoot), 0o700); err != nil {
+		return Workspace{}, fmt.Errorf("create Workspace parent: %w", err)
+	}
+	if err := os.Mkdir(absoluteRoot, 0o700); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return Workspace{}, fmt.Errorf("%w: %s", ErrAlreadyExists, absoluteRoot)
+		}
+		return Workspace{}, fmt.Errorf("claim Workspace root: %w", err)
+	}
+	succeeded := false
+	var claimedRoot os.FileInfo
+	defer func() {
+		if succeeded {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		var cleanupErr error
+		if claimedRoot == nil {
+			cleanupErr = os.Remove(absoluteRoot)
+			if errors.Is(cleanupErr, os.ErrNotExist) {
+				cleanupErr = nil
+			}
+		} else {
+			cleanupErr = cleanupWorkspaceClaim(cleanupCtx, workspace, claimedRoot, false)
+		}
+		if cleanupErr != nil {
+			resultErr = fmt.Errorf("%v; clean failed Workspace claim: %w", resultErr, cleanupErr)
+		}
+	}()
+	if err := claimOps.chmod(absoluteRoot, 0o700); err != nil {
+		return Workspace{}, fmt.Errorf("protect Workspace root: %w", err)
+	}
+	claimedRoot, err = claimOps.lstat(absoluteRoot)
+	if err != nil {
+		return Workspace{}, fmt.Errorf("inspect claimed Workspace root: %w", err)
+	}
+	if afterClaim != nil {
+		if err := afterClaim(workspace); err != nil {
+			return Workspace{}, err
+		}
+	}
 	if err := writeJSONAtomic(workspace.ManifestPath, identity, 0o600); err != nil {
 		return Workspace{}, err
 	}
-	if err := workspace.ensureDirectories(); err != nil {
+	if err := workspace.EnsureLayout(); err != nil {
 		return Workspace{}, err
 	}
 	if err := workspace.EnsureBase(ctx); err != nil {
 		return Workspace{}, err
 	}
 	workspace.Identity.Phase = "ready_for_init"
+	succeeded = true
 	return workspace, nil
+}
+
+func cleanupWorkspaceClaim(ctx context.Context, workspace Workspace, claimedRoot os.FileInfo, branchPreexisting bool) error {
+	if ctx == nil || ctx.Err() != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+	}
+	current, err := os.Lstat(workspace.Root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !os.SameFile(claimedRoot, current) {
+		return errors.New("claimed Workspace root identity changed; refusing cleanup")
+	}
+	var cleanupErr error
+	worktrees, listErr := git(ctx, workspace.Identity.SourceRepository, "worktree", "list", "--porcelain")
+	if listErr != nil {
+		cleanupErr = fmt.Errorf("list Git worktrees during cleanup: %w", listErr)
+	} else if gitWorktreeListContains(worktrees, workspace.BaseRepository) {
+		if _, err := git(ctx, workspace.Identity.SourceRepository, "worktree", "remove", "--force", workspace.BaseRepository); err != nil {
+			cleanupErr = fmt.Errorf("remove claimed Git worktree: %w", err)
+		}
+	}
+	if !branchPreexisting {
+		if _, err := git(ctx, workspace.Identity.SourceRepository, "show-ref", "--verify", "--quiet", "refs/heads/"+workspace.BaseBranch()); err == nil {
+			if _, err := git(ctx, workspace.Identity.SourceRepository, "branch", "-D", workspace.BaseBranch()); err != nil && cleanupErr == nil {
+				cleanupErr = fmt.Errorf("remove claimed Git branch: %w", err)
+			}
+		}
+	}
+	if cleanupErr != nil {
+		return cleanupErr
+	}
+	return os.RemoveAll(workspace.Root)
+}
+
+// RollbackExclusiveCreate removes only a Workspace and namespaced Git
+// side-effects owned by a successfully returned exclusive-new Create call.
+// It refuses cleanup when the on-disk manifest no longer has the same identity.
+func (w Workspace) RollbackExclusiveCreate(ctx context.Context) error {
+	lease, err := AcquireExclusiveMutationLease(ctx, w.Root)
+	if err != nil {
+		return err
+	}
+	defer lease.Close()
+	return w.RollbackExclusiveCreateWithLease(ctx, lease)
+}
+
+func (w Workspace) RollbackExclusiveCreateWithLease(ctx context.Context, lease *MutationLease) error {
+	if !lease.ownsExclusive(w.Root) {
+		return errors.New("exclusive Workspace mutation lease is required for rollback")
+	}
+	current, err := Open(w.Root)
+	if err != nil {
+		return fmt.Errorf("validate Workspace rollback identity: %w", err)
+	}
+	if current.Identity != w.Identity {
+		return errors.New("Workspace identity changed; refusing exclusive-create rollback")
+	}
+	worktreeOutput, err := git(ctx, w.Identity.SourceRepository, "worktree", "list", "--porcelain")
+	if err != nil {
+		return err
+	}
+	var ownedWorktrees []string
+	for _, line := range strings.Split(worktreeOutput, "\n") {
+		if !strings.HasPrefix(line, "worktree ") {
+			continue
+		}
+		path := filepath.Clean(strings.TrimPrefix(line, "worktree "))
+		if pathWithin(w.Root, path) && path != filepath.Clean(w.Root) {
+			ownedWorktrees = append(ownedWorktrees, path)
+		}
+	}
+	sort.Slice(ownedWorktrees, func(i, j int) bool { return len(ownedWorktrees[i]) > len(ownedWorktrees[j]) })
+	for _, path := range ownedWorktrees {
+		if _, err := git(ctx, w.Identity.SourceRepository, "worktree", "remove", "--force", path); err != nil {
+			return fmt.Errorf("remove imported Git worktree %s: %w", path, err)
+		}
+	}
+	refs, err := git(ctx, w.Identity.SourceRepository, "for-each-ref", "--format=%(refname:short)", "refs/heads/"+w.BranchNamespace()+"/")
+	if err != nil {
+		return err
+	}
+	for _, branch := range strings.Fields(refs) {
+		if !strings.HasPrefix(branch, w.BranchNamespace()+"/") {
+			return fmt.Errorf("ref %s escaped Workspace branch namespace", branch)
+		}
+		if _, err := git(ctx, w.Identity.SourceRepository, "branch", "-D", branch); err != nil {
+			return fmt.Errorf("remove imported Git branch %s: %w", branch, err)
+		}
+	}
+	return os.RemoveAll(w.Root)
+}
+
+func gitWorktreeListContains(output, target string) bool {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, "worktree ") && filepath.Clean(strings.TrimPrefix(line, "worktree ")) == filepath.Clean(target) {
+			return true
+		}
+	}
+	return false
 }
 
 func Open(root string) (Workspace, error) {
@@ -232,11 +418,24 @@ func Open(root string) (Workspace, error) {
 	if !filepath.IsAbs(identity.SourceRepository) || !filepath.IsAbs(identity.GitCommonDir) {
 		return Workspace{}, errors.New("Workspace repository identity must use absolute paths")
 	}
-	workspace := fromIdentity(identity)
-	if err := workspace.ensureDirectories(); err != nil {
-		return Workspace{}, err
+	return fromIdentity(identity), nil
+}
+
+func (w Workspace) EnsureLayout() error {
+	return w.ensureDirectories()
+}
+
+func (w Workspace) ValidateLayout() error {
+	for _, path := range append([]string{w.Root}, w.layoutDirectories()...) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("inspect Workspace directory %s: %w", path, err)
+		}
+		if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+			return fmt.Errorf("Workspace directory %s must be a private directory", path)
+		}
 	}
-	return workspace, nil
+	return nil
 }
 
 func (w Workspace) BaseBranch() string      { return "pika/" + w.Identity.ID + "/base" }
@@ -326,7 +525,7 @@ func (w Workspace) markPhase(phase string) error {
 }
 
 func (w Workspace) ensureDirectories() error {
-	for _, path := range []string{w.InstructionsRoot, w.ContextsRoot, w.EvidenceRoot, w.LogsRoot, w.RuntimeRoot, w.HerdrRoot, filepath.Dir(w.BestRepository), filepath.Join(w.Root, "attempts")} {
+	for _, path := range w.layoutDirectories() {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return fmt.Errorf("create Workspace directory %s: %w", path, err)
 		}
@@ -335,6 +534,13 @@ func (w Workspace) ensureDirectories() error {
 		}
 	}
 	return nil
+}
+
+func (w Workspace) layoutDirectories() []string {
+	return []string{
+		w.InstructionsRoot, w.ContextsRoot, w.EvidenceRoot, w.LogsRoot, w.RuntimeRoot,
+		w.HerdrRoot, filepath.Dir(w.BestRepository), filepath.Join(w.Root, "attempts"),
+	}
 }
 
 func fromIdentity(identity Identity) Workspace {

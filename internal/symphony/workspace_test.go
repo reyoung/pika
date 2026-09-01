@@ -27,6 +27,9 @@ func TestWorkspaceIdentityAndGitWorktreeRegistryAreDurable(t *testing.T) {
 	if err := engine.EnsureWorkspaceIdentity(ctx, identity); err != nil {
 		t.Fatalf("idempotent identity check: %v", err)
 	}
+	if err := engine.ValidateWorkspaceIdentity(ctx, identity); err != nil {
+		t.Fatalf("read-only identity check: %v", err)
+	}
 	changed := identity
 	changed.Root = "/moved"
 	if err := engine.EnsureWorkspaceIdentity(ctx, changed); err == nil || !strings.Contains(err.Error(), "different Optimization Workspace") {
@@ -46,6 +49,17 @@ func TestWorkspaceIdentityAndGitWorktreeRegistryAreDurable(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].HeadSHA != record.HeadSHA || records[0].Repository != record.Repository {
 		t.Fatalf("worktree records = %+v", records)
+	}
+	updatedAt := records[0].UpdatedAt
+	if err := engine.ValidateGitWorktree(ctx, record); err != nil {
+		t.Fatalf("read-only worktree check: %v", err)
+	}
+	records, err = engine.GitWorktrees(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records[0].UpdatedAt != updatedAt {
+		t.Fatalf("read-only worktree check changed updated_at from %s to %s", updatedAt, records[0].UpdatedAt)
 	}
 }
 

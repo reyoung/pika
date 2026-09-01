@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +23,9 @@ import (
 	"github.com/reyoung/pika-go/internal/configuration"
 	"github.com/reyoung/pika-go/internal/control"
 	"github.com/reyoung/pika-go/internal/daemon"
+	"github.com/reyoung/pika-go/internal/daemonupdate"
 	"github.com/reyoung/pika-go/internal/instance"
+	"github.com/reyoung/pika-go/internal/maintenance"
 	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
@@ -38,9 +41,144 @@ func TestInstallRejectsRelativeDirectory(t *testing.T) {
 	}
 }
 
+func TestMaintenanceCLIExposesPrepareStatusAndResume(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(directory, "pika.sock")
+	process := &cliFakeMaintenance{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- daemon.Serve(ctx, daemon.Config{SocketPath: socketPath, Version: "test", Maintenance: process})
+	}()
+	waitForControlHealth(t, socketPath)
+
+	var prepareOut, prepareErr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{
+		"maintenance", "prepare", "--socket", socketPath, "--request-id", "prepare-1",
+		"--to-digest", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "--to-version", "schema23", "--json",
+	}, nil, &prepareOut, &prepareErr); code != 0 {
+		t.Fatalf("prepare exit=%d out=%q err=%q", code, prepareOut.String(), prepareErr.String())
+	}
+	if status := process.current(); status.ToGeneration.Digest != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("prepare target = %+v", status.ToGeneration)
+	}
+	var statusOut bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"maintenance", "status", "--socket", socketPath, "--json"}, nil, &statusOut, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("status exit=%d out=%q", code, statusOut.String())
+	}
+	var got maintenance.Status
+	if err := json.Unmarshal(statusOut.Bytes(), &got); err != nil || got.RequestID != "prepare-1" {
+		t.Fatalf("status=%+v err=%v", got, err)
+	}
+	if code := cli.Run(context.Background(), []string{
+		"maintenance", "resume", "--socket", socketPath, "--request-id", "resume-1", "--json",
+	}, nil, io.Discard, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("resume exit=%d", code)
+	}
+	if status := process.current(); status.State != maintenance.StateResumed || status.ResumeRequestID != "resume-1" {
+		t.Fatalf("resume status = %+v", status)
+	}
+	cancel()
+	<-done
+}
+
+func TestMaintenanceCLIRejectsAmbiguousWorkspaceAndDoesNotDiscoverOnSocketMiss(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{
+		"maintenance", "status", "--socket", "/tmp/pika.sock", "--workspace", "/tmp/workspace",
+	}, nil, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "--socket and --workspace cannot be used together") {
+		t.Fatalf("ambiguous flags exit=%d stderr=%q", code, stderr.String())
+	}
+
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), newCommittedRepository(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := maintenance.NewFileStore(workspace.Root)
+	if err := store.Write(maintenance.Status{
+		ID: "foreign", RequestID: "foreign", State: maintenance.StateQuiescing,
+		FromGeneration: maintenance.Generation{Digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		ToGeneration:   maintenance.Generation{Digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		StartedAt:      "now", UpdatedAt: "now",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workspace.Root)
+	missing := filepath.Join(t.TempDir(), "missing.sock")
+	stderr.Reset()
+	if code := cli.Run(context.Background(), []string{"maintenance", "status", "--socket", missing, "--json"}, nil, io.Discard, &stderr); code == 0 || strings.Contains(stderr.String(), "foreign") {
+		t.Fatalf("explicit socket miss fell back to discovered workspace: exit=%d stderr=%q", code, stderr.String())
+	}
+}
+
+type cliFakeMaintenance struct {
+	mu     sync.Mutex
+	status maintenance.Status
+}
+
+func (f *cliFakeMaintenance) Prepare(_ context.Context, request maintenance.PrepareRequest) (maintenance.Status, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.status = maintenance.Status{
+		ID: "maintenance-1", RequestID: request.RequestID, State: maintenance.StateQuiescing,
+		ToGeneration: request.ToGeneration,
+	}
+	return f.status, nil
+}
+
+func (f *cliFakeMaintenance) Status() (maintenance.Status, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.status, nil
+}
+
+func (f *cliFakeMaintenance) Resume(_ context.Context, request maintenance.ResumeRequest) (maintenance.Status, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.status.State = maintenance.StateResumed
+	f.status.ResumeRequestID = request.RequestID
+	return f.status, nil
+}
+
+func (f *cliFakeMaintenance) Poll(context.Context) (maintenance.Status, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.status, false, nil
+}
+
+func (f *cliFakeMaintenance) current() maintenance.Status {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.status
+}
+
+func waitForControlHealth(t *testing.T, socketPath string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for {
+		if _, err := control.Health(ctx, socketPath); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("daemon did not become healthy")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func newCommittedRepository(t *testing.T) string {
 	t.Helper()
-	repository := filepath.Join(t.TempDir(), "repository")
+	return newCommittedRepositoryAt(t, filepath.Join(t.TempDir(), "repository"))
+}
+
+func newCommittedRepositoryAt(t *testing.T, repository string) string {
+	t.Helper()
 	if err := os.MkdirAll(repository, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +207,106 @@ func newCommittedRepository(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return resolved
+}
+
+type fileSnapshot struct {
+	contents []byte
+	modTime  time.Time
+}
+
+type callbackReader struct {
+	once   sync.Once
+	before func()
+	reader io.Reader
+}
+
+func (reader *callbackReader) Read(buffer []byte) (int, error) {
+	reader.once.Do(reader.before)
+	return reader.reader.Read(buffer)
+}
+
+func snapshotFiles(t *testing.T, paths []string) map[string]fileSnapshot {
+	t.Helper()
+	result := make(map[string]fileSnapshot, len(paths))
+	for _, path := range paths {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[path] = fileSnapshot{contents: contents, modTime: info.ModTime()}
+	}
+	return result
+}
+
+func assertFilesUnchanged(t *testing.T, paths []string, before map[string]fileSnapshot) {
+	t.Helper()
+	for _, path := range paths {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(contents, before[path].contents) || !info.ModTime().Equal(before[path].modTime) {
+			t.Fatalf("generation rejection changed %s", path)
+		}
+	}
+}
+
+func seedUnauthorizedMaintenanceWorkspace(t *testing.T, workspace optimizationworkspace.Workspace) []string {
+	t.Helper()
+	if err := os.WriteFile(workspace.DatabasePath, []byte("database-before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.WriteHerdrBinding(optimizationworkspace.HerdrBinding{
+		SocketPath: "/tmp/herdr-before.sock", WorkspaceID: "before", TabID: "tab-before",
+		ControlPane: "control-before", DaemonPane: "daemon-before", DaemonSocket: "/tmp/pika-before.sock",
+		UpdatedAt: "2026-09-01T13:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	layoutPath := filepath.Join(workspace.HerdrRoot, "layout.json")
+	if err := os.WriteFile(layoutPath, []byte(`{"layout":"before"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemonupdate.RestoreCurrent(workspace.Root, daemonupdate.Generation{
+		Path:    "/retained/from/pika-go",
+		Digest:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Version: "from", ActivatedAt: "2026-09-01T13:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := maintenance.NewFileStore(workspace.Root).Write(maintenance.Status{
+		ID: "maintenance-unknown", RequestID: "prepare-unknown", State: maintenance.StateHolding,
+		FromGeneration: maintenance.Generation{Digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		ToGeneration:   maintenance.Generation{Digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		HoldingGeneration: maintenance.Generation{
+			Digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		},
+		Targets:   []maintenance.Target{{WorkID: "work", SessionID: "session", WorkGeneration: 1}},
+		StartedAt: "2026-09-01T13:00:00Z", ReadyAt: "2026-09-01T13:01:00Z",
+		HoldingAt: "2026-09-01T13:02:00Z", UpdatedAt: "2026-09-01T13:02:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(workspace.ContextsRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(workspace.EvidenceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return []string{
+		workspace.DatabasePath,
+		filepath.Join(workspace.RuntimeRoot, "daemon", "current.json"),
+		workspace.HerdrBindingPath,
+		layoutPath,
+	}
 }
 
 func TestHelpExplainsThePrimaryWorkflow(t *testing.T) {
@@ -183,6 +421,489 @@ func TestKickOffDoesNotCreateWorkspaceWhenHerdrConfigurationIsDeclined(t *testin
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestKickOffHoldsMutationLeaseAcrossHerdrConfigurationPrompt(t *testing.T) {
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-kick-off-reauthorize-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	herdrSocket := filepath.Join(socketDir, "herdr.sock")
+	listener, err := net.Listen("unix", herdrSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	methods := make(chan string, 4)
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		for {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			var request struct {
+				ID     string `json:"id"`
+				Method string `json:"method"`
+			}
+			if json.NewDecoder(connection).Decode(&request) == nil {
+				methods <- request.Method
+				_ = json.NewEncoder(connection).Encode(map[string]any{
+					"id": request.ID, "result": map[string]any{"snapshot": map[string]any{"version": "0.8.2", "protocol": 20}},
+				})
+			}
+			_ = connection.Close()
+		}
+	}()
+
+	repository := newCommittedRepository(t)
+	workspaceRoot, err := optimizationworkspace.DefaultRoot(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := optimizationworkspace.Create(context.Background(), workspaceRoot, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(socketDir, "config.toml")
+	originalConfig := "[session]\nresume_agents_on_restore = true\n"
+	if err := os.WriteFile(configPath, []byte(originalConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERDR_SOCKET_PATH", herdrSocket)
+	t.Setenv("HERDR_CONFIG_PATH", configPath)
+	activationEntered := make(chan *optimizationworkspace.MutationLease, 1)
+	input := &callbackReader{
+		reader: strings.NewReader("n\n"),
+		before: func() {
+			go func() {
+				lease, leaseErr := optimizationworkspace.AcquireExclusiveMutationLease(context.Background(), workspace.Root)
+				if leaseErr == nil {
+					activationEntered <- lease
+				}
+			}()
+			select {
+			case lease := <-activationEntered:
+				_ = lease.Close()
+				t.Fatal("maintenance activation entered during Herdr configuration prompt")
+			case <-time.After(100 * time.Millisecond):
+			}
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"kick-off", "--repository", repository}, input, &stdout, &stderr); code != 2 {
+		t.Fatalf("kick-off exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	select {
+	case lease := <-activationEntered:
+		defer lease.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("maintenance activation did not enter after kickoff released its mutation lease")
+	}
+	config, err := os.ReadFile(configPath)
+	if err != nil || string(config) != originalConfig {
+		t.Fatalf("Herdr configuration changed: contents=%q err=%v", config, err)
+	}
+	if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatal(err)
+	}
+	<-serverDone
+	close(methods)
+	var called []string
+	for method := range methods {
+		called = append(called, method)
+	}
+	if !slices.Equal(called, []string{"session.snapshot"}) {
+		t.Fatalf("Herdr mutations before authorization: %v", called)
+	}
+}
+
+func TestWebUIRejectsUnauthorizedGenerationBeforeTokenOrPIDWrites(t *testing.T) {
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), newCommittedRepository(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedPaths := seedUnauthorizedMaintenanceWorkspace(t, workspace)
+	before := snapshotFiles(t, protectedPaths)
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"webui", "--workspace", workspace.Root, "--listen", "127.0.0.1:0"}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("webui exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "maintenance state rejected") {
+		t.Fatalf("webui rejection=%q", stderr.String())
+	}
+	assertFilesUnchanged(t, protectedPaths, before)
+	if _, err := os.Stat(filepath.Join(workspace.RuntimeRoot, "webui")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unauthorized WebUI created runtime state: %v", err)
+	}
+}
+
+func TestWebUIHoldingTargetReusesTokenAndOnlyOwnsPID(t *testing.T) {
+	ctx := context.Background()
+	workspace, err := optimizationworkspace.Create(ctx, filepath.Join(t.TempDir(), "workspace"), newCommittedRepository(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	socketDir, err := os.MkdirTemp("/tmp", "pika-webui-holding-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	daemonSocket := filepath.Join(socketDir, "pika.sock")
+	daemonCtx, stopDaemon := context.WithCancel(ctx)
+	daemonDone := make(chan error, 1)
+	go func() {
+		daemonDone <- daemon.Serve(daemonCtx, daemon.Config{SocketPath: daemonSocket, Version: "test"})
+	}()
+	waitForHealth(t, daemonSocket, nil)
+	t.Cleanup(func() {
+		stopDaemon()
+		<-daemonDone
+	})
+	binding := optimizationworkspace.HerdrBinding{
+		SocketPath: "/tmp/herdr.sock", WorkspaceID: "workspace", TabID: "tab",
+		ControlPane: "control", DaemonPane: "daemon", DaemonSocket: daemonSocket,
+		UpdatedAt: "2026-09-01T12:00:00Z",
+	}
+	if err := workspace.WriteHerdrBinding(binding); err != nil {
+		t.Fatal(err)
+	}
+	tokenDirectory := filepath.Join(workspace.RuntimeRoot, "webui")
+	if err := os.MkdirAll(tokenDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(tokenDirectory, "token")
+	tokenBytes := []byte("holding-token\n")
+	if err := os.WriteFile(tokenPath, tokenBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokenInfo, err := os.Stat(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := daemonupdate.FileDigest(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := maintenance.Generation{Digest: digest, Version: "target"}
+	if err := maintenance.NewFileStore(workspace.Root).Write(maintenance.Status{
+		ID: "maintenance", RequestID: "prepare", State: maintenance.StateHolding,
+		FromGeneration: maintenance.Generation{Digest: strings.Repeat("a", 64), Version: "bridge"},
+		ToGeneration:   generation, HoldingGeneration: generation,
+		Targets:   []maintenance.Target{{WorkID: "work", SessionID: "session", WorkGeneration: 1}},
+		StartedAt: "2026-09-01T12:00:00Z", ReadyAt: "2026-09-01T12:01:00Z",
+		HoldingAt: "2026-09-01T12:02:00Z", UpdatedAt: "2026-09-01T12:02:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var rotateOut, rotateErr bytes.Buffer
+	if code := cli.Run(ctx, []string{"webui", "--workspace", workspace.Root, "--listen", "127.0.0.1:0", "--rotate-token"}, nil, &rotateOut, &rotateErr); code != 1 ||
+		!strings.Contains(rotateErr.String(), "--rotate-token is forbidden") {
+		t.Fatalf("holding rotate exit=%d stdout=%q stderr=%q", code, rotateOut.String(), rotateErr.String())
+	}
+	webuiCtx, stopWebUI := context.WithCancel(ctx)
+	webuiDone := make(chan int, 1)
+	var stdout, stderr bytes.Buffer
+	go func() {
+		webuiDone <- cli.Run(webuiCtx, []string{"webui", "--workspace", workspace.Root, "--listen", "127.0.0.1:0"}, nil, &stdout, &stderr)
+	}()
+	pidPath := filepath.Join(tokenDirectory, "pid")
+	waitForPath(t, pidPath)
+	stopWebUI()
+	if code := <-webuiDone; code != 0 {
+		t.Fatalf("holding WebUI exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	after, err := os.ReadFile(tokenPath)
+	afterInfo, statErr := os.Stat(tokenPath)
+	if err != nil || statErr != nil || !bytes.Equal(after, tokenBytes) || !afterInfo.ModTime().Equal(tokenInfo.ModTime()) {
+		t.Fatalf("holding token changed: contents=%q read=%v stat=%v before=%v after=%v", after, err, statErr, tokenInfo.ModTime(), afterInfo.ModTime())
+	}
+	if _, err := os.Stat(pidPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("holding WebUI PID remains: %v", err)
+	}
+}
+
+func TestWebUIWaitsForMaintenanceActivationAndRejectsBeforeWrites(t *testing.T) {
+	ctx := context.Background()
+	workspace, err := optimizationworkspace.Create(ctx, filepath.Join(t.TempDir(), "workspace"), newCommittedRepository(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenDirectory := filepath.Join(workspace.RuntimeRoot, "webui")
+	if err := os.MkdirAll(tokenDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(tokenDirectory, "token")
+	if err := os.WriteFile(tokenPath, []byte("stable-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	protected := []string{tokenPath}
+	before := snapshotFiles(t, protected)
+	exclusive, err := optimizationworkspace.AcquireExclusiveMutationLease(ctx, workspace.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"webui", "--workspace", workspace.Root, "--listen", "127.0.0.1:0"}, nil, &stdout, &stderr)
+	}()
+	select {
+	case code := <-done:
+		t.Fatalf("WebUI crossed exclusive maintenance lease: exit=%d stderr=%q", code, stderr.String())
+	case <-time.After(100 * time.Millisecond):
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := daemonupdate.FileDigest(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := maintenance.NewFileStore(workspace.Root).Write(maintenance.Status{
+		ID: "maintenance", RequestID: "prepare", State: maintenance.StateReady,
+		FromGeneration: maintenance.Generation{Digest: strings.Repeat("a", 64)},
+		ToGeneration:   maintenance.Generation{Digest: digest},
+		Targets:        []maintenance.Target{{WorkID: "work", SessionID: "session", WorkGeneration: 1}},
+		StartedAt:      "2026-09-01T12:00:00Z", ReadyAt: "2026-09-01T12:01:00Z", UpdatedAt: "2026-09-01T12:01:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := exclusive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-done; code != 1 || !strings.Contains(stderr.String(), "maintenance state rejected") {
+		t.Fatalf("WebUI race exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	assertFilesUnchanged(t, protected, before)
+	for _, path := range []string{filepath.Join(tokenDirectory, "pid"), workspace.HerdrBindingPath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("WebUI race created %s: %v", path, err)
+		}
+	}
+}
+
+func TestUpdateRejectsUnauthorizedGenerationBeforeStagingCandidate(t *testing.T) {
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), newCommittedRepository(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedPaths := seedUnauthorizedMaintenanceWorkspace(t, workspace)
+	before := snapshotFiles(t, protectedPaths)
+	generationsRoot := filepath.Join(workspace.RuntimeRoot, "daemon", "generations")
+	if _, err := os.Stat(generationsRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected generations directory before update: %v", err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"update", "--workspace", workspace.Root, "--binary", executable}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("update exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "maintenance generation rejected") {
+		t.Fatalf("update rejection=%q", stderr.String())
+	}
+	assertFilesUnchanged(t, protectedPaths, before)
+	if _, err := os.Stat(generationsRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unauthorized update staged a generation: %v", err)
+	}
+}
+
+func TestUpdateRejectsActiveMaintenanceForAuthorizedGenerationWithoutWrites(t *testing.T) {
+	for _, state := range []maintenance.State{maintenance.StateQuiescing, maintenance.StateReady, maintenance.StateHolding} {
+		t.Run(string(state), func(t *testing.T) {
+			workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), newCommittedRepository(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			executable, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest, err := daemonupdate.FileDigest(executable)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := daemonupdate.RestoreCurrent(workspace.Root, daemonupdate.Generation{
+				Path: executable, Digest: digest, Version: "from", ActivatedAt: "2026-09-01T13:00:00Z",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := daemonupdate.WriteStatus(workspace.Root, daemonupdate.Status{
+				ID: "prior-update", State: daemonupdate.StateCommitted,
+				From:      daemonupdate.Generation{Path: executable, Digest: digest, Version: "from"},
+				To:        daemonupdate.Generation{Path: executable, Digest: strings.Repeat("d", 64), Version: "prior"},
+				StartedAt: "2026-09-01T12:00:00Z",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			maintenanceStatus := maintenance.Status{
+				ID: "maintenance", RequestID: "prepare", State: state,
+				FromGeneration: maintenance.Generation{Digest: digest, Version: "from"},
+				ToGeneration:   maintenance.Generation{Digest: strings.Repeat("b", 64), Version: "to"},
+				Targets:        []maintenance.Target{{WorkID: "work", SessionID: "session", WorkGeneration: 1}},
+				StartedAt:      "2026-09-01T13:00:00Z",
+				UpdatedAt:      "2026-09-01T13:00:00Z",
+			}
+			if state == maintenance.StateReady || state == maintenance.StateHolding {
+				maintenanceStatus.ReadyAt = "2026-09-01T13:01:00Z"
+				maintenanceStatus.UpdatedAt = maintenanceStatus.ReadyAt
+			}
+			if state == maintenance.StateHolding {
+				maintenanceStatus.HoldingGeneration = maintenanceStatus.ToGeneration
+				maintenanceStatus.HoldingAt = "2026-09-01T13:02:00Z"
+				maintenanceStatus.UpdatedAt = maintenanceStatus.HoldingAt
+			}
+			if err := maintenance.NewFileStore(workspace.Root).Write(maintenanceStatus); err != nil {
+				t.Fatal(err)
+			}
+			generationsRoot := filepath.Join(workspace.RuntimeRoot, "daemon", "generations")
+			if err := os.MkdirAll(generationsRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			sentinel := filepath.Join(generationsRoot, "retained-generation")
+			if err := os.WriteFile(sentinel, []byte("retained\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			paths := []string{
+				filepath.Join(workspace.RuntimeRoot, "daemon", "current.json"),
+				daemonupdate.StatusPath(workspace.Root),
+				filepath.Join(workspace.RuntimeRoot, "daemon", "maintenance.json"),
+				sentinel,
+			}
+			before := snapshotFiles(t, paths)
+			beforeEntries, err := os.ReadDir(generationsRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeNames := make([]string, len(beforeEntries))
+			for index, entry := range beforeEntries {
+				beforeNames[index] = entry.Name()
+			}
+
+			var stdout, stderr bytes.Buffer
+			code := cli.Run(context.Background(), []string{
+				"update", "--workspace", workspace.Root, "--binary", executable,
+			}, nil, &stdout, &stderr)
+			if code != 1 || !strings.Contains(stderr.String(), "hot update is forbidden during maintenance state "+string(state)) {
+				t.Fatalf("update exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			assertFilesUnchanged(t, paths, before)
+			afterEntries, err := os.ReadDir(generationsRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterNames := make([]string, len(afterEntries))
+			for index, entry := range afterEntries {
+				afterNames[index] = entry.Name()
+			}
+			if !slices.Equal(beforeNames, afterNames) {
+				t.Fatalf("staging entries changed: before=%v after=%v", beforeNames, afterNames)
+			}
+		})
+	}
+}
+
+func TestUpdateWaitsForConcurrentMaintenanceActivationAndRechecksBeforeStage(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	workspace, err := optimizationworkspace.Create(ctx, filepath.Join(t.TempDir(), "workspace"), newCommittedRepository(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := daemonupdate.FileDigest(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := daemonupdate.RestoreCurrent(workspace.Root, daemonupdate.Generation{
+		Path: executable, Digest: digest, Version: "from", ActivatedAt: "2026-09-01T13:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	activation, err := optimizationworkspace.AcquireExclusiveMutationLease(ctx, workspace.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(ctx, []string{"update", "--workspace", workspace.Root, "--binary", executable}, nil, &stdout, &stderr)
+	}()
+	select {
+	case code := <-done:
+		t.Fatalf("update crossed maintenance activation lease: exit=%d stderr=%q", code, stderr.String())
+	case <-time.After(100 * time.Millisecond):
+	}
+	generationsRoot := filepath.Join(workspace.RuntimeRoot, "daemon", "generations")
+	if _, err := os.Stat(generationsRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("blocked update staged before maintenance activation: %v", err)
+	}
+	if err := maintenance.NewFileStore(workspace.Root).Write(maintenance.Status{
+		ID: "maintenance", RequestID: "prepare", State: maintenance.StateQuiescing,
+		FromGeneration: maintenance.Generation{Digest: digest, Version: "from"},
+		ToGeneration:   maintenance.Generation{Digest: strings.Repeat("b", 64), Version: "to"},
+		Targets:        []maintenance.Target{{WorkID: "work", SessionID: "session", WorkGeneration: 1}},
+		StartedAt:      "2026-09-01T13:00:00Z", UpdatedAt: "2026-09-01T13:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := activation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-done:
+		if code != 1 || !strings.Contains(stderr.String(), "hot update is forbidden during maintenance state quiescing") {
+			t.Fatalf("update exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+		}
+	case <-ctx.Done():
+		t.Fatalf("update did not resume after maintenance activation: %v", ctx.Err())
+	}
+	if _, err := os.Stat(generationsRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected update staged after maintenance activation: %v", err)
+	}
+}
+
+func TestEditInstructionRejectsUnauthorizedGenerationBeforeEditorMutation(t *testing.T) {
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), newCommittedRepository(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedPaths := seedUnauthorizedMaintenanceWorkspace(t, workspace)
+	instructionPath := filepath.Join(workspace.InstructionsRoot, "baseline.md")
+	if err := os.MkdirAll(filepath.Dir(instructionPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(instructionPath, []byte("original instruction\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	protectedPaths = append(protectedPaths, instructionPath)
+	before := snapshotFiles(t, protectedPaths)
+	editor := filepath.Join(t.TempDir(), "editor")
+	if err := os.WriteFile(editor, []byte("#!/bin/sh\nprintf 'edited\\n' > \"$1\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VISUAL", editor)
+	var stdout, stderr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"edit-instruction", "--workspace", workspace.Root, "baseline"}, nil, &stdout, &stderr); code != 1 {
+		t.Fatalf("edit-instruction exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "direct Workspace mutation rejected") {
+		t.Fatalf("edit-instruction rejection=%q", stderr.String())
+	}
+	assertFilesUnchanged(t, protectedPaths, before)
 }
 
 func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T) {
@@ -553,6 +1274,354 @@ func TestDaemonUsesOptimizationWorkspaceAsDurableRoot(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].Role != "base" || records[0].Repository != workspace.BaseRepository || records[0].Branch != workspace.BaseBranch() {
 		t.Fatalf("Git worktree registry = %+v", records)
+	}
+}
+
+func TestWorkspaceDaemonRejectsReadyMaintenanceWithoutHerdrAdmission(t *testing.T) {
+	isolateHerdrEnvironment(t)
+	repository := newCommittedRepository(t)
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	engine, err := symphony.Open(ctx, workspace.DatabasePath, symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.EnsureWorkspaceIdentity(ctx, symphony.WorkspaceIdentity{
+		ID: workspace.Identity.ID, Root: workspace.Identity.Root, SourceRepository: workspace.Identity.SourceRepository,
+		GitCommonDir: workspace.Identity.GitCommonDir, GitCommonDirDevice: workspace.Identity.GitCommonDirDevice,
+		GitCommonDirInode: workspace.Identity.GitCommonDirInode, InitialSHA: workspace.Identity.InitialSHA,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.UpsertGitWorktree(ctx, symphony.GitWorktreeRecord{
+		Role: "base", Branch: workspace.BaseBranch(), Repository: workspace.BaseRepository,
+		HeadSHA: workspace.Identity.InitialSHA, State: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Apply(ctx, symphony.Init{
+		Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: workspace.Identity.ID,
+		Repository: workspace.Identity.SourceRepository, FlowVersion: symphony.FlowVersion1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := symphony.AgentSession{
+		ID: "session-hold", WorkID: view.Works[0].ID, Generation: view.Works[0].Generation,
+		Role: view.Works[0].Role, AgentKind: "codex", AgentName: "pika-hold", Status: symphony.AgentSessionRunning,
+	}
+	if err := engine.EnsureAgentSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
+		Meta: symphony.CommandMeta{RequestID: "terminal-before-hold"}, WorkID: session.WorkID,
+		Definition: testcontract.Definition(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingBefore := view.PendingEffectCount
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := daemonupdate.FileDigest(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromDigest := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := maintenance.NewFileStore(workspace.Root).Write(maintenance.Status{
+		ID: "maintenance-hold", RequestID: "prepare-1", State: maintenance.StateReady,
+		FromGeneration: maintenance.Generation{Digest: fromDigest, Version: "bridge"},
+		ToGeneration:   maintenance.Generation{Digest: digest, Version: cli.Version},
+		Targets: []maintenance.Target{{
+			WorkID: session.WorkID, SessionID: session.ID, WorkGeneration: session.Generation,
+			AgentName: session.AgentName, AgentKind: session.AgentKind,
+		}},
+		StartedAt: "2026-09-01T11:00:00Z", ReadyAt: "2026-09-01T11:01:00Z", UpdatedAt: "2026-09-01T11:01:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-hold-daemon-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "pika.sock")
+	daemonCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var daemonStderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(daemonCtx, []string{"daemon", "--socket", socketPath, "--workspace", workspace.Root}, nil, io.Discard, &daemonStderr)
+	}()
+	select {
+	case code := <-done:
+		if code != 1 || !strings.Contains(daemonStderr.String(), "maintenance.herdr_admission_failed") {
+			t.Fatalf("daemon exit=%d stderr=%s", code, daemonStderr.String())
+		}
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("daemon bypassed missing Herdr admission")
+	}
+	preserved, err := maintenance.NewFileStore(workspace.Root).Read()
+	if err != nil || preserved.State != maintenance.StateReady {
+		t.Fatalf("rejected daemon changed maintenance state: status=%+v err=%v", preserved, err)
+	}
+	reopened, err := symphony.Open(ctx, workspace.DatabasePath, symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preservedView, err := reopened.Inspect(ctx, symphony.Status{})
+	_ = reopened.Close()
+	if err != nil || preservedView.PendingEffectCount != pendingBefore {
+		t.Fatalf("rejected daemon changed durable state: pending=%d want=%d err=%v", preservedView.PendingEffectCount, pendingBefore, err)
+	}
+}
+
+func TestMaintenanceGenerationRejectsDaemonAndOpenBeforeWorkspaceWrites(t *testing.T) {
+	isolateHerdrEnvironment(t)
+	workspace, err := optimizationworkspace.Create(context.Background(), filepath.Join(t.TempDir(), "workspace"), newCommittedRepository(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	to := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	holder := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	if err := os.WriteFile(workspace.DatabasePath, []byte("schema20-before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.WriteHerdrBinding(optimizationworkspace.HerdrBinding{
+		SocketPath: "/tmp/herdr-before.sock", WorkspaceID: "before", TabID: "tab-before",
+		ControlPane: "control-before", DaemonPane: "daemon-before", DaemonSocket: "/tmp/pika-before.sock",
+		UpdatedAt: "2026-09-01T11:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := daemonupdate.RestoreCurrent(workspace.Root, daemonupdate.Generation{
+		Path: "/retained/from/pika-go", Digest: from, Version: "from", ActivatedAt: "2026-09-01T11:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := maintenance.NewFileStore(workspace.Root).Write(maintenance.Status{
+		ID: "maintenance-1", RequestID: "prepare-1", State: maintenance.StateHolding,
+		FromGeneration: maintenance.Generation{Digest: from},
+		ToGeneration:   maintenance.Generation{Digest: to},
+		HoldingGeneration: maintenance.Generation{
+			Digest: holder,
+		},
+		Targets:   []maintenance.Target{{WorkID: "work-1", SessionID: "session-1", WorkGeneration: 1}},
+		StartedAt: "2026-09-01T11:00:00Z", ReadyAt: "2026-09-01T11:01:00Z",
+		HoldingAt: "2026-09-01T11:02:00Z", UpdatedAt: "2026-09-01T11:02:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(workspace.ContextsRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(workspace.EvidenceRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	evidenceBefore, err := os.Stat(workspace.EvidenceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected := []string{
+		workspace.DatabasePath,
+		filepath.Join(workspace.RuntimeRoot, "daemon", "current.json"),
+		workspace.HerdrBindingPath,
+	}
+	type snapshot struct {
+		contents []byte
+		modTime  time.Time
+	}
+	before := make(map[string]snapshot, len(protected))
+	for _, path := range protected {
+		contents, readErr := os.ReadFile(path)
+		info, statErr := os.Stat(path)
+		if readErr != nil || statErr != nil {
+			t.Fatalf("snapshot %s: read=%v stat=%v", path, readErr, statErr)
+		}
+		before[path] = snapshot{contents: contents, modTime: info.ModTime()}
+	}
+	assertUnchanged := func() {
+		t.Helper()
+		for _, path := range protected {
+			contents, readErr := os.ReadFile(path)
+			info, statErr := os.Stat(path)
+			if readErr != nil || statErr != nil {
+				t.Fatalf("re-read %s: read=%v stat=%v", path, readErr, statErr)
+			}
+			if !bytes.Equal(contents, before[path].contents) || !info.ModTime().Equal(before[path].modTime) {
+				t.Fatalf("generation rejection changed %s", path)
+			}
+		}
+		if _, err := os.Stat(workspace.ContextsRoot); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("generation rejection created missing layout: %v", err)
+		}
+		evidenceAfter, err := os.Stat(workspace.EvidenceRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if evidenceAfter.Mode() != evidenceBefore.Mode() {
+			t.Fatalf("generation rejection changed layout mode %v to %v", evidenceBefore.Mode(), evidenceAfter.Mode())
+		}
+	}
+
+	var stderr bytes.Buffer
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-maintenance-generation-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "pika.sock")
+	code := cli.Run(context.Background(), []string{"daemon", "--workspace", workspace.Root, "--socket", socketPath}, nil, io.Discard, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "maintenance.generation_rejected") {
+		t.Fatalf("daemon rejection code=%d stderr=%s", code, stderr.String())
+	}
+	assertUnchanged()
+
+	stderr.Reset()
+	code = cli.Run(context.Background(), []string{"open", "--no-focus", workspace.Root}, nil, io.Discard, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "maintenance generation rejected") {
+		t.Fatalf("open rejection code=%d stderr=%s", code, stderr.String())
+	}
+	assertUnchanged()
+}
+
+func TestKickOffRejectsUnknownMaintenanceGenerationForEveryExistingWorkspaceResolution(t *testing.T) {
+	for _, route := range []string{"explicit workspace", "repository default root", "cwd discovery"} {
+		t.Run(route, func(t *testing.T) {
+			isolateHerdrEnvironment(t)
+			parent := t.TempDir()
+			repository := newCommittedRepositoryAt(t, filepath.Join(parent, "repository"))
+			workspaceRoot, err := optimizationworkspace.DefaultRoot(repository)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workspace, err := optimizationworkspace.Create(context.Background(), workspaceRoot, repository)
+			if err != nil {
+				t.Fatal(err)
+			}
+			protected := seedUnauthorizedMaintenanceWorkspace(t, workspace)
+			before := snapshotFiles(t, protected)
+			t.Setenv("HERDR_SOCKET_PATH", filepath.Join(parent, "unreachable-herdr.sock"))
+
+			args := []string{"kick-off", "--workspace", workspace.Root}
+			if route == "repository default root" {
+				args = []string{"kick-off", "--repository", repository}
+			}
+			if route == "cwd discovery" {
+				original, err := os.Getwd()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chdir(workspace.Root); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chdir(original) })
+				args = []string{"kick-off"}
+			}
+			var stderr bytes.Buffer
+			if code := cli.Run(context.Background(), args, nil, io.Discard, &stderr); code != 1 ||
+				!strings.Contains(stderr.String(), "maintenance generation rejected") {
+				t.Fatalf("%s rejection code=%d stderr=%s", route, code, stderr.String())
+			}
+			assertFilesUnchanged(t, protected, before)
+		})
+	}
+}
+
+func TestMaintenancePrepareRejectsUnboundActiveSessionWithoutQuiescing(t *testing.T) {
+	isolateHerdrEnvironment(t)
+	ctx := context.Background()
+	workspace, err := optimizationworkspace.Create(ctx, filepath.Join(t.TempDir(), "workspace"), newCommittedRepository(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := symphony.Open(ctx, workspace.DatabasePath, symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Apply(ctx, symphony.Init{
+		Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: workspace.Identity.ID, Repository: workspace.Identity.SourceRepository,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := view.Works[0]
+	session := symphony.AgentSession{
+		ID: "frozen-session", WorkID: work.ID, Generation: work.Generation, Role: work.Role,
+		AgentKind: "codex", AgentName: "frozen-agent", Status: symphony.AgentSessionRunning,
+	}
+	if err := engine.EnsureAgentSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	socketDir, err := os.MkdirTemp("/tmp", "pika-go-maintenance-dispatch-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socketPath := filepath.Join(socketDir, "pika.sock")
+	daemonCtx, cancel := context.WithCancel(ctx)
+	var daemonStderr bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- cli.Run(daemonCtx, []string{"daemon", "--workspace", workspace.Root, "--socket", socketPath}, nil, io.Discard, &daemonStderr)
+	}()
+	waitForHealth(t, socketPath, &daemonStderr)
+	if _, err := control.MaintenancePrepare(ctx, socketPath, protocol.MaintenancePrepareRequest{
+		RequestID: "prepare-1",
+		ToGeneration: protocol.MaintenanceGeneration{
+			Digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		},
+	}); err == nil || !strings.Contains(err.Error(), "maintenance_rejected") {
+		cancel()
+		t.Fatalf("prepare with unbound active Session error=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.RuntimeRoot, "daemon", "maintenance.json")); !errors.Is(err, os.ErrNotExist) {
+		cancel()
+		t.Fatalf("rejected prepare persisted maintenance state: %v", err)
+	}
+	if _, err := control.CancelWork(ctx, socketPath, work.ID, protocol.CancelWorkRequest{
+		Mutation: protocol.Mutation{RequestID: "cancel-after-prepare"},
+	}); err != nil {
+		cancel()
+		t.Fatalf("runtime remained quiesced after rejected prepare: %v", err)
+	}
+	after, err := control.Status(ctx, socketPath)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	if after.Works[0].Status != symphony.WorkCancelled {
+		cancel()
+		t.Fatalf("runtime mutation did not remain usable after rejected prepare: %+v", after.Works[0])
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("daemon exit=%d stderr=%s", code, daemonStderr.String())
 	}
 }
 
@@ -1775,4 +2844,16 @@ func waitForHealth(t *testing.T, socketPath string, daemonStderr *bytes.Buffer) 
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("daemon did not become healthy; stderr = %q", daemonStderr.String())
+}
+
+func waitForPath(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("path did not appear: %s", path)
 }

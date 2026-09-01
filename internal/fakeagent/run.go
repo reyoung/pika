@@ -50,6 +50,9 @@ func RunWithInterrupts(ctx context.Context, input io.Reader, output io.Writer, i
 		autorun = runOptimizationScenario
 	}
 	var autorunOnce sync.Once
+	if autorun != nil && os.Getenv("PIKA_GO_FAKE_AGENT_AUTORUN_GATE") != "" {
+		go autorunOnce.Do(func() { autorun(ctx, output) })
+	}
 	if initialPrompt := os.Getenv("PIKA_CODEX_INITIAL_PROMPT"); initialPrompt != "" {
 		setTitle(output, "⠋ FAKE_AGENT_WORKING")
 		_, _ = fmt.Fprintf(output, "FAKE_AGENT_PROMPT %s\n", strconv.Quote(initialPrompt))
@@ -562,6 +565,23 @@ func callMCPUntilActive(ctx context.Context, call string) (string, error) {
 }
 
 func runBaselineAcceptedScenario(ctx context.Context, output io.Writer) {
+	if gate := os.Getenv("PIKA_GO_FAKE_AGENT_AUTORUN_GATE"); gate != "" {
+		ticker := time.NewTicker(25 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if _, err := os.Stat(gate); err == nil {
+				break
+			} else if !errors.Is(err, os.ErrNotExist) {
+				_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}
 	timer := time.NewTimer(300 * time.Millisecond)
 	select {
 	case <-ctx.Done():
@@ -577,7 +597,24 @@ func runBaselineAcceptedScenario(ctx context.Context, output io.Writer) {
 		if scenario == "baseline-rejected" && os.Getenv("PIKA_BASELINE_NUMBER") != "1" {
 			return
 		}
-		call = fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_baseline_definition","arguments":{"idempotency_key":"fake-baseline-submit-%s","definition":%s}}}`, sessionID, testcontract.Definition())
+		definition := testcontract.Definition()
+		if os.Getenv("PIKA_GO_FAKE_AGENT_SCHEMA20_BASELINE") == "1" {
+			var value map[string]any
+			if err := json.Unmarshal(definition, &value); err != nil {
+				_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+				return
+			}
+			if measurements, ok := value["benchmark_measurements"].(map[string]any); ok {
+				delete(measurements, "iteration_performance_gate")
+			}
+			var err error
+			definition, err = json.Marshal(value)
+			if err != nil {
+				_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+				return
+			}
+		}
+		call = fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"submit_baseline_definition","arguments":{"idempotency_key":"fake-baseline-submit-%s","definition":%s}}}`, sessionID, definition)
 	case "baseline_verification":
 		if scenario == "baseline-follow-up" {
 			return
@@ -597,12 +634,15 @@ func runBaselineAcceptedScenario(ctx context.Context, output io.Writer) {
 		return
 	}
 	lastResponse := ""
+	_, _ = fmt.Fprintf(output, "FAKE_AGENT_MCP_START role=%q socket=%q grant_present=%t session=%q\n",
+		os.Getenv("PIKA_ROLE"), os.Getenv("PIKA_GO_SOCKET"), os.Getenv("PIKA_MCP_GRANT") != "", sessionID)
 	for attempt := 0; attempt < 100; attempt++ {
 		var response strings.Builder
 		if err := mcp.RunProxy(ctx, os.Getenv("PIKA_GO_SOCKET"), os.Getenv("PIKA_MCP_GRANT"), strings.NewReader(call+"\n"), &response); err != nil {
-			_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q socket=%q role=%q grant=%t\n", err.Error(), os.Getenv("PIKA_GO_SOCKET"), os.Getenv("PIKA_ROLE"), os.Getenv("PIKA_MCP_GRANT") != "")
+			_, _ = fmt.Fprintf(output, "FAKE_AGENT_MCP_ERROR %q socket=%q role=%q grant_present=%t\n", err.Error(), os.Getenv("PIKA_GO_SOCKET"), os.Getenv("PIKA_ROLE"), os.Getenv("PIKA_MCP_GRANT") != "")
 			return
 		}
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_MCP_RESPONSE %s\n", strings.TrimSpace(response.String()))
 		if !strings.Contains(response.String(), `"error"`) {
 			_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_RESPONSE %s\n", strings.TrimSpace(response.String()))
 			return

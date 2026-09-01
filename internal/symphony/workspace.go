@@ -62,6 +62,30 @@ func (e *Engine) EnsureWorkspaceIdentity(ctx context.Context, identity Workspace
 	return nil
 }
 
+func (e *Engine) ValidateWorkspaceIdentity(ctx context.Context, identity WorkspaceIdentity) error {
+	if identity.ID == "" || identity.Root == "" || identity.SourceRepository == "" || identity.GitCommonDir == "" || identity.InitialSHA == "" {
+		return errors.New("complete Workspace identity is required")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var stored WorkspaceIdentity
+	err := e.db.QueryRowContext(ctx, `SELECT workspace_id, root, source_repository, git_common_dir,
+		git_common_dir_device, git_common_dir_inode, initial_sha FROM workspace_identity WHERE singleton = 1`).Scan(
+		&stored.ID, &stored.Root, &stored.SourceRepository, &stored.GitCommonDir,
+		&stored.GitCommonDirDevice, &stored.GitCommonDirInode, &stored.InitialSHA,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("database has no Optimization Workspace identity")
+	}
+	if err != nil {
+		return fmt.Errorf("read Workspace identity: %w", err)
+	}
+	if stored != identity {
+		return fmt.Errorf("database belongs to a different Optimization Workspace: stored %s at %s", stored.ID, stored.Root)
+	}
+	return nil
+}
+
 func (e *Engine) UpsertGitWorktree(ctx context.Context, record GitWorktreeRecord) error {
 	if record.Role == "" || record.Branch == "" || record.Repository == "" || record.HeadSHA == "" || record.State == "" {
 		return errors.New("complete Git worktree record is required")
@@ -79,6 +103,33 @@ func (e *Engine) UpsertGitWorktree(ctx context.Context, record GitWorktreeRecord
 		record.Role, record.AttemptID, record.IterationRound, record.Branch, record.Repository, record.HeadSHA, record.State, record.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("record Git worktree: %w", err)
+	}
+	return nil
+}
+
+func (e *Engine) ValidateGitWorktree(ctx context.Context, record GitWorktreeRecord) error {
+	if record.Role == "" || record.Branch == "" || record.Repository == "" || record.HeadSHA == "" || record.State == "" {
+		return errors.New("complete Git worktree record is required")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var stored GitWorktreeRecord
+	err := e.db.QueryRowContext(ctx, `SELECT role, attempt_id, iteration_round, branch, repository, head_sha, state, updated_at
+		FROM git_worktrees WHERE role = ? AND attempt_id = ? AND iteration_round = ?`,
+		record.Role, record.AttemptID, record.IterationRound).Scan(
+		&stored.Role, &stored.AttemptID, &stored.IterationRound, &stored.Branch,
+		&stored.Repository, &stored.HeadSHA, &stored.State, &stored.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("Git worktree %s is not registered", record.Role)
+	}
+	if err != nil {
+		return fmt.Errorf("read Git worktree: %w", err)
+	}
+	stored.UpdatedAt = ""
+	record.UpdatedAt = ""
+	if stored != record {
+		return fmt.Errorf("Git worktree %s identity changed", record.Role)
 	}
 	return nil
 }

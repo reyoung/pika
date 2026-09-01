@@ -58,18 +58,45 @@ func runWorkspaceMigrateIterationCases(ctx context.Context, args []string, stdou
 		_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: open Workspace: %v\n", err)
 		return 2
 	}
+	mutationLease, err := optimizationworkspace.AcquireSharedMutationLease(ctx, workspace.Root)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: acquire Workspace mutation lease: %v\n", err)
+		return 1
+	}
+	defer mutationLease.Close()
+	authorizeWorkspace := func() bool {
+		_, status, authorizeErr := authorizeWorkspaceDirectMutation(workspace.Root)
+		if authorizeErr != nil {
+			if status.State != "" {
+				_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: migration is forbidden during maintenance state %s: %v\n", status.State, authorizeErr)
+			} else {
+				_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: maintenance generation rejected: %v\n", authorizeErr)
+			}
+			return false
+		}
+		return true
+	}
+	if !authorizeWorkspace() {
+		return 1
+	}
 	lock, err := instance.AcquireLock(workspace.LockPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: the daemon must be stopped: %v\n", err)
 		return 1
 	}
 	defer lock.Close()
+	if !authorizeWorkspace() {
+		return 1
+	}
 	engine, err := symphony.Open(ctx, workspace.DatabasePath, symphony.Options{AllowIterationCaseMigration: true})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: open state: %v\n", err)
 		return 1
 	}
 	defer engine.Close()
+	if !authorizeWorkspace() {
+		return 1
+	}
 	result, err := engine.MigrateIterationCases(ctx, []string(caseIDs))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "workspace migrate-iteration-cases: %v\n", err)
@@ -148,12 +175,24 @@ func runWorkspaceImport(ctx context.Context, args []string, stdout, stderr io.Wr
 		_, _ = fmt.Fprintf(stderr, "workspace import: resolve Workspace path: %v\n", err)
 		return 2
 	}
+	mutationLease, err := optimizationworkspace.AcquireExclusiveMutationLease(ctx, filepath.Clean(absolute))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "workspace import: acquire Workspace mutation lease: %v\n", err)
+		return 1
+	}
+	defer mutationLease.Close()
+	if _, _, err := authorizeWorkspaceDirectMutation(filepath.Clean(absolute)); err != nil {
+		_, _ = fmt.Fprintf(stderr, "workspace import: direct Workspace mutation rejected: %v\n", err)
+		return 1
+	}
 	roots, err := resolveLegacyRoots(*configRoot, *stateRoot)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "workspace import: %v\n", err)
 		return 2
 	}
-	workspace, err := legacymigration.Import(ctx, legacymigration.ImportOptions{Roots: roots, InstanceID: *instanceID, WorkspaceRoot: filepath.Clean(absolute)})
+	workspace, err := legacymigration.ImportWithLease(ctx, legacymigration.ImportOptions{
+		Roots: roots, InstanceID: *instanceID, WorkspaceRoot: filepath.Clean(absolute),
+	}, mutationLease)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "workspace import: %v\n", err)
 		return 1

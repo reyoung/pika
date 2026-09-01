@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/reyoung/pika-go/internal/daemonupdate"
+	"github.com/reyoung/pika-go/internal/maintenance"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/workbench"
@@ -23,6 +24,27 @@ type Workbench interface {
 	Snapshot(context.Context, int) (workbench.Snapshot, error)
 	Node(context.Context, string, string) (workbench.NodeDetail, error)
 	Artifact(context.Context, string) (workbench.Artifact, error)
+}
+
+type Maintenance interface {
+	Prepare(context.Context, maintenance.PrepareRequest) (maintenance.Status, error)
+	Status() (maintenance.Status, error)
+	Resume(context.Context, maintenance.ResumeRequest) (maintenance.Status, error)
+	Poll(context.Context) (maintenance.Status, bool, error)
+}
+
+type MutationKind string
+
+const (
+	MutationMCP       MutationKind = "mcp"
+	MutationSymphony  MutationKind = "symphony"
+	MutationGit       MutationKind = "git"
+	MutationProvider  MutationKind = "provider"
+	MutationScheduler MutationKind = "scheduler"
+)
+
+type MutationGate interface {
+	Enter(context.Context, MutationKind, string) (func(), error)
 }
 
 type Config struct {
@@ -48,6 +70,8 @@ type Config struct {
 	BinaryDigest            string
 	Ready                   func() bool
 	Workbench               Workbench
+	Maintenance             Maintenance
+	MutationGate            MutationGate
 }
 
 var ErrHandoff = errors.New("daemon update handoff requested")
@@ -106,7 +130,7 @@ func Serve(ctx context.Context, cfg Config) error {
 
 	mux := http.NewServeMux()
 	if cfg.MCPHandler != nil {
-		mux.Handle("POST /mcp", cfg.MCPHandler)
+		mux.Handle("POST /mcp", gatedMutationHandler(cfg.MutationGate, MutationMCP, cfg.MCPHandler))
 	}
 	initFailures := make(chan error, 1)
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -144,6 +168,49 @@ func Serve(ctx context.Context, cfg Config) error {
 			}
 		})
 	}
+	if cfg.Maintenance != nil {
+		mux.HandleFunc("POST /v1/maintenance/prepare", func(w http.ResponseWriter, request *http.Request) {
+			var input protocol.MaintenancePrepareRequest
+			if !decodeJSON(w, request, &input) {
+				return
+			}
+			status, err := cfg.Maintenance.Prepare(request.Context(), maintenance.PrepareRequest{
+				RequestID: input.RequestID,
+				ToGeneration: maintenance.Generation{
+					Digest: input.ToGeneration.Digest, Version: input.ToGeneration.Version,
+				},
+			})
+			if err != nil {
+				writeAPIError(w, http.StatusConflict, "maintenance_rejected", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusAccepted, status)
+		})
+		mux.HandleFunc("GET /v1/maintenance", func(w http.ResponseWriter, _ *http.Request) {
+			status, err := cfg.Maintenance.Status()
+			if errors.Is(err, os.ErrNotExist) {
+				writeAPIError(w, http.StatusNotFound, "maintenance_not_found", "maintenance has not been prepared")
+				return
+			}
+			if err != nil {
+				writeAPIError(w, http.StatusInternalServerError, "maintenance_status_failed", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, status)
+		})
+		mux.HandleFunc("POST /v1/maintenance/resume", func(w http.ResponseWriter, request *http.Request) {
+			var input protocol.MaintenanceResumeRequest
+			if !decodeJSON(w, request, &input) {
+				return
+			}
+			status, err := cfg.Maintenance.Resume(request.Context(), maintenance.ResumeRequest{RequestID: input.RequestID})
+			if err != nil {
+				writeAPIError(w, http.StatusConflict, "maintenance_resume_rejected", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, status)
+		})
+	}
 	if cfg.Symphony != nil {
 		if cfg.InitOptions != nil {
 			mux.HandleFunc("GET /v1/init/options", func(w http.ResponseWriter, request *http.Request) {
@@ -171,6 +238,12 @@ func Serve(ctx context.Context, cfg Config) error {
 				writeAPIError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("decode request: %v", err))
 				return
 			}
+			release, err := enterMutation(request.Context(), cfg.MutationGate, MutationSymphony, "")
+			if err != nil {
+				writeAPIError(w, http.StatusConflict, "maintenance_mutation_rejected", err.Error())
+				return
+			}
+			defer release()
 			prepared := PreparedInit{Rollback: func() error { return nil }}
 			if cfg.PrepareInit != nil {
 				var err error
@@ -219,28 +292,28 @@ func Serve(ctx context.Context, cfg Config) error {
 			if !decodeJSON(w, request, &input) {
 				return
 			}
-			applyAndWrite(w, request, cfg.Symphony, cfg.AfterCommit, symphony.StartBaselineDraft{Meta: commandMeta(input.Mutation)})
+			applyAndWrite(w, request, cfg.MutationGate, cfg.Symphony, cfg.AfterCommit, symphony.StartBaselineDraft{Meta: commandMeta(input.Mutation)})
 		})
 		mux.HandleFunc("POST /v1/back-offs", func(w http.ResponseWriter, request *http.Request) {
 			var input protocol.BackOffRequest
 			if !decodeJSON(w, request, &input) {
 				return
 			}
-			applyAndWrite(w, request, cfg.Symphony, cfg.AfterCommit, symphony.BackOff{Meta: commandMeta(input.Mutation), WorkID: input.WorkID, Message: input.Message})
+			applyAndWrite(w, request, cfg.MutationGate, cfg.Symphony, cfg.AfterCommit, symphony.BackOff{Meta: commandMeta(input.Mutation), WorkID: input.WorkID, Message: input.Message})
 		})
 		mux.HandleFunc("POST /v1/works/{work_id}/cancel", func(w http.ResponseWriter, request *http.Request) {
 			var input protocol.CancelWorkRequest
 			if !decodeJSON(w, request, &input) {
 				return
 			}
-			applyAndWrite(w, request, cfg.Symphony, cfg.AfterCommit, symphony.CancelWork{Meta: commandMeta(input.Mutation), WorkID: request.PathValue("work_id")})
+			applyAndWrite(w, request, cfg.MutationGate, cfg.Symphony, cfg.AfterCommit, symphony.CancelWork{Meta: commandMeta(input.Mutation), WorkID: request.PathValue("work_id")})
 		})
 		mux.HandleFunc("POST /v1/shutdown", func(w http.ResponseWriter, request *http.Request) {
 			var input protocol.ShutdownRequest
 			if !decodeJSON(w, request, &input) {
 				return
 			}
-			applyAndWrite(w, request, cfg.Symphony, cfg.AfterCommit, symphony.RequestShutdown{Meta: commandMeta(input.Mutation)})
+			applyAndWrite(w, request, cfg.MutationGate, cfg.Symphony, cfg.AfterCommit, symphony.RequestShutdown{Meta: commandMeta(input.Mutation)})
 		})
 		if cfg.SchedulerControl != nil {
 			mux.HandleFunc("POST /v1/scheduler/pause", func(w http.ResponseWriter, request *http.Request) {
@@ -248,6 +321,12 @@ func Serve(ctx context.Context, cfg Config) error {
 				if !decodeJSON(w, request, &input) {
 					return
 				}
+				release, err := enterMutation(request.Context(), cfg.MutationGate, MutationScheduler, "")
+				if err != nil {
+					writeAPIError(w, http.StatusConflict, "maintenance_mutation_rejected", err.Error())
+					return
+				}
+				defer release()
 				controlCtx, cancel := context.WithTimeout(request.Context(), 60*time.Second)
 				defer cancel()
 				response, err := cfg.SchedulerControl(controlCtx, symphony.PauseScheduler{Meta: commandMeta(input.Mutation)})
@@ -262,6 +341,12 @@ func Serve(ctx context.Context, cfg Config) error {
 				if !decodeJSON(w, request, &input) {
 					return
 				}
+				release, err := enterMutation(request.Context(), cfg.MutationGate, MutationScheduler, "")
+				if err != nil {
+					writeAPIError(w, http.StatusConflict, "maintenance_mutation_rejected", err.Error())
+					return
+				}
+				defer release()
 				controlCtx, cancel := context.WithTimeout(request.Context(), 60*time.Second)
 				defer cancel()
 				response, err := cfg.SchedulerControl(controlCtx, symphony.ResumeScheduler{Meta: commandMeta(input.Mutation)})
@@ -300,6 +385,12 @@ func Serve(ctx context.Context, cfg Config) error {
 				if !decodeJSON(w, request, &input) {
 					return
 				}
+				release, err := enterMutation(request.Context(), cfg.MutationGate, MutationGit, "")
+				if err != nil {
+					writeAPIError(w, http.StatusConflict, "maintenance_mutation_rejected", err.Error())
+					return
+				}
+				defer release()
 				intentID := request.PathValue("intent_id")
 				appliedSHA, err := cfg.ApplyGitIntent(request.Context(), intentID, input.Message)
 				if err != nil {
@@ -315,14 +406,20 @@ func Serve(ctx context.Context, cfg Config) error {
 				if !decodeProviderEventJSON(w, request, &input) {
 					return
 				}
-				var err error
-				if cfg.IngestProviderHookEvent != nil {
-					err = cfg.IngestProviderHookEvent(request.Context(), request.PathValue("provider"), input.AgentSessionID, input.HookEventName, input.Event)
-				} else {
-					err = cfg.IngestProviderEvent(request.Context(), request.PathValue("provider"), input.AgentSessionID, input.Event)
-				}
+				release, err := enterMutation(request.Context(), cfg.MutationGate, MutationProvider, input.AgentSessionID)
 				if err != nil {
-					writeError(w, err)
+					writeAPIError(w, http.StatusConflict, "maintenance_mutation_rejected", err.Error())
+					return
+				}
+				defer release()
+				var ingestErr error
+				if cfg.IngestProviderHookEvent != nil {
+					ingestErr = cfg.IngestProviderHookEvent(request.Context(), request.PathValue("provider"), input.AgentSessionID, input.HookEventName, input.Event)
+				} else {
+					ingestErr = cfg.IngestProviderEvent(request.Context(), request.PathValue("provider"), input.AgentSessionID, input.Event)
+				}
+				if ingestErr != nil {
+					writeError(w, ingestErr)
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
@@ -392,7 +489,13 @@ func Serve(ctx context.Context, cfg Config) error {
 		w.Header().Set(protocol.VersionHeader, fmt.Sprintf("%d", protocol.Version))
 		mux.ServeHTTP(w, request)
 	})
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- server.Serve(listener)
@@ -412,6 +515,7 @@ func Serve(ctx context.Context, cfg Config) error {
 		}
 	}
 	drainResult := make(chan error, 1)
+	maintenanceResult := make(chan error, 1)
 	monitorCtx, stopMonitor := context.WithCancel(ctx)
 	defer stopMonitor()
 	if cfg.DrainReady != nil {
@@ -426,6 +530,28 @@ func Serve(ctx context.Context, cfg Config) error {
 				}
 				if ready {
 					drainResult <- nil
+					return
+				}
+				select {
+				case <-monitorCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+	}
+	if cfg.Maintenance != nil {
+		go func() {
+			ticker := time.NewTicker(100 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				_, ready, err := cfg.Maintenance.Poll(monitorCtx)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					maintenanceResult <- err
+					return
+				}
+				if ready {
+					maintenanceResult <- nil
 					return
 				}
 				select {
@@ -501,6 +627,26 @@ func Serve(ctx context.Context, cfg Config) error {
 			return fmt.Errorf("serve drained daemon: %w", err)
 		}
 		return nil
+	case maintenanceErr := <-maintenanceResult:
+		if maintenanceErr != nil {
+			return fmt.Errorf("observe maintenance readiness: %w", maintenanceErr)
+		}
+		// Maintenance readiness follows a terminal MCP domain commit. Give the
+		// response a finite grace period, then close half-open or stuck local
+		// requests so Ready always releases the daemon socket.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		shutdownErr := server.Shutdown(shutdownCtx)
+		cancel()
+		if shutdownErr != nil {
+			if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+				return fmt.Errorf("force-close maintenance-ready daemon after %v: %w", shutdownErr, closeErr)
+			}
+		}
+		err := <-serveErr
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve maintenance-ready daemon: %w", err)
+		}
+		return nil
 	}
 }
 
@@ -534,7 +680,13 @@ func commandMeta(mutation protocol.Mutation) symphony.CommandMeta {
 	return symphony.CommandMeta{RequestID: mutation.RequestID, ExpectedRevision: mutation.ExpectedRevision}
 }
 
-func applyAndWrite(w http.ResponseWriter, request *http.Request, service symphony.Symphony, afterCommit func(context.Context), command symphony.Command) {
+func applyAndWrite(w http.ResponseWriter, request *http.Request, gate MutationGate, service symphony.Symphony, afterCommit func(context.Context), command symphony.Command) {
+	release, err := enterMutation(request.Context(), gate, MutationSymphony, "")
+	if err != nil {
+		writeAPIError(w, http.StatusConflict, "maintenance_mutation_rejected", err.Error())
+		return
+	}
+	defer release()
 	receipt, err := service.Apply(request.Context(), command)
 	if err != nil {
 		writeError(w, err)
@@ -544,6 +696,25 @@ func applyAndWrite(w http.ResponseWriter, request *http.Request, service symphon
 	if afterCommit != nil {
 		afterCommit(request.Context())
 	}
+}
+
+func gatedMutationHandler(gate MutationGate, kind MutationKind, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		release, err := enterMutation(request.Context(), gate, kind, "")
+		if err != nil {
+			writeAPIError(w, http.StatusConflict, "maintenance_mutation_rejected", err.Error())
+			return
+		}
+		defer release()
+		next.ServeHTTP(w, request)
+	})
+}
+
+func enterMutation(ctx context.Context, gate MutationGate, kind MutationKind, agentSessionID string) (func(), error) {
+	if gate == nil {
+		return func() {}, nil
+	}
+	return gate.Enter(ctx, kind, agentSessionID)
 }
 
 func writeError(w http.ResponseWriter, err error) {

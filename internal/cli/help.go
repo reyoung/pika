@@ -78,6 +78,12 @@ var publicCommandHelp = map[string]commandHelp{
 		details:  "Stages a local compatible binary inside the Optimization Workspace. Schema, protocol, platform, and Workspace-format changes require the documented cold-upgrade path.",
 		examples: []string{"pika-go update --binary ./pika-go", "pika-go update status --json"},
 	},
+	"maintenance": {
+		synopsis: "maintenance prepare --to-digest SHA256 [--to-version VERSION] [options]\n  pika-go maintenance status [options]\n  pika-go maintenance resume [options]",
+		summary:  "Prepare, inspect, or resume a recoverable cold daemon upgrade",
+		details:  "Maintenance quiesces only runtime dispatch. It does not drain the Optimization or interrupt the active Agent Session.",
+		examples: []string{"pika-go maintenance prepare --to-digest \"$NEW_DIGEST\" --request-id cold-upgrade-20260901", "pika-go maintenance status --workspace /path/to/workspace --json", "pika-go maintenance resume --request-id cold-upgrade-resume-20260901"},
+	},
 	"init": {
 		synopsis: "init --repository ABSOLUTE_PATH [options]",
 		summary:  "Initialize a daemon that is already running",
@@ -202,6 +208,7 @@ Workflow commands:
 Operations:
 	webui           Serve the read-only lineage Workbench
 	update           Hot-update the current Workspace daemon
+  maintenance      Prepare or resume a recoverable cold daemon upgrade
   shutdown         Gracefully drain and stop the daemon
   backup           Create a validated SQLite backup
   edit-instruction Edit a role's user-owned instruction overlay

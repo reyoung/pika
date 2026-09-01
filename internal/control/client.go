@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/reyoung/pika-go/internal/daemonupdate"
+	"github.com/reyoung/pika-go/internal/maintenance"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
@@ -93,6 +94,30 @@ func CancelWork(ctx context.Context, socketPath, workID string, request protocol
 
 func Shutdown(ctx context.Context, socketPath string, request protocol.ShutdownRequest) (symphony.Receipt, error) {
 	return mutate(ctx, socketPath, "/v1/shutdown", request)
+}
+
+func MaintenancePrepare(ctx context.Context, socketPath string, request protocol.MaintenancePrepareRequest) (maintenance.Status, error) {
+	var status maintenance.Status
+	if err := doJSON(ctx, socketPath, http.MethodPost, "/v1/maintenance/prepare", request, &status); err != nil {
+		return maintenance.Status{}, err
+	}
+	return status, nil
+}
+
+func MaintenanceStatus(ctx context.Context, socketPath string) (maintenance.Status, error) {
+	var status maintenance.Status
+	if err := doJSON(ctx, socketPath, http.MethodGet, "/v1/maintenance", nil, &status); err != nil {
+		return maintenance.Status{}, err
+	}
+	return status, nil
+}
+
+func MaintenanceResume(ctx context.Context, socketPath string, request protocol.MaintenanceResumeRequest) (maintenance.Status, error) {
+	var status maintenance.Status
+	if err := doJSONWithTimeout(ctx, socketPath, http.MethodPost, "/v1/maintenance/resume", request, &status, 60*time.Second); err != nil {
+		return maintenance.Status{}, err
+	}
+	return status, nil
 }
 
 func PauseScheduler(ctx context.Context, socketPath string, request protocol.SchedulerControlRequest) (protocol.SchedulerControlResponse, error) {

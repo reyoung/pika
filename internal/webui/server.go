@@ -185,6 +185,15 @@ func EnsureToken(runtimeRoot string, rotate bool) (string, string, error) {
 	return token, path, nil
 }
 
+func ReadToken(runtimeRoot string) (string, string, error) {
+	if runtimeRoot == "" || !filepath.IsAbs(runtimeRoot) {
+		return "", "", errors.New("absolute runtime root is required")
+	}
+	path := filepath.Join(runtimeRoot, "webui", "token")
+	token, err := readToken(path)
+	return token, path, err
+}
+
 func readToken(path string) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil {

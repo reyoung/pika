@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,7 +16,9 @@ import (
 	"github.com/reyoung/pika-go/internal/daemonupdate"
 	"github.com/reyoung/pika-go/internal/herdr"
 	"github.com/reyoung/pika-go/internal/instance"
+	"github.com/reyoung/pika-go/internal/maintenance"
 	"github.com/reyoung/pika-go/internal/optimizationworkspace"
+	"github.com/reyoung/pika-go/internal/symphony"
 )
 
 const kickOffPluginID = "pika-go"
@@ -25,17 +28,21 @@ func runOpen(ctx context.Context, args []string, input io.Reader, stdout, stderr
 	label := flags.String("label", "", "`LABEL` for the new Herdr workspace")
 	noFocus := flags.Bool("no-focus", false, "Create the Herdr workspace without switching to it")
 	timeout := flags.Duration("timeout", 30*time.Second, "Maximum time to wait for the daemon")
+	positionalRoot := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		positionalRoot, args = args[0], args[1:]
+	}
 	if ok, code := parseCommandFlags(flags, args); !ok {
 		return code
 	}
-	if flags.NArg() > 1 {
+	if flags.NArg() > 1 || (positionalRoot != "" && flags.NArg() != 0) {
 		_, _ = fmt.Fprintln(stderr, "open: at most one WORKSPACE path is supported")
 		return 2
 	}
-	root := ""
-	if flags.NArg() == 1 {
+	root := positionalRoot
+	if root == "" && flags.NArg() == 1 {
 		root = flags.Arg(0)
-	} else {
+	} else if root == "" {
 		workspace, err := optimizationworkspace.Discover("")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "open: %v\n", err)
@@ -50,10 +57,14 @@ func runOpen(ctx context.Context, args []string, input io.Reader, stdout, stderr
 	if *noFocus {
 		kickOffArgs = append(kickOffArgs, "--no-focus")
 	}
-	return runKickOff(ctx, kickOffArgs, input, stdout, stderr)
+	return runKickOffMode(ctx, kickOffArgs, input, stdout, stderr, true)
 }
 
 func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, stderr io.Writer) int {
+	return runKickOffMode(ctx, args, input, stdout, stderr, false)
+}
+
+func runKickOffMode(ctx context.Context, args []string, input io.Reader, stdout, stderr io.Writer, allowMaintenanceOpen bool) int {
 	flags := newCommandFlagSet("kick-off", stderr)
 	repository := flags.String("repository", "", "`PATH` to optimize (default: current directory)")
 	workspaceRoot := flags.String("workspace", "", "Optimization Workspace `PATH` (default: sibling of repository)")
@@ -91,6 +102,71 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 		_, _ = fmt.Fprintln(stderr, "kick-off: --timeout must be greater than zero")
 		return 2
 	}
+	mutationRoot, err := resolveKickOffMutationRoot(*repository, *workspaceRoot)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "kick-off: resolve Workspace mutation lease: %v\n", err)
+		return 2
+	}
+	_, existedBeforeLease, err := resolveExistingKickOffWorkspace(*repository, *workspaceRoot)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "kick-off: %v\n", err)
+		return 2
+	}
+	var mutationLease *optimizationworkspace.MutationLease
+	if existedBeforeLease {
+		mutationLease, err = optimizationworkspace.AcquireSharedMutationLease(ctx, mutationRoot)
+	} else {
+		mutationLease, err = optimizationworkspace.AcquireExclusiveMutationLease(ctx, mutationRoot)
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "kick-off: acquire Workspace mutation lease: %v\n", err)
+		return 1
+	}
+	defer mutationLease.Close()
+	existingWorkspace, existingWorkspaceFound, err := resolveExistingKickOffWorkspace(*repository, *workspaceRoot)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "kick-off: %v\n", err)
+		return 2
+	}
+	if existedBeforeLease && !existingWorkspaceFound {
+		_, _ = fmt.Fprintln(stderr, "kick-off: Workspace disappeared while acquiring its mutation lease; retry")
+		return 1
+	}
+	var existingMaintenance maintenance.Status
+	if existingWorkspaceFound {
+		_, existingMaintenance, err = authorizeWorkspaceExecutableWithStatus(existingWorkspace.Root)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "kick-off: maintenance generation rejected: %v\n", err)
+			return 1
+		}
+		active := existingMaintenance.State != "" && existingMaintenance.State != maintenance.StateResumed
+		if active && (!allowMaintenanceOpen ||
+			(existingMaintenance.State != maintenance.StateReady && existingMaintenance.State != maintenance.StateHolding)) {
+			_, _ = fmt.Fprintf(stderr, "kick-off: direct Workspace mutation is forbidden during maintenance state %s\n", existingMaintenance.State)
+			return 1
+		}
+		if !active {
+			if _, _, err := authorizeWorkspaceDirectMutation(existingWorkspace.Root); err != nil {
+				_, _ = fmt.Fprintf(stderr, "kick-off: direct Workspace mutation rejected: %v\n", err)
+				return 1
+			}
+		}
+	}
+	authorizeResolvedWorkspace := func() bool {
+		resolved, found, resolveErr := resolveExistingKickOffWorkspace(*repository, *workspaceRoot)
+		if resolveErr != nil {
+			_, _ = fmt.Fprintf(stderr, "kick-off: resolve Workspace for maintenance authorization: %v\n", resolveErr)
+			return false
+		}
+		if !found {
+			return true
+		}
+		if _, _, authorizeErr := authorizeWorkspaceDirectMutation(resolved.Root); authorizeErr != nil {
+			_, _ = fmt.Fprintf(stderr, "kick-off: direct Workspace mutation rejected: %v\n", authorizeErr)
+			return false
+		}
+		return true
+	}
 
 	herdrSocket := os.Getenv("HERDR_SOCKET_PATH")
 	if herdrSocket == "" {
@@ -113,6 +189,9 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 		_, _ = fmt.Fprintf(stderr, "kick-off: Herdr protocol %d is too old; protocol %d or newer is required\n", snapshot.Protocol, herdr.MinimumProtocol)
 		return 1
 	}
+	if existingWorkspaceFound && existingMaintenance.State != "" && existingMaintenance.State != maintenance.StateResumed {
+		return runMaintenanceOpen(ctx, client, snapshot, existingWorkspace, existingMaintenance, *noFocus, *timeout, stdout, stderr)
+	}
 	herdrConfigPath, err := herdr.ResolveConfigPath()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "kick-off: resolve Herdr configuration: %v\n", err)
@@ -133,19 +212,47 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 			writeFreshSessionInstructions(stderr, herdrConfigPath)
 			return 2
 		}
+		if !authorizeResolvedWorkspace() {
+			return 1
+		}
 		if err := herdr.ConfigureFreshSessions(ctx, client, herdrConfigPath); err != nil {
 			_, _ = fmt.Fprintf(stderr, "kick-off: configure Herdr fresh Agent Sessions: %v\n", err)
 			return 1
 		}
 		_, _ = fmt.Fprintln(stdout, "Updated Herdr configuration and reloaded the server.")
-	} else if err := herdr.RequireFreshSessions(ctx, client, herdrConfigPath); err != nil {
-		_, _ = fmt.Fprintf(stderr, "kick-off: reload Herdr configuration: %v\n", err)
+	} else {
+		if !authorizeResolvedWorkspace() {
+			return 1
+		}
+		if err := herdr.RequireFreshSessions(ctx, client, herdrConfigPath); err != nil {
+			_, _ = fmt.Fprintf(stderr, "kick-off: reload Herdr configuration: %v\n", err)
+			return 1
+		}
+	}
+	workspace, createdWorkspace := existingWorkspace, false
+	if !existingWorkspaceFound {
+		if !authorizeResolvedWorkspace() {
+			return 1
+		}
+		workspace, createdWorkspace, err = resolveKickOffWorkspace(ctx, *repository, *workspaceRoot, mutationLease)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "kick-off: %v\n", err)
+			return 2
+		}
+	}
+	authorizeWorkspace := func() bool {
+		if _, _, authorizeErr := authorizeWorkspaceDirectMutation(workspace.Root); authorizeErr != nil {
+			_, _ = fmt.Fprintf(stderr, "kick-off: direct Workspace mutation rejected: %v\n", authorizeErr)
+			return false
+		}
+		return true
+	}
+	if !authorizeWorkspace() {
 		return 1
 	}
-	workspace, createdWorkspace, err := resolveKickOffWorkspace(ctx, *repository, *workspaceRoot)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "kick-off: %v\n", err)
-		return 2
+	if err := workspace.EnsureLayout(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "kick-off: prepare Workspace layout: %v\n", err)
+		return 1
 	}
 	resolvedRepository := workspace.Identity.SourceRepository
 	if *label == "" {
@@ -162,11 +269,14 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 	}
 	if binding, bindingErr := workspace.ReadHerdrBinding(); bindingErr == nil && binding.SocketPath == herdrSocket && snapshotHasWorkspace(snapshot, binding.WorkspaceID) {
 		if _, healthErr := control.Health(ctx, binding.DaemonSocket); healthErr == nil {
+			if !authorizeWorkspace() {
+				return 1
+			}
 			_, _ = fmt.Fprintf(stdout, "Optimization is already running in Herdr workspace %s.\n", binding.WorkspaceID)
 			if *noFocus {
 				_, _ = fmt.Fprintf(stdout, "Open it with: herdr workspace focus %s\n", binding.WorkspaceID)
 			} else {
-				focusKickOffWorkspace(ctx, client, binding.WorkspaceID, binding.TabID, binding.ControlPane, stderr)
+				focusKickOffWorkspace(ctx, client, binding.WorkspaceID, binding.TabID, binding.ControlPane, authorizeWorkspace, stderr)
 			}
 			return 0
 		}
@@ -176,6 +286,9 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 	var created struct {
 		Workspace herdr.Workspace `json:"workspace"`
 		RootPane  herdr.Pane      `json:"root_pane"`
+	}
+	if !authorizeWorkspace() {
+		return 1
 	}
 	if err := client.Call(ctx, "workspace.create", map[string]any{
 		"cwd": workspace.Root, "label": *label, "focus": false,
@@ -187,11 +300,17 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 		_, _ = fmt.Fprintln(stderr, "kick-off: Herdr returned an incomplete workspace response")
 		return 1
 	}
+	if !authorizeWorkspace() {
+		return 1
+	}
 	if err := client.Call(ctx, "tab.rename", map[string]string{
 		"tab_id": created.RootPane.TabID, "label": "Pika",
 	}, nil); err != nil {
 		_, _ = fmt.Fprintf(stderr, "kick-off: name the new Herdr tab: %v\n", err)
 		_, _ = fmt.Fprintf(stderr, "The new workspace %s was left open for diagnostics.\n", created.Workspace.WorkspaceID)
+		return 1
+	}
+	if !authorizeWorkspace() {
 		return 1
 	}
 	if err := client.Call(ctx, "pane.rename", map[string]string{
@@ -214,6 +333,9 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 		return 1
 	}
 	integrationExecutable := pikaExecutable
+	if !authorizeWorkspace() {
+		return 1
+	}
 	currentGeneration, err := daemonupdate.EnsureCurrent(ctx, workspace.Root, pikaExecutable, Version)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "kick-off: bootstrap managed daemon generation: %v\n", err)
@@ -225,6 +347,9 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 		PluginPane struct {
 			Pane herdr.Pane `json:"pane"`
 		} `json:"plugin_pane"`
+	}
+	if !authorizeWorkspace() {
+		return 1
 	}
 	if err := client.Call(ctx, "plugin.pane.open", map[string]any{
 		"plugin_id":      kickOffPluginID,
@@ -249,6 +374,9 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 		_, _ = fmt.Fprintln(stderr, "kick-off: Herdr returned an incomplete plugin pane response")
 		return 1
 	}
+	if !authorizeWorkspace() {
+		return 1
+	}
 	if err := client.Call(ctx, "pane.rename", map[string]string{
 		"pane_id": opened.PluginPane.Pane.PaneID, "label": "Daemon",
 	}, nil); err != nil {
@@ -260,6 +388,9 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 	socketPath, err := instance.SocketForHerdrWorkspace(herdrSocket, created.Workspace.WorkspaceID)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "kick-off: resolve daemon socket: %v\n", err)
+		return 1
+	}
+	if !authorizeWorkspace() {
 		return 1
 	}
 	if err := workspace.WriteHerdrBinding(optimizationworkspace.HerdrBinding{
@@ -292,6 +423,9 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 		if *configPath != "" {
 			initArgs = append(initArgs, "--config", *configPath)
 		}
+		if !authorizeWorkspace() {
+			return 1
+		}
 		if err := client.Call(ctx, "pane.send_input", map[string]any{
 			"pane_id": created.RootPane.PaneID, "text": shellCommand(initArgs), "keys": []string{"enter"},
 		}, nil); err != nil {
@@ -311,9 +445,198 @@ func runKickOff(ctx context.Context, args []string, input io.Reader, stdout, std
 	if *noFocus {
 		_, _ = fmt.Fprintf(stdout, "\nOpen it with: herdr workspace focus %s\n", created.Workspace.WorkspaceID)
 	} else {
-		focusKickOffWorkspace(ctx, client, created.Workspace.WorkspaceID, created.RootPane.TabID, created.RootPane.PaneID, stderr)
+		focusKickOffWorkspace(ctx, client, created.Workspace.WorkspaceID, created.RootPane.TabID, created.RootPane.PaneID, authorizeWorkspace, stderr)
 	}
 	return 0
+}
+
+func runMaintenanceOpen(
+	ctx context.Context,
+	client *herdr.Client,
+	snapshot herdr.Snapshot,
+	workspace optimizationworkspace.Workspace,
+	expected maintenance.Status,
+	noFocus bool,
+	timeout time.Duration,
+	stdout, stderr io.Writer,
+) int {
+	if len(expected.Targets) == 0 {
+		_, _ = fmt.Fprintln(stderr, "open: maintenance state has no frozen Targets")
+		return 1
+	}
+	for _, target := range expected.Targets {
+		if target.WorkID == "" || target.SessionID == "" || target.WorkGeneration < 1 {
+			_, _ = fmt.Fprintln(stderr, "open: maintenance state has an incomplete frozen Target")
+			return 1
+		}
+	}
+	generation, current, err := authorizeWorkspaceExecutableWithStatus(workspace.Root)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: maintenance generation rejected: %v\n", err)
+		return 1
+	}
+	if generation.Digest != current.ToGeneration.Digest && generation.Digest != current.FromGeneration.Digest {
+		_, _ = fmt.Fprintf(stderr, "open: generation %s is not a reviewed maintenance endpoint\n", generation.Digest)
+		return 1
+	}
+	if current.ID != expected.ID || current.RequestID != expected.RequestID ||
+		(current.State != maintenance.StateReady && current.State != maintenance.StateHolding) {
+		_, _ = fmt.Fprintln(stderr, "open: maintenance identity changed during resolution")
+		return 1
+	}
+	binding, err := workspace.ReadHerdrBinding()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: read frozen Herdr binding: %v\n", err)
+		return 1
+	}
+	bindingBytes, err := os.ReadFile(workspace.HerdrBindingPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: read frozen Herdr binding bytes: %v\n", err)
+		return 1
+	}
+	if binding.SocketPath == "" || binding.WorkspaceID == "" || binding.TabID == "" ||
+		binding.ControlPane == "" || binding.DaemonPane == "" || binding.DaemonSocket == "" {
+		_, _ = fmt.Fprintln(stderr, "open: frozen Herdr binding is incomplete")
+		return 1
+	}
+	if os.Getenv("HERDR_SOCKET_PATH") != binding.SocketPath {
+		_, _ = fmt.Fprintln(stderr, "open: current Herdr socket does not match the frozen binding")
+		return 1
+	}
+	active, err := symphony.ReadActiveAgentSessions(ctx, workspace.DatabasePath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: read durable active Agent Sessions: %v\n", err)
+		return 1
+	}
+	if err := validateMaintenanceOpenSnapshot(snapshot, binding, nil); err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: %v\n", err)
+		return 1
+	}
+	if err := validateMaintenanceActiveSet(current, active, snapshot); err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: %v\n", err)
+		return 1
+	}
+	recheck := func() bool {
+		checkedGeneration, status, checkErr := authorizeWorkspaceExecutableWithStatus(workspace.Root)
+		if checkErr != nil || checkedGeneration.Digest != generation.Digest ||
+			status.ID != expected.ID || status.RequestID != expected.RequestID ||
+			(status.State != maintenance.StateReady && status.State != maintenance.StateHolding) {
+			if checkErr != nil {
+				_, _ = fmt.Fprintf(stderr, "open: maintenance recheck rejected: %v\n", checkErr)
+			} else {
+				_, _ = fmt.Fprintln(stderr, "open: maintenance identity changed before daemon launch")
+			}
+			return false
+		}
+		latestBinding, readErr := os.ReadFile(workspace.HerdrBindingPath)
+		if readErr != nil || !bytes.Equal(latestBinding, bindingBytes) {
+			_, _ = fmt.Fprintln(stderr, "open: frozen Herdr binding changed before daemon launch")
+			return false
+		}
+		return true
+	}
+	latest, err := client.Snapshot(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: refresh Herdr snapshot: %v\n", err)
+		return 1
+	}
+	if err := validateMaintenanceOpenSnapshot(latest, binding, nil); err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: %v\n", err)
+		return 1
+	}
+	active, err = symphony.ReadActiveAgentSessions(ctx, workspace.DatabasePath)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: refresh durable active Agent Sessions: %v\n", err)
+		return 1
+	}
+	if err := validateMaintenanceActiveSet(current, active, latest); err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: %v\n", err)
+		return 1
+	}
+	if !recheck() {
+		return 1
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: resolve target executable: %v\n", err)
+		return 1
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: resolve target executable path: %v\n", err)
+		return 1
+	}
+	command := shellCommand([]string{filepath.Clean(executable), "daemon", "--workspace", workspace.Root, "--socket", binding.DaemonSocket})
+	if err := client.Call(ctx, "pane.send_input", map[string]any{
+		"pane_id": binding.DaemonPane, "text": command, "keys": []string{"enter"},
+	}, nil); err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: start reviewed daemon in frozen pane: %v\n", err)
+		return 1
+	}
+	if err := waitForKickOffDaemon(ctx, binding.DaemonSocket, timeout); err != nil {
+		_, _ = fmt.Fprintf(stderr, "open: daemon did not become ready: %v\n", err)
+		return 1
+	}
+	holding, err := control.MaintenanceStatus(ctx, binding.DaemonSocket)
+	if err != nil || holding.State != maintenance.StateHolding ||
+		holding.HoldingGeneration.Digest != generation.Digest {
+		_, _ = fmt.Fprintf(stderr, "open: daemon did not enter reviewed Holding state: status=%+v err=%v\n", holding, err)
+		return 1
+	}
+	afterBinding, err := os.ReadFile(workspace.HerdrBindingPath)
+	if err != nil || !bytes.Equal(afterBinding, bindingBytes) {
+		_, _ = fmt.Fprintln(stderr, "open: daemon launch changed the frozen Herdr binding")
+		return 1
+	}
+	_, _ = fmt.Fprintf(stdout, "Reopened maintenance Holding in Herdr workspace %s using daemon pane %s.\n", binding.WorkspaceID, binding.DaemonPane)
+	if noFocus {
+		_, _ = fmt.Fprintf(stdout, "Open it with: herdr workspace focus %s\n", binding.WorkspaceID)
+	} else {
+		focusKickOffWorkspace(ctx, client, binding.WorkspaceID, binding.TabID, binding.ControlPane, recheck, stderr)
+	}
+	return 0
+}
+
+func validateMaintenanceOpenSnapshot(snapshot herdr.Snapshot, binding optimizationworkspace.HerdrBinding, targets []maintenance.Target) error {
+	if !snapshotHasWorkspace(snapshot, binding.WorkspaceID) {
+		return fmt.Errorf("frozen Herdr workspace %s is missing", binding.WorkspaceID)
+	}
+	foundControl, foundDaemon := false, false
+	for _, pane := range snapshot.Panes {
+		if pane.PaneID != binding.ControlPane && pane.PaneID != binding.DaemonPane {
+			continue
+		}
+		if pane.WorkspaceID != binding.WorkspaceID || pane.TabID != binding.TabID {
+			return fmt.Errorf("frozen Herdr pane %s moved from workspace/tab", pane.PaneID)
+		}
+		if pane.PaneID == binding.ControlPane {
+			foundControl = true
+		}
+		if pane.PaneID == binding.DaemonPane {
+			foundDaemon = true
+		}
+	}
+	if !foundControl || !foundDaemon {
+		return fmt.Errorf("frozen Herdr panes are missing: control=%t daemon=%t", foundControl, foundDaemon)
+	}
+	for _, target := range targets {
+		found := false
+		for _, agent := range snapshot.Agents {
+			if agent.Name == nil || agent.Agent == nil {
+				continue
+			}
+			if *agent.Name == target.AgentName && *agent.Agent == target.AgentKind &&
+				agent.WorkspaceID == target.WorkspaceID && agent.TabID == target.TabID &&
+				agent.PaneID == target.PaneID && agent.TerminalID == target.TerminalID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("frozen Session %s Herdr Agent identity is missing or drifted", target.SessionID)
+		}
+	}
+	return nil
 }
 
 func snapshotHasWorkspace(snapshot herdr.Snapshot, workspaceID string) bool {
@@ -325,7 +648,7 @@ func snapshotHasWorkspace(snapshot herdr.Snapshot, workspaceID string) bool {
 	return false
 }
 
-func focusKickOffWorkspace(ctx context.Context, client *herdr.Client, workspaceID, tabID, paneID string, stderr io.Writer) {
+func focusKickOffWorkspace(ctx context.Context, client *herdr.Client, workspaceID, tabID, paneID string, authorize func() bool, stderr io.Writer) {
 	for _, focus := range []struct {
 		method string
 		params map[string]string
@@ -334,6 +657,9 @@ func focusKickOffWorkspace(ctx context.Context, client *herdr.Client, workspaceI
 		{method: "tab.focus", params: map[string]string{"tab_id": tabID}},
 		{method: "pane.focus", params: map[string]string{"pane_id": paneID}},
 	} {
+		if !authorize() {
+			return
+		}
 		if err := client.Call(ctx, focus.method, focus.params, nil); err != nil {
 			_, _ = fmt.Fprintf(stderr, "kick-off: optimization is running, but Herdr could not focus its workspace/tab: %v\n", err)
 			_, _ = fmt.Fprintf(stderr, "Open it with: herdr workspace focus %s\n", workspaceID)
@@ -374,7 +700,48 @@ func promptKickOffConfirmation(input io.Reader, output io.Writer, question strin
 	}
 }
 
-func resolveKickOffWorkspace(ctx context.Context, repository, root string) (optimizationworkspace.Workspace, bool, error) {
+func resolveExistingKickOffWorkspace(repository, root string) (optimizationworkspace.Workspace, bool, error) {
+	if root != "" {
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			return optimizationworkspace.Workspace{}, false, fmt.Errorf("resolve Workspace path: %w", err)
+		}
+		if _, err := os.Stat(filepath.Join(absolute, optimizationworkspace.ManifestName)); err == nil {
+			workspace, openErr := optimizationworkspace.Open(absolute)
+			return workspace, openErr == nil, openErr
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return optimizationworkspace.Workspace{}, false, fmt.Errorf("inspect Workspace: %w", err)
+		}
+		return optimizationworkspace.Workspace{}, false, nil
+	}
+	if repository == "" {
+		workspace, err := optimizationworkspace.Discover("")
+		if err == nil {
+			return workspace, true, nil
+		}
+		if !strings.Contains(err.Error(), "was not found") {
+			return optimizationworkspace.Workspace{}, false, err
+		}
+		return optimizationworkspace.Workspace{}, false, nil
+	}
+	resolvedRepository, err := resolveKickOffRepository(repository)
+	if err != nil {
+		return optimizationworkspace.Workspace{}, false, err
+	}
+	defaultRoot, err := optimizationworkspace.DefaultRoot(resolvedRepository)
+	if err != nil {
+		return optimizationworkspace.Workspace{}, false, err
+	}
+	if _, err := os.Stat(filepath.Join(defaultRoot, optimizationworkspace.ManifestName)); err == nil {
+		workspace, openErr := optimizationworkspace.Open(defaultRoot)
+		return workspace, openErr == nil, openErr
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return optimizationworkspace.Workspace{}, false, fmt.Errorf("inspect Workspace: %w", err)
+	}
+	return optimizationworkspace.Workspace{}, false, nil
+}
+
+func resolveKickOffWorkspace(ctx context.Context, repository, root string, mutationLease *optimizationworkspace.MutationLease) (optimizationworkspace.Workspace, bool, error) {
 	if root != "" {
 		absolute, err := filepath.Abs(root)
 		if err != nil {
@@ -393,7 +760,11 @@ func resolveKickOffWorkspace(ctx context.Context, repository, root string) (opti
 		if err != nil {
 			return optimizationworkspace.Workspace{}, false, err
 		}
-		workspace, err := optimizationworkspace.Create(ctx, absolute, resolvedRepository)
+		workspace, err := optimizationworkspace.CreateWithLease(ctx, absolute, resolvedRepository, mutationLease)
+		if errors.Is(err, optimizationworkspace.ErrAlreadyExists) {
+			workspace, err = optimizationworkspace.Open(absolute)
+			return workspace, false, err
+		}
 		return workspace, true, err
 	}
 	if repository == "" {
@@ -411,10 +782,40 @@ func resolveKickOffWorkspace(ctx context.Context, repository, root string) (opti
 	if err != nil {
 		return optimizationworkspace.Workspace{}, false, err
 	}
-	_, statErr := os.Stat(filepath.Join(defaultRoot, optimizationworkspace.ManifestName))
-	created := errors.Is(statErr, os.ErrNotExist)
-	workspace, err := optimizationworkspace.Create(ctx, defaultRoot, resolvedRepository)
-	return workspace, created, err
+	if _, statErr := os.Stat(filepath.Join(defaultRoot, optimizationworkspace.ManifestName)); statErr == nil {
+		workspace, openErr := optimizationworkspace.Open(defaultRoot)
+		return workspace, false, openErr
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return optimizationworkspace.Workspace{}, false, fmt.Errorf("inspect Workspace: %w", statErr)
+	}
+	workspace, err := optimizationworkspace.CreateWithLease(ctx, defaultRoot, resolvedRepository, mutationLease)
+	if errors.Is(err, optimizationworkspace.ErrAlreadyExists) {
+		workspace, err = optimizationworkspace.Open(defaultRoot)
+		return workspace, false, err
+	}
+	return workspace, true, err
+}
+
+func resolveKickOffMutationRoot(repository, root string) (string, error) {
+	if root != "" {
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Clean(absolute), nil
+	}
+	if repository == "" {
+		if workspace, err := optimizationworkspace.Discover(""); err == nil {
+			return workspace.Root, nil
+		} else if !strings.Contains(err.Error(), "was not found") {
+			return "", err
+		}
+	}
+	resolvedRepository, err := resolveKickOffRepository(repository)
+	if err != nil {
+		return "", err
+	}
+	return optimizationworkspace.DefaultRoot(resolvedRepository)
 }
 
 func writeFreshSessionInstructions(output io.Writer, configPath string) {

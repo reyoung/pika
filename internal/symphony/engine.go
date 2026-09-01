@@ -679,7 +679,31 @@ func (e *Engine) GitIntent(ctx context.Context, intentID string) (GitIntentView,
 }
 
 func (e *Engine) ActiveAgentSessions(ctx context.Context) ([]ActiveAgentSession, error) {
-	rows, err := e.db.QueryContext(ctx, `SELECT s.id, s.work_id, s.generation, s.role, s.agent_kind, s.agent_name,
+	return queryActiveAgentSessions(ctx, e.db)
+}
+
+// ReadActiveAgentSessions opens an existing Symphony database without
+// migrations or filesystem writes. Maintenance-aware open uses it before a
+// reviewed daemon is allowed to cold-open and migrate the database.
+func ReadActiveAgentSessions(ctx context.Context, path string) ([]ActiveAgentSession, error) {
+	if path == "" {
+		return nil, errors.New("database path is required")
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	return queryActiveAgentSessions(ctx, db)
+}
+
+type activeAgentSessionQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func queryActiveAgentSessions(ctx context.Context, queryer activeAgentSessionQueryer) ([]ActiveAgentSession, error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT s.id, s.work_id, s.generation, s.role, s.agent_kind, s.agent_name,
 		COALESCE(s.provider_version, ''), COALESCE(s.provider_capabilities_json, X''), s.status,
         b.workspace_id, b.tab_id, b.pane_id, b.terminal_id
         FROM agent_sessions s

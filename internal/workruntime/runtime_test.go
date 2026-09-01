@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/reyoung/pika-go/internal/benchmarkintegrity/testcontract"
+	"github.com/reyoung/pika-go/internal/maintenance"
 	"github.com/reyoung/pika-go/internal/outbox"
 	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/symphony"
@@ -81,6 +82,71 @@ func (r *fakeRuntime) SendAgentKeys(_ context.Context, target string, keys []str
 		keys   []string
 	}{target: target, keys: append([]string(nil), keys...)})
 	return r.keyErr
+}
+
+func TestRetireMaintenanceTargetsIsExactValidatedAndIdempotent(t *testing.T) {
+	ctx := context.Background()
+	engine, _, startEffect := initializedRuntime(t, ctx)
+	runtime := &fakeRuntime{}
+	sink := workruntime.Sink{Store: engine, Runtime: runtime, AgentKind: "codex", Providers: provider.DefaultRegistry()}
+	dispatcher := outbox.Dispatcher{Store: engine, Sink: sink}
+	if err := dispatcher.DispatchEffect(ctx, startEffect.ID); err != nil {
+		t.Fatal(err)
+	}
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil || len(view.Works) != 1 {
+		t.Fatalf("inspect initial Work: view=%+v err=%v", view, err)
+	}
+	work := view.Works[0]
+	session, _, found, err := engine.CurrentAgentSession(ctx, work.ID)
+	if err != nil || !found {
+		t.Fatalf("current frozen Session: found=%v err=%v", found, err)
+	}
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
+		Meta: symphony.CommandMeta{RequestID: "complete-frozen-work"}, WorkID: work.ID, Definition: testcontract.Definition(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	target := maintenance.Target{SessionID: session.ID, WorkID: work.ID, WorkGeneration: work.Generation}
+
+	wrong := target
+	wrong.WorkGeneration++
+	if err := sink.RetireMaintenanceTargets(ctx, []maintenance.Target{wrong}); err == nil {
+		t.Fatal("generation-drift target was retired")
+	}
+	if len(runtime.closedPane) != 0 {
+		t.Fatalf("generation-drift target closed panes: %+v", runtime.closedPane)
+	}
+	missing := target
+	missing.SessionID = "missing-frozen-session"
+	if err := sink.RetireMaintenanceTargets(ctx, []maintenance.Target{target, missing}); err == nil {
+		t.Fatal("partially valid target list was retired")
+	}
+	if len(runtime.closedPane) != 0 {
+		t.Fatalf("target list was not validated before retirement: %+v", runtime.closedPane)
+	}
+
+	if err := sink.RetireMaintenanceTargets(ctx, []maintenance.Target{target}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.RetireMaintenanceTargets(ctx, []maintenance.Target{target}); err != nil {
+		t.Fatalf("idempotent retirement replay: %v", err)
+	}
+	if len(runtime.closedPane) != 1 {
+		t.Fatalf("frozen pane close count=%d, want 1", len(runtime.closedPane))
+	}
+	if err := dispatcher.DispatchPending(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.starts) != 2 {
+		t.Fatalf("Agent starts=%d, want frozen plus one successor", len(runtime.starts))
+	}
+	if err := sink.RetireMaintenanceTargets(ctx, []maintenance.Target{target}); err != nil {
+		t.Fatalf("replay after successor dispatch: %v", err)
+	}
+	if len(runtime.closedPane) != 1 || len(runtime.starts) != 2 {
+		t.Fatalf("replay touched successor: closes=%v starts=%d", runtime.closedPane, len(runtime.starts))
+	}
 }
 
 func TestSchedulerPauseInterruptsAndResumeContinuesSameSession(t *testing.T) {

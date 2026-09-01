@@ -59,12 +59,13 @@ type CommitChangesResult struct {
 }
 
 type Application struct {
-	Store            Store
-	MaxEvidenceBytes int64
-	WorktreeRoot     string
-	Repository       string
-	BranchNamespace  string
-	WorktreeRecorder gitworkspace.WorktreeRecorder
+	Store               Store
+	MaxEvidenceBytes    int64
+	WorktreeRoot        string
+	Repository          string
+	BranchNamespace     string
+	WorktreeRecorder    gitworkspace.WorktreeRecorder
+	AuthorizeInvocation func(context.Context, symphony.AgentGrant, Call) error
 	// EvidenceRoot is the Pika-owned Workspace evidence directory. KDA roles
 	// write raw artifacts there rather than into source worktrees whose clean
 	// Git state is independently verified.
@@ -98,6 +99,11 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 	grant, err := a.resolve(ctx, token)
 	if err != nil {
 		return Invocation{}, err
+	}
+	if a.AuthorizeInvocation != nil {
+		if err := a.AuthorizeInvocation(ctx, grant, call); err != nil {
+			return Invocation{}, err
+		}
 	}
 	var names []string
 	if err := json.Unmarshal(grant.Catalog, &names); err != nil {
