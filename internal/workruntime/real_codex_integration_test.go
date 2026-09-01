@@ -227,7 +227,7 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 		}
 		exerciseRealProviderHotReload(t, testCtx, *workspace, hotBinary, followUpTarget, client, pikaSocket, daemon, &serverOutput)
 		releaseRealCodexHold(t, followUpHoldPath)
-		waitForRealProviderFollowUp(t, testCtx, followUpTarget, false, client, pikaSocket, daemon, &serverOutput)
+		waitForRealProviderFollowUp(t, testCtx, followUpTarget, client, pikaSocket, daemon, &serverOutput)
 		releaseRealCodexHold(t, iterationHoldPath)
 		releaseRealCodexHold(t, integrationHoldPath)
 		view := waitForRealCodexBest(t, testCtx, client, pikaSocket, daemon, &serverOutput)
@@ -257,12 +257,11 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 		t.Logf("simple real %s hot-reload flow advanced Best to sequence %d", spec.name, view.Best.Sequence)
 		return
 	}
-	followUpTarget := exerciseRealCodexFollowUp(t, testCtx, stateRoot, client, pikaSocket, daemon, &serverOutput)
+	followUpTarget := exerciseRealCodexFollowUp(t, testCtx, stateRoot, followUpHoldPath, client, pikaSocket, daemon, &serverOutput)
 	crashedOutput := crashRealCodexDaemon(t, daemon)
 	daemon = nil
 	daemon = startRealCodexDaemon(t, pikaBinary, pikaSocket, workspace, stateRoot, configRoot, herdrSocket, created.RootPane.PaneID, codexHome, codexBinary, cursorBinary)
 	waitForRealCodexReplacement(t, testCtx, stateRoot, followUpTarget, client, pikaSocket, daemon, &serverOutput)
-	releaseRealCodexHold(t, followUpHoldPath)
 	t.Logf("real Codex Verification recovered through a fresh Session after daemon crash; crashed daemon output bytes=%d", len(crashedOutput))
 
 	exerciseRealCodexCancellation(t, testCtx, stateRoot, iterationHoldPath, client, pikaSocket, daemon, &serverOutput)
@@ -463,6 +462,16 @@ func TestRealProviderBestRefUsesWorkspaceNamespace(t *testing.T) {
 	}
 }
 
+func TestRealProviderVerificationInstructionsKeepWorkPendingForFollowUp(t *testing.T) {
+	instructions := realProviderRoleInstructions()["baseline-verify.md"]
+	if !strings.Contains(instructions, "do not call `finish_baseline_verification` during this first turn") {
+		t.Fatalf("Verification instructions do not preserve pending Work for a natural Follow-up: %q", instructions)
+	}
+	if !strings.Contains(instructions, "messages.records is greater than zero") {
+		t.Fatalf("Verification recovery instructions force a duplicate Follow-up: %q", instructions)
+	}
+}
+
 func assertRealProviderJournal(t *testing.T, ctx context.Context, databasePath string, view symphony.View, minimumProviderSessions int) {
 	t.Helper()
 	engine, err := symphony.Open(ctx, databasePath, symphony.Options{})
@@ -571,20 +580,22 @@ func configureRealProviderInstance(t *testing.T, ctx context.Context, workspace 
 	if err := os.WriteFile(gatePath, []byte(gateScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	roleInstructions := map[string]string{
-		"baseline-verify.md": "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate verification` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
-		"iteration.md":       "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate iteration` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
-		"integration.md":     "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate integration` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
-	}
-	if simple {
-		roleInstructions["baseline-verify.md"] += "After the gate exits, establish the Development Baseline but do not call `finish_baseline_verification` during this first turn. End the turn with the Work still pending and wait for Pika's Follow-up. Only after that Follow-up arrives may you call `finish_baseline_verification`.\n"
-	}
+	roleInstructions := realProviderRoleInstructions()
 	for name, instruction := range roleInstructions {
 		if err := os.WriteFile(filepath.Join(instructionRoot, name), []byte(instruction), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return rollback
+}
+
+func realProviderRoleInstructions() map[string]string {
+	roleInstructions := map[string]string{
+		"baseline-verify.md": "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate verification` and wait until it exits successfully. This is a test-instance synchronization requirement.\nAfter the gate exits, establish the Development Baseline. When the Context Bundle reports messages.records is zero, do not call `finish_baseline_verification` during this first turn: end the turn with the Work still pending and wait for Pika's Follow-up, then finish only after that Follow-up arrives. When messages.records is greater than zero, this is a recovered Session with prior Work history; do not deliberately request another Follow-up and proceed to the terminal operation when the evidence is ready.\n",
+		"iteration.md":       "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate iteration` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
+		"integration.md":     "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate integration` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
+	}
+	return roleInstructions
 }
 
 func realCursorMCPPath(t *testing.T) string {
@@ -845,10 +856,11 @@ func TestRealProviderProgressWatchResetsOnlyForObservableProgress(t *testing.T) 
 	}
 }
 
-func exerciseRealCodexFollowUp(t *testing.T, ctx context.Context, stateRoot string, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) realCodexSessionObservation {
+func exerciseRealCodexFollowUp(t *testing.T, ctx context.Context, stateRoot, holdPath string, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) realCodexSessionObservation {
 	t.Helper()
 	target := waitForRealProviderVerificationHold(t, ctx, stateRoot, client, socketPath, daemon, serverOutput)
-	return waitForRealProviderFollowUp(t, ctx, target, true, client, socketPath, daemon, serverOutput)
+	releaseRealCodexHold(t, holdPath)
+	return waitForRealProviderFollowUp(t, ctx, target, client, socketPath, daemon, serverOutput)
 }
 
 func waitForRealProviderVerificationHold(t *testing.T, ctx context.Context, stateRoot string, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) realCodexSessionObservation {
@@ -916,15 +928,8 @@ func waitForRealProviderVerificationHold(t *testing.T, ctx context.Context, stat
 	return realCodexSessionObservation{Work: target, Session: targetSession, ProviderSessionID: providerSessionID}
 }
 
-func waitForRealProviderFollowUp(t *testing.T, ctx context.Context, target realCodexSessionObservation, injectStoppedTurn bool, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) realCodexSessionObservation {
+func waitForRealProviderFollowUp(t *testing.T, ctx context.Context, target realCodexSessionObservation, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) realCodexSessionObservation {
 	t.Helper()
-	if injectStoppedTurn {
-		hook := matrixStopEvent(target.Session.AgentKind, target.ProviderSessionID, "pika-real-follow-up-stopped-turn")
-		if err := control.IngestProviderEvent(ctx, socketPath, target.Session.AgentKind, protocol.ProviderEventRequest{AgentSessionID: target.Session.ID, Event: hook}); err != nil {
-			t.Fatalf("inject stopped-turn observation for real Follow-up smoke: %v", err)
-		}
-	}
-
 	watch := newRealProviderProgressWatch(time.Now())
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -942,20 +947,16 @@ func waitForRealProviderFollowUp(t *testing.T, ctx context.Context, target realC
 		}
 		for _, followUp := range view.FollowUps {
 			if followUp.TargetWorkID == target.Work.ID && followUp.Status == "delivered" && followUp.Message != "" {
-				if injectStoppedTurn {
-					for _, work := range view.Works {
-						if work.ID == target.Work.ID && work.Status != symphony.WorkPending {
-							t.Fatalf("real Follow-up completed target Work: %+v", work)
-						}
+				for _, work := range view.Works {
+					if work.ID == target.Work.ID && work.Status != symphony.WorkPending {
+						t.Fatalf("real Follow-up completed target Work: %+v", work)
 					}
 				}
 				if followUp.TargetAgentSessionID != target.Session.ID {
 					t.Fatalf("real Follow-up changed target Session: got %s, want %s", followUp.TargetAgentSessionID, target.Session.ID)
 				}
-				if !injectStoppedTurn {
-					if followUp.TargetProviderTurnID == "" || followUp.TargetProviderTurnID == "pika-real-follow-up-stopped-turn" {
-						t.Fatalf("real Follow-up was not armed by a natural provider Stop: %+v", followUp)
-					}
+				if followUp.TargetProviderTurnID == "" || followUp.TargetProviderTurnID == "pika-real-follow-up-stopped-turn" {
+					t.Fatalf("real Follow-up was not armed by a natural provider Stop: %+v", followUp)
 				}
 				t.Logf("real %s Follow-up request %s delivered to Verification Work %s", target.Session.AgentKind, followUp.ID, target.Work.ID)
 				return target
@@ -1113,41 +1114,55 @@ func waitForRealCodexRoleSessions(t *testing.T, ctx context.Context, stateRoot s
 		t.Fatal(err)
 	}
 	defer engine.Close()
-	deadline := time.Now().Add(3 * time.Minute)
-	for time.Now().Before(deadline) {
+	watch := newRealProviderProgressWatch(time.Now())
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
 		view, statusErr := control.Status(ctx, socketPath)
-		if statusErr == nil {
-			observations := make([]realCodexSessionObservation, 0, count)
-			for _, work := range view.Works {
-				if work.Role != role || work.Status != symphony.WorkPending {
-					continue
-				}
-				session, _, found, currentErr := engine.CurrentAgentSession(ctx, work.ID)
-				if currentErr != nil || !found || session.Status != symphony.AgentSessionRunning {
-					continue
-				}
-				journal, journalErr := engine.ConversationJournal(ctx, work.ID)
-				if journalErr != nil {
-					continue
-				}
-				providerSessionID := ""
-				for _, event := range journal.Events {
-					if event.ProviderSessionID != "" {
-						providerSessionID = event.ProviderSessionID
-					}
-				}
-				if providerSessionID != "" {
-					observations = append(observations, realCodexSessionObservation{Work: work, Session: session, ProviderSessionID: providerSessionID})
+		if statusErr != nil {
+			t.Fatalf("observe real-provider status while waiting for %s Sessions: %v", role, statusErr)
+		}
+		snapshot, snapshotErr := client.Snapshot(ctx)
+		if snapshotErr != nil {
+			t.Fatalf("observe Herdr status while waiting for %s Sessions: %v", role, snapshotErr)
+		}
+		if progressErr := watch.Observe(time.Now(), view, snapshot); progressErr != nil {
+			t.Fatalf("real-provider workflow failed while waiting for %s Sessions: %v; %s", role, progressErr, diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
+		}
+		observations := make([]realCodexSessionObservation, 0, count)
+		for _, work := range view.Works {
+			if work.Role != role || work.Status != symphony.WorkPending {
+				continue
+			}
+			session, _, found, currentErr := engine.CurrentAgentSession(ctx, work.ID)
+			if currentErr != nil || !found || session.Status != symphony.AgentSessionRunning {
+				continue
+			}
+			journal, journalErr := engine.ConversationJournal(ctx, work.ID)
+			if journalErr != nil {
+				continue
+			}
+			providerSessionID := ""
+			for _, event := range journal.Events {
+				if event.ProviderSessionID != "" {
+					providerSessionID = event.ProviderSessionID
 				}
 			}
-			if len(observations) >= count {
-				return observations[:count]
+			if providerSessionID != "" {
+				observations = append(observations, realCodexSessionObservation{Work: work, Session: session, ProviderSessionID: providerSessionID})
 			}
 		}
-		time.Sleep(200 * time.Millisecond)
+		if len(observations) >= count {
+			return observations[:count]
+		}
+		select {
+		case err := <-daemon.done:
+			t.Fatalf("real-provider daemon exited while waiting for %s Sessions: %v; output=%s", role, err, daemon.output.String())
+		case <-ctx.Done():
+			t.Fatalf("real-provider context ended while waiting for %d %s Sessions: %v; %s", count, role, ctx.Err(), diagnoseRealCodex(context.Background(), client, socketPath, daemon, serverOutput))
+		case <-ticker.C:
+		}
 	}
-	t.Fatalf("real Codex did not start %d %s provider Sessions: %s", count, role, diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
-	return nil
 }
 
 func createRealCodexHold(t *testing.T, root, kind string) string {
