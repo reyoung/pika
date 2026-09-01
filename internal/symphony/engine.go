@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/reyoung/pika-go/internal/benchmarkintegrity"
+	"github.com/reyoung/pika-go/internal/candidatepolicy"
 	"github.com/reyoung/pika-go/internal/provider"
 	_ "modernc.org/sqlite"
 )
@@ -521,6 +522,13 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 	if len(baselineDefinition) != 0 {
 		digest := sha256.Sum256(baselineDefinition)
 		runtimeWork.BaselineDefinitionSHA256 = hex.EncodeToString(digest[:])
+		policy, present, err := candidatepolicy.Parse(baselineDefinition)
+		if err != nil {
+			return RuntimeWork{}, fmt.Errorf("parse stored candidate change policy: %w", err)
+		}
+		if present {
+			runtimeWork.CandidateChangePolicy = policy
+		}
 	}
 	if runtimeWork.Work.Role == RoleBaselineDraft && runtimeWork.PredecessorBaselineID != "" {
 		var failureKind, failureReason, requestedChanges sql.NullString
@@ -991,6 +999,9 @@ func (e *Engine) applySubmitBaselineDefinition(ctx context.Context, tx *sql.Tx, 
 	}
 	if baselineStatus != BaselineDrafting {
 		return Receipt{}, domainError(CodeInvalidTransition, "baseline revision is not drafting")
+	}
+	if err := candidatepolicy.ValidateNewDefinition(command.Definition); err != nil {
+		return Receipt{}, domainError(CodeInvalidCommand, "invalid candidate change policy: "+err.Error())
 	}
 	if err := benchmarkintegrity.ValidateDefinition(command.Definition); err != nil {
 		return Receipt{}, domainError(CodeInvalidCommand, "invalid benchmark integrity contract: "+err.Error())

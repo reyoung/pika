@@ -231,7 +231,10 @@ func TestIterationAndIntegrationToolsVerifyGitBeforeAdvancingBest(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(repository, "kernel.txt"), []byte("baseline\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, repository, "add", "kernel.txt")
+	if err := os.WriteFile(filepath.Join(repository, "target.txt"), []byte("validation baseline\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repository, "add", "kernel.txt", "target.txt")
 	runGit(t, repository, "commit", "-m", "baseline")
 	baselineSHA := strings.TrimSpace(runGit(t, repository, "rev-parse", "HEAD"))
 	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
@@ -271,6 +274,25 @@ func TestIterationAndIntegrationToolsVerifyGitBeforeAdvancingBest(t *testing.T) 
 	}
 	iterationGrant := runningGrant(t, ctx, engine, iteration, "iteration-session")
 	app := toolapp.Application{Store: engine, WorktreeRoot: worktreeRoot}
+	if err := os.WriteFile(filepath.Join(runtimeWork.Repository, "target.txt"), []byte("changed validation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Invoke(ctx, iterationGrant.Token, toolapp.Call{Name: "commit_changes", Arguments: json.RawMessage(`{"idempotency_key":"commit-protected","message":"protected","paths":["target.txt"]}`)}); err == nil {
+		t.Fatal("commit_changes accepted a protected validation path")
+	}
+	protectedView, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pendingRole(t, protectedView, symphony.RoleIteration).ID != iteration.ID {
+		t.Fatalf("early protected commit did not leave Work pending: %+v", protectedView)
+	}
+	if got := strings.TrimSpace(runGit(t, runtimeWork.Repository, "rev-parse", "HEAD")); got != runtimeWork.BaseSHA {
+		t.Fatalf("early protected commit changed HEAD to %s", got)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeWork.Repository, "target.txt"), []byte("validation baseline\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	committed, err := app.Invoke(ctx, iterationGrant.Token, toolapp.Call{Name: "commit_changes", Arguments: json.RawMessage(`{"idempotency_key":"commit-candidate","message":"candidate","paths":["kernel.txt"]}`)})
 	if err != nil {
 		t.Fatalf("commit Candidate through scoped MCP: %v", err)
@@ -334,6 +356,120 @@ func TestIterationAndIntegrationToolsVerifyGitBeforeAdvancingBest(t *testing.T) 
 	if view.Best == nil || view.Best.Sequence != 1 || view.Best.CommitSHA != appliedSHA {
 		t.Fatalf("Best = %+v", view.Best)
 	}
+}
+
+func TestFinishIterationRejectsProtectedChangeWithoutCompletingWork(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	engine, app, iteration, runtimeWork := candidatePolicyIterationFixture(t, ctx)
+	if err := os.WriteFile(filepath.Join(runtimeWork.Repository, "target.txt"), []byte("changed validation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, runtimeWork.Repository, "add", "target.txt")
+	runGit(t, runtimeWork.Repository, "commit", "-m", "change protected validation")
+	candidateSHA := strings.TrimSpace(runGit(t, runtimeWork.Repository, "rev-parse", "HEAD"))
+	grant := runningGrant(t, ctx, engine, iteration, "protected-finish-session")
+	_, err := app.Invoke(ctx, grant.Token, toolapp.Call{Name: "finish_iteration", Arguments: json.RawMessage(fmt.Sprintf(`{"idempotency_key":"protected-finish","outcome":"candidate","candidate_sha":%q,"summary":"candidate","evidence":%s}`, candidateSHA, testcontract.Evidence()))})
+	if err == nil || !strings.Contains(err.Error(), "protected validation path") {
+		t.Fatalf("finish protected candidate error = %v", err)
+	}
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pendingRole(t, view, symphony.RoleIteration).ID != iteration.ID || len(view.Integrations) != 0 {
+		t.Fatalf("protected finish changed durable state: %+v", view)
+	}
+}
+
+func TestPrepareBestUpdateRejectsProtectedChangeBeforeCreatingIntent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	engine, app, iteration, runtimeWork := candidatePolicyIterationFixture(t, ctx)
+	if err := os.WriteFile(filepath.Join(runtimeWork.Repository, "target.txt"), []byte("changed validation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, runtimeWork.Repository, "add", "target.txt")
+	runGit(t, runtimeWork.Repository, "commit", "-m", "change protected validation")
+	candidateSHA := strings.TrimSpace(runGit(t, runtimeWork.Repository, "rev-parse", "HEAD"))
+	if _, err := engine.Apply(ctx, symphony.FinishIteration{Meta: symphony.CommandMeta{RequestID: "bypass-tool-for-setup"}, WorkID: iteration.ID, Outcome: symphony.IterationCandidate, CandidateSHA: candidateSHA, Summary: "candidate", Evidence: testcontract.Evidence()}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	integration := pendingRole(t, before, symphony.RoleIntegration)
+	grant := runningGrant(t, ctx, engine, integration, "protected-prepare-session")
+	_, err = app.Invoke(ctx, grant.Token, toolapp.Call{Name: "prepare_best_update", Arguments: json.RawMessage(fmt.Sprintf(`{"idempotency_key":"protected-prepare","validation":%s}`, testcontract.Validation()))})
+	if err == nil || !strings.Contains(err.Error(), "protected validation path") {
+		t.Fatalf("prepare protected candidate error = %v", err)
+	}
+	after, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Optimization.Revision != before.Optimization.Revision || after.Integrations[0].Status != "running" || after.Works[len(after.Works)-1].Status != symphony.WorkPending {
+		t.Fatalf("protected prepare changed durable state: before=%+v after=%+v", before, after)
+	}
+	runtime, err := engine.RuntimeWork(ctx, integration.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GitIntentID != "" || runtime.GitIntentState != "" {
+		t.Fatalf("protected prepare created Git intent: %+v", runtime)
+	}
+}
+
+func candidatePolicyIterationFixture(t *testing.T, ctx context.Context) (*symphony.Engine, toolapp.Application, symphony.WorkView, symphony.RuntimeWork) {
+	t.Helper()
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.MkdirAll(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repository, "init", "--quiet", "--initial-branch=main")
+	runGit(t, repository, "config", "user.name", "Pika Test")
+	runGit(t, repository, "config", "user.email", "pika@example.invalid")
+	for name, contents := range map[string]string{"kernel.txt": "baseline\n", "target.txt": "validation baseline\n"} {
+		if err := os.WriteFile(filepath.Join(repository, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGit(t, repository, "add", "kernel.txt", "target.txt")
+	runGit(t, repository, "commit", "-m", "baseline")
+	baselineSHA := strings.TrimSpace(runGit(t, repository, "rev-parse", "HEAD"))
+	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
+	engine, err := symphony.Open(ctx, filepath.Join(t.TempDir(), "pika.db"), symphony.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	if _, err := engine.Apply(ctx, symphony.Init{Meta: symphony.CommandMeta{RequestID: "fixture-init"}, OptimizationID: "fixture", Repository: repository, IterationConcurrency: 1}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{Meta: symphony.CommandMeta{RequestID: "fixture-submit"}, WorkID: view.Works[0].ID, Definition: testcontract.Definition()}); err != nil {
+		t.Fatal(err)
+	}
+	view, _ = engine.Inspect(ctx, symphony.Status{})
+	verification := pendingRole(t, view, symphony.RoleBaselineVerification)
+	if _, err := engine.Apply(ctx, symphony.FinishBaselineVerification{Meta: symphony.CommandMeta{RequestID: "fixture-accept"}, WorkID: verification.ID, Decision: symphony.VerificationAccepted, Evidence: testcontract.Evidence(), InitialBestSHA: baselineSHA}); err != nil {
+		t.Fatal(err)
+	}
+	view, _ = engine.Inspect(ctx, symphony.Status{})
+	iteration := pendingRole(t, view, symphony.RoleIteration)
+	runtimeWork, err := engine.RuntimeWork(ctx, iteration.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeWork, err = (gitworkspace.RuntimePreparer{Root: worktreeRoot}).PrepareWork(ctx, runtimeWork)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return engine, toolapp.Application{Store: engine, WorktreeRoot: worktreeRoot}, iteration, runtimeWork
 }
 
 func pendingRole(t *testing.T, view symphony.View, role symphony.WorkRole) symphony.WorkView {
@@ -422,7 +558,11 @@ func TestDefinitionPathRecordsStableArtifactInTerminalTransaction(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(repository, "baseline.json"), definition, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(repository, "target.txt"), []byte("baseline\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	runGit(t, repository, "add", "baseline.json")
+	runGit(t, repository, "add", "target.txt")
 	runGit(t, repository, "commit", "-m", "baseline")
 	engine, err := symphony.Open(ctx, filepath.Join(t.TempDir(), "pika.db"), symphony.Options{})
 	if err != nil {

@@ -1,18 +1,21 @@
 package benchmarkintegrity
 
+import "github.com/reyoung/pika-go/internal/candidatepolicy"
+
 // DefinitionSchema returns the discoverable JSON Schema for the versioned
 // benchmark_integrity object. Workload-specific outer fields remain allowed.
 func DefinitionSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"benchmark_integrity":    definitionContractSchema(),
-			"benchmark_measurements": measurementDefinitionSchema(),
+			"candidate_change_policy": candidatepolicy.Schema(),
+			"benchmark_integrity":     definitionContractSchema(),
+			"benchmark_measurements":  measurementDefinitionSchema(),
 		},
 		// The terminal transaction enforces benchmark_measurements for v1
 		// Baseline Revisions. Keeping it optional in the static tool catalog is
 		// required so grandfathered in-flight Revisions can still finish.
-		"required":             []string{"benchmark_integrity"},
+		"required":             []string{"candidate_change_policy", "benchmark_integrity"},
 		"additionalProperties": true,
 	}
 }

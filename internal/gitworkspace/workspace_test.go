@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/reyoung/pika-go/internal/candidatepolicy"
 	"github.com/reyoung/pika-go/internal/gitworkspace"
 )
 
@@ -234,6 +235,52 @@ func TestAttemptIdentityCannotBecomeGitArgumentsOrPaths(t *testing.T) {
 	workspace := gitworkspace.Workspace{Repository: repository, Root: filepath.Join(t.TempDir(), "worktrees")}
 	if _, err := workspace.CreateAttempt(context.Background(), "../unsafe", 1, baselineSHA); err == nil {
 		t.Fatal("unsafe attempt identity was accepted")
+	}
+}
+
+func TestCandidateChangePolicyAllowsImplementationAndRejectsProtectedChanges(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	policy := &candidatepolicy.Policy{SchemaVersion: 1, ProtectedValidationPaths: []candidatepolicy.ProtectedPath{{Path: "kernel.txt", Kind: "unit_test"}}}
+
+	tests := map[string]func(t *testing.T, repository string){
+		"implementation": func(t *testing.T, repository string) {
+			if err := os.MkdirAll(filepath.Join(repository, "include", "mk", "taskv2"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(repository, "include", "mk", "taskv2", "decode_attention_common.cuh"), "implementation\n")
+			git(t, repository, "add", "include/mk/taskv2/decode_attention_common.cuh")
+		},
+		"modify": func(t *testing.T, repository string) {
+			writeFile(t, filepath.Join(repository, "kernel.txt"), "changed\n")
+			git(t, repository, "add", "kernel.txt")
+		},
+		"delete": func(t *testing.T, repository string) {
+			if err := os.Remove(filepath.Join(repository, "kernel.txt")); err != nil {
+				t.Fatal(err)
+			}
+			git(t, repository, "add", "-u", "kernel.txt")
+		},
+		"rename": func(t *testing.T, repository string) {
+			git(t, repository, "mv", "kernel.txt", "renamed-kernel.txt")
+		},
+	}
+	for name, change := range tests {
+		name, change := name, change
+		t.Run(name, func(t *testing.T) {
+			repository, baselineSHA := fixtureRepository(t)
+			change(t, repository)
+			git(t, repository, "commit", "-m", name)
+			candidateSHA := strings.TrimSpace(git(t, repository, "rev-parse", "HEAD"))
+			workspace := gitworkspace.Workspace{Repository: repository, Root: filepath.Join(t.TempDir(), "worktrees")}
+			err := workspace.VerifyCandidateChangePolicy(ctx, repository, baselineSHA, candidateSHA, policy)
+			if name == "implementation" && err != nil {
+				t.Fatalf("implementation change rejected: %v", err)
+			}
+			if name != "implementation" && err == nil {
+				t.Fatal("protected change accepted")
+			}
+		})
 	}
 }
 

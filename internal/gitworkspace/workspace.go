@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/reyoung/pika-go/internal/candidatepolicy"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
 
@@ -289,6 +290,39 @@ func (w Workspace) VerifyCandidate(ctx context.Context, repository, baseSHA, can
 	status, err := w.git(ctx, root, "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil || strings.TrimSpace(status) != "" {
 		return errors.New("candidate worktree is not clean")
+	}
+	return nil
+}
+
+// VerifyCandidateChangePolicy rejects every changed path that is protected by
+// the Baseline's canonical validation policy. --no-renames makes a rename
+// observable as a deletion and an addition.
+func (w Workspace) VerifyCandidateChangePolicy(ctx context.Context, repository, baseSHA, candidateSHA string, policy *candidatepolicy.Policy) error {
+	if policy == nil {
+		return nil
+	}
+	if err := w.validate(); err != nil {
+		return err
+	}
+	if err := validateSHA(baseSHA); err != nil {
+		return fmt.Errorf("candidate base: %w", err)
+	}
+	if err := validateSHA(candidateSHA); err != nil {
+		return fmt.Errorf("candidate HEAD: %w", err)
+	}
+	output, err := w.gitBytes(ctx, repository, nil, "diff", "--name-status", "--no-renames", "-z", baseSHA+".."+candidateSHA, "--")
+	if err != nil {
+		return fmt.Errorf("inspect Candidate changes: %w", err)
+	}
+	parts := bytes.Split(output, []byte{0})
+	for index := 0; index+1 < len(parts); index += 2 {
+		if len(parts[index]) == 0 {
+			continue
+		}
+		path := filepath.ToSlash(string(parts[index+1]))
+		if policy.Protects(path) {
+			return fmt.Errorf("Candidate changes protected validation path %q", path)
+		}
 	}
 	return nil
 }

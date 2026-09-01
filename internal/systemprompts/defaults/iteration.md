@@ -22,6 +22,8 @@
 - stale/back-off merge 若有冲突，当前 worktree 会保留 `MERGE_HEAD` 和冲突文件供本轮处理；先检查 `git status`，结合当前 Best 与上一 Round 意图解决全部冲突，调用 `commit_changes` 时显式列出这次 merge 中全部 staged/unmerged 路径，由该操作创建 merge commit；
 - rejected Attempt 只证明那次实现或测量失败，不代表方向永久无效，但不得无解释地复制旧失败方案。
 
+Candidate 实现通常可以修改任意实现和构建路径，包括 `include/`、`mk/`、`taskv2/` 等；不要发明或执行 implementation allowlist。只有 Baseline `candidate_change_policy` 中精确列出的冻结验证资产受到机械保护，历史 `optimization_contract.allowed_candidate_surface` 一律忽略。提交前确认 Candidate diff 没有修改、删除或重命名这些资产。
+
 用户可以直接在当前 Herdr pane 中 steering；在不违反冻结 Baseline 和 Work 边界的前提下应用新要求。若本 Session 丢失，Pika 会新建 Session，并通过领域状态与 Conversation Journal 恢复；hypothesis、关键命令、结果和未完成现场应保持可恢复。
 
 ## 开发与验证

@@ -43,6 +43,13 @@ func TestRoleSystemPromptsAreEmbeddedAndMatchCurrentContracts(t *testing.T) {
 			if test.logicalName == "integration" && !strings.Contains(prompt, "apply_best_update") {
 				t.Fatalf("Integration prompt omits scoped Best application MCP: %q", prompt)
 			}
+			if test.logicalName == "baseline" || test.logicalName == "baseline-verify" || test.logicalName == "iteration" || test.logicalName == "integration" {
+				for _, requirement := range []string{"candidate_change_policy", "allowed_candidate_surface", "implementation allowlist", "冻结验证资产"} {
+					if !strings.Contains(prompt, requirement) {
+						t.Fatalf("prompt omits candidate change policy requirement %q: %q", requirement, prompt)
+					}
+				}
+			}
 			if test.logicalName == "integration" {
 				for _, requirement := range []string{"每次 warm-up 和 measured invocation", "checked invocation 数", "NaN 或其他 sentinel", "接近或超过一个数量级", "首次调用、capture/compile/setup", `"performance_claim"`, `"independent_retest"`, `"max_case_speedup"`} {
 					if !strings.Contains(prompt, requirement) {

@@ -1355,7 +1355,10 @@ func initializeFixtureRepository(t *testing.T, repository string) {
 	if err := os.WriteFile(filepath.Join(repository, "kernel.txt"), []byte("baseline\n"), 0o600); err != nil {
 		t.Fatalf("write baseline fixture: %v", err)
 	}
-	for _, args := range [][]string{{"-C", repository, "add", "kernel.txt"}, {"-C", repository, "commit", "-m", "baseline"}} {
+	if err := os.WriteFile(filepath.Join(repository, "target.txt"), []byte("validation baseline\n"), 0o600); err != nil {
+		t.Fatalf("write validation fixture: %v", err)
+	}
+	for _, args := range [][]string{{"-C", repository, "add", "kernel.txt", "target.txt"}, {"-C", repository, "commit", "-m", "baseline"}} {
 		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, output)
 		}

@@ -8,6 +8,8 @@
 
 当前目录是 Candidate worktree。冻结的 Target、Oracle、Full Case Set、harness 和测量协议不可修改。不得复用少量 Iteration 结果代替全量 Integration，不得伪造、插值或删掉不利样本。
 
+路径政策只来自 Baseline 的 canonical `candidate_change_policy`；不要发明或执行 implementation allowlist，历史 `optimization_contract.allowed_candidate_surface` 一律忽略。Integration 不得仅因实现路径或文件名而 Reject；应依据实际冻结验证资产（frozen validation asset）的修改、删除或重命名以及真实 correctness/benchmark 语义变化作出判断。实现代码（包括 `include/`、`mk/`、`taskv2/`）通常允许变化。
+
 用户可以直接在当前 Herdr pane 中 steering，但新消息不能绕过 FIFO、全量验证或 Git Intent。若本 Session 丢失，Pika 会新建 Session，并根据领域状态、Conversation Journal、已有 Intent 和 Git postcondition 恢复；不要因为旧进程消失就假设 mutation 未发生。
 
 ## 全量验证与判断

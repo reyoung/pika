@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/reyoung/pika-go/internal/benchmarkintegrity"
+	"github.com/reyoung/pika-go/internal/candidatepolicy"
 	"github.com/reyoung/pika-go/internal/evidence"
 	"github.com/reyoung/pika-go/internal/gitworkspace"
 	"github.com/reyoung/pika-go/internal/symphony"
@@ -112,6 +113,13 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			return Invocation{}, err
 		}
 		workspace := gitworkspace.Workspace{Repository: repository, Root: a.WorktreeRoot, Namespace: a.BranchNamespace}
+		if work.CandidateChangePolicy != nil && grant.Role == symphony.RoleIteration {
+			for _, path := range input.Paths {
+				if work.CandidateChangePolicy.Protects(filepath.ToSlash(filepath.Clean(path))) {
+					return Invocation{}, fmt.Errorf("commit path %q is protected by the Baseline candidate change policy", path)
+				}
+			}
+		}
 		result, err := workspace.CommitChanges(ctx, grant.WorkID, input.IdempotencyKey, input.Message, input.Paths)
 		if err != nil {
 			return Invocation{}, err
@@ -175,12 +183,21 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			return Invocation{}, err
 		}
 		workspace := a.gitWorkspace(work)
+		policy, present, err := candidatepolicy.Parse(input.Definition)
+		if err != nil {
+			return Invocation{}, fmt.Errorf("invalid candidate change policy: %w", err)
+		}
 		snapshot, err := workspace.SourceSnapshot(ctx)
 		if err != nil {
 			return Invocation{}, err
 		}
 		if !snapshot.Clean {
 			return Invocation{}, fmt.Errorf("repository must be clean before Baseline submission: %s", snapshot.Status)
+		}
+		if present {
+			if err := policy.ValidateRepositoryPaths(ctx, workspace.Repository, snapshot.CommitSHA); err != nil {
+				return Invocation{}, err
+			}
 		}
 		command := symphony.SubmitBaselineDefinition{
 			Meta: symphony.CommandMeta{RequestID: input.IdempotencyKey}, WorkID: grant.WorkID, Definition: input.Definition,
@@ -310,6 +327,9 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			if err := workspace.VerifyCandidate(ctx, repository, work.BaseSHA, input.CandidateSHA); err != nil {
 				return Invocation{}, err
 			}
+			if err := workspace.VerifyCandidateChangePolicy(ctx, repository, work.BaseSHA, input.CandidateSHA, work.CandidateChangePolicy); err != nil {
+				return Invocation{}, err
+			}
 		}
 		command := symphony.FinishIteration{Meta: symphony.CommandMeta{RequestID: input.IdempotencyKey}, WorkID: grant.WorkID,
 			Outcome: input.Outcome, CandidateSHA: input.CandidateSHA, Summary: input.Summary, Evidence: input.Evidence}
@@ -335,6 +355,14 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if input.IdempotencyKey == "" {
 			return Invocation{}, errors.New("idempotency_key is required")
 		}
+		work, err := a.Store.RuntimeWork(ctx, grant.WorkID)
+		if err != nil {
+			return Invocation{}, err
+		}
+		workspace := a.gitWorkspace(work)
+		if err := workspace.VerifyCandidateChangePolicy(ctx, workspace.Repository, work.ExpectedBestSHA, work.CandidateSHA, work.CandidateChangePolicy); err != nil {
+			return Invocation{}, err
+		}
 		receipt, err := a.Store.Apply(ctx, symphony.PrepareBestUpdate{Meta: symphony.CommandMeta{RequestID: input.IdempotencyKey}, WorkID: grant.WorkID, Validation: input.Validation})
 		if err != nil {
 			return Invocation{}, err
@@ -347,11 +375,11 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if err := json.Unmarshal(receipt.Result, &result); err != nil {
 			return Invocation{}, fmt.Errorf("decode prepared Git intent: %w", err)
 		}
-		work, err := a.Store.RuntimeWork(ctx, grant.WorkID)
+		work, err = a.Store.RuntimeWork(ctx, grant.WorkID)
 		if err != nil {
 			return Invocation{}, err
 		}
-		workspace := a.gitWorkspace(work)
+		workspace = a.gitWorkspace(work)
 		intent, err := workspace.PrepareBestUpdate(ctx, result.IntentID, result.ExpectedBestSHA, result.CandidateSHA)
 		if err != nil {
 			return Invocation{}, err
@@ -563,7 +591,7 @@ func toolByName(name string) (Tool, bool) {
 	}, "case_id", "kind", "summary", "evidence")
 	tools := map[string]Tool{
 		"submit_baseline_definition": {
-			Name: "submit_baseline_definition", Description: "Submit the immutable Baseline definition and complete this Work. The daemon requires benchmark_integrity schema_version 1.",
+			Name: "submit_baseline_definition", Description: "Submit the immutable Baseline definition and complete this Work. The daemon requires candidate_change_policy schema_version 1 and benchmark_integrity schema_version 1; implementation allowlists are not authoritative.",
 			InputSchema: object(map[string]any{
 				"idempotency_key": map[string]any{"type": "string", "minLength": 1},
 				"definition":      benchmarkintegrity.DefinitionSchema(),

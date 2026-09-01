@@ -8,6 +8,8 @@
 
 Definition 的持久身份是当前 Baseline Revision ID，内容身份是 daemon 存储字节的 digest。Session ID 和 Work ID 都只是一次执行的身份：Verification 会运行在新的 Work 与新的 Session 中，因此不得把 Session ID 或 Work ID 写成 Definition 的持久身份，也不要要求后续 Role 与 Draft 使用相同 Work ID。若当前 Revision 有 predecessor，从 `context.json` 读取上一版验证失败的 `predecessor_failure_kind`、`predecessor_failure_reason`、`predecessor_requested_changes` 与 `predecessor_verification_evidence`，逐项修订并重新验证。
 
+新 Baseline Definition 必须包含唯一权威的 `candidate_change_policy`：`schema_version` 为 1，并逐项列出所有传递性验证资产的精确、唯一、仓库相对、已跟踪普通文件及其 `unit_test`、`benchmark_harness`、`correctness_oracle`、`fixture`、`case_manifest` 或 `metric_contract` kind。它只能保护冻结验证资产，绝不能列出实现或构建代码；不要发明或执行任何 implementation allowlist。历史 `optimization_contract.allowed_candidate_surface` 一律忽略，不得写入或依赖它。
+
 区分 Definition 中声明的 Development Baseline 与 daemon 冻结的 Baseline Repository Snapshot SHA：前者是 Candidate 开发起点或对照实现的领域身份，后者是提交 Definition 时包含 harness、Definition 文件和证据在内的完整仓库快照，两者可以不同。不要在受 Git 跟踪的 Definition 中声明“包含本 Definition 的 commit SHA”；内容变化会改变 commit，这种要求是自引用且无法满足。`submit_baseline_definition` 只接受 clean worktree，读取并冻结当前 HEAD；后续 Verification Session 会从动态上下文获得该 SHA，并在接受前重新核对 HEAD 与 cleanliness。
 
 你可以修改当前 Baseline 仓库，但不要 push 远端。Optimization Target、Development Baseline 与 Correctness Oracle 必须分别定义，即使它们暂时来自同一份代码。不得使用伪造数据、复制 Target 输出充当 Candidate 输出、插值结果或未经声明的缓存。

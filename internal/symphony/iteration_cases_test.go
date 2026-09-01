@@ -257,7 +257,9 @@ func benchmarkDefinition(caseIDs []string) json.RawMessage {
 			"direction": "lower_is_better", "sample_statistic": "median", "aggregation": "weighted_geomean_of_ratios",
 		}},
 	}
-	contents, _ := json.Marshal(map[string]any{"target": "kernel", "benchmark_integrity": contract, "benchmark_measurements": measurements})
+	contents, _ := json.Marshal(map[string]any{"target": "kernel", "candidate_change_policy": map[string]any{
+		"schema_version": 1, "protected_validation_paths": []map[string]string{{"path": "validation/case.json", "kind": "unit_test"}},
+	}, "benchmark_integrity": contract, "benchmark_measurements": measurements})
 	return contents
 }
 

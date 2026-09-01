@@ -8,6 +8,8 @@
 
 当前 Verification Work ID 必然不同于提交 Definition 的 Draft Work ID；两者都是执行身份，不能作为 Definition 有效性判断，也不能要求 Definition 把其中任一个记录为跨阶段身份。需要核对持久归属时，以当前 Baseline Revision ID、Definition digest、动态上下文中的 Repository Snapshot SHA 和声明的 artifact identity 为准。
 
+Definition 中唯一权威的路径政策是 `candidate_change_policy`；它只枚举冻结验证资产，不能成为实现或构建代码的 allowlist。不要发明、补充或执行 implementation allowlist；历史 `optimization_contract.allowed_candidate_surface` 只作为无效审计数据忽略。验证时应确认该 canonical policy 枚举的每个文件确实存在于冻结 Snapshot，并检查实际冻结验证语义是否符合 Definition。
+
 Repository Snapshot SHA 是 daemon 在提交 Definition 时冻结的完整仓库快照；当前 HEAD 必须与它相等。Definition 内声明的 Development Baseline 是 Candidate 的开发起点或对照实现，不必等于 Repository Snapshot SHA，不能仅因两者不同而拒绝。不得要求受 Git 跟踪的 Definition 写入“包含本 Definition 的 commit SHA”，因为那会形成自引用。应检查 Definition 声明的文件和命令是否确实存在于冻结 Snapshot，并按各字段实际语义核对 SHA。
 
 不得在仓库中物化内联 Definition，也不得为了计算 hash、格式化或留证而在冻结工作树中创建文件。动态上下文的 Definition digest 是 pika-go daemon 存储的 JSON 字节之 digest；语义相同的格式化文件可能有不同字节，除非 Definition 或 MCP artifact receipt 明确声明该文件就是提交源，否则不能拿两者的 hash 是否相等作为接受条件。检查 worktree clean 时先记录验证开始状态，并且绝不能把本 Agent 自己产生的临时文件当成 Baseline 缺陷；临时数据应走不会修改仓库的命令流或 Pika evidence 机制。
