@@ -34,6 +34,14 @@ func EvidenceSchema() map[string]any {
 	}
 }
 
+// StrictEvidenceSchema exposes the versioned evidence object when it is
+// nested inside another strict MCP contract (for example an Experiment).
+func StrictEvidenceSchema() map[string]any { return evidenceContractSchema() }
+
+// StrictMeasurementComparisonSchema exposes benchmark_measurements comparison
+// schema when nested inside strict contracts such as Iteration Experiment v1.
+func StrictMeasurementComparisonSchema() map[string]any { return measurementComparisonSchema() }
+
 // IntegrationSchema returns the Integration validation schema, including the
 // performance claim whose >=10x branch is enforced by ValidateIntegration.
 func IntegrationSchema() map[string]any {
@@ -67,11 +75,21 @@ func measurementDefinitionSchema() map[string]any {
 		"sample_statistic": map[string]any{"type": "string", "minLength": 1},
 		"aggregation":      map[string]any{"enum": []string{WeightedGeomeanOfRatios, RatioOfWeightedArithmeticMeans}},
 	}, "id", "label", "unit", "role", "direction", "sample_statistic", "aggregation")
-	return strictObject(map[string]any{
+	gateMetricSchema := strictObject(map[string]any{
+		"metric_id":                        map[string]any{"type": "string", "minLength": 1},
+		"minimum_aggregate_speedup":        map[string]any{"type": "number", "exclusiveMinimum": 0},
+		"maximum_case_regression_fraction": map[string]any{"type": "number", "minimum": 0, "exclusiveMaximum": 1},
+	}, "metric_id", "minimum_aggregate_speedup", "maximum_case_regression_fraction")
+	gateSchema := strictObject(map[string]any{
 		"schema_version": map[string]any{"type": "integer", "const": MeasurementSchemaVersion},
-		"cases":          map[string]any{"type": "array", "minItems": 1, "items": caseSchema},
-		"metrics":        map[string]any{"type": "array", "minItems": 1, "items": metricSchema},
-	}, "schema_version", "cases", "metrics")
+		"metrics":        map[string]any{"type": "array", "minItems": 1, "items": gateMetricSchema},
+	}, "schema_version", "metrics")
+	return strictObject(map[string]any{
+		"schema_version":             map[string]any{"type": "integer", "const": MeasurementSchemaVersion},
+		"cases":                      map[string]any{"type": "array", "minItems": 1, "items": caseSchema},
+		"metrics":                    map[string]any{"type": "array", "minItems": 1, "items": metricSchema},
+		"iteration_performance_gate": gateSchema,
+	}, "schema_version", "cases", "metrics", "iteration_performance_gate")
 }
 
 func measurementBaselineSchema() map[string]any {

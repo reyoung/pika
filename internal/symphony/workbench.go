@@ -44,19 +44,20 @@ func (e *Engine) WorkbenchRecords(ctx context.Context) (WorkbenchRecords, error)
 		return records, err
 	}
 
-	setRows, err := e.db.QueryContext(ctx, `SELECT id, baseline_revision_id, work_id, integration_id, best_sequence, kind, created_at FROM benchmark_measurement_sets ORDER BY rowid`)
+	setRows, err := e.db.QueryContext(ctx, `SELECT id, baseline_revision_id, work_id, integration_id, experiment_id, receipt_id, scope_best_sha, best_sequence, kind, created_at FROM benchmark_measurement_sets ORDER BY rowid`)
 	if err != nil {
 		return records, err
 	}
 	for setRows.Next() {
 		var item BenchmarkMeasurementSetView
-		var workID, integrationID sql.NullString
+		var workID, integrationID, experimentID, receiptID, scopeBestSHA sql.NullString
 		var bestSequence sql.NullInt64
-		if err := setRows.Scan(&item.ID, &item.BaselineRevisionID, &workID, &integrationID, &bestSequence, &item.Kind, &item.CreatedAt); err != nil {
+		if err := setRows.Scan(&item.ID, &item.BaselineRevisionID, &workID, &integrationID, &experimentID, &receiptID, &scopeBestSHA, &bestSequence, &item.Kind, &item.CreatedAt); err != nil {
 			_ = setRows.Close()
 			return records, err
 		}
 		item.WorkID, item.IntegrationID = workID.String, integrationID.String
+		item.ExperimentID, item.ReceiptID, item.ScopeBestSHA = experimentID.String, receiptID.String, scopeBestSHA.String
 		if bestSequence.Valid {
 			value := bestSequence.Int64
 			item.BestSequence = &value
@@ -83,7 +84,7 @@ func (e *Engine) WorkbenchRecords(ctx context.Context) (WorkbenchRecords, error)
 		return records, err
 	}
 
-	comparisonRows, err := e.db.QueryContext(ctx, `SELECT integration_id, case_id, metric_id, reference_value, candidate_value, speedup,
+	comparisonRows, err := e.db.QueryContext(ctx, `SELECT integration_id, experiment_id, receipt_id, scope_best_sha, case_id, metric_id, reference_value, candidate_value, speedup,
 		regression, regression_fraction, aggregate_speedup, max_case_speedup, max_case_id FROM benchmark_derived_comparisons ORDER BY integration_id, metric_id, case_id`)
 	if err != nil {
 		return records, err
@@ -92,13 +93,14 @@ func (e *Engine) WorkbenchRecords(ctx context.Context) (WorkbenchRecords, error)
 		var item BenchmarkComparisonView
 		var reference, candidate, aggregate, maxCase sql.NullFloat64
 		var regression int
-		var maxCaseID sql.NullString
-		if err := comparisonRows.Scan(&item.IntegrationID, &item.CaseID, &item.MetricID, &reference, &candidate, &item.Speedup,
+		var experimentID, receiptID, scopeBestSHA, maxCaseID sql.NullString
+		if err := comparisonRows.Scan(&item.IntegrationID, &experimentID, &receiptID, &scopeBestSHA, &item.CaseID, &item.MetricID, &reference, &candidate, &item.Speedup,
 			&regression, &item.RegressionFraction, &aggregate, &maxCase, &maxCaseID); err != nil {
 			_ = comparisonRows.Close()
 			return records, err
 		}
 		item.Regression = regression != 0
+		item.ExperimentID, item.ReceiptID, item.ScopeBestSHA = experimentID.String, receiptID.String, scopeBestSHA.String
 		if reference.Valid {
 			value := reference.Float64
 			item.ReferenceValue = &value
@@ -121,6 +123,45 @@ func (e *Engine) WorkbenchRecords(ctx context.Context) (WorkbenchRecords, error)
 	if err := comparisonRows.Close(); err != nil {
 		return records, err
 	}
+	experimentComparisonRows, err := e.db.QueryContext(ctx, `SELECT experiment_id, receipt_id, scope_best_sha, case_id, metric_id, reference_value, candidate_value, speedup,
+		regression, regression_fraction, aggregate_speedup, max_case_speedup, max_case_id
+		FROM benchmark_experiment_derived_comparisons ORDER BY experiment_id, metric_id, case_id`)
+	if err != nil {
+		return records, err
+	}
+	for experimentComparisonRows.Next() {
+		var item BenchmarkComparisonView
+		var reference, candidate, aggregate, maxCase sql.NullFloat64
+		var maxCaseID sql.NullString
+		var regression int
+		if err := experimentComparisonRows.Scan(&item.ExperimentID, &item.ReceiptID, &item.ScopeBestSHA, &item.CaseID, &item.MetricID,
+			&reference, &candidate, &item.Speedup, &regression, &item.RegressionFraction, &aggregate, &maxCase, &maxCaseID); err != nil {
+			_ = experimentComparisonRows.Close()
+			return records, err
+		}
+		item.Regression = regression != 0
+		if reference.Valid {
+			value := reference.Float64
+			item.ReferenceValue = &value
+		}
+		if candidate.Valid {
+			value := candidate.Float64
+			item.CandidateValue = &value
+		}
+		if aggregate.Valid {
+			value := aggregate.Float64
+			item.AggregateSpeedup = &value
+		}
+		if maxCase.Valid {
+			value := maxCase.Float64
+			item.MaxCaseSpeedup = &value
+		}
+		item.MaxCaseID = maxCaseID.String
+		records.Comparisons = append(records.Comparisons, item)
+	}
+	if err := experimentComparisonRows.Close(); err != nil {
+		return records, err
+	}
 
 	artifactRows, err := e.db.QueryContext(ctx, `SELECT id, work_id, receipt_id, relative_path, byte_size, content_sha256, contract_version FROM evidence_artifacts ORDER BY created_at, id`)
 	if err != nil {
@@ -139,7 +180,8 @@ func (e *Engine) WorkbenchRecords(ctx context.Context) (WorkbenchRecords, error)
 	if err := artifactRows.Close(); err != nil {
 		return records, err
 	}
-	if err := e.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM benchmark_measurement_sets) + (SELECT COUNT(*) FROM benchmark_case_values) + (SELECT COUNT(*) FROM benchmark_derived_comparisons)`).Scan(&records.MeasurementSequence); err != nil {
+	if err := e.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM benchmark_measurement_sets) + (SELECT COUNT(*) FROM benchmark_case_values) +
+		(SELECT COUNT(*) FROM benchmark_derived_comparisons) + (SELECT COUNT(*) FROM benchmark_experiment_derived_comparisons)`).Scan(&records.MeasurementSequence); err != nil {
 		return records, err
 	}
 	return records, nil

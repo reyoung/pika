@@ -76,7 +76,7 @@ func (adapter CursorAdapter) Probe(ctx context.Context, request ProbeRequest) (C
 		}
 	}
 	versionCtx, cancelVersion := context.WithTimeout(ctx, cursorVersionProbeTimeout)
-	output, err := exec.CommandContext(versionCtx, executable, "--version").CombinedOutput()
+	output, err := providerCombinedOutput(versionCtx, executable, "--version")
 	versionCtxErr := versionCtx.Err()
 	cancelVersion()
 	if err != nil {
@@ -90,7 +90,7 @@ func (adapter CursorAdapter) Probe(ctx context.Context, request ProbeRequest) (C
 		return Capabilities{}, fmt.Errorf("unsupported Cursor version %q; require %s", version, CursorCandidateVersion)
 	}
 	authenticationCtx, cancelAuthentication := context.WithTimeout(ctx, cursorAuthenticationProbeTimeout)
-	output, err = exec.CommandContext(authenticationCtx, executable, "status").CombinedOutput()
+	output, err = providerCombinedOutput(authenticationCtx, executable, "status")
 	authenticationCtxErr := authenticationCtx.Err()
 	cancelAuthentication()
 	if err != nil {
@@ -108,10 +108,92 @@ func (adapter CursorAdapter) Probe(ctx context.Context, request ProbeRequest) (C
 	if !strings.Contains(status, "Logged in") || strings.Contains(status, "Not logged in") {
 		return Capabilities{}, fmt.Errorf("probe Cursor authentication: %s", status)
 	}
+	skillInjection := false
+	if request.RequireSkillInjection {
+		if err := probeCursorPluginDirectory(ctx, executable); err != nil {
+			return Capabilities{}, err
+		}
+		skillInjection = true
+	}
 	return Capabilities{
 		Kind: "cursor", Executable: executable, Version: version, Authenticated: true,
-		Journal: true, TurnStop: true, FollowUp: true, FullOutput: true, FreshSession: true, Interrupt: true, Compatible: true,
+		Journal: true, TurnStop: true, FollowUp: true, FullOutput: true, FreshSession: true, Interrupt: true, SkillInjection: skillInjection, Compatible: true,
 	}, nil
+}
+
+func probeCursorPluginDirectory(ctx context.Context, executable string) error {
+	root, err := os.MkdirTemp("", "pika-cursor-plugin-")
+	if err != nil {
+		return fmt.Errorf("probe Cursor --plugin-dir: %w", err)
+	}
+	defer os.RemoveAll(root)
+	manifest := []byte(`{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"pika-kda-probe","description":"Pika non-model plugin discovery probe","version":"1.0.0","author":{"name":"pika-go"}}`)
+	if err := os.WriteFile(filepath.Join(root, "plugin.json"), manifest, 0o600); err != nil {
+		return fmt.Errorf("probe Cursor plugin manifest: %w", err)
+	}
+	for _, name := range []string{"KernelWiki", "ncu-report-skill"} {
+		path := filepath.Join(root, "skills", name)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("---\nname: "+name+"\ndescription: Pika discovery probe\n---\n"), 0o600); err != nil {
+			return err
+		}
+	}
+	if err := validateCursorPluginDiscovery(root); err != nil {
+		return fmt.Errorf("probe Cursor generated plugin: %w", err)
+	}
+	output, err := providerCombinedOutput(ctx, executable, "--plugin-dir", root, "--help")
+	if err != nil {
+		return fmt.Errorf("probe Cursor --plugin-dir manifest acceptance: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if !strings.Contains(string(output), "--plugin-dir") {
+		return errors.New("probe Cursor --plugin-dir: help output does not advertise local plugin support")
+	}
+	return nil
+}
+
+func validateCursorPluginDiscovery(root string) error {
+	contents, err := os.ReadFile(filepath.Join(root, "plugin.json"))
+	if err != nil {
+		return err
+	}
+	var manifest struct {
+		Schema      string `json:"$schema"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Version     string `json:"version"`
+		Author      struct {
+			Name string `json:"name"`
+		} `json:"author"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(contents)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return fmt.Errorf("invalid plugin.json: %w", err)
+	}
+	if manifest.Schema != "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json" ||
+		manifest.Name == "" || manifest.Description == "" || manifest.Version == "" || manifest.Author.Name == "" {
+		return errors.New("plugin.json identity is incomplete")
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "skills"))
+	if err != nil {
+		return err
+	}
+	want := map[string]bool{"KernelWiki": true, "ncu-report-skill": true}
+	if len(entries) != len(want) {
+		return errors.New("plugin must expose exactly two skill directories")
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !want[entry.Name()] {
+			return fmt.Errorf("unexpected plugin skill %s", entry.Name())
+		}
+		info, err := os.Stat(filepath.Join(root, "skills", entry.Name(), "SKILL.md"))
+		if err != nil || info.IsDir() {
+			return fmt.Errorf("plugin skill %s has no SKILL.md", entry.Name())
+		}
+	}
+	return nil
 }
 
 func (adapter CursorAdapter) PrepareSession(_ context.Context, activation SessionActivation) (Launch, error) {
@@ -120,6 +202,9 @@ func (adapter CursorAdapter) PrepareSession(_ context.Context, activation Sessio
 	}
 	if len(activation.SystemPrompt) == 0 {
 		return Launch{}, errors.New("frozen System Prompt is required")
+	}
+	if err := validateFrozenSkills(activation.FrozenSkills); err != nil {
+		return Launch{}, err
 	}
 	if activation.AgentSessionID == "" || filepath.Base(activation.AgentSessionID) != activation.AgentSessionID || activation.AgentSessionID == "." {
 		return Launch{}, errors.New("safe Pika Agent Session identity is required")
@@ -142,9 +227,13 @@ func (adapter CursorAdapter) PrepareSession(_ context.Context, activation Sessio
 			return Launch{}, fmt.Errorf("protect Cursor Session directory: %w", err)
 		}
 	}
+	arguments := append([]string{}, activation.Configuration.Args...)
+	if activation.FrozenSkills != nil {
+		arguments = append(arguments, "--plugin-dir", activation.FrozenSkills.RootPath)
+	}
 	files := map[string][]byte{
 		filepath.Join(sessionDir, "system-prompt.md"): activation.SystemPrompt,
-		filepath.Join(sessionDir, "cursor.args"):      []byte(strings.Join(activation.Configuration.Args, "\n") + cursorArgsTerminator(activation.Configuration.Args)),
+		filepath.Join(sessionDir, "cursor.args"):      []byte(strings.Join(arguments, "\n") + cursorArgsTerminator(arguments)),
 	}
 	for path, contents := range files {
 		if err := writeProviderFile(path, contents, 0o600); err != nil {

@@ -115,8 +115,9 @@ the next package relies on it. Package numbering is not an estimate.
 - Add Round current checkpoint and ordered Experiment persistence.
 - Implement `record_iteration_experiment` and its discoverable strict schema.
 - Reuse benchmark-integrity validation for kept Experiment exact Case coverage.
-- Verify performance Case coverage, Baseline gate claims, artifact receipts,
-  Git ancestry, current HEAD, clean worktree, and permitted committed paths.
+- Accept raw reference/candidate measurements, recompute direction, ratios,
+  aggregates, and regression limits from the frozen gate, and verify artifact
+  receipts, Git ancestry, current HEAD, and permitted committed paths.
 - Make the transaction advance the checkpoint only for `kept`.
 - Require a flow-v2 Candidate to reference its latest kept Experiment; preserve
   the flow-v1 terminal interface.
@@ -164,8 +165,9 @@ the next package relies on it. Package numbering is not an estimate.
 
 ### Work
 
-- Add flow, skill snapshot, Diagnosis, Experiment, checkpoint, and knowledge
-  summaries to human and JSON status.
+- Add bounded flow, skill snapshot, Diagnosis, Experiment, checkpoint, and
+  knowledge identity/state/count projections to human and JSON status; keep
+  free text, paths, reports, and evidence out of status.
 - Add Diagnosis to pause/resume, cancel-work, graceful drain, recovery, pane
   naming, and instruction editing.
 - Extend backup/restore and Workspace validation to cover toolkit provenance and
@@ -176,8 +178,8 @@ the next package relies on it. Package numbering is not an estimate.
 
 ### Completion criteria
 
-- Status reveals exact skill commits and all new lifecycle states without
-  printing evidence contents.
+- Status reveals exact skill commits and lifecycle states without repository
+  paths, summaries, failure text, reports, or evidence contents.
 - Pause/resume and daemon crash tests preserve Diagnosis and Experiment
   identity.
 - Backup validation proves SQLite and provenance refer to a present, verified

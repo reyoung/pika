@@ -2,6 +2,7 @@ package gitworkspace_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,7 +11,26 @@ import (
 
 	"github.com/reyoung/pika-go/internal/candidatepolicy"
 	"github.com/reyoung/pika-go/internal/gitworkspace"
+	"github.com/reyoung/pika-go/internal/symphony"
 )
+
+type runtimeStateRecorder struct {
+	checkpoint string
+	calls      int
+}
+
+func (r *runtimeStateRecorder) UpsertGitWorktree(context.Context, symphony.GitWorktreeRecord) error {
+	return nil
+}
+
+func (r *runtimeStateRecorder) InitializeIterationRoundCheckpoint(_ context.Context, _ string, _ int64, expected, prepared string) (string, error) {
+	if r.checkpoint != expected {
+		return "", fmt.Errorf("checkpoint = %s, expected %s", r.checkpoint, expected)
+	}
+	r.checkpoint = prepared
+	r.calls++
+	return prepared, nil
+}
 
 func TestBestAndAttemptWorktreesNeverMutateUserBranch(t *testing.T) {
 	t.Parallel()
@@ -164,6 +184,104 @@ func TestRefreshCreatesNewRoundAndMergesBestWithoutRebase(t *testing.T) {
 	}
 }
 
+func TestRuntimePreparationRetryDoesNotAdoptAgentCommitAsRoundCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	repository, baselineSHA := fixtureRepository(t)
+	root := filepath.Join(t.TempDir(), "worktrees")
+	workspace := gitworkspace.Workspace{Repository: repository, Root: root}
+	if _, err := workspace.EnsureBest(ctx, baselineSHA); err != nil {
+		t.Fatal(err)
+	}
+	old, err := workspace.CreateAttempt(ctx, "retry-stale", 1, baselineSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(old.Repository, "candidate.txt"), "candidate\n")
+	git(t, old.Repository, "add", "candidate.txt")
+	git(t, old.Repository, "commit", "-m", "candidate")
+	candidateSHA := strings.TrimSpace(git(t, old.Repository, "rev-parse", "HEAD"))
+
+	winner, err := workspace.CreateAttempt(ctx, "retry-winner", 1, baselineSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(winner.Repository, "winner.txt"), "winner\n")
+	git(t, winner.Repository, "add", "winner.txt")
+	git(t, winner.Repository, "commit", "-m", "winner")
+	winnerSHA := strings.TrimSpace(git(t, winner.Repository, "rev-parse", "HEAD"))
+	intent, err := workspace.PrepareBestUpdate(ctx, "retry-winner-intent", baselineSHA, winnerSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bestSHA, err := workspace.ApplyBestUpdate(ctx, intent, "accept retry winner")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := &runtimeStateRecorder{checkpoint: bestSHA}
+	preparer := gitworkspace.RuntimePreparer{Repository: repository, Root: root, Recorder: recorder, CheckpointInitializer: recorder}
+	work := symphony.RuntimeWork{
+		Work:          symphony.WorkView{Role: symphony.RoleIteration, AttemptID: "retry-stale", IterationRound: 2},
+		IterationKind: "stale_best", BaseSHA: bestSHA, CandidateSHA: candidateSHA, CurrentCheckpointSHA: bestSHA,
+	}
+	prepared, err := preparer.PrepareWork(ctx, work)
+	if err != nil {
+		t.Fatalf("initial stale preparation: %v", err)
+	}
+	setupSHA := prepared.CurrentCheckpointSHA
+	if recorder.calls != 1 || setupSHA == "" || setupSHA == bestSHA {
+		t.Fatalf("setup checkpoint=%s calls=%d", setupSHA, recorder.calls)
+	}
+
+	writeFile(t, filepath.Join(prepared.Repository, "agent.txt"), "unrecorded agent change\n")
+	git(t, prepared.Repository, "add", "agent.txt")
+	git(t, prepared.Repository, "commit", "-m", "agent commit before Experiment")
+	agentSHA := strings.TrimSpace(git(t, prepared.Repository, "rev-parse", "HEAD"))
+	work.CurrentCheckpointSHA = setupSHA
+	replayed, err := preparer.PrepareWork(ctx, work)
+	if err != nil {
+		t.Fatalf("retry stale preparation: %v", err)
+	}
+	if recorder.calls != 1 || recorder.checkpoint != setupSHA || replayed.CurrentCheckpointSHA != setupSHA {
+		t.Fatalf("retry adopted Agent commit: recorder=%+v runtime=%s agent=%s", recorder, replayed.CurrentCheckpointSHA, agentSHA)
+	}
+	if got := strings.TrimSpace(git(t, replayed.Repository, "rev-parse", "HEAD")); got != agentSHA {
+		t.Fatalf("retry unexpectedly rewrote Agent worktree HEAD=%s want=%s", got, agentSHA)
+	}
+}
+
+func TestRefreshCreatesExplicitSetupMergeWhenBestIsAlreadyAncestor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repository, bestSHA := fixtureRepository(t)
+	workspace := gitworkspace.Workspace{Repository: repository, Root: filepath.Join(t.TempDir(), "worktrees")}
+	if _, err := workspace.EnsureBest(ctx, bestSHA); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := workspace.CreateAttempt(ctx, "back-off-attempt", 1, bestSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(prior.Repository, "candidate.txt"), "candidate\n")
+	git(t, prior.Repository, "add", "candidate.txt")
+	git(t, prior.Repository, "commit", "-m", "candidate")
+	candidateSHA := strings.TrimSpace(git(t, prior.Repository, "rev-parse", "HEAD"))
+
+	refreshed, err := workspace.RefreshFromBest(ctx, "back-off-attempt", 2, candidateSHA, bestSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parents := strings.Fields(strings.TrimSpace(git(t, refreshed.Repository, "show", "-s", "--format=%P", refreshed.HeadSHA)))
+	if len(parents) != 2 || parents[0] != candidateSHA || parents[1] != bestSHA {
+		t.Fatalf("back-off setup parents=%v want Candidate=%s Best=%s", parents, candidateSHA, bestSHA)
+	}
+	if got := strings.TrimSpace(git(t, refreshed.Repository, "status", "--porcelain")); got != "" {
+		t.Fatalf("back-off setup worktree is dirty: %q", got)
+	}
+}
+
 func TestRefreshLeavesMergeConflictsForIterationAgentAndIsIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -310,6 +428,39 @@ func TestCommitChangesIsScopedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestVerifyExperimentCheckpointAcceptsMultipleScopedCommits(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	repository, baselineSHA := fixtureRepository(t)
+	workspace := gitworkspace.Workspace{Repository: repository, Root: filepath.Join(t.TempDir(), "worktrees")}
+	round, err := workspace.CreateAttempt(ctx, "attempt-1", 1, baselineSHA)
+	if err != nil {
+		t.Fatalf("create attempt worktree: %v", err)
+	}
+	writeFile(t, filepath.Join(round.Repository, "kernel.txt"), "first change\n")
+	if _, err := (gitworkspace.Workspace{Repository: round.Repository, Root: workspace.Root}).CommitChanges(ctx, "iteration-1", "first-change", "first scoped change", []string{"kernel.txt"}); err != nil {
+		t.Fatalf("first scoped commit: %v", err)
+	}
+	writeFile(t, filepath.Join(round.Repository, "kernel.txt"), "second change\n")
+	second, err := (gitworkspace.Workspace{Repository: round.Repository, Root: workspace.Root}).CommitChanges(ctx, "iteration-1", "second-change", "second scoped change", []string{"kernel.txt"})
+	if err != nil {
+		t.Fatalf("second scoped commit: %v", err)
+	}
+
+	if _, err := workspace.VerifyExperimentCheckpoint(ctx, round.Repository, baselineSHA, second.CommitSHA, []string{"kernel.txt"}); err != nil {
+		t.Fatalf("multiple scoped commits were rejected: %v", err)
+	}
+
+	writeFile(t, filepath.Join(round.Repository, "kernel.txt"), "ungranted change\n")
+	git(t, round.Repository, "add", "kernel.txt")
+	git(t, round.Repository, "commit", "-m", "manual change")
+	manual := strings.TrimSpace(git(t, round.Repository, "rev-parse", "HEAD"))
+	if _, err := workspace.VerifyExperimentCheckpoint(ctx, round.Repository, second.CommitSHA, manual, []string{"kernel.txt"}); err == nil || !strings.Contains(err.Error(), "not made through commit_changes") {
+		t.Fatalf("manual commit validation error = %v", err)
+	}
+}
+
 func TestCommitChangesRejectsPreStagedPathsOutsideScope(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -327,6 +478,26 @@ func TestCommitChangesRejectsPreStagedPathsOutsideScope(t *testing.T) {
 	}
 	if staged := strings.TrimSpace(git(t, repository, "diff", "--cached", "--name-only")); staged != "unrelated.txt" {
 		t.Fatalf("rejected scoped commit changed user's index: %q", staged)
+	}
+}
+
+func TestVerifyExperimentCheckpointPreservesWhitespaceInPaths(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repository, baselineSHA := fixtureRepository(t)
+	workspace := gitworkspace.Workspace{Repository: repository, Root: filepath.Join(t.TempDir(), "worktrees")}
+	round, err := workspace.CreateAttempt(ctx, "attempt-space", 1, baselineSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "kernel source.txt"
+	writeFile(t, filepath.Join(round.Repository, path), "candidate\n")
+	committed, err := (gitworkspace.Workspace{Repository: round.Repository, Root: workspace.Root}).CommitChanges(ctx, "iteration-space", "space", "space path", []string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorizations, err := workspace.VerifyExperimentCheckpoint(ctx, round.Repository, baselineSHA, committed.CommitSHA, []string{path}); err != nil || len(authorizations) != 1 {
+		t.Fatalf("whitespace path verification = %+v, %v", authorizations, err)
 	}
 }
 

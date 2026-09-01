@@ -14,6 +14,7 @@ import (
 	"github.com/reyoung/pika-go/internal/contextbundle"
 	"github.com/reyoung/pika-go/internal/instructions"
 	"github.com/reyoung/pika-go/internal/provider"
+	"github.com/reyoung/pika-go/internal/skillsnapshot"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/systemprompts"
 	"github.com/reyoung/pika-go/internal/toolapp"
@@ -30,6 +31,7 @@ type Preparer struct {
 	Store           Store
 	InstructionRoot string
 	ContextsRoot    string
+	EvidenceRoot    string
 	GrantTTL        time.Duration
 	SocketPath      string
 	Environment     map[string]string
@@ -40,6 +42,9 @@ type Preparer struct {
 func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, work symphony.RuntimeWork) (workruntime.Preparation, error) {
 	if p.Store == nil || p.InstructionRoot == "" || p.ContextsRoot == "" {
 		return workruntime.Preparation{}, errors.New("activation store, instruction root, and contexts root are required")
+	}
+	if work.FlowVersion == symphony.FlowVersion2 && (p.EvidenceRoot == "" || !filepath.IsAbs(p.EvidenceRoot)) {
+		return workruntime.Preparation{}, errors.New("absolute evidence root is required for flow v2 activation")
 	}
 	logicalName, err := logicalNameForRole(session.Role)
 	if session.Role == symphony.RoleFollowUp {
@@ -75,16 +80,23 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 		}
 		agentConfiguration = configured
 	}
-	contentHash := sha256.Sum256(contents)
-	bundle, err := (contextbundle.Materializer{Store: p.Store, Root: p.ContextsRoot}).Materialize(ctx, session)
-	if err != nil {
-		return workruntime.Preparation{}, fmt.Errorf("materialize Agent Session Context Bundle: %w", err)
-	}
-	contextSchema, messageSchema, err := contextbundle.Schemas()
+	// Validate external immutable provenance before creating a Context Snapshot,
+	// freezing instructions, or minting a capability grant. A broken snapshot is
+	// an operator-visible recovery failure, never a partially activated Session.
+	frozenSkills, err := frozenSkillsFor(work)
 	if err != nil {
 		return workruntime.Preparation{}, err
 	}
-	summarySchema, err := contextbundle.SummarySchema()
+	contentHash := sha256.Sum256(contents)
+	bundle, err := (contextbundle.Materializer{Store: p.Store, Root: p.ContextsRoot, EvidenceRoot: p.EvidenceRoot}).Materialize(ctx, session)
+	if err != nil {
+		return workruntime.Preparation{}, fmt.Errorf("materialize Agent Session Context Bundle: %w", err)
+	}
+	contextSchema, messageSchema, err := contextbundle.SchemasForVersion(bundle.SchemaVersion)
+	if err != nil {
+		return workruntime.Preparation{}, err
+	}
+	summarySchema, err := contextbundle.SummarySchemaForVersion(bundle.SchemaVersion)
 	if err != nil {
 		return workruntime.Preparation{}, err
 	}
@@ -153,6 +165,7 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 		SystemPrompt:   stored.SystemPrompt,
 		InitialPrompt:  kickoff,
 		Environment:    environment,
+		FrozenSkills:   frozenSkills,
 	})
 	if err != nil {
 		return workruntime.Preparation{}, fmt.Errorf("prepare %s provider Session: %w", session.AgentKind, err)
@@ -170,18 +183,10 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 }
 
 func agentConfigRole(role symphony.WorkRole) string {
-	switch role {
-	case symphony.RoleBaselineDraft:
-		return "baseline"
-	case symphony.RoleBaselineVerification:
-		return "baseline_verify"
-	case symphony.RoleIteration:
-		return "iteration"
-	case symphony.RoleIntegration:
-		return "integration"
-	default:
-		return string(role)
+	if descriptor, ok := symphony.DescribeRole(role); ok {
+		return descriptor.ConfigurationKey
 	}
+	return string(role)
 }
 
 func kickoffPrompt(work symphony.RuntimeWork) string {
@@ -197,48 +202,43 @@ func kickoffPrompt(work symphony.RuntimeWork) string {
 }
 
 func logicalNameForRole(role symphony.WorkRole) (string, error) {
-	switch role {
-	case symphony.RoleBaselineDraft:
-		return "baseline", nil
-	case symphony.RoleBaselineVerification:
-		return "baseline-verify", nil
-	case symphony.RoleIteration:
-		return "iteration", nil
-	case symphony.RoleIntegration:
-		return "integration", nil
-	case symphony.RoleFollowUp:
-		return "", nil
-	default:
+	descriptor, ok := symphony.DescribeRole(role)
+	if !ok {
 		return "", fmt.Errorf("unsupported activation role %q", role)
 	}
+	return descriptor.InstructionName, nil
 }
 
 func logicalNameForFollowUp(role symphony.WorkRole) (string, error) {
-	switch role {
-	case symphony.RoleBaselineVerification:
-		return "follow-up/baseline-verify", nil
-	case symphony.RoleIteration:
-		return "follow-up/iteration", nil
-	case symphony.RoleIntegration:
-		return "follow-up/integration", nil
-	default:
+	name, ok := symphony.FollowUpInstructionName(role)
+	if !ok {
 		return "", fmt.Errorf("unsupported Follow-up target role %q", role)
 	}
+	return name, nil
 }
 
 func terminalOperation(role symphony.WorkRole) string {
-	switch role {
-	case symphony.RoleBaselineDraft:
-		return "submit_baseline_definition"
-	case symphony.RoleBaselineVerification:
-		return "finish_baseline_verification"
-	case symphony.RoleIteration:
-		return "finish_iteration"
-	case symphony.RoleIntegration:
-		return "finish_integration"
-	case symphony.RoleFollowUp:
-		return "submit_followup_message"
-	default:
-		return ""
+	if descriptor, ok := symphony.DescribeRole(role); ok {
+		return descriptor.TerminalOperation
 	}
+	return ""
+}
+
+func frozenSkillsFor(work symphony.RuntimeWork) (*provider.FrozenSkillSnapshot, error) {
+	descriptor, ok := symphony.DescribeRole(work.Work.Role)
+	if !ok || !descriptor.InjectSkills || work.FlowVersion != symphony.FlowVersion2 {
+		return nil, nil
+	}
+	if work.SkillSnapshot == nil {
+		return nil, errors.New("flow v2 coding Work has no frozen skill snapshot")
+	}
+	if err := skillsnapshot.VerifyView(*work.SkillSnapshot); err != nil {
+		return nil, fmt.Errorf("verify frozen KDA skill snapshot: %w", err)
+	}
+	snapshot := &provider.FrozenSkillSnapshot{SnapshotID: work.SkillSnapshot.SnapshotID, RootPath: work.SkillSnapshot.RootPath}
+	for _, entry := range work.SkillSnapshot.Entries {
+		snapshot.Skills = append(snapshot.Skills, provider.FrozenSkillReference{Name: entry.Name,
+			Path: filepath.Join(work.SkillSnapshot.RootPath, filepath.FromSlash(entry.RelativePath)), CommitSHA: entry.CommitSHA, ContentSHA: entry.ContentSHA256})
+	}
+	return snapshot, nil
 }

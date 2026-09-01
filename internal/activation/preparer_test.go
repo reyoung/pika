@@ -2,6 +2,9 @@ package activation_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,72 @@ import (
 	"github.com/reyoung/pika-go/internal/instructions"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
+
+func TestFlowV2ActivationFailsBeforeContextOrGrantForMissingOrCorruptSnapshot(t *testing.T) {
+	ctx := context.Background()
+	for _, fixture := range []struct {
+		name    string
+		prepare func(*testing.T, string) string
+	}{
+		{name: "missing", prepare: func(_ *testing.T, root string) string { return filepath.Join(root, "missing") }},
+		{name: "corrupt", prepare: func(t *testing.T, root string) string {
+			path := filepath.Join(root, "corrupt")
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			root := t.TempDir()
+			instructionRoot := filepath.Join(root, "instructions")
+			if err := instructions.Install(instructionRoot); err != nil {
+				t.Fatal(err)
+			}
+			engine, err := symphony.Open(ctx, filepath.Join(root, "pika.db"), symphony.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = engine.Close() })
+			snapshot := activationFixtureSnapshot(t, fixture.prepare(t, root))
+			if _, err := engine.Apply(ctx, symphony.Init{Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: "optimization", Repository: filepath.Join(root, "repository"),
+				FlowVersion: symphony.FlowVersion2, SkillSnapshot: &snapshot}); err != nil {
+				t.Fatal(err)
+			}
+			view, _ := engine.Inspect(ctx, symphony.Status{})
+			session := symphony.AgentSession{ID: "session", WorkID: view.Works[0].ID, Generation: 1, Role: symphony.RoleBaselineDraft, AgentKind: "codex", AgentName: "agent", Status: symphony.AgentSessionStarting}
+			if err := engine.EnsureAgentSession(ctx, session); err != nil {
+				t.Fatal(err)
+			}
+			work, err := engine.RuntimeWork(ctx, session.WorkID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contexts := filepath.Join(root, "contexts")
+			_, err = (activation.Preparer{Store: engine, InstructionRoot: instructionRoot, ContextsRoot: contexts, EvidenceRoot: filepath.Join(root, "evidence")}).Prepare(ctx, session, work)
+			if err == nil || !strings.Contains(err.Error(), "verify frozen KDA skill snapshot") {
+				t.Fatalf("activation error = %v", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(contexts, session.ID)); !os.IsNotExist(statErr) {
+				t.Fatalf("corrupt snapshot created a frozen Context Bundle: %v", statErr)
+			}
+		})
+	}
+}
+
+func activationFixtureSnapshot(t *testing.T, root string) symphony.SkillSnapshotInput {
+	t.Helper()
+	manifest, err := json.Marshal(map[string]any{"schema_version": 1, "skills": []string{"KernelWiki", "ncu-report-skill"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(manifest)
+	return symphony.SkillSnapshotInput{SchemaVersion: symphony.SkillSnapshotSchemaV1, SnapshotID: strings.Repeat("c", 64), RootPath: root,
+		Manifest: manifest, ManifestSHA256: hex.EncodeToString(digest[:]), Entries: []symphony.SkillSnapshotEntry{
+			{Name: "KernelWiki", Repository: symphony.KernelWikiRepository, Branch: symphony.KernelWikiBranch, CommitSHA: strings.Repeat("1", 40), RelativePath: "skills/KernelWiki", ContentSHA256: strings.Repeat("a", 64)},
+			{Name: "ncu-report-skill", Repository: symphony.NCUReportSkillRepository, Branch: symphony.NCUReportSkillBranch, CommitSHA: strings.Repeat("2", 40), RelativePath: "skills/ncu-report-skill", ContentSHA256: strings.Repeat("b", 64)},
+		}}
+}
 
 func TestPreparationFreezesInstructionForOneSession(t *testing.T) {
 	t.Parallel()

@@ -50,7 +50,46 @@ func (e *Engine) ContextProjection(ctx context.Context, sessionID string) (Conte
 			return ContextProjection{}, err
 		}
 	}
+	if target.FlowVersion == FlowVersion2 {
+		projection.KnowledgeExperiments = append(projection.KnowledgeExperiments, target.IterationExperiments...)
+		// History limit governs cross-Attempt learning as well as transcript
+		// references. Current Diagnosis and current-Round records remain present
+		// even when it is zero.
+		selectedAttempts := map[string]bool{}
+		for _, history := range projection.AttemptHistories {
+			selectedAttempts[history.Attempt.ID] = true
+		}
+		for _, experiment := range view.IterationExperiments {
+			if selectedAttempts[experiment.AttemptID] {
+				projection.KnowledgeExperiments = append(projection.KnowledgeExperiments, experiment)
+			}
+		}
+		projection.KnowledgeArtifacts, err = e.readAllEvidenceArtifacts(ctx)
+		if err != nil {
+			return ContextProjection{}, err
+		}
+	}
 	return projection, nil
+}
+
+func (e *Engine) readAllEvidenceArtifacts(ctx context.Context) ([]EvidenceArtifact, error) {
+	rows, err := e.db.QueryContext(ctx, `SELECT id, work_id, receipt_id, relative_path, byte_size, content_sha256, contract_version
+		FROM evidence_artifacts ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("read evidence artifacts: %w", err)
+	}
+	defer rows.Close()
+	var artifacts []EvidenceArtifact
+	for rows.Next() {
+		var item EvidenceArtifact
+		var receiptID sql.NullString
+		if err := rows.Scan(&item.ID, &item.WorkID, &receiptID, &item.RelativePath, &item.ByteSize, &item.ContentSHA256, &item.ContractVersion); err != nil {
+			return nil, fmt.Errorf("scan evidence artifact: %w", err)
+		}
+		item.ReceiptID = receiptID.String
+		artifacts = append(artifacts, item)
+	}
+	return artifacts, rows.Err()
 }
 
 func (e *Engine) previousRoundHistory(ctx context.Context, current WorkView) (*RoundHistoryProjection, error) {

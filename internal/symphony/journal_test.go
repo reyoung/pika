@@ -50,6 +50,10 @@ func TestCodexHookJournalDeduplicatesAndCorrelatesSessionTurnAndTool(t *testing.
 	if journal.ProviderSessionID != "codex-session" || len(journal.Events) != 4 || len(journal.Turns) != 1 || len(journal.Tools) != 1 {
 		t.Fatalf("journal = %+v", journal)
 	}
+	sessionEvents, err := engine.ProviderEvents(ctx, session.ID)
+	if err != nil || len(sessionEvents) != 4 || sessionEvents[1].HookEventName != "UserPromptSubmit" {
+		t.Fatalf("session-scoped provider events = %+v err=%v", sessionEvents, err)
+	}
 	turn := journal.Turns[0]
 	if turn.ProviderTurnID != "turn-1" || turn.UserMessage != "optimize this" || turn.AssistantMessage != "benchmark completed" || turn.Status != "stopped" {
 		t.Fatalf("turn = %+v", turn)
@@ -215,5 +219,45 @@ func TestCursorJournalKeepsTerminalTurnWhenHooksAreReordered(t *testing.T) {
 	if len(journal.Events) != 3 || len(journal.Turns) != 1 || journal.Turns[0].Status != "completed" ||
 		journal.Turns[0].UserMessage != "question" || journal.Turns[0].AssistantMessage != "answer" {
 		t.Fatalf("journal = %+v", journal)
+	}
+}
+
+func TestPromptSubmissionEvidenceRequiresNewExactNormalizedMessage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	engine, err := symphony.Open(ctx, filepath.Join(t.TempDir(), "pika.db"), symphony.Options{NewID: countingIDs()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	if _, err := engine.Apply(ctx, symphony.Init{Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: "optimization", Repository: "/repo"}); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := engine.Inspect(ctx, symphony.Status{})
+	session := symphony.AgentSession{ID: "cursor-evidence", WorkID: view.Works[0].ID, Generation: 1, Role: symphony.RoleBaselineDraft, AgentKind: "cursor", AgentName: "cursor-evidence", Status: symphony.AgentSessionStarting}
+	if err := engine.EnsureAgentSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.IngestProviderEvent(ctx, "cursor", session.ID, json.RawMessage(`{"conversation_id":"conversation","generation_id":"old","hook_event_name":"beforeSubmitPrompt","prompt":"old"}`)); err != nil {
+		t.Fatal(err)
+	}
+	highWatermark, err := engine.LatestProviderEventSequence(ctx, session.ID)
+	if err != nil || highWatermark == 0 {
+		t.Fatalf("provider event high-watermark=%d err=%v", highWatermark, err)
+	}
+	if observed, err := engine.PromptSubmissionObservedAfter(ctx, session.ID, highWatermark, "old"); err != nil || observed {
+		t.Fatalf("stale prompt observed=%v err=%v", observed, err)
+	}
+	if err := engine.IngestProviderEvent(ctx, "cursor", session.ID, json.RawMessage(`{"conversation_id":"conversation","generation_id":"wrong","hook_event_name":"beforeSubmitPrompt","prompt":"wrong"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if observed, err := engine.PromptSubmissionObservedAfter(ctx, session.ID, highWatermark, "expected"); err != nil || observed {
+		t.Fatalf("mismatched prompt observed=%v err=%v", observed, err)
+	}
+	if err := engine.IngestProviderEvent(ctx, "cursor", session.ID, json.RawMessage(`{"conversation_id":"conversation","generation_id":"expected","hook_event_name":"beforeSubmitPrompt","prompt":"expected"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if observed, err := engine.PromptSubmissionObservedAfter(ctx, session.ID, highWatermark, "expected"); err != nil || !observed {
+		t.Fatalf("matching prompt observed=%v err=%v", observed, err)
 	}
 }

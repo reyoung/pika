@@ -14,21 +14,23 @@ type AgentConfiguration struct {
 }
 
 type Capabilities struct {
-	Kind          string `json:"kind"`
-	Executable    string `json:"executable"`
-	Version       string `json:"version"`
-	Authenticated bool   `json:"authenticated"`
-	Journal       bool   `json:"journal"`
-	TurnStop      bool   `json:"turn_stop"`
-	FollowUp      bool   `json:"follow_up"`
-	FullOutput    bool   `json:"full_output"`
-	FreshSession  bool   `json:"fresh_session"`
-	Interrupt     bool   `json:"interrupt"`
-	Compatible    bool   `json:"compatible"`
+	Kind           string `json:"kind"`
+	Executable     string `json:"executable"`
+	Version        string `json:"version"`
+	Authenticated  bool   `json:"authenticated"`
+	Journal        bool   `json:"journal"`
+	TurnStop       bool   `json:"turn_stop"`
+	FollowUp       bool   `json:"follow_up"`
+	FullOutput     bool   `json:"full_output"`
+	FreshSession   bool   `json:"fresh_session"`
+	Interrupt      bool   `json:"interrupt"`
+	SkillInjection bool   `json:"skill_injection"`
+	Compatible     bool   `json:"compatible"`
 }
 
 type ProbeRequest struct {
-	Executable string
+	Executable            string
+	RequireSkillInjection bool
 }
 
 type SessionActivation struct {
@@ -38,6 +40,22 @@ type SessionActivation struct {
 	SystemPrompt   []byte
 	InitialPrompt  string
 	Environment    map[string]string
+	// FrozenSkills is populated only for flow-v2 coding Roles.  It is an
+	// invocation-scoped capability: adapters must not install it globally.
+	FrozenSkills *FrozenSkillSnapshot
+}
+
+type FrozenSkillSnapshot struct {
+	SnapshotID string
+	RootPath   string
+	Skills     []FrozenSkillReference
+}
+
+type FrozenSkillReference struct {
+	Name       string
+	Path       string
+	CommitSHA  string
+	ContentSHA string
 }
 
 type Launch struct {

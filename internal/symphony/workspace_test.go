@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity/testcontract"
 )
 
 func TestWorkspaceIdentityAndGitWorktreeRegistryAreDurable(t *testing.T) {
@@ -44,6 +46,50 @@ func TestWorkspaceIdentityAndGitWorktreeRegistryAreDurable(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].HeadSHA != record.HeadSHA || records[0].Repository != record.Repository {
 		t.Fatalf("worktree records = %+v", records)
+	}
+}
+
+func TestInitializeIterationRoundCheckpointIsCompareAndSetAndIdempotent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	engine, err := Open(ctx, filepath.Join(t.TempDir(), "pika.db"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	baseSHA := strings.Repeat("a", 40)
+	preparedSHA := strings.Repeat("b", 40)
+	if _, err := engine.Apply(ctx, Init{Meta: CommandMeta{RequestID: "init"}, OptimizationID: "optimization", Repository: "/repo", IterationConcurrency: 1}); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := engine.Inspect(ctx, Status{})
+	if _, err := engine.Apply(ctx, SubmitBaselineDefinition{Meta: CommandMeta{RequestID: "submit"}, WorkID: view.Works[0].ID, Definition: testcontract.Definition()}); err != nil {
+		t.Fatal(err)
+	}
+	view, _ = engine.Inspect(ctx, Status{})
+	verification := pendingWorkForRole(t, view, RoleBaselineVerification)
+	if _, err := engine.Apply(ctx, FinishBaselineVerification{Meta: CommandMeta{RequestID: "accept"}, WorkID: verification.ID, Decision: VerificationAccepted, Evidence: testcontract.Evidence(), InitialBestSHA: baseSHA}); err != nil {
+		t.Fatal(err)
+	}
+	view, _ = engine.Inspect(ctx, Status{})
+	iteration := pendingWorkForRole(t, view, RoleIteration)
+	checkpoint, err := engine.InitializeIterationRoundCheckpoint(ctx, iteration.AttemptID, iteration.IterationRound, baseSHA, preparedSHA)
+	if err != nil || checkpoint != preparedSHA {
+		t.Fatalf("initialize checkpoint = %q, %v", checkpoint, err)
+	}
+	if replay, err := engine.InitializeIterationRoundCheckpoint(ctx, iteration.AttemptID, iteration.IterationRound, baseSHA, preparedSHA); err != nil || replay != preparedSHA {
+		t.Fatalf("replay checkpoint = %q, %v", replay, err)
+	}
+	runtimeWork, err := engine.RuntimeWork(ctx, iteration.ID)
+	if err != nil || runtimeWork.CurrentCheckpointSHA != preparedSHA {
+		t.Fatalf("runtime checkpoint = %q, %v", runtimeWork.CurrentCheckpointSHA, err)
+	}
+	view, _ = engine.Inspect(ctx, Status{})
+	if len(view.IterationRounds) != 1 || view.IterationRounds[0].BaseSHA != baseSHA || view.IterationRounds[0].CurrentCheckpointSHA != preparedSHA {
+		t.Fatalf("canonical Round checkpoint = %+v", view.IterationRounds)
+	}
+	if _, err := engine.InitializeIterationRoundCheckpoint(ctx, iteration.AttemptID, iteration.IterationRound, baseSHA, strings.Repeat("c", 40)); err == nil {
+		t.Fatal("initialized checkpoint changed after compare-and-set completed")
 	}
 }
 

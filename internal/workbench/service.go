@@ -94,6 +94,7 @@ type Node struct {
 	Aggregates   []PrimarySummary    `json:"aggregates,omitempty"`
 	detail       any
 	workIDs      []string
+	artifactIDs  []string
 }
 
 type Edge struct {
@@ -238,12 +239,29 @@ func project(view symphony.View, records symphony.WorkbenchRecords, runtime work
 		selectedIDs[attempt.ID] = true
 	}
 	aggregatesByIntegration := make(map[string][]PrimarySummary)
+	aggregatesByExperiment := make(map[string][]PrimarySummary)
 	metricDefinitions := make(map[string]symphony.BenchmarkMetricDefinitionView)
 	for _, metric := range records.Metrics {
 		metricDefinitions[metric.BaselineRevisionID+":"+metric.MetricID] = metric
 	}
 	for _, comparison := range records.Comparisons {
 		if comparison.CaseID != "" || comparison.AggregateSpeedup == nil {
+			continue
+		}
+		if comparison.ExperimentID != "" {
+			var baselineID string
+			for _, experiment := range view.IterationExperiments {
+				if experiment.ID == comparison.ExperimentID {
+					baselineID = workByAttemptRound[roundKey(experiment.AttemptID, experiment.IterationRound)].BaselineRevisionID
+					break
+				}
+			}
+			if metric, exists := metricDefinitions[baselineID+":"+comparison.MetricID]; exists {
+				aggregatesByExperiment[comparison.ExperimentID] = append(aggregatesByExperiment[comparison.ExperimentID], PrimarySummary{
+					MetricID: metric.MetricID, Label: metric.Label, Role: metric.Role, Direction: metric.Direction,
+					AggregateSpeedup: *comparison.AggregateSpeedup, Unit: metric.Unit, MaxCaseSpeedup: dereference(comparison.MaxCaseSpeedup), Aggregation: metric.Aggregation, Source: "structured",
+				})
+			}
 			continue
 		}
 		work, exists := workByIntegration[comparison.IntegrationID]
@@ -278,6 +296,11 @@ func project(view symphony.View, records symphony.WorkbenchRecords, runtime work
 	for integrationID := range aggregatesByIntegration {
 		sort.SliceStable(aggregatesByIntegration[integrationID], func(left, right int) bool {
 			return aggregateRoleOrder(aggregatesByIntegration[integrationID][left].Role) < aggregateRoleOrder(aggregatesByIntegration[integrationID][right].Role)
+		})
+	}
+	for experimentID := range aggregatesByExperiment {
+		sort.SliceStable(aggregatesByExperiment[experimentID], func(left, right int) bool {
+			return aggregateRoleOrder(aggregatesByExperiment[experimentID][left].Role) < aggregateRoleOrder(aggregatesByExperiment[experimentID][right].Role)
 		})
 	}
 	aggregatesByAttempt := make(map[string][]PrimarySummary)
@@ -349,6 +372,47 @@ func project(view symphony.View, records symphony.WorkbenchRecords, runtime work
 			addEdge(roundKey(round.AttemptID, round.Round-1), id, "refresh", true)
 		}
 	}
+	checkpointOwner := map[string]string{}
+	artifactNodeAdded := map[string]bool{}
+	artifactsByReceipt := map[string][]symphony.EvidenceArtifact{}
+	for _, artifact := range records.Artifacts {
+		artifactsByReceipt[artifact.ReceiptID] = append(artifactsByReceipt[artifact.ReceiptID], artifact)
+	}
+	for _, experiment := range view.IterationExperiments {
+		if !selectedIDs[experiment.AttemptID] {
+			continue
+		}
+		node := Node{
+			Kind: "experiment", ID: experiment.ID, Label: fmt.Sprintf("Experiment %d", experiment.Sequence),
+			DomainStatus: experiment.Outcome, Subtitle: shortSHA(experiment.CheckpointSHA), detail: experiment,
+		}
+		if work, exists := workByAttemptRound[roundKey(experiment.AttemptID, experiment.IterationRound)]; exists {
+			node.workIDs = []string{work.ID}
+		}
+		if aggregates := aggregatesByExperiment[experiment.ID]; len(aggregates) != 0 {
+			node.Aggregates = aggregates
+			node.Primary = primaryAggregate(aggregates)
+		}
+		for _, artifact := range artifactsByReceipt[experiment.ReceiptID] {
+			node.artifactIDs = append(node.artifactIDs, artifact.ID)
+		}
+		nodes = append(nodes, node)
+		source := roundKey(experiment.AttemptID, experiment.IterationRound)
+		if owner := checkpointOwner[experiment.ParentCheckpointSHA]; owner != "" {
+			source = owner
+		}
+		addEdge(source, experiment.ID, "checkpoint", false)
+		if experiment.CheckpointSHA != "" {
+			checkpointOwner[experiment.CheckpointSHA] = experiment.ID
+		}
+		for _, artifact := range artifactsByReceipt[experiment.ReceiptID] {
+			if !artifactNodeAdded[artifact.ID] {
+				nodes = append(nodes, Node{Kind: "artifact", ID: artifact.ID, Label: "Evidence " + shortID(artifact.ID), DomainStatus: "verified", Subtitle: artifact.RelativePath, detail: artifact, artifactIDs: []string{artifact.ID}})
+				artifactNodeAdded[artifact.ID] = true
+			}
+			addEdge(experiment.ID, artifact.ID, "evidence", true)
+		}
+	}
 	for _, integration := range view.Integrations {
 		if !selectedIDs[integration.AttemptID] {
 			continue
@@ -364,6 +428,9 @@ func project(view symphony.View, records symphony.WorkbenchRecords, runtime work
 		}
 		nodes = append(nodes, node)
 		addEdge(roundKey(integration.AttemptID, integration.IterationRound), integration.ID, "integration", false)
+		if integration.CandidateExperimentID != "" {
+			addEdge(integration.CandidateExperimentID, integration.ID, "candidate", false)
+		}
 		if target := bestByAttempt[integration.AttemptID]; target != "" && integration.Status == "accepted" {
 			addEdge(integration.ID, target, "accepted", false)
 		}
@@ -406,9 +473,13 @@ func artifactsForNode(artifacts []symphony.EvidenceArtifact, node Node) []sympho
 	for _, workID := range node.workIDs {
 		wanted[workID] = true
 	}
+	wantedArtifacts := make(map[string]bool, len(node.artifactIDs))
+	for _, artifactID := range node.artifactIDs {
+		wantedArtifacts[artifactID] = true
+	}
 	var result []symphony.EvidenceArtifact
 	for _, artifact := range artifacts {
-		if wanted[artifact.WorkID] {
+		if wantedArtifacts[artifact.ID] || (len(wantedArtifacts) == 0 && wanted[artifact.WorkID]) {
 			result = append(result, artifact)
 		}
 	}

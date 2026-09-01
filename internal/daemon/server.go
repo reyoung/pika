@@ -78,6 +78,8 @@ type PreparedInit struct {
 	IterationConcurrency  int64
 	MaxPendingAttempts    int64
 	IterationHistoryLimit int64
+	FlowVersion           symphony.FlowVersion
+	SkillSnapshot         *symphony.SkillSnapshotInput
 }
 
 func Serve(ctx context.Context, cfg Config) error {
@@ -159,7 +161,7 @@ func Serve(ctx context.Context, cfg Config) error {
 				writeError(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, view)
+			writeJSON(w, http.StatusOK, symphony.ProjectOperatorStatus(view))
 		})
 		mux.HandleFunc("POST /v1/init", func(w http.ResponseWriter, request *http.Request) {
 			var input protocol.InitRequest
@@ -196,6 +198,8 @@ func Serve(ctx context.Context, cfg Config) error {
 				MaxPendingAttempts:       prepared.MaxPendingAttempts,
 				IterationHistoryLimit:    prepared.IterationHistoryLimit,
 				IterationHistoryLimitSet: true,
+				FlowVersion:              prepared.FlowVersion,
+				SkillSnapshot:            prepared.SkillSnapshot,
 			})
 			if err != nil {
 				if rollbackErr := prepared.Rollback(); rollbackErr != nil {

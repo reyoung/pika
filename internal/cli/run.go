@@ -26,6 +26,7 @@ import (
 	"github.com/reyoung/pika-go/internal/control"
 	"github.com/reyoung/pika-go/internal/daemon"
 	"github.com/reyoung/pika-go/internal/daemonupdate"
+	"github.com/reyoung/pika-go/internal/evidence"
 	"github.com/reyoung/pika-go/internal/gitworkspace"
 	"github.com/reyoung/pika-go/internal/herdr"
 	"github.com/reyoung/pika-go/internal/instance"
@@ -37,6 +38,7 @@ import (
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/provider"
 	"github.com/reyoung/pika-go/internal/scheduler"
+	"github.com/reyoung/pika-go/internal/skillsnapshot"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/toolapp"
 	webuiapp "github.com/reyoung/pika-go/internal/webui"
@@ -50,6 +52,12 @@ var Version = "dev"
 // builds leave it empty.
 var UpdateFailBeforeReadyVersion string
 var UpdateFailAfterCommitVersion string
+
+// newSkillSnapshotManager is an internal dependency seam. Production always
+// returns the manager with its fixed allowlisted HTTPS sources; only package
+// tests replace the factory with a Git transport that maps those remotes to
+// committed local fixtures.
+var newSkillSnapshotManager = func() skillsnapshot.Manager { return skillsnapshot.Manager{} }
 
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if stdout == nil {
@@ -492,6 +500,16 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			writeDaemonLog(stderr, "error", "provider.registry_failed", registryErr, nil)
 			return 1
 		}
+		codexHome := os.Getenv("CODEX_HOME")
+		if codexHome == "" {
+			if userHome, homeErr := os.UserHomeDir(); homeErr == nil {
+				codexHome = filepath.Join(userHome, ".codex")
+			}
+		}
+		providerModelRequests := map[string]provider.ModelRequest{
+			"codex":  {Executable: codexExecutable, ConfigRoot: codexHome},
+			"cursor": {Executable: cursorExecutable},
+		}
 		var followUpInactivity time.Duration
 		var followUpPolicies map[symphony.WorkRole]symphony.FollowUpPolicy
 		var configuredIterationAgentCount int64
@@ -509,7 +527,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				return 1
 			}
 			configuredIterationAgentCount = int64(len(iterationAgents))
-			if configErr := configuration.ProbeConfiguredProviders(ctx, instanceConfigPath, providerRegistry, map[string]string{"codex": codexExecutable, "cursor": cursorExecutable}); configErr != nil {
+			if configErr := configuration.ProbeConfiguredProviders(ctx, instanceConfigPath, providerRegistry, map[string]string{"codex": codexExecutable, "cursor": cursorExecutable}, providerModelRequests); configErr != nil {
 				writeDaemonLog(stderr, "error", "provider.preflight_failed", configErr, nil)
 				return 1
 			}
@@ -587,6 +605,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				return 1
 			}
 		}
+		if err := validateFlowV2Evidence(ctx, engine, paths.EvidenceRoot); err != nil {
+			writeDaemonLog(stderr, "error", "workspace.evidence_failed", err, nil)
+			return 1
+		}
 		activeSessions, activeErr := engine.ActiveAgentSessions(ctx)
 		if activeErr != nil {
 			writeDaemonLog(stderr, "error", "provider.reconciliation_failed", activeErr, nil)
@@ -610,12 +632,6 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			}
 			return observeRuntime(observeCtx)
 		})
-		codexHome := os.Getenv("CODEX_HOME")
-		if codexHome == "" {
-			if userHome, homeErr := os.UserHomeDir(); homeErr == nil {
-				codexHome = filepath.Join(userHome, ".codex")
-			}
-		}
 		cursorMCPPath := os.Getenv("PIKA_GO_CURSOR_MCP_PATH")
 		cursorHooksPath := os.Getenv("PIKA_GO_CURSOR_HOOKS_PATH")
 		if cursorMCPPath == "" {
@@ -632,7 +648,8 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			Workspace: paths.Workspace, ConfigRoot: paths.ConfigRoot, StateRoot: paths.StateRoot, InstanceID: paths.InstanceID,
 			CodexHome: codexHome, CursorMCPPath: cursorMCPPath, CursorHooksPath: cursorHooksPath, PikaExecutable: pikaExecutable, CodexExecutable: codexExecutable, Providers: providerRegistry,
 			RequireConfigurationTOML: true, ProbeProviders: true,
-			ProviderExecutables: map[string]string{"codex": codexExecutable, "cursor": cursorExecutable},
+			ProviderExecutables:   map[string]string{"codex": codexExecutable, "cursor": cursorExecutable},
+			ProviderModelRequests: providerModelRequests,
 		}
 		if paths.Workspace != nil && !handoffCandidate {
 			if _, statErr := os.Stat(instanceConfigPath); statErr == nil {
@@ -697,7 +714,60 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				}
 				return daemon.PreparedInit{}, fmt.Errorf("configure instance: %w", configErr)
 			}
-			return daemon.PreparedInit{Rollback: rollback, IterationConcurrency: int64(len(iterationAgents)), MaxPendingAttempts: schedulerConfig.MaxPendingAttempts, IterationHistoryLimit: contextConfig.IterationHistoryLimit}, nil
+			snapshotRoot := paths.StateRoot
+			if paths.Workspace != nil {
+				snapshotRoot = paths.Workspace.Root
+			} else {
+				snapshotRoot = filepath.Join(paths.StateRoot, "instances", paths.InstanceID)
+			}
+			var snapshot skillsnapshot.Snapshot
+			view, viewErr := engine.Inspect(initCtx, symphony.Status{})
+			if viewErr == nil && view.SkillSnapshot != nil {
+				// An Init replay must use the published manifest byte-for-byte.
+				// resolved_at is part of snapshot_id, so re-resolving sources here
+				// would turn an otherwise idempotent request into a conflict.
+				input, inputErr := skillsnapshot.InputFromView(*view.SkillSnapshot)
+				if inputErr != nil {
+					if rollbackErr := rollback(); rollbackErr != nil {
+						return daemon.PreparedInit{}, fmt.Errorf("read frozen KDA skills for Init replay: %v; rollback: %w", inputErr, rollbackErr)
+					}
+					return daemon.PreparedInit{}, fmt.Errorf("read frozen KDA skills for Init replay: %w", inputErr)
+				}
+				snapshot.Input = input
+			} else {
+				if viewErr != nil {
+					var domainErr *symphony.DomainError
+					if !errors.As(viewErr, &domainErr) || domainErr.Code != symphony.CodeNotInitialized {
+						if rollbackErr := rollback(); rollbackErr != nil {
+							return daemon.PreparedInit{}, fmt.Errorf("inspect Optimization before frozen KDA skills: %v; rollback: %w", viewErr, rollbackErr)
+						}
+						return daemon.PreparedInit{}, fmt.Errorf("inspect Optimization before frozen KDA skills: %w", viewErr)
+					}
+				}
+				snapshotManager := newSkillSnapshotManager()
+				var snapshotErr error
+				snapshot, snapshotErr = snapshotManager.Prepare(initCtx, skillsnapshot.Request{WorkspaceRoot: snapshotRoot})
+				if snapshotErr != nil {
+					if rollbackErr := rollback(); rollbackErr != nil {
+						return daemon.PreparedInit{}, fmt.Errorf("prepare frozen KDA skills: %v; rollback: %w", snapshotErr, rollbackErr)
+					}
+					return daemon.PreparedInit{}, fmt.Errorf("prepare frozen KDA skills: %w", snapshotErr)
+				}
+			}
+			configurationRollback := rollback
+			rollback = func() error {
+				snapshotErr := snapshot.RollbackPublication()
+				configurationErr := configurationRollback()
+				if snapshotErr != nil && configurationErr != nil {
+					return fmt.Errorf("skill snapshot rollback: %v; configuration rollback: %w", snapshotErr, configurationErr)
+				}
+				if snapshotErr != nil {
+					return snapshotErr
+				}
+				return configurationErr
+			}
+			return daemon.PreparedInit{Rollback: rollback, IterationConcurrency: int64(len(iterationAgents)), MaxPendingAttempts: schedulerConfig.MaxPendingAttempts, IterationHistoryLimit: contextConfig.IterationHistoryLimit,
+				FlowVersion: symphony.FlowVersion2, SkillSnapshot: &snapshot.Input}, nil
 		}
 		initOptions = func(optionsCtx context.Context) (protocol.InitOptionsResponse, error) {
 			_, statErr := os.Stat(instanceConfigPath)
@@ -777,8 +847,8 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				pathEntries = append([]string{prefix}, pathEntries...)
 			}
 			activationEnvironment := map[string]string{"PATH": strings.Join(pathEntries, string(os.PathListSeparator))}
-			preparer := activation.Preparer{Store: engine, InstructionRoot: paths.InstructionsRoot, ContextsRoot: paths.ContextsRoot, SocketPath: paths.SocketPath, Environment: activationEnvironment, AgentConfigPath: instanceConfigPath, Providers: providerRegistry}
-			dispatcher := outbox.Dispatcher{Store: engine, Sink: workruntime.Sink{Store: engine, Runtime: runtimeAdapter, AgentKind: "codex", AgentConfigPath: instanceConfigPath, Providers: providerRegistry, ProviderRuntimeRoot: runtimeRoot, RequireProviderCapabilities: true, Preparer: preparer, WorkspacePreparer: gitworkspace.RuntimePreparer{Repository: assignedRepository, Root: worktreeRoot, Namespace: branchNamespace, Recorder: engine}}}
+			preparer := activation.Preparer{Store: engine, InstructionRoot: paths.InstructionsRoot, ContextsRoot: paths.ContextsRoot, EvidenceRoot: paths.EvidenceRoot, SocketPath: paths.SocketPath, Environment: activationEnvironment, AgentConfigPath: instanceConfigPath, Providers: providerRegistry}
+			dispatcher := outbox.Dispatcher{Store: engine, Sink: workruntime.Sink{Store: engine, Runtime: runtimeAdapter, AgentKind: "codex", AgentConfigPath: instanceConfigPath, Providers: providerRegistry, ProviderRuntimeRoot: runtimeRoot, RequireProviderCapabilities: true, Preparer: preparer, WorkspacePreparer: gitworkspace.RuntimePreparer{Repository: assignedRepository, Root: worktreeRoot, Namespace: branchNamespace, Recorder: engine, CheckpointInitializer: engine}}}
 			coordinator := workruntime.Coordinator{
 				Reconciler:  workruntime.Reconciler{Store: engine, Runtime: runtimeAdapter, ProviderRuntimeRoot: runtimeRoot},
 				Dispatcher:  dispatcher,
@@ -864,7 +934,8 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 			afterCommit = func(ctx context.Context) { _ = dispatcher.DispatchPending(ctx) }
 			afterCommit(ctx)
 		}
-		mcpHandler = mcp.Handler{Application: toolapp.Application{Store: engine, WorktreeRoot: worktreeRoot, Repository: assignedRepository, BranchNamespace: branchNamespace, WorktreeRecorder: engine}, AfterMutation: func() {
+		mcpHandler = mcp.Handler{Application: toolapp.Application{Store: engine, WorktreeRoot: worktreeRoot, Repository: assignedRepository, BranchNamespace: branchNamespace, WorktreeRecorder: engine,
+			EvidenceRoot: paths.EvidenceRoot}, AfterMutation: func() {
 			if afterCommit != nil {
 				afterCommit(ctx)
 			}
@@ -907,7 +978,26 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	var backup func(context.Context, string) error
 	var drainReady func(context.Context) (bool, error)
 	if engine != nil {
-		backup = engine.Backup
+		backup = func(backupCtx context.Context, destination string) error {
+			view, inspectErr := engine.Inspect(backupCtx, symphony.Status{})
+			if inspectErr == nil && view.Optimization.FlowVersion == symphony.FlowVersion2 {
+				if view.SkillSnapshot == nil {
+					return errors.New("flow v2 backup has no frozen skill snapshot provenance")
+				}
+				if verifyErr := skillsnapshot.VerifyView(*view.SkillSnapshot); verifyErr != nil {
+					return fmt.Errorf("validate frozen skill snapshot provenance before backup: %w", verifyErr)
+				}
+			} else if inspectErr != nil {
+				var domainErr *symphony.DomainError
+				if !errors.As(inspectErr, &domainErr) || domainErr.Code != symphony.CodeNotInitialized {
+					return fmt.Errorf("inspect Optimization before backup: %w", inspectErr)
+				}
+			}
+			if err := validateFlowV2Evidence(backupCtx, engine, paths.EvidenceRoot); err != nil {
+				return fmt.Errorf("validate durable evidence before backup: %w", err)
+			}
+			return engine.Backup(backupCtx, destination)
+		}
 		drainReady = engine.DrainReady
 	}
 	var listener net.Listener
@@ -1144,6 +1234,55 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	}
 	writeDaemonLog(stderr, "info", "daemon.stopped", nil, map[string]any{"instance_id": paths.InstanceID})
 	return 0
+}
+
+func validateFlowV2Evidence(ctx context.Context, engine *symphony.Engine, evidenceRoot string) error {
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		var domainErr *symphony.DomainError
+		if errors.As(err, &domainErr) && domainErr.Code == symphony.CodeNotInitialized {
+			return nil
+		}
+		return err
+	}
+	if view.Optimization.FlowVersion != symphony.FlowVersion2 {
+		return nil
+	}
+	for _, work := range view.Works {
+		artifacts, err := engine.EvidenceArtifacts(ctx, work.ID)
+		if err != nil {
+			return err
+		}
+		if len(artifacts) == 0 {
+			continue
+		}
+		root := ""
+		switch work.Role {
+		case symphony.RoleDiagnosis:
+			root, err = evidence.EnsureWorkRoot(evidenceRoot, evidence.DiagnosisScope, work.ID)
+		case symphony.RoleIteration:
+			root, err = evidence.EnsureWorkRoot(evidenceRoot, evidence.IterationScope, work.ID)
+		default:
+			runtimeWork, err := engine.RuntimeWork(ctx, work.ID)
+			if err != nil {
+				return fmt.Errorf("resolve evidence Work %s: %w", work.ID, err)
+			}
+			root = runtimeWork.Repository
+		}
+		if err != nil {
+			return fmt.Errorf("resolve evidence root for Work %s: %w", work.ID, err)
+		}
+		for _, recorded := range artifacts {
+			_, actual, err := evidence.ReadStable(root, recorded.RelativePath, recorded.ByteSize)
+			if err != nil {
+				return fmt.Errorf("verify evidence artifact %s for Work %s: %w", recorded.ID, work.ID, err)
+			}
+			if actual.RelativePath != recorded.RelativePath || actual.ByteSize != recorded.ByteSize || actual.ContentSHA256 != recorded.ContentSHA256 || actual.ContractVersion != recorded.ContractVersion {
+				return fmt.Errorf("evidence artifact %s for Work %s differs from its durable receipt", recorded.ID, work.ID)
+			}
+		}
+	}
+	return nil
 }
 
 func providerProbeTimeout(kind string) time.Duration {
@@ -1400,7 +1539,27 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 			}
 			return 0
 		}
-		_, _ = fmt.Fprintf(stdout, "optimization %s: %s (revision %d), scheduler: %s\n", view.Optimization.ID, view.Optimization.Status, view.Optimization.Revision, view.Scheduler.Status)
+		_, _ = fmt.Fprintf(stdout, "optimization %s: %s (flow v%d, revision %d), scheduler: %s\n", view.Optimization.ID, view.Optimization.Status, view.Optimization.FlowVersion, view.Optimization.Revision, view.Scheduler.Status)
+		if view.SkillSnapshot != nil {
+			commits := make([]string, 0, len(view.SkillSnapshot.Entries))
+			for _, entry := range view.SkillSnapshot.Entries {
+				commits = append(commits, entry.Name+"@"+entry.CommitSHA)
+			}
+			_, _ = fmt.Fprintf(stdout, "skill snapshot: %s (%s)\n", view.SkillSnapshot.SnapshotID, strings.Join(commits, ", "))
+		}
+		for _, diagnosis := range view.Diagnoses {
+			_, _ = fmt.Fprintf(stdout, "diagnosis %s: %s, %d hypotheses\n", diagnosis.ID, diagnosis.Status, diagnosis.HypothesisCount)
+		}
+		for _, round := range view.IterationRounds {
+			count := 0
+			for _, experiment := range view.IterationExperiments {
+				if experiment.AttemptID == round.AttemptID && experiment.IterationRound == round.Round {
+					count++
+				}
+			}
+			_, _ = fmt.Fprintf(stdout, "round %s/%d: %d experiments, checkpoint %s\n", round.AttemptID, round.Round, count, round.CurrentCheckpointSHA)
+		}
+		_, _ = fmt.Fprintf(stdout, "knowledge: verified=%d provisional=%d negative=%d inconclusive=%d\n", view.Knowledge.Verified, view.Knowledge.Provisional, view.Knowledge.Negative, view.Knowledge.Inconclusive)
 		if view.IterationCaseSet != nil {
 			_, _ = fmt.Fprintf(stdout, "iteration cases: v%d, %d cases\n", view.IterationCaseSet.Version, len(view.IterationCaseSet.CaseIDs))
 		}

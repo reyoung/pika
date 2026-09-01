@@ -31,10 +31,14 @@ type Initializer struct {
 	RequireConfigurationTOML bool
 	ProbeProviders           bool
 	ProviderExecutables      map[string]string
+	// ProviderModelRequests identify the account-local catalog source for each
+	// configured provider. They are required whenever ProbeProviders is true so
+	// a syntactically valid but unavailable model cannot reach agent.start.
+	ProviderModelRequests map[string]provider.ModelRequest
 }
 
 const DefaultSummary = `Pika-Go initialization defaults:
-  iteration agents: 1
+  iteration concurrency: 4
   max pending attempts: 8
   follow-up inactivity timeout: 5m
   follow-up generator concurrency: 1
@@ -85,20 +89,28 @@ func (i Initializer) Prepare(ctx context.Context, repository string) (func() err
 	if i.ConfigurationTOML != nil {
 		contents = *i.ConfigurationTOML
 	}
-	var providerKinds []string
+	validationPath := configPath
+	cleanupValidationPath := func() {}
 	if !configurationExists {
-		providerKinds, err = validateCompleteConfiguration(contents, resolvedRepository, providers)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		providerKinds, err = validateConfigurationPath(configPath, resolvedRepository, providers)
+		validationPath, cleanupValidationPath, err = temporaryConfiguration(contents)
 		if err != nil {
 			return nil, err
 		}
 	}
+	defer cleanupValidationPath()
+	providerKinds, err := validateConfigurationPath(validationPath, resolvedRepository, providers)
+	if err != nil {
+		return nil, err
+	}
 	if i.ProbeProviders {
-		if err := probeProviders(ctx, providers, providerKinds, i.ProviderExecutables); err != nil {
+		codingKinds, err := configuredCodingProviderKinds(validationPath, providers)
+		if err != nil {
+			return nil, err
+		}
+		if err := probeProviders(ctx, providers, providerKinds, codingKinds, i.ProviderExecutables); err != nil {
+			return nil, err
+		}
+		if err := validateConfiguredModelCatalog(ctx, validationPath, providers, i.ProviderModelRequests); err != nil {
 			return nil, err
 		}
 	}
@@ -206,9 +218,10 @@ func (i Initializer) Prepare(ctx context.Context, repository string) (func() err
 	}, nil
 }
 
-func probeProviders(ctx context.Context, providers *provider.Registry, kinds []string, executables map[string]string) error {
+func probeProviders(ctx context.Context, providers *provider.Registry, kinds []string, codingKinds map[string]bool, executables map[string]string) error {
 	for _, kind := range kinds {
-		capabilities, err := providers.Probe(ctx, kind, provider.ProbeRequest{Executable: executables[kind]})
+		requireSkillInjection := codingKinds[kind]
+		capabilities, err := providers.Probe(ctx, kind, provider.ProbeRequest{Executable: executables[kind], RequireSkillInjection: requireSkillInjection})
 		if err != nil {
 			return fmt.Errorf("probe %s provider: %w", kind, err)
 		}
@@ -216,13 +229,16 @@ func probeProviders(ctx context.Context, providers *provider.Registry, kinds []s
 			!capabilities.FollowUp || !capabilities.FullOutput || !capabilities.FreshSession || !capabilities.Interrupt {
 			return fmt.Errorf("probe %s provider: required capabilities are unavailable", kind)
 		}
+		if requireSkillInjection && !capabilities.SkillInjection {
+			return fmt.Errorf("probe %s provider: coding Role skill injection is unavailable", kind)
+		}
 	}
 	return nil
 }
 
 // ProbeConfiguredProviders validates one complete persisted configuration and
-// probes exactly the distinct provider kinds referenced by its configured Agents.
-func ProbeConfiguredProviders(ctx context.Context, path string, providers *provider.Registry, executables map[string]string) error {
+// probes exactly the distinct provider kinds referenced by its five Roles.
+func ProbeConfiguredProviders(ctx context.Context, path string, providers *provider.Registry, executables map[string]string, modelRequests map[string]provider.ModelRequest) error {
 	identity, err := LoadIdentity(path)
 	if err != nil {
 		return err
@@ -235,24 +251,71 @@ func ProbeConfiguredProviders(ctx context.Context, path string, providers *provi
 	if err != nil {
 		return err
 	}
-	return probeProviders(ctx, providers, kinds, executables)
+	codingKinds, err := configuredCodingProviderKinds(path, providers)
+	if err != nil {
+		return err
+	}
+	if err := probeProviders(ctx, providers, kinds, codingKinds, executables); err != nil {
+		return err
+	}
+	return validateConfiguredModelCatalog(ctx, path, providers, modelRequests)
 }
 
-func validateCompleteConfiguration(contents, repository string, providers *provider.Registry) ([]string, error) {
+func configuredCodingProviderKinds(path string, providers *provider.Registry) (map[string]bool, error) {
+	result := map[string]bool{}
+	for _, role := range []string{"baseline", "baseline_verify", "integration"} {
+		agent, err := LoadAgentWithRegistry(path, role, providers)
+		if err != nil {
+			return nil, err
+		}
+		result[agent.Kind] = true
+	}
+	iterations, err := LoadIterationAgentsWithRegistry(path, providers)
+	if err != nil {
+		return nil, err
+	}
+	for _, agent := range iterations {
+		result[agent.Kind] = true
+	}
+	return result, nil
+}
+
+func temporaryConfiguration(contents string) (string, func(), error) {
 	temporary, err := os.CreateTemp("", "pika-go-config-*.toml")
 	if err != nil {
-		return nil, fmt.Errorf("create temporary configuration: %w", err)
+		return "", nil, fmt.Errorf("create temporary configuration: %w", err)
 	}
 	path := temporary.Name()
-	defer os.Remove(path)
 	if _, err := temporary.WriteString(contents); err != nil {
 		_ = temporary.Close()
-		return nil, fmt.Errorf("write temporary configuration: %w", err)
+		_ = os.Remove(path)
+		return "", nil, fmt.Errorf("write temporary configuration: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return nil, fmt.Errorf("close temporary configuration: %w", err)
+		_ = os.Remove(path)
+		return "", nil, fmt.Errorf("close temporary configuration: %w", err)
 	}
-	return validateConfigurationPath(path, repository, providers)
+	return path, func() { _ = os.Remove(path) }, nil
+}
+
+func validateConfiguredModelCatalog(ctx context.Context, path string, providers *provider.Registry, modelRequests map[string]provider.ModelRequest) error {
+	if modelRequests == nil {
+		return errors.New("provider model catalog requests are required when provider probing is enabled")
+	}
+	for _, role := range AgentRoleOrder {
+		agent, err := LoadAgentWithRegistry(path, role, providers)
+		if err != nil {
+			return err
+		}
+		request, found := modelRequests[agent.Kind]
+		if !found {
+			return fmt.Errorf("provider model catalog request is required for %s", agent.Kind)
+		}
+		if err := providers.ValidateModelCatalog(ctx, agent, request); err != nil {
+			return fmt.Errorf("validate agents.%s model selection: %w", role, err)
+		}
+	}
+	return nil
 }
 
 func validateConfigurationPath(path, repository string, providers *provider.Registry) ([]string, error) {
@@ -279,15 +342,13 @@ func validateConfigurationPath(path, repository string, providers *provider.Regi
 	seen := map[string]bool{}
 	var kinds []string
 	for _, role := range []string{"baseline", "baseline_verify", "iteration", "integration", "follow_up"} {
-		agents, err := LoadAgentsWithRegistry(path, role, providers)
+		agent, err := LoadAgentWithRegistry(path, role, providers)
 		if err != nil {
 			return nil, err
 		}
-		for _, agent := range agents {
-			if !seen[agent.Kind] {
-				seen[agent.Kind] = true
-				kinds = append(kinds, agent.Kind)
-			}
+		if !seen[agent.Kind] {
+			seen[agent.Kind] = true
+			kinds = append(kinds, agent.Kind)
 		}
 	}
 	return kinds, nil

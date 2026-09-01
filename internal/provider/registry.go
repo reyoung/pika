@@ -82,6 +82,27 @@ func (r *Registry) Models(ctx context.Context, kind string, request ModelRequest
 	return lister.ListModels(ctx, request)
 }
 
+// ValidateModelCatalog proves that a syntactically valid AgentConfiguration is
+// currently selectable by the provider account.  Callers use this at
+// configuration preflight, before any Agent process is started.
+func (r *Registry) ValidateModelCatalog(ctx context.Context, configuration AgentConfiguration, request ModelRequest) error {
+	adapter, err := r.Resolve(configuration.Kind)
+	if err != nil {
+		return err
+	}
+	if err := adapter.Validate(configuration); err != nil {
+		return err
+	}
+	models, err := r.Models(ctx, configuration.Kind, request)
+	if err != nil {
+		return fmt.Errorf("read %s model catalog: %w", configuration.Kind, err)
+	}
+	if err := ValidateCatalogMembership(models, configuration); err != nil {
+		return fmt.Errorf("%s model catalog: %w", configuration.Kind, err)
+	}
+	return nil
+}
+
 func DefaultRegistry() *Registry {
 	registry, err := NewRegistry(NewCodexAdapter(), NewCursorAdapter())
 	if err != nil {

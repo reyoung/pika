@@ -10,6 +10,7 @@ import (
 
 	"github.com/reyoung/pika-go/internal/configuration"
 	"github.com/reyoung/pika-go/internal/optimizationworkspace"
+	"github.com/reyoung/pika-go/internal/provider"
 )
 
 func TestPrepareInitWritesAndRollsBackOnlyWorkspaceOwnedConfiguration(t *testing.T) {
@@ -198,7 +199,7 @@ func TestPrepareInitCursorOnlyDoesNotRequireOrInstallCodex(t *testing.T) {
 	}
 	resolved, _ := filepath.EvalSymlinks(repository)
 	cursor := filepath.Join(t.TempDir(), "cursor-agent")
-	if err := os.WriteFile(cursor, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+	if err := os.WriteFile(cursor, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nif [ \"$1\" = --plugin-dir ] && [ \"$3\" = --help ]; then echo --plugin-dir; exit 0; fi\nif [ \"$1\" = --list-models ]; then printf 'Available models\\nauto - Auto (default)\\ngpt-5.6-sol-high - GPT-5.6 Sol High\\ngpt-5.6-terra-medium - GPT-5.6 Terra Medium\\n'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	candidate := strings.ReplaceAll(configuration.RenderDefaults(resolved), `kind = "codex"`, `kind = "cursor"`)
@@ -208,7 +209,8 @@ func TestPrepareInitCursorOnlyDoesNotRequireOrInstallCodex(t *testing.T) {
 		ConfigRoot: configRoot, StateRoot: stateRoot, InstanceID: "cursor-only", PikaExecutable: "/bin/echo",
 		CursorMCPPath: filepath.Join(t.TempDir(), ".cursor", "mcp.json"), CursorHooksPath: filepath.Join(t.TempDir(), ".cursor", "hooks.json"),
 		ConfigurationTOML: &candidate, RequireConfigurationTOML: true, ProbeProviders: true,
-		ProviderExecutables: map[string]string{"cursor": cursor},
+		ProviderExecutables:   map[string]string{"cursor": cursor},
+		ProviderModelRequests: map[string]provider.ModelRequest{"cursor": {Executable: cursor}},
 	}
 	if _, err := initializer.Prepare(context.Background(), repository); err != nil {
 		t.Fatal(err)
@@ -220,6 +222,46 @@ func TestPrepareInitCursorOnlyDoesNotRequireOrInstallCodex(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(stateRoot, "instances", "cursor-only", "runtime", "bin", "codex")); !os.IsNotExist(err) {
 		t.Fatalf("Cursor-only init installed Codex: %v", err)
+	}
+}
+
+func TestPrepareInitRejectsCatalogUnavailableModelBeforeWritingConfiguration(t *testing.T) {
+	t.Parallel()
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.Mkdir(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	resolved, err := filepath.EvalSymlinks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := filepath.Join(t.TempDir(), "cursor-agent")
+	if err := os.WriteFile(cursor, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nif [ \"$1\" = --plugin-dir ] && [ \"$3\" = --help ]; then echo --plugin-dir; exit 0; fi\nif [ \"$1\" = --list-models ]; then printf 'Available models\\nauto - Auto (default)\\n'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	candidate := strings.ReplaceAll(configuration.RenderDefaults(resolved), `kind = "codex"`, `kind = "cursor"`)
+	candidate = strings.ReplaceAll(candidate, `model = "gpt-5.6-sol"`, `model = "gpt-5.6-luna"`)
+	candidate = strings.ReplaceAll(candidate, `model = "gpt-5.6-terra"`, `model = "gpt-5.6-luna"`)
+	candidate = strings.ReplaceAll(candidate, `reasoning_effort = "high"`, `reasoning_effort = "medium"`)
+	configRoot, stateRoot := filepath.Join(t.TempDir(), "config"), filepath.Join(t.TempDir(), "state")
+	initializer := configuration.Initializer{
+		ConfigRoot: configRoot, StateRoot: stateRoot, InstanceID: "catalog-unavailable", PikaExecutable: "/bin/echo",
+		CursorMCPPath: filepath.Join(t.TempDir(), ".cursor", "mcp.json"), CursorHooksPath: filepath.Join(t.TempDir(), ".cursor", "hooks.json"),
+		ConfigurationTOML: &candidate, RequireConfigurationTOML: true, ProbeProviders: true,
+		ProviderExecutables:   map[string]string{"cursor": cursor},
+		ProviderModelRequests: map[string]provider.ModelRequest{"cursor": {Executable: cursor}},
+	}
+	if _, err := initializer.Prepare(context.Background(), repository); err == nil || !strings.Contains(err.Error(), `model "gpt-5.6-luna" is not available`) {
+		t.Fatalf("catalog-unavailable configuration error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(configRoot, "instances", "catalog-unavailable", "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("configuration was written after catalog rejection: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateRoot, "instances", "catalog-unavailable")); !os.IsNotExist(err) {
+		t.Fatalf("state was written after catalog rejection: %v", err)
 	}
 }
 

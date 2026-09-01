@@ -71,6 +71,11 @@ type ProviderPrompter interface {
 	PromptForProvider(context.Context, string, string, string) error
 }
 
+type providerEventStore interface {
+	LatestProviderEventSequence(context.Context, string) (int64, error)
+	PromptSubmissionObservedAfter(context.Context, string, int64, string) (bool, error)
+}
+
 type AgentKeySender interface {
 	SendAgentKeys(context.Context, string, []string) error
 }
@@ -103,6 +108,9 @@ type Sink struct {
 	RequireProviderCapabilities bool
 	Preparer                    Preparer
 	WorkspacePreparer           WorkspacePreparer
+	// PromptEvidenceTimeout is an optional test seam for the bounded durable
+	// Cursor submit confirmation. A zero value uses the production timeout.
+	PromptEvidenceTimeout time.Duration
 }
 
 func (s Sink) Dispatch(ctx context.Context, effect symphony.RuntimeEffect) error {
@@ -225,7 +233,7 @@ func (s Sink) controlScheduler(ctx context.Context, effect symphony.RuntimeEffec
 						return
 					}
 				}
-				if promptErr := promptProvider(actionCtx, s.Runtime, observation.PaneID, action.Message, action.AgentKind); promptErr != nil {
+				if promptErr := promptProvider(actionCtx, s.Runtime, s.Store, action.AgentSessionID, observation.PaneID, action.Message, action.AgentKind, s.PromptEvidenceTimeout); promptErr != nil {
 					finish(symphony.SchedulerActionFailed, promptErr.Error())
 					return
 				}
@@ -366,7 +374,7 @@ func (s Sink) deliverFollowUp(ctx context.Context, effect symphony.RuntimeEffect
 		}
 		return nil
 	}
-	if err := promptProvider(ctx, s.Runtime, observation.PaneID, payload.Message, targetSession.AgentKind); err != nil {
+	if err := promptProvider(ctx, s.Runtime, s.Store, targetSession.ID, observation.PaneID, payload.Message, targetSession.AgentKind, s.PromptEvidenceTimeout); err != nil {
 		if markErr := s.Store.FinishFollowUpDelivery(ctx, payload.RequestID, false); markErr != nil {
 			return fmt.Errorf("deliver Follow-up: %v; mark delivery unknown: %w", err, markErr)
 		}
@@ -507,7 +515,7 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		return err
 	}
 	if preparation.Prompt != "" {
-		if err := promptProvider(ctx, s.Runtime, observation.PaneID, preparation.Prompt, session.AgentKind); err != nil {
+		if err := promptProvider(ctx, s.Runtime, s.Store, session.ID, observation.PaneID, preparation.Prompt, session.AgentKind, s.PromptEvidenceTimeout); err != nil {
 			return fmt.Errorf("send activation prompt: %w", err)
 		}
 	}
@@ -538,6 +546,8 @@ func workPaneLabel(work symphony.RuntimeWork) string {
 		return withBaselineNumber("Baseline")
 	case symphony.RoleBaselineVerification:
 		return withBaselineNumber("Verify")
+	case symphony.RoleDiagnosis:
+		return withBaselineNumber("Diagnosis")
 	case symphony.RoleIteration:
 		if work.Work.IterationRound > 0 {
 			return fmt.Sprintf("Iteration R%d", work.Work.IterationRound)
@@ -552,26 +562,51 @@ func workPaneLabel(work symphony.RuntimeWork) string {
 	}
 }
 
-func promptProvider(ctx context.Context, runtime Runtime, target, message, providerKind string) error {
-	if prompter, ok := runtime.(ProviderPrompter); ok {
-		return prompter.PromptForProvider(ctx, target, message, providerKind)
+func promptProvider(ctx context.Context, runtime Runtime, store Store, agentSessionID, target, message, providerKind string, evidenceTimeout time.Duration) error {
+	prompter, ok := runtime.(ProviderPrompter)
+	if !ok {
+		return runtime.Prompt(ctx, target, message)
 	}
-	return runtime.Prompt(ctx, target, message)
+	var eventsBefore int64
+	eventStore, durableConfirmation := store.(providerEventStore)
+	if providerKind == "cursor" && durableConfirmation && agentSessionID != "" {
+		var err error
+		eventsBefore, err = eventStore.LatestProviderEventSequence(ctx, agentSessionID)
+		if err != nil {
+			durableConfirmation = false
+		}
+	} else {
+		durableConfirmation = false
+	}
+	promptErr := prompter.PromptForProvider(ctx, target, message, providerKind)
+	if promptErr == nil || !durableConfirmation || ctx.Err() != nil {
+		return promptErr
+	}
+	if evidenceTimeout <= 0 {
+		evidenceTimeout = 5 * time.Second
+	}
+	confirmationCtx, cancel := context.WithTimeout(ctx, evidenceTimeout)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		observed, err := eventStore.PromptSubmissionObservedAfter(confirmationCtx, agentSessionID, eventsBefore, message)
+		if err == nil && observed {
+			return nil
+		}
+		select {
+		case <-confirmationCtx.Done():
+			return promptErr
+		case <-ticker.C:
+		}
+	}
 }
 
 func agentConfigRole(role symphony.WorkRole) string {
-	switch role {
-	case symphony.RoleBaselineDraft:
-		return "baseline"
-	case symphony.RoleBaselineVerification:
-		return "baseline_verify"
-	case symphony.RoleIteration:
-		return "iteration"
-	case symphony.RoleIntegration:
-		return "integration"
-	default:
-		return string(role)
+	if descriptor, ok := symphony.DescribeRole(role); ok {
+		return descriptor.ConfigurationKey
 	}
+	return string(role)
 }
 
 func (s Sink) close(ctx context.Context, effect symphony.RuntimeEffect) error {

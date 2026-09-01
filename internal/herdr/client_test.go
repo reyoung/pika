@@ -13,7 +13,7 @@ import (
 	"github.com/reyoung/pika-go/internal/herdr"
 )
 
-func TestBootstrapSubscribesBeforeSnapshotAndBuffersGapEvents(t *testing.T) {
+func TestBootstrapSubscribesBeforeSnapshotDoesNotLoseGapEvents(t *testing.T) {
 	t.Parallel()
 
 	dir, err := os.MkdirTemp("/tmp", "pika-go-herdr-client-test-")
@@ -39,8 +39,26 @@ func TestBootstrapSubscribesBeforeSnapshotAndBuffersGapEvents(t *testing.T) {
 	if bootstrap.Snapshot.Protocol != 20 || bootstrap.Snapshot.Version != "0.8.2" || len(bootstrap.Snapshot.Panes) != 1 || bootstrap.Snapshot.Panes[0].PaneID != "w1:p1" {
 		t.Fatalf("snapshot = %+v", bootstrap.Snapshot)
 	}
-	if len(bootstrap.Buffered) != 1 || bootstrap.Buffered[0].Kind != "pane.created" {
-		t.Fatalf("buffered events = %+v", bootstrap.Buffered)
+	// The event socket reader runs independently of the snapshot request.  An
+	// event written between subscribe and snapshot can therefore be either
+	// already drained by Bootstrap or waiting on the returned stream.  Both are
+	// correct: Watch consumes Buffered before it enters the stream loop, and
+	// consumes a waiting event immediately afterwards.  What matters at this
+	// boundary is that the event is not lost.
+	events := bootstrap.Buffered
+	if len(events) == 0 {
+		select {
+		case event, ok := <-bootstrap.Stream.Events():
+			if !ok {
+				t.Fatal("event stream closed before the gap event arrived")
+			}
+			events = append(events, event)
+		case <-time.After(time.Second):
+			t.Fatal("gap event was not delivered after bootstrap")
+		}
+	}
+	if len(events) != 1 || events[0].Kind != "pane.created" {
+		t.Fatalf("gap events = %+v", events)
 	}
 	if err := <-serverDone; err != nil {
 		t.Fatalf("fixture server: %v", err)

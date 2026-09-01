@@ -439,6 +439,28 @@ func (e *Engine) ReadAgentSession(ctx context.Context, sessionID string) (AgentS
 	return session, nil
 }
 
+// AgentSessionBinding returns the durable pane identity for a Session,
+// including bindings retired after the Session exited. A binding is the
+// authoritative marker that the runtime successfully launched and observed
+// the Session; a starting record alone is only scheduling intent.
+func (e *Engine) AgentSessionBinding(ctx context.Context, sessionID string) (PaneBinding, bool, error) {
+	if sessionID == "" {
+		return PaneBinding{}, false, errors.New("agent session ID is required")
+	}
+	var binding PaneBinding
+	err := e.db.QueryRowContext(ctx, `SELECT workspace_id, tab_id, pane_id, terminal_id
+		FROM pane_bindings WHERE agent_session_id = ?`, sessionID).Scan(
+		&binding.WorkspaceID, &binding.TabID, &binding.PaneID, &binding.TerminalID,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PaneBinding{}, false, nil
+	}
+	if err != nil {
+		return PaneBinding{}, false, fmt.Errorf("read agent session pane binding: %w", err)
+	}
+	return binding, true, nil
+}
+
 // AgentSessionHistory returns every Pika Agent Session recorded for one Work.
 // Recovery diagnostics use it instead of inferring history from the
 // currently active pane, which may already have completed by observation time.
@@ -470,15 +492,15 @@ func (e *Engine) AgentSessionHistory(ctx context.Context, workID string) ([]Agen
 
 func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, error) {
 	var runtimeWork RuntimeWork
-	var attemptID, integrationID, parentWorkID, followUpRequestID, baseSHA, candidateSHA, iterationKind, backOffMessage sql.NullString
+	var attemptID, integrationID, parentWorkID, followUpRequestID, baseSHA, candidateSHA, iterationKind, backOffMessage, currentCheckpoint sql.NullString
 	var expectedBestSHA, integrationStatus, gitIntentID, gitIntentState sql.NullString
 	var predecessorBaselineID, baselineRepositorySHA sql.NullString
 	var iterationRound, fifoPosition, historyLimit, iterationSlotIndex sql.NullInt64
 	var baselineDefinition []byte
 	err := e.db.QueryRowContext(ctx, `SELECT w.id, w.baseline_revision_id, w.role, w.status, w.generation,
 		w.attempt_id, w.iteration_round, w.integration_id, w.parent_work_id, w.followup_request_id,
-		o.id, o.status, o.revision, o.repository, b.number, b.status, b.definition_json, b.repository_sha, b.predecessor_id,
-		a.base_sha, a.candidate_sha, a.slot_index, a.history_limit, r.kind, r.back_off_message,
+		o.id, o.status, o.revision, o.flow_version, o.repository, b.number, b.status, b.definition_json, b.repository_sha, b.predecessor_id,
+		a.base_sha, a.candidate_sha, a.slot_index, a.history_limit, r.kind, r.back_off_message, r.current_checkpoint_sha,
 		i.expected_best_sha, i.fifo_position, i.status, g.id, g.state
 		FROM works w JOIN optimizations o ON o.id = w.optimization_id
 		JOIN baseline_revisions b ON b.id = w.baseline_revision_id
@@ -489,9 +511,9 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		WHERE w.id = ?`, workID).Scan(
 		&runtimeWork.Work.ID, &runtimeWork.Work.BaselineRevisionID, &runtimeWork.Work.Role,
 		&runtimeWork.Work.Status, &runtimeWork.Work.Generation, &attemptID, &iterationRound, &integrationID, &parentWorkID, &followUpRequestID,
-		&runtimeWork.OptimizationID, &runtimeWork.OptimizationStatus, &runtimeWork.OptimizationRevision, &runtimeWork.Repository,
+		&runtimeWork.OptimizationID, &runtimeWork.OptimizationStatus, &runtimeWork.OptimizationRevision, &runtimeWork.FlowVersion, &runtimeWork.Repository,
 		&runtimeWork.BaselineNumber, &runtimeWork.BaselineStatus, &baselineDefinition, &baselineRepositorySHA, &predecessorBaselineID,
-		&baseSHA, &candidateSHA, &iterationSlotIndex, &historyLimit, &iterationKind, &backOffMessage,
+		&baseSHA, &candidateSHA, &iterationSlotIndex, &historyLimit, &iterationKind, &backOffMessage, &currentCheckpoint,
 		&expectedBestSHA, &fifoPosition, &integrationStatus, &gitIntentID, &gitIntentState,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -512,6 +534,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 	runtimeWork.IterationHistoryLimit = historyLimit.Int64
 	runtimeWork.IterationKind = iterationKind.String
 	runtimeWork.BackOffMessage = backOffMessage.String
+	runtimeWork.CurrentCheckpointSHA = currentCheckpoint.String
 	runtimeWork.ExpectedBestSHA = expectedBestSHA.String
 	runtimeWork.IntegrationFIFOPosition = fifoPosition.Int64
 	runtimeWork.IntegrationStatus = integrationStatus.String
@@ -544,7 +567,32 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		runtimeWork.PredecessorRequestedChanges = requestedChanges.String
 		runtimeWork.PredecessorVerificationEvidence = evidence
 	}
-	if runtimeWork.Work.Role == RoleIteration || runtimeWork.Work.Role == RoleIntegration {
+	if runtimeWork.FlowVersion == FlowVersion2 {
+		snapshot, snapshotErr := e.readSkillSnapshot(ctx, runtimeWork.OptimizationID)
+		if snapshotErr != nil {
+			return RuntimeWork{}, snapshotErr
+		}
+		runtimeWork.SkillSnapshot = &snapshot
+		var diagnosis DiagnosisView
+		var report []byte
+		diagnosisErr := e.db.QueryRowContext(ctx, `SELECT id, baseline_revision_id, work_id, status, report_json
+			FROM diagnoses WHERE baseline_revision_id = ?`, runtimeWork.Work.BaselineRevisionID).Scan(
+			&diagnosis.ID, &diagnosis.BaselineRevisionID, &diagnosis.WorkID, &diagnosis.Status, &report)
+		if diagnosisErr == nil {
+			diagnosis.Report = report
+			if len(report) != 0 {
+				_, _, hypotheses, countErr := diagnosisReportCounts(report)
+				if countErr != nil {
+					return RuntimeWork{}, domainError(CodeStateCorrupt, "stored Diagnosis report is invalid JSON")
+				}
+				diagnosis.HypothesisCount = hypotheses
+			}
+			runtimeWork.Diagnosis = &diagnosis
+		} else if !errors.Is(diagnosisErr, sql.ErrNoRows) {
+			return RuntimeWork{}, fmt.Errorf("read runtime Diagnosis: %w", diagnosisErr)
+		}
+	}
+	if runtimeWork.Work.Role == RoleIteration || runtimeWork.Work.Role == RoleIntegration || runtimeWork.Work.Role == RoleDiagnosis {
 		if err := e.db.QueryRowContext(ctx, `SELECT sequence, commit_sha FROM best_revisions
 			WHERE optimization_id = (SELECT optimization_id FROM works WHERE id = ?)
 			ORDER BY sequence DESC LIMIT 1`, workID).Scan(&runtimeWork.BestSequence, &runtimeWork.BestSHA); err != nil {
@@ -561,6 +609,13 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 			return RuntimeWork{}, err
 		}
 		runtimeWork.IterationCaseSet = &caseSet
+	}
+	if (runtimeWork.Work.Role == RoleIteration || runtimeWork.Work.Role == RoleIntegration) && runtimeWork.FlowVersion == FlowVersion2 {
+		experiments, experimentsErr := e.readIterationExperiments(ctx, runtimeWork.Work.AttemptID, runtimeWork.Work.IterationRound)
+		if experimentsErr != nil {
+			return RuntimeWork{}, experimentsErr
+		}
+		runtimeWork.IterationExperiments = experiments
 	}
 	if runtimeWork.Work.Role == RoleFollowUp {
 		if err := e.db.QueryRowContext(ctx, `SELECT target_work_id, target_role, request_sequence, due_at,
@@ -580,6 +635,8 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		runtimeWork.IterationKind, runtimeWork.BackOffMessage = target.IterationKind, target.BackOffMessage
 		runtimeWork.IterationHistoryLimit = target.IterationHistoryLimit
 		runtimeWork.IterationCaseSet = target.IterationCaseSet
+		runtimeWork.FlowVersion, runtimeWork.SkillSnapshot, runtimeWork.Diagnosis = target.FlowVersion, target.SkillSnapshot, target.Diagnosis
+		runtimeWork.IterationExperiments, runtimeWork.CurrentCheckpointSHA = target.IterationExperiments, target.CurrentCheckpointSHA
 		runtimeWork.BestSHA, runtimeWork.BestSequence = target.BestSHA, target.BestSequence
 		runtimeWork.ExpectedBestSHA = target.ExpectedBestSHA
 		runtimeWork.IntegrationFIFOPosition, runtimeWork.IntegrationStatus = target.IntegrationFIFOPosition, target.IntegrationStatus
@@ -882,6 +939,10 @@ func (e *Engine) Apply(ctx context.Context, command Command) (Receipt, error) {
 		receipt, err = e.applySubmitBaselineDefinition(ctx, tx, typed)
 	case FinishBaselineVerification:
 		receipt, err = e.applyFinishBaselineVerification(ctx, tx, typed)
+	case FinishDiagnosis:
+		receipt, err = e.applyFinishDiagnosis(ctx, tx, typed)
+	case RecordIterationExperiment:
+		receipt, err = e.applyRecordIterationExperiment(ctx, tx, typed)
 	case BackOff:
 		receipt, err = e.applyBackOff(ctx, tx, typed)
 	case CancelWork:
@@ -1015,17 +1076,17 @@ func (e *Engine) applySubmitBaselineDefinition(ctx context.Context, tx *sql.Tx, 
 		if err != nil {
 			return Receipt{}, domainError(CodeInvalidCommand, "invalid benchmark measurement contract: "+err.Error())
 		}
+		if optimization.FlowVersion == FlowVersion2 {
+			if err := benchmarkintegrity.RequireIterationGate(measurementDefinition); err != nil {
+				return Receipt{}, domainError(CodeInvalidCommand, "invalid benchmark measurement contract: "+err.Error())
+			}
+		}
 	}
 
 	receiptID := e.newID()
 	now := e.timestamp()
 	nextRevision := optimization.Revision + 1
 	digest := sha256.Sum256(command.Definition)
-	if measurementContractVersion.Valid {
-		if err := persistMeasurementDefinition(ctx, tx, baselineID, measurementDefinition); err != nil {
-			return Receipt{}, err
-		}
-	}
 	if optimization.Status == OptimizationDraining {
 		eventID := e.newID()
 		closeEffectID := e.newID()
@@ -1061,6 +1122,11 @@ func (e *Engine) applySubmitBaselineDefinition(ctx context.Context, tx *sql.Tx, 
 	if _, err := tx.ExecContext(ctx, `UPDATE baseline_revisions SET status = ?, definition_json = ?, definition_digest = ?, repository_sha = ?, submitted_at = ? WHERE id = ?`,
 		BaselineVerifying, []byte(command.Definition), hex.EncodeToString(digest[:]), nullable(command.RepositorySHA), now, baselineID); err != nil {
 		return Receipt{}, fmt.Errorf("submit baseline revision: %w", err)
+	}
+	if measurementContractVersion.Valid {
+		if err := persistMeasurementDefinition(ctx, tx, baselineID, measurementDefinition); err != nil {
+			return Receipt{}, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE works SET status = ?, finished_at = ? WHERE id = ?`, WorkCompleted, now, command.WorkID); err != nil {
 		return Receipt{}, fmt.Errorf("complete baseline draft work: %w", err)
@@ -1159,7 +1225,7 @@ func (e *Engine) applyFinishBaselineVerification(ctx context.Context, tx *sql.Tx
 		}
 		baselineMeasurements, parseErr = benchmarkintegrity.ParseBaselineMeasurements(measurementDefinition, command.Evidence)
 		if parseErr != nil {
-			return Receipt{}, domainError(CodeInvalidCommand, "invalid Development Baseline measurements: "+parseErr.Error())
+			return Receipt{}, domainError(CodeInvalidCommand, "invalid baseline measurements: "+parseErr.Error())
 		}
 	}
 
@@ -1197,7 +1263,7 @@ func (e *Engine) applyFinishBaselineVerification(ctx context.Context, tx *sql.Tx
 		successorWorkID := e.newID()
 		startEffectID := e.newID()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_revisions
-			(id, optimization_id, number, status, predecessor_id, created_at, measurement_contract_version) VALUES (?, ?, ?, ?, ?, ?, 1)`,
+            (id, optimization_id, number, status, predecessor_id, created_at, measurement_contract_version) VALUES (?, ?, ?, ?, ?, ?, 1)`,
 			successorID, optimization.ID, baselineNumber+1, BaselineDrafting, baselineID, now); err != nil {
 			return Receipt{}, fmt.Errorf("create successor baseline revision: %w", err)
 		}
@@ -1300,7 +1366,7 @@ func (e *Engine) applyBackOff(ctx context.Context, tx *sql.Tx, command BackOff) 
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_revisions
-		(id, optimization_id, number, status, predecessor_id, created_at, measurement_contract_version) VALUES (?, ?, ?, ?, ?, ?, 1)`,
+        (id, optimization_id, number, status, predecessor_id, created_at, measurement_contract_version) VALUES (?, ?, ?, ?, ?, ?, 1)`,
 		successorID, optimization.ID, baselineNumber+1, BaselineDrafting, baselineID, now); err != nil {
 		return Receipt{}, fmt.Errorf("create back-off successor baseline: %w", err)
 	}
@@ -1368,6 +1434,11 @@ func (e *Engine) applyCancelWork(ctx context.Context, tx *sql.Tx, command Cancel
 	nextRevision := optimization.Revision + 1
 	if _, err := tx.ExecContext(ctx, `UPDATE works SET status = ?, finished_at = ? WHERE id = ?`, WorkCancelled, now, command.WorkID); err != nil {
 		return Receipt{}, fmt.Errorf("cancel work: %w", err)
+	}
+	if role == RoleDiagnosis {
+		if _, err := tx.ExecContext(ctx, `UPDATE diagnoses SET status = ?, finished_at = ? WHERE work_id = ? AND status = ?`, DiagnosisCancelled, now, command.WorkID, DiagnosisPending); err != nil {
+			return Receipt{}, fmt.Errorf("cancel Diagnosis: %w", err)
+		}
 	}
 	nextStatus := OptimizationPaused
 	if optimization.Status == OptimizationDraining {
@@ -1517,6 +1588,18 @@ func (e *Engine) applyInit(ctx context.Context, tx *sql.Tx, command Init) (Recei
 	if !command.IterationHistoryLimitSet {
 		command.IterationHistoryLimit = 20
 	}
+	flowVersion, err := normalizedFlowVersion(command.FlowVersion)
+	if err != nil {
+		return Receipt{}, domainError(CodeInvalidCommand, err.Error())
+	}
+	if flowVersion == FlowVersion1 && command.SkillSnapshot != nil {
+		return Receipt{}, domainError(CodeInvalidCommand, "flow v1 cannot receive a skill snapshot")
+	}
+	if flowVersion == FlowVersion2 {
+		if err := validateSkillSnapshotInput(command.SkillSnapshot); err != nil {
+			return Receipt{}, domainError(CodeInvalidCommand, err.Error())
+		}
+	}
 	var count int
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM optimizations").Scan(&count); err != nil {
 		return Receipt{}, fmt.Errorf("inspect optimization singleton: %w", err)
@@ -1532,10 +1615,27 @@ func (e *Engine) applyInit(ctx context.Context, tx *sql.Tx, command Init) (Recei
 	effectID := e.newID()
 	now := e.timestamp()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO optimizations
-		(id, status, revision, repository, iteration_concurrency, max_pending_attempts, iteration_history_limit, created_at, updated_at)
-		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)`, command.OptimizationID, OptimizationDraftingBaseline, command.Repository,
-		command.IterationConcurrency, command.MaxPendingAttempts, command.IterationHistoryLimit, now, now); err != nil {
+		(id, status, revision, repository, iteration_concurrency, max_pending_attempts, iteration_history_limit, flow_version, created_at, updated_at)
+		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`, command.OptimizationID, OptimizationDraftingBaseline, command.Repository,
+		command.IterationConcurrency, command.MaxPendingAttempts, command.IterationHistoryLimit, flowVersion, now, now); err != nil {
 		return Receipt{}, fmt.Errorf("create optimization: %w", err)
+	}
+	if flowVersion == FlowVersion2 {
+		snapshot := command.SkillSnapshot
+		if _, err := tx.ExecContext(ctx, `INSERT INTO skill_snapshots
+			(optimization_id, schema_version, snapshot_id, root_path, manifest_json, manifest_sha256, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`, command.OptimizationID, snapshot.SchemaVersion, snapshot.SnapshotID,
+			snapshot.RootPath, []byte(snapshot.Manifest), snapshot.ManifestSHA256, now); err != nil {
+			return Receipt{}, fmt.Errorf("persist frozen skill snapshot: %w", err)
+		}
+		for ordinal, entry := range snapshot.Entries {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO skill_snapshot_entries
+				(optimization_id, ordinal, name, repository, branch, commit_sha, relative_path, content_sha256)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, command.OptimizationID, ordinal, entry.Name, entry.Repository,
+				entry.Branch, entry.CommitSHA, entry.RelativePath, entry.ContentSHA256); err != nil {
+				return Receipt{}, fmt.Errorf("persist frozen skill snapshot entry: %w", err)
+			}
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_revisions
 		(id, optimization_id, number, status, created_at, measurement_contract_version) VALUES (?, ?, 1, ?, ?, 1)`, baselineID, command.OptimizationID, BaselineDrafting, now); err != nil {
@@ -1546,7 +1646,7 @@ func (e *Engine) applyInit(ctx context.Context, tx *sql.Tx, command Init) (Recei
         VALUES (?, ?, ?, ?, ?, 1, ?)`, workID, command.OptimizationID, baselineID, RoleBaselineDraft, WorkPending, now); err != nil {
 		return Receipt{}, fmt.Errorf("create baseline draft work: %w", err)
 	}
-	result, _ := json.Marshal(map[string]string{"optimization_id": command.OptimizationID, "baseline_revision_id": baselineID, "work_id": workID})
+	result, _ := json.Marshal(map[string]any{"optimization_id": command.OptimizationID, "baseline_revision_id": baselineID, "work_id": workID, "flow_version": flowVersion})
 	payloadValues := map[string]string{"baseline_revision_id": baselineID, "work_id": workID}
 	if command.CallerPaneID != "" {
 		payloadValues["preferred_pane_id"] = command.CallerPaneID
@@ -1569,9 +1669,9 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	var schedulerPausedAt sql.NullString
 	var iterationCaseSetVersion sql.NullInt64
 	if err := e.db.QueryRowContext(ctx, `SELECT id, status, revision, repository, iteration_concurrency, max_pending_attempts,
-		iteration_history_limit, scheduler_status, scheduler_paused_at, scheduler_epoch, iteration_case_set_version FROM optimizations LIMIT 1`).Scan(
+		iteration_history_limit, flow_version, scheduler_status, scheduler_paused_at, scheduler_epoch, iteration_case_set_version FROM optimizations LIMIT 1`).Scan(
 		&view.Optimization.ID, &view.Optimization.Status, &view.Optimization.Revision, &view.Optimization.Repository,
-		&view.Optimization.IterationConcurrency, &view.Optimization.MaxPendingAttempts, &view.Optimization.IterationHistoryLimit,
+		&view.Optimization.IterationConcurrency, &view.Optimization.MaxPendingAttempts, &view.Optimization.IterationHistoryLimit, &view.Optimization.FlowVersion,
 		&view.Scheduler.Status, &schedulerPausedAt, &view.Scheduler.Epoch, &iterationCaseSetVersion,
 	); errors.Is(err, sql.ErrNoRows) {
 		return View{}, domainError(CodeNotInitialized, "optimization is not initialized")
@@ -1579,6 +1679,13 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		return View{}, fmt.Errorf("read optimization: %w", err)
 	}
 	view.Scheduler.PausedAt = schedulerPausedAt.String
+	if view.Optimization.FlowVersion == FlowVersion2 {
+		snapshot, err := e.readSkillSnapshot(ctx, view.Optimization.ID)
+		if err != nil {
+			return View{}, err
+		}
+		view.SkillSnapshot = &snapshot
+	}
 	if iterationCaseSetVersion.Valid {
 		caseSet, err := currentIterationCaseSet(ctx, e.db, view.Optimization.ID)
 		if err != nil {
@@ -1715,20 +1822,22 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		return View{}, fmt.Errorf("close attempt rows: %w", err)
 	}
 	integrationRows, err := e.db.QueryContext(ctx, `SELECT sequence, fifo_position, id, attempt_id, iteration_round, status,
-		candidate_sha, expected_best_sha, intent_id, regression_cases_json, validation_json, result_json FROM integrations ORDER BY sequence`)
+		candidate_sha, expected_best_sha, candidate_experiment_id, intent_id, regression_cases_json, validation_json, result_json FROM integrations ORDER BY sequence`)
 	if err != nil {
 		return View{}, fmt.Errorf("read integrations: %w", err)
 	}
 	for integrationRows.Next() {
 		var integration IntegrationView
 		var intentID sql.NullString
+		var candidateExperimentID sql.NullString
 		var regressionCases, validation, result []byte
 		if err := integrationRows.Scan(&integration.Sequence, &integration.FIFOPosition, &integration.ID, &integration.AttemptID,
 			&integration.IterationRound, &integration.Status, &integration.CandidateSHA,
-			&integration.ExpectedBestSHA, &intentID, &regressionCases, &validation, &result); err != nil {
+			&integration.ExpectedBestSHA, &candidateExperimentID, &intentID, &regressionCases, &validation, &result); err != nil {
 			_ = integrationRows.Close()
 			return View{}, fmt.Errorf("scan integration: %w", err)
 		}
+		integration.CandidateExperimentID = candidateExperimentID.String
 		integration.IntentID = intentID.String
 		if len(regressionCases) != 0 {
 			if err := json.Unmarshal(regressionCases, &integration.RegressionCases); err != nil {
@@ -1742,7 +1851,7 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	if err := integrationRows.Close(); err != nil {
 		return View{}, fmt.Errorf("close integration rows: %w", err)
 	}
-	roundRows, err := e.db.QueryContext(ctx, `SELECT r.attempt_id, r.round, r.kind, r.base_sha, r.status, r.back_off_message,
+	roundRows, err := e.db.QueryContext(ctx, `SELECT r.attempt_id, r.round, r.kind, r.base_sha, r.current_checkpoint_sha, r.status, r.back_off_message,
 		r.iteration_case_set_version, r.evidence_json
 		FROM iteration_rounds r JOIN attempts a ON a.id = r.attempt_id
 		WHERE a.optimization_id = ? ORDER BY r.created_at, r.id`, view.Optimization.ID)
@@ -1751,20 +1860,60 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	}
 	for roundRows.Next() {
 		var round IterationRoundView
-		var message sql.NullString
+		var message, currentCheckpoint sql.NullString
 		var version sql.NullInt64
 		var evidence []byte
-		if err := roundRows.Scan(&round.AttemptID, &round.Round, &round.Kind, &round.BaseSHA, &round.Status, &message, &version, &evidence); err != nil {
+		if err := roundRows.Scan(&round.AttemptID, &round.Round, &round.Kind, &round.BaseSHA, &currentCheckpoint, &round.Status, &message, &version, &evidence); err != nil {
 			_ = roundRows.Close()
 			return View{}, fmt.Errorf("scan iteration round: %w", err)
 		}
 		round.BackOffMessage = message.String
+		round.CurrentCheckpointSHA = currentCheckpoint.String
 		round.IterationCaseSetVersion = version.Int64
 		round.Evidence = evidence
 		view.IterationRounds = append(view.IterationRounds, round)
 	}
 	if err := roundRows.Close(); err != nil {
 		return View{}, fmt.Errorf("close iteration round rows: %w", err)
+	}
+	diagnosisRows, err := e.db.QueryContext(ctx, `SELECT id, baseline_revision_id, work_id, status, report_json
+		FROM diagnoses WHERE optimization_id = ? ORDER BY created_at, id`, view.Optimization.ID)
+	if err != nil {
+		return View{}, fmt.Errorf("read Diagnoses: %w", err)
+	}
+	for diagnosisRows.Next() {
+		var diagnosis DiagnosisView
+		var report []byte
+		if err := diagnosisRows.Scan(&diagnosis.ID, &diagnosis.BaselineRevisionID, &diagnosis.WorkID, &diagnosis.Status, &report); err != nil {
+			_ = diagnosisRows.Close()
+			return View{}, fmt.Errorf("scan Diagnosis: %w", err)
+		}
+		diagnosis.Report = report
+		view.Diagnoses = append(view.Diagnoses, diagnosis)
+	}
+	if err := diagnosisRows.Close(); err != nil {
+		return View{}, fmt.Errorf("close Diagnosis rows: %w", err)
+	}
+	experimentRows, err := e.db.QueryContext(ctx, `SELECT id, attempt_id, iteration_round, sequence, outcome, parent_checkpoint_sha, checkpoint_sha, scope_best_sha, receipt_id, experiment_json
+		FROM iteration_experiments WHERE optimization_id = ? ORDER BY attempt_id, iteration_round, sequence`, view.Optimization.ID)
+	if err != nil {
+		return View{}, fmt.Errorf("read Iteration Experiments: %w", err)
+	}
+	for experimentRows.Next() {
+		var experiment IterationExperimentView
+		var checkpoint sql.NullString
+		if err := experimentRows.Scan(&experiment.ID, &experiment.AttemptID, &experiment.IterationRound, &experiment.Sequence, &experiment.Outcome, &experiment.ParentCheckpointSHA, &checkpoint, &experiment.ScopeBestSHA, &experiment.ReceiptID, &experiment.Experiment); err != nil {
+			_ = experimentRows.Close()
+			return View{}, fmt.Errorf("scan Iteration Experiment: %w", err)
+		}
+		experiment.CheckpointSHA = checkpoint.String
+		view.IterationExperiments = append(view.IterationExperiments, experiment)
+	}
+	if err := experimentRows.Close(); err != nil {
+		return View{}, fmt.Errorf("close Iteration Experiment rows: %w", err)
+	}
+	if err := summarizeKnowledge(&view); err != nil {
+		return View{}, err
 	}
 	backOffRows, err := e.db.QueryContext(ctx, `SELECT id, source_work_id, successor_baseline_revision_id, message
         FROM back_offs WHERE optimization_id = ? ORDER BY rowid`, view.Optimization.ID)
@@ -1860,7 +2009,8 @@ func validateOnlineState(ctx context.Context, db *sql.DB, allowIterationCaseMigr
 	}
 	var invalidCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM optimizations
-        WHERE status NOT IN ('drafting_baseline', 'verifying_baseline', 'optimizing', 'paused', 'draining') OR revision < 1`).Scan(&invalidCount); err != nil {
+        WHERE status NOT IN ('drafting_baseline', 'verifying_baseline', 'optimizing', 'paused', 'draining') OR revision < 1
+        OR flow_version NOT IN (1, 2)`).Scan(&invalidCount); err != nil {
 		return fmt.Errorf("validate optimization state: %w", err)
 	}
 	if invalidCount != 0 {
@@ -1923,7 +2073,7 @@ func validateOnlineState(ctx context.Context, db *sql.DB, allowIterationCaseMigr
 		return domainError(CodeStateCorrupt, "baseline revision has an invalid status or number")
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM works
-		WHERE role NOT IN ('baseline_draft', 'baseline_verification', 'iteration', 'integration', 'follow_up') OR status NOT IN ('pending', 'completed', 'cancelled') OR generation < 1`).Scan(&invalidCount); err != nil {
+		WHERE role NOT IN ('baseline_draft', 'baseline_verification', 'diagnosis', 'iteration', 'integration', 'follow_up') OR status NOT IN ('pending', 'completed', 'cancelled') OR generation < 1`).Scan(&invalidCount); err != nil {
 		return fmt.Errorf("validate work state: %w", err)
 	}
 	if invalidCount != 0 {
@@ -2007,9 +2157,7 @@ func validateOnlineState(ctx context.Context, db *sql.DB, allowIterationCaseMigr
 		return domainError(CodeStateCorrupt, "more than one Integration is active")
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM optimizations o
-		WHERE (SELECT COUNT(*) FROM attempts a WHERE a.optimization_id = o.id AND a.status = 'iterating') > o.iteration_concurrency
-		OR EXISTS (SELECT 1 FROM attempts a WHERE a.optimization_id = o.id AND a.status = 'iterating'
-			AND (a.slot_index < 0 OR a.slot_index >= o.iteration_concurrency))`).Scan(&invalidCount); err != nil {
+		WHERE (SELECT COUNT(*) FROM attempts a WHERE a.optimization_id = o.id AND a.status = 'iterating') > o.iteration_concurrency`).Scan(&invalidCount); err != nil {
 		return fmt.Errorf("validate Iteration concurrency: %w", err)
 	}
 	if invalidCount != 0 {
@@ -2152,14 +2300,57 @@ func mustJSON(value any) []byte {
 }
 
 type optimizationRecord struct {
-	ID       string
-	Status   OptimizationStatus
-	Revision int64
+	ID          string
+	Status      OptimizationStatus
+	Revision    int64
+	FlowVersion FlowVersion
+}
+
+func (e *Engine) readSkillSnapshot(ctx context.Context, optimizationID string) (SkillSnapshotView, error) {
+	expectedSources := expectedSkillSourcesForCurrentProcess()
+	var snapshot SkillSnapshotView
+	err := e.db.QueryRowContext(ctx, `SELECT schema_version, snapshot_id, root_path, manifest_sha256
+		FROM skill_snapshots WHERE optimization_id = ?`, optimizationID).Scan(
+		&snapshot.SchemaVersion, &snapshot.SnapshotID, &snapshot.RootPath, &snapshot.ManifestSHA256)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SkillSnapshotView{}, domainError(CodeStateCorrupt, "flow v2 Optimization has no frozen skill snapshot")
+	}
+	if err != nil {
+		return SkillSnapshotView{}, fmt.Errorf("read frozen skill snapshot: %w", err)
+	}
+	rows, err := e.db.QueryContext(ctx, `SELECT name, repository, branch, commit_sha, relative_path, content_sha256
+		FROM skill_snapshot_entries WHERE optimization_id = ? ORDER BY ordinal`, optimizationID)
+	if err != nil {
+		return SkillSnapshotView{}, fmt.Errorf("read frozen skill snapshot entries: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var entry SkillSnapshotEntry
+		if err := rows.Scan(&entry.Name, &entry.Repository, &entry.Branch, &entry.CommitSHA, &entry.RelativePath, &entry.ContentSHA256); err != nil {
+			return SkillSnapshotView{}, fmt.Errorf("scan frozen skill snapshot entry: %w", err)
+		}
+		snapshot.Entries = append(snapshot.Entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return SkillSnapshotView{}, fmt.Errorf("iterate frozen skill snapshot entries: %w", err)
+	}
+	if snapshot.SchemaVersion != SkillSnapshotSchemaV1 || !isSHA256(snapshot.SnapshotID) || !filepath.IsAbs(snapshot.RootPath) ||
+		!isSHA256(snapshot.ManifestSHA256) || len(snapshot.Entries) != len(expectedSources) {
+		return SkillSnapshotView{}, domainError(CodeStateCorrupt, "frozen skill snapshot has invalid shape")
+	}
+	for index, expected := range expectedSources {
+		entry := snapshot.Entries[index]
+		if entry.Name != expected.name || entry.Repository != expected.repository || entry.Branch != expected.branch || entry.RelativePath != expected.path ||
+			!isGitSHA(entry.CommitSHA) || !isSHA256(entry.ContentSHA256) {
+			return SkillSnapshotView{}, domainError(CodeStateCorrupt, "frozen skill snapshot has invalid entries")
+		}
+	}
+	return snapshot, nil
 }
 
 func readOptimization(ctx context.Context, tx *sql.Tx) (optimizationRecord, error) {
 	var optimization optimizationRecord
-	err := tx.QueryRowContext(ctx, `SELECT id, status, revision FROM optimizations LIMIT 1`).Scan(&optimization.ID, &optimization.Status, &optimization.Revision)
+	err := tx.QueryRowContext(ctx, `SELECT id, status, revision, flow_version FROM optimizations LIMIT 1`).Scan(&optimization.ID, &optimization.Status, &optimization.Revision, &optimization.FlowVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return optimizationRecord{}, domainError(CodeNotInitialized, "optimization is not initialized")
 	}

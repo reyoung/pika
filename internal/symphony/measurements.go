@@ -48,11 +48,51 @@ func persistBaselineMeasurementSet(ctx context.Context, tx *sql.Tx, baselineID, 
 	return nil
 }
 
-func persistIntegrationMeasurements(ctx context.Context, tx *sql.Tx, baselineID, workID, integrationID, now string, comparison benchmarkintegrity.MeasurementComparison) error {
+func persistExperimentMeasurements(ctx context.Context, tx *sql.Tx, baselineID, workID, experimentID, receiptID, scopeBestSHA, now string, comparison benchmarkintegrity.MeasurementComparison) error {
+	for _, kind := range []string{"reference", "candidate"} {
+		setID := experimentID + ":" + kind
+		if _, err := tx.ExecContext(ctx, `INSERT INTO benchmark_measurement_sets
+			(id, baseline_revision_id, work_id, experiment_id, receipt_id, scope_best_sha, kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, setID, baselineID, workID, experimentID, receiptID, scopeBestSHA, kind, now); err != nil {
+			return fmt.Errorf("persist Experiment %s measurement set: %w", kind, err)
+		}
+		for _, item := range comparison.Cases {
+			for metricID, value := range item.Metrics {
+				measured := value.Reference
+				if kind == "candidate" {
+					measured = value.Candidate
+				}
+				if _, err := tx.ExecContext(ctx, `INSERT INTO benchmark_case_values
+					(measurement_set_id, case_id, metric_id, value) VALUES (?, ?, ?, ?)`, setID, item.CaseID, metricID, measured); err != nil {
+					return fmt.Errorf("persist Experiment %s value: %w", kind, err)
+				}
+			}
+		}
+	}
+	for _, item := range comparison.Cases {
+		for metricID, value := range item.Metrics {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO benchmark_experiment_derived_comparisons
+				(experiment_id, case_id, metric_id, reference_value, candidate_value, speedup, regression, regression_fraction, receipt_id, scope_best_sha)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, experimentID, item.CaseID, metricID, value.Reference, value.Candidate, value.Speedup, value.Regression, value.RegressionFraction, receiptID, scopeBestSHA); err != nil {
+				return fmt.Errorf("persist Experiment benchmark comparison: %w", err)
+			}
+		}
+	}
+	for metricID, value := range comparison.Metrics {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO benchmark_experiment_derived_comparisons
+			(experiment_id, case_id, metric_id, speedup, regression, regression_fraction, aggregate_speedup, max_case_speedup, max_case_id, receipt_id, scope_best_sha)
+			VALUES (?, '', ?, ?, 0, 0, ?, ?, ?, ?, ?)`, experimentID, metricID, value.AggregateSpeedup, value.AggregateSpeedup, value.MaxCaseSpeedup, value.MaxCaseID, receiptID, scopeBestSHA); err != nil {
+			return fmt.Errorf("persist Experiment benchmark aggregate comparison: %w", err)
+		}
+	}
+	return nil
+}
+
+func persistIntegrationMeasurements(ctx context.Context, tx *sql.Tx, baselineID, workID, integrationID, experimentID, receiptID, scopeBestSHA, now string, comparison benchmarkintegrity.MeasurementComparison) error {
+	experimentRef := nullable(experimentID)
 	for _, kind := range []string{"reference", "candidate"} {
 		setID := integrationID + ":" + kind
 		if _, err := tx.ExecContext(ctx, `INSERT INTO benchmark_measurement_sets
-			(id, baseline_revision_id, work_id, integration_id, kind, created_at) VALUES (?, ?, ?, ?, ?, ?)`, setID, baselineID, workID, integrationID, kind, now); err != nil {
+			(id, baseline_revision_id, work_id, integration_id, experiment_id, receipt_id, scope_best_sha, kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, setID, baselineID, workID, integrationID, experimentRef, receiptID, scopeBestSHA, kind, now); err != nil {
 			return fmt.Errorf("persist Integration %s measurement set: %w", kind, err)
 		}
 		for _, item := range comparison.Cases {
@@ -71,16 +111,16 @@ func persistIntegrationMeasurements(ctx context.Context, tx *sql.Tx, baselineID,
 	for _, item := range comparison.Cases {
 		for metricID, value := range item.Metrics {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO benchmark_derived_comparisons
-				(integration_id, case_id, metric_id, reference_value, candidate_value, speedup, regression, regression_fraction)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, integrationID, item.CaseID, metricID, value.Reference, value.Candidate, value.Speedup, value.Regression, value.RegressionFraction); err != nil {
+				(integration_id, experiment_id, case_id, metric_id, reference_value, candidate_value, speedup, regression, regression_fraction, receipt_id, scope_best_sha)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, integrationID, experimentRef, item.CaseID, metricID, value.Reference, value.Candidate, value.Speedup, value.Regression, value.RegressionFraction, receiptID, scopeBestSHA); err != nil {
 				return fmt.Errorf("persist benchmark comparison: %w", err)
 			}
 		}
 	}
 	for metricID, value := range comparison.Metrics {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO benchmark_derived_comparisons
-			(integration_id, case_id, metric_id, speedup, regression, regression_fraction, aggregate_speedup, max_case_speedup, max_case_id)
-			VALUES (?, '', ?, ?, 0, 0, ?, ?, ?)`, integrationID, metricID, value.AggregateSpeedup, value.AggregateSpeedup, value.MaxCaseSpeedup, value.MaxCaseID); err != nil {
+			(integration_id, experiment_id, case_id, metric_id, speedup, regression, regression_fraction, aggregate_speedup, max_case_speedup, max_case_id, receipt_id, scope_best_sha)
+			VALUES (?, ?, '', ?, ?, 0, 0, ?, ?, ?, ?, ?)`, integrationID, experimentRef, metricID, value.AggregateSpeedup, value.AggregateSpeedup, value.MaxCaseSpeedup, value.MaxCaseID, receiptID, scopeBestSHA); err != nil {
 			return fmt.Errorf("persist benchmark aggregate comparison: %w", err)
 		}
 	}

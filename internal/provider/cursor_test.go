@@ -148,18 +148,19 @@ func TestCursorProbeRejectsVersionAndAuthenticationFailures(t *testing.T) {
 		script  string
 		wantErr string
 	}{
-		{name: "compatible", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nexit 1\n"},
+		{name: "compatible", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nif [ \"$1\" = --plugin-dir ] && [ \"$3\" = --help ]; then echo --plugin-dir; exit 0; fi\nexit 1\n"},
 		{name: "authentication-status", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Not logged in'; exit 0; fi\nexit 1\n", wantErr: "authentication"},
 		{name: "version", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo other; exit 0; fi\nexit 1\n", wantErr: "unsupported Cursor version"},
 		{name: "authentication", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\necho logged-out; exit 1\n", wantErr: "authentication"},
 		{name: "empty-authentication-error", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nexit 1\n", wantErr: "exit status 1"},
+		{name: "plugin-directory", script: "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in'; exit 0; fi\nexit 1\n", wantErr: "--plugin-dir"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			executable := filepath.Join(t.TempDir(), "cursor-agent")
 			if err := os.WriteFile(executable, []byte(test.script), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			capabilities, err := provider.NewCursorAdapter().Probe(context.Background(), provider.ProbeRequest{Executable: executable})
+			capabilities, err := provider.NewCursorAdapter().Probe(context.Background(), provider.ProbeRequest{Executable: executable, RequireSkillInjection: true})
 			if test.wantErr == "" {
 				if err != nil || !capabilities.Compatible || !capabilities.Authenticated || capabilities.Version != provider.CursorCandidateVersion {
 					t.Fatalf("capabilities=%+v err=%v", capabilities, err)

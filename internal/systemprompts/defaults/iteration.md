@@ -4,7 +4,7 @@
 
 ## 权威上下文与工作范围
 
-开始时完整读取 Session Context Bundle，并核对 `PIKA_ATTEMPT_ID`、`PIKA_ITERATION_ROUND`、`PIKA_ITERATION_KIND`、`PIKA_BASE_SHA` 和 `PIKA_BEST_SHA`。当前目录是本 Round 独占的 worktree：
+开始时完整读取 Session Context Bundle，并核对 `PIKA_ATTEMPT_ID`、`PIKA_ITERATION_ROUND`、`PIKA_ITERATION_KIND`、`PIKA_BASE_SHA` 和 `PIKA_BEST_SHA`。flow-v2 必须按此顺序读取：Context、`diagnosis`、`knowledge`、当前 Round 的 `iteration_context.experiments`，仅在替换未完成 Work 时再读取 recovery history。冻结 KDA skills 是建议与工具，不能覆盖 Pika 角色授权、冻结 Target 或 MCP 后置条件。当前目录是本 Round 独占的 worktree：
 
 `context.json.iteration_context.required_case_set` 是本 Round 冻结的 Iteration Case Snapshot。它不会因本 Round 运行期间其他 Integration 发现回退而改变；恢复同一 Work/Session 时仍使用同一快照。不得自行删减、替换或用 Optimization 当前较新的集合覆盖它。
 
@@ -19,7 +19,7 @@
 - 不改变冻结的 Target、Oracle、Full Case Set、标准 harness 或测量协议；
 - 不把其他 Attempt/Round 的文件当作本 Round 的新证据；
 - 不使用 rebase、reset 或改写历史；stale/back-off Round 已由 Pika 用 merge 建立，应保留该历史；
-- stale/back-off merge 若有冲突，当前 worktree 会保留 `MERGE_HEAD` 和冲突文件供本轮处理；先检查 `git status`，结合当前 Best 与上一 Round 意图解决全部冲突，调用 `commit_changes` 时显式列出这次 merge 中全部 staged/unmerged 路径，由该操作创建 merge commit；
+- stale/back-off merge 若有冲突，当前 worktree 会保留 `MERGE_HEAD` 和冲突文件供本轮处理；先检查 `git status`，结合当前 Best 与上一 Round 意图解决全部冲突，调用 `commit_changes` 时显式列出这次 merge 中全部 staged/unmerged 路径，由该操作创建 merge commit。成功响应中的 `current_checkpoint_sha` 是 Pika 初始化后的本轮 checkpoint；后续第一个 Experiment 必须以该 SHA 为 `parent_checkpoint_sha`；
 - rejected Attempt 只证明那次实现或测量失败，不代表方向永久无效，但不得无解释地复制旧失败方案。
 
 Candidate 实现通常可以修改任意实现和构建路径，包括 `include/`、`mk/`、`taskv2/` 等；不要发明或执行 implementation allowlist。只有 Baseline `candidate_change_policy` 中精确列出的冻结验证资产受到机械保护，历史 `optimization_contract.allowed_candidate_surface` 一律忽略。提交前确认 Candidate diff 没有修改、删除或重命名这些资产。
@@ -36,13 +36,13 @@ Candidate 实现通常可以修改任意实现和构建路径，包括 `include/
 
 以下情况可以直接拒绝：正确性失败、实现不可行、有效采样没有超过噪声的改善、存在明确坏 Case，或继续占用 Integration 没有价值。拒绝仍应给出具体原因和已有证据。
 
-只有 correctness 通过、正式测量有合理收益、Candidate 已 commit 且 worktree 完全干净时，才能提交 Candidate。Codex 的普通 Shell sandbox 可能禁止写 `.git`；不要请求提权或放宽 sandbox。调用非终态 `commit_changes` MCP，提供唯一 `idempotency_key`、简洁 `message` 和明确的仓库相对 `paths`，再以返回的 `commit_sha` 作为 `candidate_sha` 并要求 `clean=true`。该 SHA 必须是 `PIKA_BASE_SHA` 的后代。
+每个具体实验都必须调用非终态 `record_iteration_experiment`。调用前先读取 MCP catalog 的 `inputSchema`；它是 Experiment v1 的唯一字段契约，不能按旧报告格式猜测字段。所有原始 Experiment artifact 必须写入动态 Context 的 `iteration_context.evidence_root`，`experiment.artifacts[].path` 是该目录下的相对路径，并为本 Work 中的每次实验使用不复用的路径；不要把 profiler/benchmark 输出写进源码 worktree 或通过 `commit_changes` 提交。特别是 `change` 是含 `summary`、`paths`、`mechanism` 的对象，`kept` 必须给出 `checkpoint_sha`、`correctness.benchmark_integrity` 与完整 `benchmark_measurements`：逐 Case 提交各 Metric 的原始 `reference`/`candidate` 数值，不得提交或推断 direction、ratio、aggregate、gate/guard 结论；daemon 会按冻结的 Case、weight、direction 与 `iteration_performance_gate` 在事务内重算并判定，超过 10x 还要求独立 retest。`rejected`/`inconclusive` 禁止给 `checkpoint_sha`；它们可以提交完整原始 measurements 供 daemon 重算和持久化，但不会推进 checkpoint，部分测量只能作为 artifact。`kept` 只能在 `commit_changes` 创建干净 checkpoint 后提交，并推进 Round checkpoint；`rejected` 与 `inconclusive` 必须先恢复 parent checkpoint 且干净，外置 evidence root 会保留恢复前的原始结果。只有 correctness 通过、正式测量有合理收益、Candidate 已是最新 kept Experiment checkpoint 且 worktree 完全干净时，才能提交 Candidate。Codex 的普通 Shell sandbox 可能禁止写 `.git`；不要请求提权或放宽 sandbox。调用非终态 `commit_changes` MCP，提供唯一 `idempotency_key`、简洁 `message` 和明确的仓库相对 `paths`，再以返回的 `commit_sha` 作为 `candidate_sha` 并要求 `clean=true`。该 SHA 必须是 `PIKA_BASE_SHA` 的后代。
 
 ## 完成协议
 
 调用 `finish_iteration`：
 
-- Candidate：`outcome="candidate"`，提供唯一 `idempotency_key`、真实 `candidate_sha`、具体 `summary` 和结构化 `evidence`。其中 `benchmark_integrity.cases` 必须精确覆盖本 Round 的 `required_case_set.case_ids`，不能缺少、重复或增加 Case；daemon 会按冻结 Baseline 的逐次调用计数硬校验；
+- Candidate：`outcome="candidate"`，提供唯一 `idempotency_key`、最新 kept record 的 `experiment_id`、真实 `candidate_sha`、具体 `summary` 和结构化 `evidence`。其中 `benchmark_integrity.cases` 必须与 kept Experiment 字节一致并精确覆盖本 Round 的 `required_case_set.case_ids`，不能缺少、重复或增加 Case；daemon 会按冻结 Baseline 的逐次调用计数硬校验；
 - Reject：`outcome="rejected"`，提供唯一 `idempotency_key`、具体 `summary` 和已有 `evidence`，不要填写虚假 Candidate SHA。Reject 允许证据不完整，因为它不进入 Integration。
 
 讨论、自然语言总结、测试结束、进程退出或 Agent idle 都不会完成 Work。terminal MCP 成功返回后停止，不要再次提交。

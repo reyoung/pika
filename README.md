@@ -2,7 +2,13 @@
 
 Pika-Go is a Herdr plugin for long-running automatic optimization. The implementation is being delivered in the vertical slices defined by [the development plan](docs/design/development-plan.md).
 
-Current implementation status: the Phase 0–8 first-release plan and Codex release gate pass. Phase 9 adds a provider-neutral adapter, additive Cursor MCP/Hook integration, frozen per-Session prompt injection, normalized Cursor journaling, static per-Role Codex/Cursor selection, and fresh-Session recovery. The pinned Cursor release and both mirror-image mixed-provider matrices pass their credentialed real-model gates; those commands remain explicit because they consume model quota. See the development plan for exact evidence.
+Current implementation status: the Phase 0–9 provider-neutral release and KDA
+flow v2 trusted-evidence loop are implemented. Flow v2 freezes benchmark gates
+and skill commits, records raw per-Case Experiment measurements, derives
+comparisons transactionally, promotes knowledge only through audited
+Integration, and exposes the resulting lineage in the read-only Workbench.
+Credentialed real-model gates remain explicit because they consume model quota;
+see the development plan for recorded evidence and commands.
 
 Role System Prompts are immutable resources embedded in the binary. At each fresh Agent Session, Pika materializes a read-only Context Bundle, then freezes the Role prompt together with the bundle's exact paths, SHA-256 digests, complete versioned JSON Schemas, and an optional per-Role user instruction overlay. User instruction files are empty by default and can be edited with `pika-go edit-instruction <name>`.
 
@@ -27,7 +33,11 @@ pika-go pause
 pika-go resume
 ```
 
-Pause freezes new Session starts and Follow-up clocks and interrupts active Agent turns. Resume sends `继续` to surviving pending-Work Sessions before releasing held scheduling. `pika-go status --json` reports durable Scheduler state and the latest per-Session control results.
+Pause freezes new Session starts and Follow-up clocks and interrupts active
+Agent turns. Resume sends `继续` to surviving pending-Work Sessions before
+releasing held scheduling. `pika-go status --json` is intentionally bounded to
+identities, lifecycle states, SHAs, and counts; raw Diagnosis, Experiment,
+provider, and benchmark evidence stays in artifacts, SQLite, and the Workbench.
 
 Attach the read-only lineage Workbench to the current Workspace daemon:
 

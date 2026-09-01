@@ -39,7 +39,7 @@
     }},
     "optimization": {"type": "object", "additionalProperties": false, "required": ["id", "status", "revision", "repository", "iteration_concurrency", "max_pending_attempts", "iteration_history_limit"], "properties": {
       "id": {"type": "string"}, "status": {"type": "string"}, "revision": {"type": "integer"}, "repository": {"type": "string"},
-      "iteration_concurrency": {"type": "integer"}, "max_pending_attempts": {"type": "integer"}, "iteration_history_limit": {"type": "integer", "minimum": 0}
+      "iteration_concurrency": {"type": "integer"}, "max_pending_attempts": {"type": "integer"}, "iteration_history_limit": {"type": "integer", "minimum": 0}, "flow_version": {"const": 1}
     }},
     "baseline": {"type": "object", "additionalProperties": false, "required": ["id", "number", "status"], "properties": {
       "id": {"type": "string"}, "number": {"type": "integer"}, "status": {"type": "string"}, "definition": {},
@@ -87,7 +87,7 @@
       "followup_sequence": {"type": "integer"}, "followup_due_at": {"type": "string"}, "followup_max_messages": {"type": "integer"},
       "followup_generator_max_attempts": {"type": "integer"}, "followup_generator_attempt": {"type": "integer"},
       "iteration_history_limit": {"type": "integer", "minimum": 0},
-      "iteration_case_set": {"$ref": "#/$defs/iteration_case_set"}
+      "iteration_case_set": {"$ref": "#/$defs/iteration_case_set"}, "flow_version": {"const": 1}
     }},
     "iteration_case_set": {"type": "object", "additionalProperties": false, "required": ["version", "case_ids"], "properties": {
       "version": {"type": "integer", "minimum": 1},

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,27 @@ type fakeRuntime struct {
 		keys   []string
 	}
 	keyErr error
+}
+
+type unconfirmedCursorRuntime struct {
+	*fakeRuntime
+	onPrompt func(context.Context, string, string, string) error
+}
+
+type pollingPromptStore struct {
+	*symphony.Engine
+	firstQuery chan struct{}
+	once       sync.Once
+}
+
+func (s *pollingPromptStore) PromptSubmissionObservedAfter(ctx context.Context, sessionID string, after int64, message string) (bool, error) {
+	observed, err := s.Engine.PromptSubmissionObservedAfter(ctx, sessionID, after, message)
+	s.once.Do(func() { close(s.firstQuery) })
+	return observed, err
+}
+
+func (r *unconfirmedCursorRuntime) PromptForProvider(ctx context.Context, target, message, providerKind string) error {
+	return r.onPrompt(ctx, target, message, providerKind)
 }
 
 func (r *fakeRuntime) Snapshot(context.Context) (workruntime.Snapshot, error) {
@@ -112,6 +134,92 @@ func TestSchedulerPauseInterruptsAndResumeContinuesSameSession(t *testing.T) {
 	active, err := engine.ActiveAgentSessions(ctx)
 	if err != nil || len(active) != 1 || active[0].Session.ID != sessionID {
 		t.Fatalf("active Session after resume=%+v err=%v", active, err)
+	}
+}
+
+func TestCursorResumeAcceptsOnlyNewMatchingDurableSubmitHookWhenLifecycleTransitionIsMissed(t *testing.T) {
+	ctx := context.Background()
+	engine, _, startEffect := initializedRuntime(t, ctx)
+	store := &pollingPromptStore{Engine: engine, firstQuery: make(chan struct{})}
+	baseRuntime := &fakeRuntime{}
+	runtime := &unconfirmedCursorRuntime{fakeRuntime: baseRuntime}
+	sink := workruntime.Sink{Store: store, Runtime: runtime, AgentKind: "cursor", Providers: provider.DefaultRegistry(), PromptEvidenceTimeout: time.Second}
+	if err := sink.Dispatch(ctx, startEffect); err != nil {
+		t.Fatal(err)
+	}
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil || len(view.AgentSessions) != 1 {
+		t.Fatalf("started Cursor Session=%+v err=%v", view.AgentSessions, err)
+	}
+	sessionID := view.AgentSessions[0].ID
+	baseRuntime.snapshot.Sessions[0].Status = "working"
+	pause, err := engine.Apply(ctx, symphony.PauseScheduler{Meta: symphony.CommandMeta{RequestID: "pause-cursor"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (outbox.Dispatcher{Store: engine, Sink: sink}).DispatchEffect(ctx, schedulerEffectID(t, pause)); err != nil {
+		t.Fatal(err)
+	}
+	baseRuntime.snapshot.Sessions[0].Status = "idle"
+	// A stale submit hook for a different prompt must not be enough. The
+	// transport deliberately reports that Herdr missed the lifecycle transition;
+	// the matching durable submission arrives only after the first false query.
+	if err := engine.IngestProviderEvent(ctx, "cursor", sessionID, json.RawMessage(`{"conversation_id":"cursor-session","generation_id":"stale","hook_event_name":"beforeSubmitPrompt","prompt":"old"}`)); err != nil {
+		t.Fatal(err)
+	}
+	const transportFailure = "Herdr lifecycle transition was not observed"
+	promptCalls := make(chan struct{ message, kind string }, 1)
+	runtime.onPrompt = func(_ context.Context, _, message, kind string) error {
+		promptCalls <- struct{ message, kind string }{message: message, kind: kind}
+		return errors.New(transportFailure)
+	}
+	ingested := make(chan error, 1)
+	go func() {
+		<-store.firstQuery
+		ingested <- engine.IngestProviderEvent(context.Background(), "cursor", sessionID, json.RawMessage(`{"conversation_id":"cursor-session","generation_id":"resume","hook_event_name":"beforeSubmitPrompt","prompt":"继续"}`))
+	}()
+	resume, err := engine.Apply(ctx, symphony.ResumeScheduler{Meta: symphony.CommandMeta{RequestID: "resume-cursor"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (outbox.Dispatcher{Store: engine, Sink: sink}).DispatchEffect(ctx, schedulerEffectID(t, resume)); err != nil {
+		t.Fatal(err)
+	}
+	if call := <-promptCalls; call.kind != "cursor" || call.message != "继续" {
+		t.Fatalf("Cursor resume prompt kind=%q message=%q", call.kind, call.message)
+	}
+	if err := <-ingested; err != nil {
+		t.Fatal(err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil || view.Scheduler.Latest == nil || len(view.Scheduler.Latest.Actions) != 1 ||
+		(view.Scheduler.Latest.Actions[0].Status != symphony.SchedulerActionSent && view.Scheduler.Latest.Actions[0].Status != symphony.SchedulerActionObserved) {
+		t.Fatalf("Cursor durable prompt confirmation cycle=%+v err=%v", view.Scheduler.Latest, err)
+	}
+
+	// With no event after the new high-watermark, the same transport error must
+	// remain a delivery failure; neither the stale nor prior matching hook can
+	// confirm this second resume.
+	baseRuntime.snapshot.Sessions[0].Status = "working"
+	pause, err = engine.Apply(ctx, symphony.PauseScheduler{Meta: symphony.CommandMeta{RequestID: "pause-cursor-again"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	negativeSink := workruntime.Sink{Store: engine, Runtime: runtime, AgentKind: "cursor", Providers: provider.DefaultRegistry(), PromptEvidenceTimeout: time.Millisecond}
+	if err := (outbox.Dispatcher{Store: engine, Sink: negativeSink}).DispatchEffect(ctx, schedulerEffectID(t, pause)); err != nil {
+		t.Fatal(err)
+	}
+	baseRuntime.snapshot.Sessions[0].Status = "idle"
+	resume, err = engine.Apply(ctx, symphony.ResumeScheduler{Meta: symphony.CommandMeta{RequestID: "resume-cursor-again"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (outbox.Dispatcher{Store: engine, Sink: negativeSink}).DispatchEffect(ctx, schedulerEffectID(t, resume)); err != nil {
+		t.Fatal(err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil || view.Scheduler.Latest == nil || len(view.Scheduler.Latest.Actions) != 1 || view.Scheduler.Latest.Actions[0].Status != symphony.SchedulerActionFailed || !strings.Contains(view.Scheduler.Latest.Actions[0].Error, transportFailure) {
+		t.Fatalf("stale Cursor prompt evidence cycle=%+v err=%v", view.Scheduler.Latest, err)
 	}
 }
 

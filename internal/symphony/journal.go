@@ -73,6 +73,77 @@ type ConversationJournalView struct {
 	ToolSupplements   []ToolSupplementView   `json:"tool_supplements"`
 }
 
+// ProviderEvents returns the durable, provider-native hook ledger for one
+// Pika Agent Session. It is intentionally session-scoped: callers that need
+// to coordinate a transport boundary must not infer it from another recovery
+// generation of the same Work.
+func (e *Engine) ProviderEvents(ctx context.Context, agentSessionID string) ([]ProviderEventView, error) {
+	if agentSessionID == "" {
+		return nil, domainError(CodeInvalidCommand, "Agent Session ID is required")
+	}
+	rows, err := e.db.QueryContext(ctx, `SELECT sequence, provider, hook_event_name, provider_session_id,
+		provider_turn_id, raw_json FROM provider_events WHERE agent_session_id = ? ORDER BY sequence`, agentSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("read provider events: %w", err)
+	}
+	defer rows.Close()
+	events := []ProviderEventView{}
+	for rows.Next() {
+		var event ProviderEventView
+		var turnID sql.NullString
+		if err := rows.Scan(&event.Sequence, &event.Provider, &event.HookEventName, &event.ProviderSessionID, &turnID, &event.Raw); err != nil {
+			return nil, fmt.Errorf("scan provider event: %w", err)
+		}
+		event.ProviderTurnID = turnID.String
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate provider events: %w", err)
+	}
+	return events, nil
+}
+
+// LatestProviderEventSequence returns the durable high-watermark for one Pika
+// Agent Session. Prompt delivery reads it before transport so an old submit
+// event can never confirm a new message.
+func (e *Engine) LatestProviderEventSequence(ctx context.Context, agentSessionID string) (int64, error) {
+	if agentSessionID == "" {
+		return 0, domainError(CodeInvalidCommand, "Agent Session ID is required")
+	}
+	var sequence int64
+	if err := e.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) FROM provider_events WHERE agent_session_id = ?`, agentSessionID).Scan(&sequence); err != nil {
+		return 0, fmt.Errorf("read provider event high-watermark: %w", err)
+	}
+	return sequence, nil
+}
+
+// PromptSubmissionObservedAfter checks normalized conversation data rather
+// than decoding provider wire payloads in the runtime layer. The Pika Session,
+// event ordering, submit kind, and exact user message must all match.
+func (e *Engine) PromptSubmissionObservedAfter(ctx context.Context, agentSessionID string, afterSequence int64, message string) (bool, error) {
+	if agentSessionID == "" || afterSequence < 0 || message == "" {
+		return false, domainError(CodeInvalidCommand, "Agent Session ID, non-negative event sequence, and prompt message are required")
+	}
+	var observed int
+	err := e.db.QueryRowContext(ctx, `SELECT 1
+		FROM provider_events e
+		JOIN conversation_turns t ON t.agent_session_id = e.agent_session_id
+			AND t.provider = e.provider
+			AND t.provider_session_id = e.provider_session_id
+			AND t.provider_turn_id = e.provider_turn_id
+		WHERE e.agent_session_id = ? AND e.sequence > ?
+			AND e.hook_event_name IN ('beforeSubmitPrompt', 'UserPromptSubmit')
+			AND t.user_message = ?
+		LIMIT 1`, agentSessionID, afterSequence, message).Scan(&observed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read durable prompt submission: %w", err)
+	}
+	return observed == 1, nil
+}
+
 func (e *Engine) IngestProviderEvent(ctx context.Context, providerKind, agentSessionID string, raw json.RawMessage) error {
 	return e.ingestProviderEvent(ctx, providerKind, agentSessionID, "", raw)
 }

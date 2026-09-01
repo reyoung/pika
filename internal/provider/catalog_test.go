@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/reyoung/pika-go/internal/provider"
@@ -70,5 +71,35 @@ exit 1
 	}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("models = %+v, want %+v", models, want)
+	}
+}
+
+func TestValidateCatalogMembershipRejectsSyntacticallyValidUnavailablePair(t *testing.T) {
+	models := []provider.Model{
+		{ID: "auto", Default: true},
+		{ID: "gpt-5.6-sol", ReasoningEfforts: []string{"high"}},
+	}
+	for _, test := range []struct {
+		name   string
+		config provider.AgentConfiguration
+		want   string
+	}{
+		{name: "default accepts no effort", config: provider.AgentConfiguration{Kind: "cursor", Model: "auto"}},
+		{name: "unavailable model", config: provider.AgentConfiguration{Kind: "cursor", Model: "gpt-5.6-luna", ReasoningEffort: "medium"}, want: "not available"},
+		{name: "unavailable effort", config: provider.AgentConfiguration{Kind: "cursor", Model: "gpt-5.6-sol", ReasoningEffort: "medium"}, want: "does not offer"},
+		{name: "forged effort on default", config: provider.AgentConfiguration{Kind: "cursor", Model: "auto", ReasoningEffort: "medium"}, want: "does not accept"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := provider.ValidateCatalogMembership(models, test.config)
+			if test.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateCatalogMembership(%+v) = %v, want %q", test.config, err, test.want)
+			}
+		})
 	}
 }

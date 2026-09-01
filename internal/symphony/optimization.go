@@ -21,6 +21,17 @@ func (e *Engine) seedOptimization(ctx context.Context, tx *sql.Tx, optimizationI
 	if err := seedIterationCaseSet(ctx, tx, optimizationID, baselineID, now); err != nil {
 		return err
 	}
+	var flowVersion FlowVersion
+	if err := tx.QueryRowContext(ctx, `SELECT flow_version FROM optimizations WHERE id = ?`, optimizationID).Scan(&flowVersion); err != nil {
+		return fmt.Errorf("read Optimization flow version: %w", err)
+	}
+	if flowVersion == FlowVersion2 {
+		return e.createDiagnosisWork(ctx, tx, optimizationID, baselineID, now)
+	}
+	return e.seedInitialIterationAttempts(ctx, tx, optimizationID, baselineID, bestSHA, now)
+}
+
+func (e *Engine) seedInitialIterationAttempts(ctx context.Context, tx *sql.Tx, optimizationID, baselineID, bestSHA, now string) error {
 	var concurrency int
 	if err := tx.QueryRowContext(ctx, `SELECT iteration_concurrency FROM optimizations WHERE id = ?`, optimizationID).Scan(&concurrency); err != nil {
 		return fmt.Errorf("read iteration concurrency: %w", err)
@@ -45,8 +56,8 @@ func (e *Engine) createIterationAttempt(ctx context.Context, tx *sql.Tx, optimiz
 		return fmt.Errorf("create attempt: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO iteration_rounds
-		(id, attempt_id, round, kind, base_sha, status, back_off_message, created_at)
-		VALUES (?, ?, 1, ?, ?, 'running', ?, ?)`, roundID, attemptID, kind, bestSHA, nullable(backOffMessage), now); err != nil {
+		(id, attempt_id, round, kind, base_sha, current_checkpoint_sha, status, back_off_message, created_at)
+		VALUES (?, ?, 1, ?, ?, ?, 'running', ?, ?)`, roundID, attemptID, kind, bestSHA, bestSHA, nullable(backOffMessage), now); err != nil {
 		return fmt.Errorf("create iteration round: %w", err)
 	}
 	if err := snapshotIterationCaseSet(ctx, tx, optimizationID, attemptID, 1); err != nil {
@@ -90,6 +101,36 @@ func (e *Engine) applyFinishIteration(ctx context.Context, tx *sql.Tx, command F
 		return Receipt{}, domainError(CodeInvalidTransition, "work is not an active iteration")
 	}
 	if command.Outcome == IterationCandidate {
+		if optimization.FlowVersion == FlowVersion2 {
+			if command.ExperimentID == "" {
+				return Receipt{}, domainError(CodeInvalidCommand, "flow v2 candidate requires experiment_id")
+			}
+			var experimentID, checkpoint, experimentJSON, currentCheckpoint string
+			err := tx.QueryRowContext(ctx, `SELECT e.id, e.checkpoint_sha, e.experiment_json, r.current_checkpoint_sha
+				FROM iteration_experiments e JOIN iteration_rounds r ON r.attempt_id = e.attempt_id AND r.round = e.iteration_round
+				WHERE e.attempt_id = ? AND e.iteration_round = ? AND e.outcome = 'kept'
+				ORDER BY e.sequence DESC LIMIT 1`, attemptID, round).Scan(&experimentID, &checkpoint, &experimentJSON, &currentCheckpoint)
+			if errors.Is(err, sql.ErrNoRows) {
+				return Receipt{}, domainError(CodeInvalidTransition, "flow v2 candidate has no kept Experiment")
+			}
+			if err != nil {
+				return Receipt{}, fmt.Errorf("read latest kept Experiment: %w", err)
+			}
+			if experimentID != command.ExperimentID || checkpoint != command.CandidateSHA || currentCheckpoint != command.CandidateSHA {
+				return Receipt{}, domainError(CodeInvalidCommand, "candidate must reference the latest kept Experiment checkpoint")
+			}
+			var experiment struct {
+				Correctness struct {
+					BenchmarkIntegrity json.RawMessage `json:"benchmark_integrity"`
+				} `json:"correctness"`
+			}
+			var candidate struct {
+				BenchmarkIntegrity json.RawMessage `json:"benchmark_integrity"`
+			}
+			if err := json.Unmarshal([]byte(experimentJSON), &experiment); err != nil || json.Unmarshal(command.Evidence, &candidate) != nil || len(experiment.Correctness.BenchmarkIntegrity) == 0 || string(experiment.Correctness.BenchmarkIntegrity) != string(candidate.BenchmarkIntegrity) {
+				return Receipt{}, domainError(CodeInvalidCommand, "candidate benchmark-integrity evidence must be byte-equivalent to its kept Experiment")
+			}
+		}
 		if len(command.Evidence) == 0 {
 			return Receipt{}, domainError(CodeInvalidCommand, "candidate outcome requires evidence for its Iteration Case Snapshot")
 		}
@@ -124,14 +165,15 @@ func (e *Engine) applyFinishIteration(ctx context.Context, tx *sql.Tx, command F
 		var fifoPosition int64
 		err := tx.QueryRowContext(ctx, `SELECT id, fifo_position FROM integrations WHERE attempt_id = ?
 			AND status IN ('stale', 'backed_off') ORDER BY sequence DESC LIMIT 1`, attemptID).Scan(&priorIntegrationID, &fifoPosition)
+		candidateExperiment := nullable(command.ExperimentID)
 		if errors.Is(err, sql.ErrNoRows) {
 			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(i.fifo_position), 0) + 1 FROM integrations i
 				JOIN attempts a ON a.id = i.attempt_id WHERE a.optimization_id = ?`, optimization.ID).Scan(&fifoPosition); err != nil {
 				return Receipt{}, err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO integrations
-				(id, attempt_id, iteration_round, status, candidate_sha, expected_best_sha, created_at, fifo_position)
-				VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)`, e.newID(), attemptID, round, command.CandidateSHA, baseSHA, now, fifoPosition); err != nil {
+				(id, attempt_id, iteration_round, status, candidate_sha, expected_best_sha, candidate_experiment_id, created_at, fifo_position)
+				VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)`, e.newID(), attemptID, round, command.CandidateSHA, baseSHA, candidateExperiment, now, fifoPosition); err != nil {
 				return Receipt{}, fmt.Errorf("queue integration: %w", err)
 			}
 		} else if err != nil {
@@ -141,8 +183,8 @@ func (e *Engine) applyFinishIteration(ctx context.Context, tx *sql.Tx, command F
 				return Receipt{}, err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO integrations
-				(id, attempt_id, iteration_round, status, candidate_sha, expected_best_sha, created_at, fifo_position)
-				VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)`, e.newID(), attemptID, round, command.CandidateSHA, baseSHA, now, fifoPosition); err != nil {
+				(id, attempt_id, iteration_round, status, candidate_sha, expected_best_sha, candidate_experiment_id, created_at, fifo_position)
+				VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)`, e.newID(), attemptID, round, command.CandidateSHA, baseSHA, candidateExperiment, now, fifoPosition); err != nil {
 				return Receipt{}, fmt.Errorf("requeue refreshed integration: %w", err)
 			}
 		}
@@ -285,7 +327,7 @@ func (e *Engine) refreshStaleAttempt(ctx context.Context, tx *sql.Tx, optimizati
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO iteration_rounds
-		(id, attempt_id, round, kind, base_sha, status, back_off_message, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)`, e.newID(), attemptID, round, kind, bestSHA, nullable(message), now); err != nil {
+		(id, attempt_id, round, kind, base_sha, current_checkpoint_sha, status, back_off_message, created_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)`, e.newID(), attemptID, round, kind, bestSHA, bestSHA, nullable(message), now); err != nil {
 		return err
 	}
 	if err := snapshotIterationCaseSet(ctx, tx, optimizationID, attemptID, round); err != nil {
@@ -348,15 +390,16 @@ func (e *Engine) applyPrepareBestUpdate(ctx context.Context, tx *sql.Tx, command
 		return Receipt{}, err
 	}
 	var integrationID, attemptID, baselineID, candidateSHA, expectedBestSHA string
+	var candidateExperimentID sql.NullString
 	var baselineDefinition []byte
 	var measurementContractVersion sql.NullInt64
 	var role WorkRole
 	var status WorkStatus
-	if err := tx.QueryRowContext(ctx, `SELECT w.integration_id, w.attempt_id, w.baseline_revision_id, w.role, w.status, i.candidate_sha, i.expected_best_sha, b.definition_json, b.measurement_contract_version
+	if err := tx.QueryRowContext(ctx, `SELECT w.integration_id, w.attempt_id, w.baseline_revision_id, w.role, w.status, i.candidate_sha, i.expected_best_sha, i.candidate_experiment_id, b.definition_json, b.measurement_contract_version
 		FROM works w
 		JOIN integrations i ON i.id = w.integration_id
 		JOIN baseline_revisions b ON b.id = w.baseline_revision_id
-		WHERE w.id = ?`, command.WorkID).Scan(&integrationID, &attemptID, &baselineID, &role, &status, &candidateSHA, &expectedBestSHA, &baselineDefinition, &measurementContractVersion); err != nil {
+		WHERE w.id = ?`, command.WorkID).Scan(&integrationID, &attemptID, &baselineID, &role, &status, &candidateSHA, &expectedBestSHA, &candidateExperimentID, &baselineDefinition, &measurementContractVersion); err != nil {
 		return Receipt{}, domainError(CodeInvalidTransition, "integration work is not active")
 	}
 	if role != RoleIntegration || status != WorkPending {
@@ -396,7 +439,7 @@ func (e *Engine) applyPrepareBestUpdate(ctx context.Context, tx *sql.Tx, command
 		return Receipt{}, err
 	}
 	if measurementContractVersion.Valid {
-		if err := persistIntegrationMeasurements(ctx, tx, baselineID, command.WorkID, integrationID, now, measurementComparison); err != nil {
+		if err := persistIntegrationMeasurements(ctx, tx, baselineID, command.WorkID, integrationID, candidateExperimentID.String, receiptID, bestSHA, now, measurementComparison); err != nil {
 			return Receipt{}, err
 		}
 	}

@@ -64,6 +64,10 @@ func TestAgentSessionAndPaneBindingSurviveReopenAndPaneMove(t *testing.T) {
 	if binding.TerminalID != "term-1" || binding.PaneID != "w2:p1" || binding.WorkspaceID != "w2" {
 		t.Fatalf("pane binding = %+v", binding)
 	}
+	durableBinding, found, err := reopened.AgentSessionBinding(ctx, session.ID)
+	if err != nil || !found || durableBinding != binding {
+		t.Fatalf("durable pane binding = %+v, found = %v, err = %v", durableBinding, found, err)
+	}
 }
 
 func TestReplaceLostAgentSessionAtomicallyEnqueuesFreshStart(t *testing.T) {

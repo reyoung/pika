@@ -563,12 +563,15 @@ func TestWorkspaceDaemonInitPersistsConfigurationAndOptimization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fakeCodex := filepath.Join(t.TempDir(), "codex")
-	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo codex-test; exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then echo 'Logged in'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	// flow-v2 publishes immutable skill content below the workspace. Restore
+	// write bits before t.TempDir's cleanup so this integration fixture can be
+	// removed on filesystems where RemoveAll does not chmod descendants.
+	t.Cleanup(func() { makeWorkspaceWritable(workspace.Root) })
+	fakeCodex := writeTestCodexExecutable(t, t.TempDir())
 	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", fakeCodex)
-	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), "codex-home"))
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	writeTestCodexModelsCache(t, codexHome)
+	t.Setenv("CODEX_HOME", codexHome)
 	socketDir, err := os.MkdirTemp("/tmp", "pika-go-workspace-init-")
 	if err != nil {
 		t.Fatal(err)
@@ -592,9 +595,18 @@ func TestWorkspaceDaemonInitPersistsConfigurationAndOptimization(t *testing.T) {
 		cancel()
 		t.Fatal(err)
 	}
-	if view.Optimization.Repository != repository || view.Optimization.Status != symphony.OptimizationDraftingBaseline || len(view.Works) != 1 {
+	if view.Optimization.Status != symphony.OptimizationDraftingBaseline || view.Optimization.FlowVersion != symphony.FlowVersion2 || view.SkillSnapshot == nil || len(view.Works) != 1 {
 		cancel()
 		t.Fatalf("Workspace optimization = %+v works=%+v", view.Optimization, view.Works)
+	}
+	var humanStatus, humanStatusErr bytes.Buffer
+	if code := cli.Run(context.Background(), []string{"status", "--socket", socketPath}, nil, &humanStatus, &humanStatusErr); code != 0 {
+		cancel()
+		t.Fatalf("human status exit = %d, stderr=%q", code, humanStatusErr.String())
+	}
+	if !strings.Contains(humanStatus.String(), "flow v2") || !strings.Contains(humanStatus.String(), "skill snapshot: "+view.SkillSnapshot.SnapshotID) || !strings.Contains(humanStatus.String(), "knowledge: verified=0 provisional=0 negative=0 inconclusive=0") {
+		cancel()
+		t.Fatalf("human status omitted flow-v2 summaries: %q", humanStatus.String())
 	}
 	if _, err := os.Stat(workspace.ConfigPath); err != nil {
 		cancel()
@@ -609,6 +621,18 @@ func TestWorkspaceDaemonInitPersistsConfigurationAndOptimization(t *testing.T) {
 		cancel()
 		t.Fatalf("source checkout was modified: %q", got)
 	}
+	snapshotRoot := filepath.Join(workspace.Root, "toolkits", "kda-skills", view.SkillSnapshot.SnapshotID)
+	makeWorkspaceWritable(snapshotRoot)
+	if err := os.RemoveAll(snapshotRoot); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	var backupStdout, backupStderr bytes.Buffer
+	backupPath := filepath.Join(t.TempDir(), "backup", "pika.db")
+	if code := cli.Run(context.Background(), []string{"backup", "--socket", socketPath, "--output", backupPath}, nil, &backupStdout, &backupStderr); code != 1 || !strings.Contains(backupStderr.String(), "frozen skill snapshot provenance") {
+		cancel()
+		t.Fatalf("backup with missing flow-v2 provenance exit=%d stdout=%q stderr=%q", code, backupStdout.String(), backupStderr.String())
+	}
 	cancel()
 	if code := <-done; code != 0 {
 		t.Fatalf("daemon exit = %d, stderr=%s", code, daemonStderr.String())
@@ -622,11 +646,9 @@ func TestColdWorkspaceDaemonRefreshesManagedCodexIntegrationWithStableExecutable
 	if err != nil {
 		t.Fatal(err)
 	}
-	fakeCodex := filepath.Join(t.TempDir(), "codex")
-	if err := os.WriteFile(fakeCodex, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo codex-test; exit 0; fi\nif [ \"$1\" = login ] && [ \"$2\" = status ]; then echo 'Logged in'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakeCodex := writeTestCodexExecutable(t, t.TempDir())
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	writeTestCodexModelsCache(t, codexHome)
 	initializer := configuration.Initializer{
 		Workspace: &workspace, CodexHome: codexHome,
 		PikaExecutable: "/usr/bin/false", CodexExecutable: fakeCodex,
@@ -802,6 +824,7 @@ func TestSecondDaemonCannotOwnSameDurableInstanceOnAnotherSocket(t *testing.T) {
 	firstSocket := filepath.Join(socketDir, "first.sock")
 	secondSocket := filepath.Join(socketDir, "second.sock")
 	stateDir := filepath.Join(t.TempDir(), "state")
+	t.Cleanup(func() { makeWorkspaceWritable(stateDir) })
 	configDir := filepath.Join(t.TempDir(), "config")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -856,8 +879,9 @@ func TestDaemonPreservesNonSocketAtConfiguredPath(t *testing.T) {
 func TestCLIInitAndStatusPersistThroughDaemon(t *testing.T) {
 	isolateHerdrEnvironment(t)
 	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	writeTestCodexModelsCache(t, codexHome)
 	t.Setenv("CODEX_HOME", codexHome)
-	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/echo")
+	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", writeTestCodexExecutable(t, t.TempDir()))
 	socketDir, err := os.MkdirTemp("/tmp", "pika-go-control-test-")
 	if err != nil {
 		t.Fatalf("create socket directory: %v", err)
@@ -865,6 +889,7 @@ func TestCLIInitAndStatusPersistThroughDaemon(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
 	socketPath := filepath.Join(socketDir, "pika-go.sock")
 	stateDir := filepath.Join(t.TempDir(), "state")
+	t.Cleanup(func() { makeWorkspaceWritable(stateDir) })
 	configDir := filepath.Join(t.TempDir(), "config")
 	repository := filepath.Join(t.TempDir(), "repository")
 	if err := os.MkdirAll(repository, 0o700); err != nil {
@@ -928,7 +953,6 @@ func TestCLIInitAndStatusPersistThroughDaemon(t *testing.T) {
 		Optimization struct {
 			ID                   string `json:"id"`
 			Status               string `json:"status"`
-			Repository           string `json:"repository"`
 			IterationConcurrency int64  `json:"iteration_concurrency"`
 			MaxPendingAttempts   int64  `json:"max_pending_attempts"`
 		} `json:"optimization"`
@@ -942,7 +966,12 @@ func TestCLIInitAndStatusPersistThroughDaemon(t *testing.T) {
 	if err := json.Unmarshal(statusStdout.Bytes(), &status); err != nil {
 		t.Fatalf("decode status: %v; output = %q", err, statusStdout.String())
 	}
-	if status.Optimization.ID != "instance-1" || status.Optimization.Status != "drafting_baseline" || status.Optimization.Repository != resolvedRepository {
+	for _, forbidden := range [][]byte{[]byte(`"repository":`), []byte(`"experiment":`), []byte(`"message":`), []byte(`"provider_capabilities":`)} {
+		if bytes.Contains(statusStdout.Bytes(), forbidden) {
+			t.Fatalf("CLI status reintroduced forbidden field %s: %s", forbidden, statusStdout.Bytes())
+		}
+	}
+	if status.Optimization.ID != "instance-1" || status.Optimization.Status != "drafting_baseline" {
 		t.Fatalf("optimization status = %+v", status.Optimization)
 	}
 	if status.Optimization.IterationConcurrency != 2 || status.Optimization.MaxPendingAttempts != 6 {
@@ -1043,9 +1072,35 @@ func TestCLIInitAndStatusPersistThroughDaemon(t *testing.T) {
 	}
 }
 
+func writeTestCodexModelsCache(t *testing.T, codexHome string) {
+	t.Helper()
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache := `{"models":[{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]},{"slug":"gpt-5.6-terra","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]}]}`
+	if err := os.WriteFile(filepath.Join(codexHome, "models_cache.json"), []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestCodexExecutable(t *testing.T, root string) string {
+	t.Helper()
+	executable := filepath.Join(root, "codex")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = --version ]; then echo codex-test; exit 0; fi\n" +
+		"if [ \"$1\" = login ] && [ \"$2\" = status ]; then echo Logged-in; exit 0; fi\n" +
+		"if [ \"$1\" = debug ] && [ \"$2\" = prompt-input ] && [ -L .agents/skills/pika-kda-kernelwiki ] && [ -L .agents/skills/pika-kda-ncu-report ]; then root=\"$(pwd)/.agents/skills\"; printf '[{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"<skills_instructions>\\\\n## Skills\\\\n### Skill roots\\\\n- `r0` = `%s`\\\\n### Available skills\\\\n- KernelWiki: probe (file: r0/pika-kda-kernelwiki/SKILL.md)\\\\n- ncu-report-skill: probe (file: r0/pika-kda-ncu-report/SKILL.md)\\\\n</skills_instructions>\"}]}]\\n' \"$root\"; exit 0; fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return executable
+}
+
 func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T) {
 	isolateHerdrEnvironment(t)
 	root := t.TempDir()
+	t.Cleanup(func() { makeWorkspaceWritable(root) })
 	codexHome := filepath.Join(root, "codex-home")
 	t.Setenv("CODEX_HOME", codexHome)
 	if err := os.MkdirAll(codexHome, 0o700); err != nil {
@@ -1058,10 +1113,10 @@ func TestCLIInteractiveInitBuildsPerRoleMixedProviderConfiguration(t *testing.T)
 	if err := os.WriteFile(filepath.Join(codexHome, "models_cache.json"), []byte(modelsCache), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/echo")
+	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", writeTestCodexExecutable(t, root))
 	cursorExecutable := filepath.Join(root, "cursor-agent")
 	t.Setenv("PIKA_GO_CURSOR_TEST_STATUS_SEEN", filepath.Join(root, "cursor-status-seen"))
-	if err := os.WriteFile(cursorExecutable, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nif [ \"$1\" = status ]; then if [ ! -e \"$PIKA_GO_CURSOR_TEST_STATUS_SEEN\" ]; then : > \"$PIKA_GO_CURSOR_TEST_STATUS_SEEN\"; sleep 10.1; fi; echo 'Logged in as test@example.com'; exit 0; fi\nif [ \"$1\" = --list-models ]; then printf 'Available models\\n\\nauto - Auto (default)\\ngpt-5.6-sol-low - GPT-5.6 Sol Low\\ngpt-5.6-sol-medium - GPT-5.6 Sol Medium\\ngpt-5.6-sol-high - GPT-5.6 Sol High\\ngpt-5.6-sol-xhigh - GPT-5.6 Sol Extra High\\ngpt-5.6-sol-max - GPT-5.6 Sol Max\\ngpt-5.6-terra-low - GPT-5.6 Terra Low\\ngpt-5.6-terra-medium - GPT-5.6 Terra Medium\\ngpt-5.6-terra-high - GPT-5.6 Terra High\\n'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+	if err := os.WriteFile(cursorExecutable, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nif [ \"$1\" = status ]; then if [ ! -e \"$PIKA_GO_CURSOR_TEST_STATUS_SEEN\" ]; then : > \"$PIKA_GO_CURSOR_TEST_STATUS_SEEN\"; sleep 10.1; fi; echo 'Logged in as test@example.com'; exit 0; fi\nif [ \"$1\" = --plugin-dir ] && [ \"$3\" = --help ]; then echo --plugin-dir; exit 0; fi\nif [ \"$1\" = --list-models ]; then printf 'Available models\\n\\nauto - Auto (default)\\ngpt-5.6-sol-low - GPT-5.6 Sol Low\\ngpt-5.6-sol-medium - GPT-5.6 Sol Medium\\ngpt-5.6-sol-high - GPT-5.6 Sol High\\ngpt-5.6-sol-xhigh - GPT-5.6 Sol Extra High\\ngpt-5.6-sol-max - GPT-5.6 Sol Max\\ngpt-5.6-terra-low - GPT-5.6 Terra Low\\ngpt-5.6-terra-medium - GPT-5.6 Terra Medium\\ngpt-5.6-terra-high - GPT-5.6 Terra High\\n'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PIKA_GO_CURSOR_EXECUTABLE", cursorExecutable)
@@ -1695,6 +1750,19 @@ func waitForStatus(t *testing.T, socketPath string, daemonStderr *bytes.Buffer) 
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("daemon did not become healthy; stderr = %q", daemonStderr.String())
+}
+
+func makeWorkspaceWritable(root string) {
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return nil
+		}
+		mode := os.FileMode(0o600)
+		if info.IsDir() {
+			mode = 0o700
+		}
+		return os.Chmod(path, mode)
+	})
 }
 
 func waitForHealth(t *testing.T, socketPath string, daemonStderr *bytes.Buffer) {

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pika-go.local/schemas/pika-snapshot-v1.json",
+  "title": "Pika KDA Skill Snapshot Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "validation_version", "snapshot_id", "resolved_at", "skills"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "validation_version": {"const": 1},
+    "snapshot_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "resolved_at": {"type": "string", "format": "date-time"},
+    "skills": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {"allOf": [
+          {"$ref": "#/$defs/entry"},
+          {"properties": {"name": {"const": "KernelWiki"}, "repository": {"const": "https://github.com/mit-han-lab/KernelWiki.git"}, "branch": {"const": "master"}, "path": {"const": "skills/KernelWiki"}}}
+        ]},
+        {"allOf": [
+          {"$ref": "#/$defs/entry"},
+          {"properties": {"name": {"const": "ncu-report-skill"}, "repository": {"const": "https://github.com/mit-han-lab/ncu-report-skill.git"}, "branch": {"const": "main"}, "path": {"const": "skills/ncu-report-skill"}}}
+        ]}
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "repository", "branch", "commit_sha", "path", "content_sha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "repository": {"type": "string", "minLength": 1},
+        "branch": {"type": "string", "minLength": 1},
+        "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "path": {"type": "string", "minLength": 1},
+        "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

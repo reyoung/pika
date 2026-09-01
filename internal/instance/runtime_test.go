@@ -105,6 +105,9 @@ func TestResolveRuntimeBuildsPerInstanceLayout(t *testing.T) {
 	if paths.ContextsRoot != filepath.Join(root, "state", "instances", "instance-1", "contexts") {
 		t.Fatalf("contexts root = %q", paths.ContextsRoot)
 	}
+	if paths.EvidenceRoot != filepath.Join(root, "state", "instances", "instance-1", "evidence") {
+		t.Fatalf("evidence root = %q", paths.EvidenceRoot)
+	}
 }
 
 func TestSocketForHerdrWorkspaceMatchesEnvironmentDiscovery(t *testing.T) {

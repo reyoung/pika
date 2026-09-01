@@ -167,15 +167,15 @@ Optimization or scheduling Baseline Draft:
 
 1. Resolve both configured branch heads from the allowlisted HTTPS remotes.
 2. Create a user-only staging directory under the Workspace toolkit root.
-3. Clone and detach each repository at the resolved SHA into its exact skill
-   directory.
+3. Initialize each checkout, depth-1 fetch the resolved SHA, and detach
+   `FETCH_HEAD` into its exact skill directory.
 4. Validate source identity, commit identity, required files, safe paths, and
    supported skill metadata.
-5. Reject absolute symlinks, symlinks escaping the snapshot, unexpected nested
-   repositories, and provider plugin/hook/MCP manifests inside the selected
-   skill roots.
-6. Generate `plugin.json` and `pika-snapshot.json`, then compute the snapshot
-   digest.
+5. Allow only relative symlinks resolving inside the skill root. Reject
+   absolute, escaping, circular, or `.git`-resolving links, nested `.git`,
+   provider control manifests, and additional/nested `SKILL.md` files.
+6. Generate strict `plugin.json` and `pika-snapshot.json` with
+   `validation_version`, then compute the snapshot digest.
 7. Make the published content read-only and atomically rename staging to the
    digest-addressed final directory.
 8. Return the frozen `SkillSnapshot` to initialization.
@@ -183,7 +183,8 @@ Optimization or scheduling Baseline Draft:
 Any failure removes staging and fails initialization. Pika does not start a
 Baseline Agent with one skill, an unfrozen branch, or a warning-only fallback.
 A final directory that already exists is reused only after complete identity
-and digest validation.
+and digest validation. If durable Init later fails, only a snapshot newly
+published by that request is verified and removed; a reused publication remains.
 
 ### 3.4 Activation validation
 
@@ -234,8 +235,10 @@ exact patterns for those two reserved paths to the repository-local Git exclude
 file, so the links never enter Candidate state or contaminate cleanliness
 checks. The Adapter refuses a tracked path, a pre-existing non-owned entry, or
 a link with the wrong target. It creates links by atomic rename, validates what
-Codex will see, and returns cleanup that removes only the exact links it owns;
-empty parent directories are removed only when Pika created them. Crash
+Codex will see, records an explicit Session/snapshot ownership receipt, and
+returns cleanup that requires the unchanged receipt and unchanged targets;
+empty parent directories are removed only when Pika created them. Symlinked
+parents are rejected and existing directory modes are preserved. Crash
 recovery applies the same ownership checks before replacing stale links.
 
 Codex still launches at the Work repository root, so Git and build behavior do
@@ -245,10 +248,13 @@ or the Pika-managed profile to add Optimization-specific paths. The existing
 managed profile remains responsible only for hooks, MCP, and stable Pika
 integration.
 
-Initialization probes the installed Codex version with `codex debug
-prompt-input` or an equivalent non-model validation launch and verifies that
-both reserved names resolve to the frozen paths. If repo-local symlink discovery
-is unsupported, a Codex Role makes initialization fail before durable commit.
+When Codex is selected by a coding Role, initialization runs `codex debug
+prompt-input` in an isolated repository. It parses the real JSON message array,
+locates the unique developer `skills_instructions`, resolves root aliases and
+file references, and requires `KernelWiki` and `ncu-report-skill` to map
+one-to-one to the mounted absolute `SKILL.md` paths. Missing, duplicate,
+ambiguous, or mismatched records fail before durable Init. Follow-up-only Codex
+receives the generic availability probe without this coding-specific gate.
 
 ### 4.2 Cursor
 
@@ -265,9 +271,11 @@ state, or require persistent local-plugin installation. Existing reserved-argv
 validation prevents a Role configuration from supplying a conflicting
 Pika-owned plugin directory.
 
-Initialization probes the pinned Cursor CLI for `--plugin-dir` support and
-validates the generated plugin manifest. Unsupported or rejected local Agent
-Plugins fail initialization when any Role selects Cursor.
+When Cursor is selected by a coding Role, initialization uses
+`--plugin-dir ROOT --help` only as a non-model option-support probe. Pika's
+strict local validator separately proves the generated manifest and that its
+discovery surface contains exactly two root skills. Follow-up-only Cursor does
+not run this coding-specific gate.
 
 ### 4.3 Role scope
 
@@ -339,10 +347,12 @@ For each experiment:
 1. Select a Diagnosis hypothesis or define a new inline hypothesis.
 2. Record the parent checkpoint and pre-change measurements.
 3. Make one coherent change and run the frozen Iteration Case Set.
-4. Restore the worktree to the parent checkpoint when the result is rejected or
+4. Write raw results under the protected `iteration_context.evidence_root`,
+   outside the source worktree.
+5. Restore the worktree to the parent checkpoint when the result is rejected or
    inconclusive.
-5. For a kept result, commit through `commit_changes`, leaving a clean worktree.
-6. Call `record_iteration_experiment`; only its successful receipt advances the
+6. For a kept result, commit through `commit_changes`, leaving a clean worktree.
+7. Call `record_iteration_experiment`; only its successful receipt advances the
    Round's current checkpoint.
 
 The control plane validates the ratchet. A kept Experiment cannot point

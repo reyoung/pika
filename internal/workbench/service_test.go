@@ -51,7 +51,11 @@ func TestSnapshotBuildsBestSpineAndKeepsRuntimeSeparate(t *testing.T) {
 		Bests:            []symphony.BestView{{ID: "best-0", Sequence: 0, CommitSHA: "0000000"}, {ID: "best-1", Sequence: 1, CommitSHA: "1111111", SourceAttemptID: "attempt-a"}},
 		Attempts:         []symphony.AttemptView{{ID: "attempt-a", Status: "accepted", BaseBestSequence: 0}, {ID: "attempt-b", Status: "iterating", BaseBestSequence: 1}},
 		IterationRounds:  []symphony.IterationRoundView{{AttemptID: "attempt-a", Round: 1, Status: "candidate"}, {AttemptID: "attempt-b", Round: 1, Status: "running"}},
-		Integrations:     []symphony.IntegrationView{{ID: "integration-a", AttemptID: "attempt-a", IterationRound: 1, Status: "accepted"}},
+		Integrations:     []symphony.IntegrationView{{ID: "integration-a", AttemptID: "attempt-a", IterationRound: 1, Status: "accepted", CandidateExperimentID: "experiment-a"}},
+		IterationExperiments: []symphony.IterationExperimentView{{
+			ID: "experiment-a", AttemptID: "attempt-a", IterationRound: 1, Sequence: 1, Outcome: "kept",
+			ParentCheckpointSHA: "0000000", CheckpointSHA: "candidate-a", ReceiptID: "receipt-a", ScopeBestSHA: "0000000",
+		}},
 		Works: []symphony.WorkView{
 			{ID: "work-a", BaselineRevisionID: "baseline", AttemptID: "attempt-a", IterationRound: 1, IntegrationID: "integration-a", Role: symphony.RoleIntegration},
 			{ID: "work-b", BaselineRevisionID: "baseline", AttemptID: "attempt-b", IterationRound: 1, Role: symphony.RoleIteration, Status: symphony.WorkPending},
@@ -66,7 +70,9 @@ func TestSnapshotBuildsBestSpineAndKeepsRuntimeSeparate(t *testing.T) {
 		Comparisons: []symphony.BenchmarkComparisonView{
 			{IntegrationID: "integration-a", MetricID: "latency", AggregateSpeedup: &aggregateSpeedup, MaxCaseSpeedup: &maxCaseSpeedup},
 			{IntegrationID: "integration-a", MetricID: "accuracy", AggregateSpeedup: floatPointer(1.02)},
+			{ExperimentID: "experiment-a", MetricID: "latency", AggregateSpeedup: &aggregateSpeedup, MaxCaseSpeedup: &maxCaseSpeedup},
 		},
+		Artifacts: []symphony.EvidenceArtifact{{ID: "artifact-a", WorkID: "work-a", ReceiptID: "receipt-a", RelativePath: "evidence/profile.json"}},
 	}}
 	service := workbench.New(store, func(context.Context) (workruntime.Snapshot, error) {
 		return workruntime.Snapshot{Sessions: []workruntime.Observation{{AgentName: "pika-b", Status: "idle", PaneID: "pane-b"}}}, nil
@@ -78,8 +84,18 @@ func TestSnapshotBuildsBestSpineAndKeepsRuntimeSeparate(t *testing.T) {
 	if snapshot.Version.DomainRevision != 12 || snapshot.Version.MeasurementSequence != 7 || snapshot.Version.EventSequence != 30 || snapshot.Version.RuntimeGeneration != 1 {
 		t.Fatalf("snapshot version = %+v", snapshot.Version)
 	}
-	if !hasEdge(snapshot, "best-0", "attempt-a", "branch") || !hasEdge(snapshot, "integration-a", "best-1", "accepted") {
+	if !hasEdge(snapshot, "best-0", "attempt-a", "branch") || !hasEdge(snapshot, "integration-a", "best-1", "accepted") ||
+		!hasEdge(snapshot, "attempt-a:round:1", "experiment-a", "checkpoint") ||
+		!hasEdge(snapshot, "experiment-a", "integration-a", "candidate") ||
+		!hasEdge(snapshot, "experiment-a", "artifact-a", "evidence") {
 		t.Fatalf("lineage edges = %+v", snapshot.Edges)
+	}
+	experimentNode := findNode(t, snapshot, "experiment", "experiment-a")
+	if experimentNode.DomainStatus != "kept" || experimentNode.Primary == nil || experimentNode.Primary.AggregateSpeedup != aggregateSpeedup {
+		t.Fatalf("Experiment node = %+v", experimentNode)
+	}
+	if artifactNode := findNode(t, snapshot, "artifact", "artifact-a"); artifactNode.DomainStatus != "verified" {
+		t.Fatalf("artifact node = %+v", artifactNode)
 	}
 	node := findNode(t, snapshot, "attempt", "attempt-b")
 	if node.DomainStatus != "iterating" || node.Runtime == nil || node.Runtime.Status != "idle" {

@@ -157,7 +157,9 @@ Input:
 
 Validation:
 
-- `subject` must identify the active accepted Baseline and Best revision 0;
+- `subject` must identify the active accepted Baseline and Best revision 0
+  and include `hardware` and `software` objects, which may be empty but cannot
+  be omitted; environment values are finite scalars;
 - `coverage.case_ids` is a non-empty subset of the initial Iteration Case Set;
 - observation, bottleneck, and hypothesis IDs are unique within the report;
 - every reference resolves inside the report or to a submitted artifact;
@@ -228,23 +230,13 @@ Input:
         "cases": []
       }
     },
-    "performance": {
-      "primary_metric": "latency",
-      "aggregation": "workload-weighted or Baseline-defined name",
-      "direction": "minimize",
-      "parent_value": 12.5,
-      "candidate_value": 11.0,
-      "unit": "us",
-      "ratio": 1.136,
-      "gate_passed": true,
-      "cases": [
+    "benchmark_measurements": {
+      "schema_version": 1,
+      "comparisons": [
         {
           "case_id": "case-a",
-          "parent_value": 12.5,
-          "candidate_value": 11.0,
-          "unit": "us",
-          "ratio": 1.136,
-          "guard_passed": true
+          "reference": {"latency": 12.5, "accuracy": 0.99},
+          "candidate": {"latency": 11.0, "accuracy": 0.99}
         }
       ]
     },
@@ -260,17 +252,20 @@ Input:
 hypothesis summary. It may contain both when the experiment refines a Diagnosis
 hypothesis.
 
-`performance.direction` is exactly `minimize` or `maximize`. Ratios and gate
-comparisons follow that declared direction and the frozen Baseline Definition;
-the daemon rejects internally inconsistent values.
+Agents submit only raw reference/candidate values. Direction, ratios,
+regression fractions, aggregates, and gate conclusions are recomputed by the
+daemon from the Baseline's frozen `iteration_performance_gate` and the exact
+Round Case subset; self-reported conclusions are not part of Experiment v1.
 
 For `kept`:
 
-- `checkpoint_sha`, correctness, and performance are required;
+- `checkpoint_sha`, correctness, and `benchmark_measurements` are required;
 - correctness must satisfy the existing benchmark-integrity contract for
   exactly the Round-frozen Iteration Case Set;
-- performance cases must cover the same Case IDs exactly once;
-- the Baseline-defined primary and guard gates must pass;
+- measurement cases must cover the same Case IDs exactly once;
+- aggregate speedup must meet the frozen minimum and every Case/metric
+  regression fraction must remain within its frozen maximum;
+- speedups above 10x require the existing independent retest evidence;
 - `checkpoint_sha` must be the clean current HEAD, descend from
   `parent_checkpoint_sha`, and contain only paths committed through the
   existing `commit_changes` grant;
@@ -279,14 +274,20 @@ For `kept`:
 For `rejected` and `inconclusive`:
 
 - `checkpoint_sha` is absent;
-- correctness and performance may be partial but cannot claim gates that were
-  not measured;
+- complete `benchmark_measurements` may be submitted and is recomputed and
+  persisted without requiring the positive gate; partial evidence remains an
+  artifact rather than a structured comparison;
 - current HEAD must equal `parent_checkpoint_sha` and the worktree must be
   clean;
 - the Round current checkpoint does not change.
 
 All outcomes require a concrete summary. Submitted artifacts are read stably
-and recorded through the existing evidence-artifact mechanism. Idempotent
+from the protected Iteration Work-owned evidence root published as
+`iteration_context.evidence_root`; artifact paths are relative to that root and
+never require dirtying or committing the source worktree. They are recorded
+through the existing evidence-artifact mechanism. A relative path becomes an
+immutable artifact identity after its first receipt and cannot be reused by a
+later Experiment in the same Work. Idempotent
 replay returns the original Experiment; reuse of one key with different input
 is rejected.
 
@@ -333,7 +334,9 @@ it. Each line is one record:
   "scope": {
     "case_ids": ["case-a"],
     "best_sha": "git-sha",
-    "hardware": {}
+    "baseline_revision_id": "baseline-id",
+    "hardware": {},
+    "software": {}
   },
   "summary": "fact or bounded claim",
   "source": {
@@ -360,6 +363,14 @@ An Integration rejection never turns a general optimization technique into a
 universal prohibition. Scope always retains Case IDs, Best SHA, environment,
 and source identities.
 
+`KnowledgeRecord` v1 has one canonical Draft 2020-12 schema at
+`internal/symphony/schemas/knowledge-record-v1.schema.json`. Every generated
+record is validated against it before `knowledge.jsonl` is materialized.
+Experiment scope uses the Experiment's persisted Round-base Best SHA and
+inherits baseline revision, hardware/software, and applicable Case IDs from
+the frozen Diagnosis and measured Experiment evidence; it never consults the
+current global Best.
+
 ## 6. Context Bundle v4
 
 Flow-v2 Context adds these top-level references:
@@ -377,6 +388,10 @@ Flow-v2 Context adds these top-level references:
   "knowledge": {"path": "...", "sha256": "...", "bytes": 1, "records": 1},
   "iteration_context": {
     "experiments": {"path": "...", "sha256": "...", "bytes": 1, "records": 1}
+  },
+  "integration_context": {
+    "candidate_experiment_id": "experiment-id",
+    "experiments": {"path": "...", "sha256": "...", "bytes": 1, "records": 1}
   }
 }
 ```
@@ -387,6 +402,9 @@ Materialization rules:
   Roles after they exist;
 - Iteration receives the complete Experiment list for its current Round and a
   bounded knowledge projection from recent terminal Attempts;
+- Integration receives the exact Candidate Experiment ID and the relevant
+  Round ledger, including persisted scope Best, receipt, raw input, daemon-
+  derived comparisons, checkpoint edges, and durable artifact IDs;
 - `context.iteration.history_limit` continues to bound selected historical
   Attempts, now selecting their knowledge and Experiment summaries before
   transcript references;
@@ -409,7 +427,7 @@ Conceptual tables:
 | `skill_snapshots` | one frozen snapshot identity and manifest per Optimization |
 | `skill_snapshot_entries` | repository, branch, commit, path, and content digest per skill |
 | `diagnoses` | Baseline-owned terminal status and immutable report JSON |
-| `iteration_experiments` | ordered Round-local Experiment JSON and checkpoint transition |
+| `iteration_experiments` | ordered Round-local Experiment JSON, checkpoint transition, scope Best SHA, and receipt ID |
 
 Evidence files continue to use `evidence_artifacts`; no second artifact table
 is introduced. Domain events and operation receipts are written in the same
@@ -417,11 +435,17 @@ transaction as Diagnosis and Experiment mutations.
 
 `optimizations.flow_version` defaults migrated rows to 1 and is required for
 new rows. `iteration_rounds.current_checkpoint_sha` is the control-plane
-ratchet cursor and begins at the Round Base SHA.
+ratchet cursor and begins at the Round Base SHA. For a stale/back-off Round,
+the Pika-prepared merge (or the scoped `commit_changes` result that resolves a
+preserved merge conflict) becomes the current checkpoint before the first
+Experiment while the Round Base SHA remains the accepted Best that scopes its
+measurements and receipts. That setup merge is not attributed to the Experiment
+Agent; subsequent Experiment verification starts at the machine-readable
+`current_checkpoint_sha` returned by the control plane.
 
 ## 8. Observability
 
-Human and JSON status views add:
+Human and JSON status views expose bounded operational projections:
 
 - flow version;
 - skill snapshot ID and both resolved commits;
@@ -429,6 +453,8 @@ Human and JSON status views add:
 - current Round Experiment count and current checkpoint;
 - count of verified, provisional, negative, and inconclusive knowledge records.
 
-Status prints identities and counts only. Full profiler output, source excerpts,
+Status prints identities, states, SHAs, and counts only. It excludes repository
+paths, free-text summaries/errors/messages, raw Diagnosis/Experiment payloads,
+provider payloads, and artifact paths. Full profiler output, source excerpts,
 tool payloads, and potentially sensitive evidence remain in protected files and
 SQLite.

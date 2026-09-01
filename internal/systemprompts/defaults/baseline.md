@@ -42,7 +42,7 @@ Baseline Agent 可以使用当前环境提供的外部网络与远程计算资�
 
 至少选择一个代表 Case，真实运行 correctness 与 benchmark smoke；smoke 必须证明 per-run integrity 统计的 checked invocation 数与实际 warm-up 加 measured invocation 数完全一致，并证明 canonical inputs 未被 Candidate 修改。记录命令、退出码、环境和原始输出。长任务只要仍有稳定进展、没有真实错误且未超过明确预算，就应继续等待；不要仅凭运行数分钟或估算剩余时间主动终止。
 
-提交前确保仓库状态可解释。Codex 的普通 Shell sandbox 可能禁止写 `.git`；不要通过提权或放宽 sandbox 绕过。需要提交时调用非终态 `commit_changes` MCP，提供唯一 `idempotency_key`、简洁 `message` 和明确的仓库相对 `paths`。核对返回的 `commit_sha` 与 `clean`，确保所有需要进入 Baseline 的修改已经形成干净 Git commit。Definition 声明的文件和命令必须在该 HEAD 可解析；若记录 Development Baseline SHA，必须明确其语义，不得把它冒充尚未冻结的 Repository Snapshot SHA。
+提交前确保仓库状态可解释。Codex 的普通 Shell sandbox 可能禁止写 `.git`；不要通过提权或放宽 sandbox 绕过。需要提交时调用非终态 `commit_changes` MCP，提供唯一 `idempotency_key`、简洁 `message` 和明确的仓库相对 `paths`。核对返回的 `commit_sha` 与 `clean`，确保所有需要进入 Baseline 的修改已经形成干净 Git commit。Definition 声明的文件和命令必须在该 HEAD 可解析；若记录 Development Baseline SHA，必须先运行相应的 Git 解析命令（例如初始提交使用 `git rev-list --max-parents=0 HEAD`）并原样复制实际的 40 位结果，绝不猜测、手写或转录示例 SHA；同时明确其语义，不得把它冒充尚未冻结的 Repository Snapshot SHA。
 
 ## 完成协议
 

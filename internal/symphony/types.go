@@ -18,6 +18,15 @@ const (
 	OptimizationDraining          OptimizationStatus = "draining"
 )
 
+// FlowVersion freezes an Optimization's control-plane behavior. A Workspace
+// already running before flow v2 remains on v1 after an upgrade.
+type FlowVersion int64
+
+const (
+	FlowVersion1 FlowVersion = 1
+	FlowVersion2 FlowVersion = 2
+)
+
 type SchedulerStatus string
 
 const (
@@ -40,6 +49,7 @@ type WorkRole string
 const (
 	RoleBaselineDraft        WorkRole = "baseline_draft"
 	RoleBaselineVerification WorkRole = "baseline_verification"
+	RoleDiagnosis            WorkRole = "diagnosis"
 	RoleIteration            WorkRole = "iteration"
 	RoleIntegration          WorkRole = "integration"
 	RoleFollowUp             WorkRole = "follow_up"
@@ -72,6 +82,10 @@ type Init struct {
 	MaxPendingAttempts       int64       `json:"max_pending_attempts,omitempty"`
 	IterationHistoryLimit    int64       `json:"iteration_history_limit,omitempty"`
 	IterationHistoryLimitSet bool        `json:"-"`
+	// Zero is the legacy v1 default for pre-v2 Engine callers. Production
+	// initialization passes an explicit version.
+	FlowVersion   FlowVersion         `json:"flow_version,omitempty"`
+	SkillSnapshot *SkillSnapshotInput `json:"skill_snapshot,omitempty"`
 }
 
 func (Init) commandName() string        { return "init" }
@@ -114,6 +128,26 @@ type ArtifactInput struct {
 	ContractVersion int64  `json:"contract_version"`
 }
 
+// SkillSnapshotInput is immutable flow-v2 provenance prepared before the
+// Optimization is committed. Its root remains external to SQLite.
+type SkillSnapshotInput struct {
+	SchemaVersion  int64                `json:"schema_version"`
+	SnapshotID     string               `json:"snapshot_id"`
+	RootPath       string               `json:"root_path"`
+	Manifest       json.RawMessage      `json:"manifest"`
+	ManifestSHA256 string               `json:"manifest_sha256"`
+	Entries        []SkillSnapshotEntry `json:"entries"`
+}
+
+type SkillSnapshotEntry struct {
+	Name          string `json:"name"`
+	Repository    string `json:"repository"`
+	Branch        string `json:"branch"`
+	CommitSHA     string `json:"commit_sha"`
+	RelativePath  string `json:"relative_path"`
+	ContentSHA256 string `json:"content_sha256"`
+}
+
 type EvidenceArtifact struct {
 	ID              string `json:"id"`
 	WorkID          string `json:"work_id"`
@@ -127,6 +161,30 @@ type EvidenceArtifact struct {
 func (FinishBaselineVerification) commandName() string        { return "finish_baseline_verification" }
 func (c FinishBaselineVerification) commandMeta() CommandMeta { return c.Meta }
 
+type FinishDiagnosis struct {
+	Meta      CommandMeta     `json:"meta"`
+	WorkID    string          `json:"work_id"`
+	Outcome   DiagnosisStatus `json:"outcome"`
+	Report    json.RawMessage `json:"report"`
+	Artifacts []ArtifactInput `json:"artifacts,omitempty"`
+}
+
+func (FinishDiagnosis) commandName() string        { return "finish_diagnosis" }
+func (c FinishDiagnosis) commandMeta() CommandMeta { return c.Meta }
+
+// RecordIterationExperiment is deliberately non-terminal.  It is the only
+// operation that moves a flow-v2 Round checkpoint, which keeps an Agent from
+// turning an unrecorded local commit directly into a Candidate.
+type RecordIterationExperiment struct {
+	Meta       CommandMeta     `json:"meta"`
+	WorkID     string          `json:"work_id"`
+	Experiment json.RawMessage `json:"experiment"`
+	Artifacts  []ArtifactInput `json:"artifacts,omitempty"`
+}
+
+func (RecordIterationExperiment) commandName() string        { return "record_iteration_experiment" }
+func (c RecordIterationExperiment) commandMeta() CommandMeta { return c.Meta }
+
 type IterationOutcome string
 
 const (
@@ -138,6 +196,7 @@ type FinishIteration struct {
 	Meta         CommandMeta      `json:"meta"`
 	WorkID       string           `json:"work_id"`
 	Outcome      IterationOutcome `json:"outcome"`
+	ExperimentID string           `json:"experiment_id,omitempty"`
 	CandidateSHA string           `json:"candidate_sha,omitempty"`
 	Summary      string           `json:"summary"`
 	Evidence     json.RawMessage  `json:"evidence,omitempty"`
@@ -254,6 +313,16 @@ type Receipt struct {
 	Replayed  bool            `json:"replayed"`
 }
 
+// CommitCapabilityReceipt binds one Git commit and its exact Pika trailers to
+// the Work that invoked commit_changes. Git trailers alone are Agent-writable;
+// this durable receipt is the authoritative capability record.
+type CommitCapabilityReceipt struct {
+	WorkID          string `json:"work_id"`
+	CommitSHA       string `json:"commit_sha"`
+	CommitKeySHA256 string `json:"commit_key_sha256"`
+	RequestSHA256   string `json:"request_sha256"`
+}
+
 type OptimizationView struct {
 	ID                    string             `json:"id"`
 	Status                OptimizationStatus `json:"status"`
@@ -262,6 +331,7 @@ type OptimizationView struct {
 	IterationConcurrency  int64              `json:"iteration_concurrency"`
 	MaxPendingAttempts    int64              `json:"max_pending_attempts"`
 	IterationHistoryLimit int64              `json:"iteration_history_limit"`
+	FlowVersion           FlowVersion        `json:"flow_version,omitempty"`
 }
 
 type IterationCaseSetView struct {
@@ -318,18 +388,19 @@ type BestView struct {
 }
 
 type IntegrationView struct {
-	Sequence        int64            `json:"sequence"`
-	FIFOPosition    int64            `json:"fifo_position"`
-	ID              string           `json:"id"`
-	AttemptID       string           `json:"attempt_id"`
-	IterationRound  int64            `json:"iteration_round"`
-	Status          string           `json:"status"`
-	CandidateSHA    string           `json:"candidate_sha"`
-	ExpectedBestSHA string           `json:"expected_best_sha"`
-	IntentID        string           `json:"intent_id,omitempty"`
-	RegressionCases []RegressionCase `json:"regression_cases,omitempty"`
-	Validation      json.RawMessage  `json:"validation,omitempty"`
-	Result          json.RawMessage  `json:"result,omitempty"`
+	Sequence              int64            `json:"sequence"`
+	FIFOPosition          int64            `json:"fifo_position"`
+	ID                    string           `json:"id"`
+	AttemptID             string           `json:"attempt_id"`
+	IterationRound        int64            `json:"iteration_round"`
+	Status                string           `json:"status"`
+	CandidateSHA          string           `json:"candidate_sha"`
+	ExpectedBestSHA       string           `json:"expected_best_sha"`
+	CandidateExperimentID string           `json:"candidate_experiment_id,omitempty"`
+	IntentID              string           `json:"intent_id,omitempty"`
+	RegressionCases       []RegressionCase `json:"regression_cases,omitempty"`
+	Validation            json.RawMessage  `json:"validation,omitempty"`
+	Result                json.RawMessage  `json:"result,omitempty"`
 }
 
 type IterationRoundView struct {
@@ -341,6 +412,57 @@ type IterationRoundView struct {
 	BackOffMessage          string          `json:"back_off_message,omitempty"`
 	IterationCaseSetVersion int64           `json:"iteration_case_set_version"`
 	Evidence                json.RawMessage `json:"evidence,omitempty"`
+	CurrentCheckpointSHA    string          `json:"current_checkpoint_sha,omitempty"`
+}
+
+type SkillSnapshotView struct {
+	SchemaVersion  int64                `json:"schema_version"`
+	SnapshotID     string               `json:"snapshot_id"`
+	RootPath       string               `json:"root_path"`
+	ManifestSHA256 string               `json:"manifest_sha256"`
+	Entries        []SkillSnapshotEntry `json:"entries"`
+}
+
+type DiagnosisStatus string
+
+const (
+	DiagnosisPending     DiagnosisStatus = "pending"
+	DiagnosisReady       DiagnosisStatus = "ready"
+	DiagnosisUnavailable DiagnosisStatus = "unavailable"
+	DiagnosisCancelled   DiagnosisStatus = "cancelled"
+)
+
+type DiagnosisView struct {
+	ID                 string          `json:"id"`
+	BaselineRevisionID string          `json:"baseline_revision_id"`
+	WorkID             string          `json:"work_id"`
+	Status             DiagnosisStatus `json:"status"`
+	HypothesisCount    int64           `json:"hypothesis_count"`
+	Report             json.RawMessage `json:"report,omitempty"`
+}
+
+// KnowledgeSummary is deliberately limited to lifecycle counts.  Detailed
+// evidence remains in the protected Context artifacts rather than status.
+type KnowledgeSummary struct {
+	Verified     int64 `json:"verified"`
+	Provisional  int64 `json:"provisional"`
+	Negative     int64 `json:"negative"`
+	Inconclusive int64 `json:"inconclusive"`
+}
+
+type IterationExperimentView struct {
+	ID                  string                    `json:"id"`
+	AttemptID           string                    `json:"attempt_id"`
+	IterationRound      int64                     `json:"iteration_round"`
+	Sequence            int64                     `json:"sequence"`
+	Outcome             string                    `json:"outcome"`
+	ParentCheckpointSHA string                    `json:"parent_checkpoint_sha"`
+	CheckpointSHA       string                    `json:"checkpoint_sha,omitempty"`
+	ScopeBestSHA        string                    `json:"scope_best_sha,omitempty"`
+	ReceiptID           string                    `json:"receipt_id,omitempty"`
+	DerivedComparisons  []BenchmarkComparisonView `json:"derived_comparisons,omitempty"`
+	ArtifactIDs         []string                  `json:"artifact_ids,omitempty"`
+	Experiment          json.RawMessage           `json:"experiment"`
 }
 
 type GitIntentView struct {
@@ -480,43 +602,48 @@ type PaneBinding struct {
 }
 
 type RuntimeWork struct {
-	Work                            WorkView                `json:"work"`
-	Repository                      string                  `json:"repository"`
-	OptimizationRepository          string                  `json:"optimization_repository"`
-	OptimizationID                  string                  `json:"optimization_id"`
-	OptimizationStatus              OptimizationStatus      `json:"optimization_status"`
-	OptimizationRevision            int64                   `json:"optimization_revision"`
-	BaselineNumber                  int64                   `json:"baseline_number"`
-	BaselineStatus                  BaselineStatus          `json:"baseline_status"`
-	BaselineDefinitionSHA256        string                  `json:"baseline_definition_sha256,omitempty"`
-	CandidateChangePolicy           *candidatepolicy.Policy `json:"-"`
-	BaselineRepositorySHA           string                  `json:"baseline_repository_sha,omitempty"`
-	PredecessorBaselineID           string                  `json:"predecessor_baseline_id,omitempty"`
-	PredecessorFailureKind          string                  `json:"predecessor_failure_kind,omitempty"`
-	PredecessorFailureReason        string                  `json:"predecessor_failure_reason,omitempty"`
-	PredecessorRequestedChanges     string                  `json:"predecessor_requested_changes,omitempty"`
-	PredecessorVerificationEvidence json.RawMessage         `json:"predecessor_verification_evidence,omitempty"`
-	BaseSHA                         string                  `json:"base_sha,omitempty"`
-	CandidateSHA                    string                  `json:"candidate_sha,omitempty"`
-	IterationSlotIndex              int64                   `json:"iteration_slot_index,omitempty"`
-	IterationKind                   string                  `json:"iteration_kind,omitempty"`
-	BackOffMessage                  string                  `json:"back_off_message,omitempty"`
-	BestSHA                         string                  `json:"best_sha,omitempty"`
-	BestSequence                    int64                   `json:"best_sequence,omitempty"`
-	ExpectedBestSHA                 string                  `json:"expected_best_sha,omitempty"`
-	IntegrationFIFOPosition         int64                   `json:"integration_fifo_position,omitempty"`
-	IntegrationStatus               string                  `json:"integration_status,omitempty"`
-	GitIntentID                     string                  `json:"git_intent_id,omitempty"`
-	GitIntentState                  string                  `json:"git_intent_state,omitempty"`
-	FollowUpTargetWorkID            string                  `json:"followup_target_work_id,omitempty"`
-	FollowUpTargetRole              WorkRole                `json:"followup_target_role,omitempty"`
-	FollowUpSequence                int64                   `json:"followup_sequence,omitempty"`
-	FollowUpDueAt                   string                  `json:"followup_due_at,omitempty"`
-	FollowUpMaxMessages             int64                   `json:"followup_max_messages,omitempty"`
-	FollowUpGeneratorMax            int64                   `json:"followup_generator_max_attempts,omitempty"`
-	FollowUpGeneratorTry            int64                   `json:"followup_generator_attempt,omitempty"`
-	IterationHistoryLimit           int64                   `json:"iteration_history_limit,omitempty"`
-	IterationCaseSet                *IterationCaseSetView   `json:"iteration_case_set,omitempty"`
+	Work                            WorkView                  `json:"work"`
+	Repository                      string                    `json:"repository"`
+	OptimizationRepository          string                    `json:"optimization_repository"`
+	OptimizationID                  string                    `json:"optimization_id"`
+	OptimizationStatus              OptimizationStatus        `json:"optimization_status"`
+	OptimizationRevision            int64                     `json:"optimization_revision"`
+	BaselineNumber                  int64                     `json:"baseline_number"`
+	BaselineStatus                  BaselineStatus            `json:"baseline_status"`
+	BaselineDefinitionSHA256        string                    `json:"baseline_definition_sha256,omitempty"`
+	CandidateChangePolicy           *candidatepolicy.Policy   `json:"-"`
+	BaselineRepositorySHA           string                    `json:"baseline_repository_sha,omitempty"`
+	PredecessorBaselineID           string                    `json:"predecessor_baseline_id,omitempty"`
+	PredecessorFailureKind          string                    `json:"predecessor_failure_kind,omitempty"`
+	PredecessorFailureReason        string                    `json:"predecessor_failure_reason,omitempty"`
+	PredecessorRequestedChanges     string                    `json:"predecessor_requested_changes,omitempty"`
+	PredecessorVerificationEvidence json.RawMessage           `json:"predecessor_verification_evidence,omitempty"`
+	BaseSHA                         string                    `json:"base_sha,omitempty"`
+	CandidateSHA                    string                    `json:"candidate_sha,omitempty"`
+	IterationSlotIndex              int64                     `json:"iteration_slot_index,omitempty"`
+	IterationKind                   string                    `json:"iteration_kind,omitempty"`
+	BackOffMessage                  string                    `json:"back_off_message,omitempty"`
+	BestSHA                         string                    `json:"best_sha,omitempty"`
+	BestSequence                    int64                     `json:"best_sequence,omitempty"`
+	ExpectedBestSHA                 string                    `json:"expected_best_sha,omitempty"`
+	IntegrationFIFOPosition         int64                     `json:"integration_fifo_position,omitempty"`
+	IntegrationStatus               string                    `json:"integration_status,omitempty"`
+	GitIntentID                     string                    `json:"git_intent_id,omitempty"`
+	GitIntentState                  string                    `json:"git_intent_state,omitempty"`
+	FollowUpTargetWorkID            string                    `json:"followup_target_work_id,omitempty"`
+	FollowUpTargetRole              WorkRole                  `json:"followup_target_role,omitempty"`
+	FollowUpSequence                int64                     `json:"followup_sequence,omitempty"`
+	FollowUpDueAt                   string                    `json:"followup_due_at,omitempty"`
+	FollowUpMaxMessages             int64                     `json:"followup_max_messages,omitempty"`
+	FollowUpGeneratorMax            int64                     `json:"followup_generator_max_attempts,omitempty"`
+	FollowUpGeneratorTry            int64                     `json:"followup_generator_attempt,omitempty"`
+	IterationHistoryLimit           int64                     `json:"iteration_history_limit,omitempty"`
+	IterationCaseSet                *IterationCaseSetView     `json:"iteration_case_set,omitempty"`
+	FlowVersion                     FlowVersion               `json:"flow_version,omitempty"`
+	SkillSnapshot                   *SkillSnapshotView        `json:"skill_snapshot,omitempty"`
+	Diagnosis                       *DiagnosisView            `json:"diagnosis,omitempty"`
+	IterationExperiments            []IterationExperimentView `json:"iteration_experiments,omitempty"`
+	CurrentCheckpointSHA            string                    `json:"current_checkpoint_sha,omitempty"`
 }
 
 type ActiveAgentSession struct {
@@ -560,13 +687,15 @@ type ContextSnapshot struct {
 }
 
 type ContextProjection struct {
-	Session          AgentSession               `json:"session"`
-	View             View                       `json:"-"`
-	TargetWork       RuntimeWork                `json:"target_work"`
-	GeneratorWork    WorkView                   `json:"generator_work"`
-	Journal          ConversationJournalView    `json:"-"`
-	AttemptHistories []AttemptHistoryProjection `json:"-"`
-	PreviousRound    *RoundHistoryProjection    `json:"-"`
+	Session              AgentSession               `json:"session"`
+	View                 View                       `json:"-"`
+	TargetWork           RuntimeWork                `json:"target_work"`
+	GeneratorWork        WorkView                   `json:"generator_work"`
+	Journal              ConversationJournalView    `json:"-"`
+	AttemptHistories     []AttemptHistoryProjection `json:"-"`
+	PreviousRound        *RoundHistoryProjection    `json:"-"`
+	KnowledgeExperiments []IterationExperimentView  `json:"-"`
+	KnowledgeArtifacts   []EvidenceArtifact         `json:"-"`
 }
 
 type AttemptHistoryProjection struct {
@@ -581,24 +710,28 @@ type RoundHistoryProjection struct {
 }
 
 type View struct {
-	Optimization       OptimizationView      `json:"optimization"`
-	Scheduler          SchedulerView         `json:"scheduler"`
-	Baseline           *BaselineView         `json:"baseline,omitempty"`
-	Baselines          []BaselineView        `json:"baselines"`
-	Works              []WorkView            `json:"works"`
-	AgentSessions      []AgentSession        `json:"agent_sessions,omitempty"`
-	BackOffs           []BackOffView         `json:"back_offs"`
-	Attempts           []AttemptView         `json:"attempts"`
-	Integrations       []IntegrationView     `json:"integrations"`
-	IterationRounds    []IterationRoundView  `json:"iteration_rounds"`
-	Best               *BestView             `json:"best,omitempty"`
-	Bests              []BestView            `json:"bests,omitempty"`
-	IterationCaseSet   *IterationCaseSetView `json:"iteration_case_set,omitempty"`
-	FollowUps          []FollowUpView        `json:"follow_ups,omitempty"`
-	PaneActivityNotice string                `json:"pane_activity_notice,omitempty"`
-	DomainEventCount   int64                 `json:"domain_event_count"`
-	PendingEffectCount int64                 `json:"pending_effect_count"`
-	Storage            StorageView           `json:"storage"`
+	Optimization         OptimizationView          `json:"optimization"`
+	Scheduler            SchedulerView             `json:"scheduler"`
+	Baseline             *BaselineView             `json:"baseline,omitempty"`
+	Baselines            []BaselineView            `json:"baselines"`
+	Works                []WorkView                `json:"works"`
+	AgentSessions        []AgentSession            `json:"agent_sessions,omitempty"`
+	BackOffs             []BackOffView             `json:"back_offs"`
+	Attempts             []AttemptView             `json:"attempts"`
+	Integrations         []IntegrationView         `json:"integrations"`
+	IterationRounds      []IterationRoundView      `json:"iteration_rounds"`
+	Best                 *BestView                 `json:"best,omitempty"`
+	Bests                []BestView                `json:"bests,omitempty"`
+	IterationCaseSet     *IterationCaseSetView     `json:"iteration_case_set,omitempty"`
+	SkillSnapshot        *SkillSnapshotView        `json:"skill_snapshot,omitempty"`
+	Diagnoses            []DiagnosisView           `json:"diagnoses,omitempty"`
+	IterationExperiments []IterationExperimentView `json:"iteration_experiments,omitempty"`
+	Knowledge            KnowledgeSummary          `json:"knowledge"`
+	FollowUps            []FollowUpView            `json:"follow_ups,omitempty"`
+	PaneActivityNotice   string                    `json:"pane_activity_notice,omitempty"`
+	DomainEventCount     int64                     `json:"domain_event_count"`
+	PendingEffectCount   int64                     `json:"pending_effect_count"`
+	Storage              StorageView               `json:"storage"`
 }
 
 type StorageView struct {
@@ -633,6 +766,9 @@ type BenchmarkMeasurementSetView struct {
 	BaselineRevisionID string `json:"baseline_revision_id"`
 	WorkID             string `json:"work_id,omitempty"`
 	IntegrationID      string `json:"integration_id,omitempty"`
+	ExperimentID       string `json:"experiment_id,omitempty"`
+	ReceiptID          string `json:"receipt_id,omitempty"`
+	ScopeBestSHA       string `json:"scope_best_sha,omitempty"`
 	BestSequence       *int64 `json:"best_sequence,omitempty"`
 	Kind               string `json:"kind"`
 	CreatedAt          string `json:"created_at"`
@@ -647,6 +783,9 @@ type BenchmarkCaseValueView struct {
 
 type BenchmarkComparisonView struct {
 	IntegrationID      string   `json:"integration_id"`
+	ExperimentID       string   `json:"experiment_id,omitempty"`
+	ReceiptID          string   `json:"receipt_id,omitempty"`
+	ScopeBestSHA       string   `json:"scope_best_sha,omitempty"`
 	CaseID             string   `json:"case_id,omitempty"`
 	MetricID           string   `json:"metric_id"`
 	ReferenceValue     *float64 `json:"reference_value,omitempty"`

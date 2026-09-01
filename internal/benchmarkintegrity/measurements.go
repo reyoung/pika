@@ -27,6 +27,7 @@ type MeasurementDefinition struct {
 	SchemaVersion   int                 `json:"schema_version"`
 	Cases           []MeasurementCase   `json:"cases"`
 	Metrics         []MeasurementMetric `json:"metrics"`
+	IterationGate   IterationGate       `json:"iteration_performance_gate"`
 	PrimaryMetricID string              `json:"-"`
 }
 
@@ -43,6 +44,17 @@ type MeasurementMetric struct {
 	Direction       string `json:"direction"`
 	SampleStatistic string `json:"sample_statistic"`
 	Aggregation     string `json:"aggregation"`
+}
+
+type IterationGate struct {
+	SchemaVersion int                   `json:"schema_version"`
+	Metrics       []IterationGateMetric `json:"metrics"`
+}
+
+type IterationGateMetric struct {
+	MetricID                      string  `json:"metric_id"`
+	MinimumAggregateSpeedup       float64 `json:"minimum_aggregate_speedup"`
+	MaximumCaseRegressionFraction float64 `json:"maximum_case_regression_fraction"`
 }
 
 type measurementComparisonEnvelope struct {
@@ -130,6 +142,7 @@ func ParseMeasurementDefinition(raw json.RawMessage) (MeasurementDefinition, err
 		return MeasurementDefinition{}, fmt.Errorf("benchmark_measurements.metrics must be non-empty")
 	}
 	metricIDs := make(map[string]struct{}, len(definition.Metrics))
+	metricByID := make(map[string]MeasurementMetric, len(definition.Metrics))
 	primaryCount := 0
 	for index, metric := range definition.Metrics {
 		prefix := fmt.Sprintf("benchmark_measurements.metrics[%d]", index)
@@ -154,11 +167,80 @@ func ParseMeasurementDefinition(raw json.RawMessage) (MeasurementDefinition, err
 		if metric.Aggregation != WeightedGeomeanOfRatios && metric.Aggregation != RatioOfWeightedArithmeticMeans {
 			return MeasurementDefinition{}, fmt.Errorf("%s.aggregation is unsupported", prefix)
 		}
+		metricByID[metric.ID] = metric
 	}
 	if primaryCount != 1 {
 		return MeasurementDefinition{}, fmt.Errorf("benchmark_measurements.metrics must contain exactly one primary metric")
 	}
-	return definition, nil
+	if len(definition.IterationGate.Metrics) == 0 && definition.IterationGate.SchemaVersion == 0 {
+		return definition, nil
+	}
+	if definition.IterationGate.SchemaVersion != MeasurementSchemaVersion {
+		return MeasurementDefinition{}, fmt.Errorf("benchmark_measurements.iteration_performance_gate.schema_version must be %d", MeasurementSchemaVersion)
+	}
+	if len(definition.IterationGate.Metrics) == 0 {
+		return MeasurementDefinition{}, fmt.Errorf("benchmark_measurements.iteration_performance_gate.metrics must be non-empty")
+	}
+	return definition, validateIterationGateDefinition(definition, metricByID)
+}
+
+func validateIterationGateDefinition(definition MeasurementDefinition, metricByID map[string]MeasurementMetric) error {
+	requiredMetricCount := 0
+	for _, metric := range definition.Metrics {
+		if metric.Role == MetricRolePrimary || metric.Role == MetricRoleGuard {
+			requiredMetricCount++
+		}
+	}
+	if len(definition.IterationGate.Metrics) != requiredMetricCount {
+		return fmt.Errorf("benchmark_measurements.iteration_performance_gate.metrics must include exactly one entry for each primary or guard metric")
+	}
+	seenGateMetrics := map[string]struct{}{}
+	for index, gate := range definition.IterationGate.Metrics {
+		prefix := fmt.Sprintf("benchmark_measurements.iteration_performance_gate.metrics[%d]", index)
+		if gate.MetricID == "" {
+			return fmt.Errorf("%s.metric_id is required", prefix)
+		}
+		if _, duplicate := seenGateMetrics[gate.MetricID]; duplicate {
+			return fmt.Errorf("benchmark_measurements.iteration_performance_gate.metrics contains duplicate %q", gate.MetricID)
+		}
+		seenGateMetrics[gate.MetricID] = struct{}{}
+		metric, exists := metricByID[gate.MetricID]
+		if !exists {
+			return fmt.Errorf("%s.metric_id %q is not declared in benchmark_measurements.metrics", prefix, gate.MetricID)
+		}
+		if metric.Role == MetricRoleInformational {
+			return fmt.Errorf("%s.metric_id %q cannot target an informational metric", prefix, gate.MetricID)
+		}
+		if !finitePositive(gate.MinimumAggregateSpeedup) {
+			return fmt.Errorf("%s.minimum_aggregate_speedup must be finite and greater than zero", prefix)
+		}
+		if metric.Role == MetricRolePrimary && gate.MinimumAggregateSpeedup <= 1 {
+			return fmt.Errorf("%s.minimum_aggregate_speedup must be greater than 1 for primary metrics", prefix)
+		}
+		if !finite(gate.MaximumCaseRegressionFraction) || gate.MaximumCaseRegressionFraction < 0 || gate.MaximumCaseRegressionFraction >= 1 {
+			return fmt.Errorf("%s.maximum_case_regression_fraction must be in [0, 1)", prefix)
+		}
+	}
+	for _, metric := range definition.Metrics {
+		if metric.Role == MetricRoleInformational {
+			continue
+		}
+		if _, exists := seenGateMetrics[metric.ID]; !exists {
+			return fmt.Errorf("benchmark_measurements.iteration_performance_gate.metrics is missing %q", metric.ID)
+		}
+	}
+	return nil
+}
+
+func RequireIterationGate(definition MeasurementDefinition) error {
+	if len(definition.IterationGate.Metrics) == 0 {
+		return fmt.Errorf("benchmark_measurements.iteration_performance_gate is required")
+	}
+	metricByID := make(map[string]MeasurementMetric, len(definition.Metrics))
+	for _, metric := range definition.Metrics {
+		metricByID[metric.ID] = metric
+	}
+	return validateIterationGateDefinition(definition, metricByID)
 }
 
 // ParseFrozenMeasurementDefinition additionally proves that measurement Cases
@@ -301,6 +383,68 @@ func ParseMeasurementComparison(definition MeasurementDefinition, raw json.RawMe
 	return result, nil
 }
 
+func FrozenCaseSubset(definition MeasurementDefinition, caseIDs []string) (MeasurementDefinition, error) {
+	if len(caseIDs) == 0 {
+		return MeasurementDefinition{}, fmt.Errorf("frozen Iteration Case subset must be non-empty")
+	}
+	byID := make(map[string]MeasurementCase, len(definition.Cases))
+	for _, item := range definition.Cases {
+		byID[item.CaseID] = item
+	}
+	seen := map[string]struct{}{}
+	subset := make([]MeasurementCase, 0, len(caseIDs))
+	for index, caseID := range caseIDs {
+		if caseID == "" {
+			return MeasurementDefinition{}, fmt.Errorf("frozen Iteration Case subset contains an empty case_id at index %d", index)
+		}
+		if _, duplicate := seen[caseID]; duplicate {
+			return MeasurementDefinition{}, fmt.Errorf("frozen Iteration Case subset contains duplicate %q", caseID)
+		}
+		seen[caseID] = struct{}{}
+		item, exists := byID[caseID]
+		if !exists {
+			return MeasurementDefinition{}, fmt.Errorf("frozen Iteration Case %q is not in benchmark_measurements.cases", caseID)
+		}
+		subset = append(subset, item)
+	}
+	filtered := definition
+	filtered.Cases = subset
+	return filtered, nil
+}
+
+func ValidateIterationGate(definition MeasurementDefinition, comparison MeasurementComparison) error {
+	gateByMetric := make(map[string]IterationGateMetric, len(definition.IterationGate.Metrics))
+	for _, gate := range definition.IterationGate.Metrics {
+		gateByMetric[gate.MetricID] = gate
+	}
+	for _, metric := range definition.Metrics {
+		if metric.Role == MetricRoleInformational {
+			continue
+		}
+		gate, exists := gateByMetric[metric.ID]
+		if !exists {
+			return fmt.Errorf("iteration_performance_gate is missing %q", metric.ID)
+		}
+		aggregate, exists := comparison.Metrics[metric.ID]
+		if !exists {
+			return fmt.Errorf("derived comparison is missing metric %q", metric.ID)
+		}
+		if aggregate.AggregateSpeedup < gate.MinimumAggregateSpeedup {
+			return fmt.Errorf("metric %q aggregate speedup %.6g is below minimum %.6g", metric.ID, aggregate.AggregateSpeedup, gate.MinimumAggregateSpeedup)
+		}
+		for _, item := range comparison.Cases {
+			value, exists := item.Metrics[metric.ID]
+			if !exists {
+				return fmt.Errorf("derived comparison case %q is missing metric %q", item.CaseID, metric.ID)
+			}
+			if value.RegressionFraction > gate.MaximumCaseRegressionFraction {
+				return fmt.Errorf("metric %q case %q regression fraction %.6g exceeds maximum %.6g", metric.ID, item.CaseID, value.RegressionFraction, gate.MaximumCaseRegressionFraction)
+			}
+		}
+	}
+	return nil
+}
+
 func aggregateMetric(metric MeasurementMetric, cases []DerivedMeasurementCase) DerivedMeasurementMetric {
 	var weightSum, logarithmSum, referenceSum, candidateSum float64
 	result := DerivedMeasurementMetric{}
@@ -337,3 +481,5 @@ func retestPassed(retest *independentRetest) bool {
 	}
 	return true
 }
+
+func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }

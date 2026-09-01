@@ -15,6 +15,57 @@ import (
 
 const DefaultMaxBytes int64 = 16 << 20
 
+type WorkScope string
+
+const (
+	DiagnosisScope WorkScope = "diagnoses"
+	IterationScope WorkScope = "iterations"
+)
+
+// EnsureWorkRoot is the canonical owner of Pika-managed evidence paths. Both
+// Context publication and MCP stable reads call this function so an Agent
+// cannot be shown one directory while the control plane verifies another.
+func EnsureWorkRoot(base string, scope WorkScope, workID string) (string, error) {
+	if base == "" || !filepath.IsAbs(base) {
+		return "", errors.New("absolute Pika evidence root is required")
+	}
+	if scope != DiagnosisScope && scope != IterationScope {
+		return "", errors.New("recognized evidence scope is required")
+	}
+	if workID == "" || workID == "." || workID == ".." || filepath.IsAbs(workID) || filepath.Base(workID) != workID || strings.ContainsAny(workID, `/\\`) {
+		return "", errors.New("plain Work ID is required for evidence root")
+	}
+	for _, character := range workID {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' || character == '_' {
+			continue
+		}
+		return "", errors.New("safe Work ID is required for evidence root")
+	}
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", fmt.Errorf("create Pika evidence root: %w", err)
+	}
+	resolvedBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", fmt.Errorf("resolve Pika evidence root: %w", err)
+	}
+	root := filepath.Join(base, string(scope), workID)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", fmt.Errorf("create Work evidence root: %w", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve Work evidence root: %w", err)
+	}
+	relative, err := filepath.Rel(resolvedBase, resolvedRoot)
+	if err != nil || relative != filepath.Join(string(scope), workID) {
+		return "", errors.New("Work evidence root escapes the Pika evidence directory")
+	}
+	if err := os.Chmod(resolvedRoot, 0o700); err != nil {
+		return "", fmt.Errorf("protect Work evidence root: %w", err)
+	}
+	return resolvedRoot, nil
+}
+
 func ReadStable(root, evidencePath string, maxBytes int64) ([]byte, symphony.ArtifactInput, error) {
 	if root == "" || !filepath.IsAbs(root) || evidencePath == "" {
 		return nil, symphony.ArtifactInput{}, errors.New("absolute root and non-empty evidence path are required")

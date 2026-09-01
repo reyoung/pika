@@ -2,10 +2,12 @@ package provider_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -62,12 +64,8 @@ func TestCursorPrepareSessionCreatesPrivateStateAndShellSafeLaunch(t *testing.T)
 		t.Fatalf("system prompt = %s", systemPrompt)
 	}
 	wrapper := filepath.Join(instanceBin, "cursor-agent")
-	command := exec.Command(wrapper)
-	command.Env = os.Environ()
-	for key, value := range launch.Environment {
-		command.Env = append(command.Env, key+"="+value)
-	}
-	output, err := command.CombinedOutput()
+	commandEnvironment := cursorCommandEnvironment(launch.Environment)
+	output, err := runPublishedCursor(t, wrapper, commandEnvironment)
 	if err != nil {
 		t.Fatalf("run Cursor wrapper: %v: %s", err, output)
 	}
@@ -84,7 +82,7 @@ func TestCursorPrepareSessionCreatesPrivateStateAndShellSafeLaunch(t *testing.T)
 		t.Fatal("Cursor arg was evaluated by a shell")
 	}
 	resume := exec.Command(wrapper, "--resume", "native-session")
-	resume.Env = command.Env
+	resume.Env = commandEnvironment
 	if err := resume.Run(); err == nil {
 		t.Fatal("Cursor wrapper accepted native resume")
 	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 64 {
@@ -124,12 +122,7 @@ func TestCursorPrepareSessionCanWaitForOperatorPrompt(t *testing.T) {
 	if launch.HandlesInitialPrompt || launch.ReturnOnLaunch || launch.Environment["PIKA_CURSOR_INITIAL_PROMPT"] != "" {
 		t.Fatalf("operator-driven launch = %+v", launch)
 	}
-	command := exec.Command(filepath.Join(root, "runtime", "bin", "cursor-agent"))
-	command.Env = os.Environ()
-	for key, value := range launch.Environment {
-		command.Env = append(command.Env, key+"="+value)
-	}
-	output, err := command.CombinedOutput()
+	output, err := runPublishedCursor(t, filepath.Join(root, "runtime", "bin", "cursor-agent"), cursorCommandEnvironment(launch.Environment))
 	if err != nil {
 		t.Fatalf("run Cursor wrapper without initial prompt: %v: %s", err, output)
 	}
@@ -168,18 +161,39 @@ func TestCursorPrepareSessionUsesAutoRoutingWithoutReasoningEffort(t *testing.T)
 	if _, present := launch.Environment["PIKA_AGENT_REASONING_EFFORT"]; present {
 		t.Fatalf("auto-routing unexpectedly set reasoning effort: %+v", launch.Environment)
 	}
-	command := exec.Command(filepath.Join(root, "runtime", "bin", "cursor-agent"))
-	command.Env = os.Environ()
-	for key, value := range launch.Environment {
-		command.Env = append(command.Env, key+"="+value)
-	}
-	output, err := command.CombinedOutput()
+	output, err := runPublishedCursor(t, filepath.Join(root, "runtime", "bin", "cursor-agent"), cursorCommandEnvironment(launch.Environment))
 	if err != nil {
 		t.Fatalf("run Cursor wrapper: %v: %s", err, output)
 	}
 	if !strings.Contains(string(output), "--model\nauto\n") {
 		t.Fatalf("auto-routing argv:\n%s", output)
 	}
+}
+
+func cursorCommandEnvironment(values map[string]string) []string {
+	environment := os.Environ()
+	for key, value := range values {
+		environment = append(environment, key+"="+value)
+	}
+	return environment
+}
+
+// runPublishedCursor models the immediate consumer of the atomically
+// published wrapper.  On filesystems that transiently retain an executable
+// writer, retry only ETXTBSY and cap the wait so ordinary launch errors remain
+// test-visible.
+func runPublishedCursor(t *testing.T, executable string, environment []string, arguments ...string) ([]byte, error) {
+	t.Helper()
+	for attempt := 0; attempt < 8; attempt++ {
+		command := exec.Command(executable, arguments...)
+		command.Env = environment
+		output, err := command.CombinedOutput()
+		if !errors.Is(err, syscall.ETXTBSY) || attempt == 7 {
+			return output, err
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	panic("unreachable")
 }
 
 func TestRealCursorDiscoversInstalledPikaMCP(t *testing.T) {

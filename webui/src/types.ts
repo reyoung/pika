@@ -64,13 +64,19 @@ export type MeasurementSet = {
   baseline_revision_id: string
   work_id?: string
   integration_id?: string
+  experiment_id?: string
+  receipt_id?: string
+  scope_best_sha?: string
   best_sequence?: number
   kind: 'development_baseline' | 'reference' | 'candidate'
   created_at: string
 }
 export type CaseValue = { measurement_set_id: string; case_id: string; metric_id: string; value: number }
 export type Comparison = {
-  integration_id: string
+  integration_id?: string
+  experiment_id?: string
+  receipt_id?: string
+  scope_best_sha?: string
   case_id?: string
   metric_id: string
   reference_value?: number

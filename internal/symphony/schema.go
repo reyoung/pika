@@ -8,7 +8,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 20
+const schemaVersion = 23
 
 func CurrentSchemaVersion() int { return schemaVersion }
 
@@ -674,6 +674,111 @@ CREATE TABLE benchmark_derived_comparisons (
 );
 `
 
+// Existing Optimizations are explicitly frozen to flow v1. This migration
+// never schedules a new Work, so a live v1 execution graph is unchanged.
+const schemaV21 = `
+ALTER TABLE optimizations ADD COLUMN flow_version INTEGER NOT NULL DEFAULT 1 CHECK(flow_version IN (1, 2));
+ALTER TABLE iteration_rounds ADD COLUMN current_checkpoint_sha TEXT;
+UPDATE iteration_rounds SET current_checkpoint_sha = base_sha WHERE current_checkpoint_sha IS NULL;
+ALTER TABLE integrations ADD COLUMN candidate_experiment_id TEXT REFERENCES iteration_experiments(id);
+ALTER TABLE benchmark_measurement_sets ADD COLUMN experiment_id TEXT REFERENCES iteration_experiments(id);
+ALTER TABLE benchmark_measurement_sets ADD COLUMN receipt_id TEXT;
+ALTER TABLE benchmark_measurement_sets ADD COLUMN scope_best_sha TEXT;
+UPDATE benchmark_measurement_sets SET scope_best_sha = '' WHERE scope_best_sha IS NULL;
+ALTER TABLE benchmark_derived_comparisons ADD COLUMN experiment_id TEXT REFERENCES iteration_experiments(id);
+ALTER TABLE benchmark_derived_comparisons ADD COLUMN receipt_id TEXT;
+ALTER TABLE benchmark_derived_comparisons ADD COLUMN scope_best_sha TEXT;
+UPDATE benchmark_derived_comparisons SET scope_best_sha = '' WHERE scope_best_sha IS NULL;
+CREATE UNIQUE INDEX benchmark_measurement_sets_integration_kind
+    ON benchmark_measurement_sets(integration_id, kind);
+CREATE INDEX benchmark_measurement_sets_experiment_kind
+    ON benchmark_measurement_sets(experiment_id, kind);
+CREATE INDEX benchmark_derived_comparisons_experiment_case_metric
+    ON benchmark_derived_comparisons(experiment_id, case_id, metric_id);
+
+CREATE TABLE skill_snapshots (
+    optimization_id TEXT NOT NULL REFERENCES optimizations(id),
+    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+    snapshot_id TEXT NOT NULL UNIQUE,
+    root_path TEXT NOT NULL,
+    manifest_json BLOB NOT NULL,
+    manifest_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(optimization_id)
+);
+CREATE TABLE skill_snapshot_entries (
+    optimization_id TEXT NOT NULL REFERENCES skill_snapshots(optimization_id),
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    name TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    PRIMARY KEY(optimization_id, name),
+    UNIQUE(optimization_id, ordinal)
+);
+CREATE TABLE diagnoses (
+    id TEXT PRIMARY KEY,
+    optimization_id TEXT NOT NULL REFERENCES optimizations(id),
+    baseline_revision_id TEXT NOT NULL UNIQUE REFERENCES baseline_revisions(id),
+    work_id TEXT NOT NULL UNIQUE REFERENCES works(id),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'ready', 'unavailable', 'cancelled')),
+    report_json BLOB,
+    report_sha256 TEXT,
+    created_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE TABLE iteration_experiments (
+    id TEXT PRIMARY KEY,
+    optimization_id TEXT NOT NULL REFERENCES optimizations(id),
+    attempt_id TEXT NOT NULL REFERENCES attempts(id),
+    iteration_round INTEGER NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence >= 1),
+    outcome TEXT NOT NULL CHECK(outcome IN ('kept', 'rejected', 'inconclusive')),
+    parent_checkpoint_sha TEXT NOT NULL,
+    checkpoint_sha TEXT,
+    scope_best_sha TEXT NOT NULL,
+    receipt_id TEXT NOT NULL UNIQUE,
+    experiment_json BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(attempt_id, iteration_round, sequence),
+    FOREIGN KEY(attempt_id, iteration_round) REFERENCES iteration_rounds(attempt_id, round)
+);
+CREATE TABLE benchmark_experiment_derived_comparisons (
+    experiment_id TEXT NOT NULL REFERENCES iteration_experiments(id),
+    case_id TEXT NOT NULL DEFAULT '',
+    metric_id TEXT NOT NULL,
+    reference_value REAL,
+    candidate_value REAL,
+    speedup REAL NOT NULL CHECK(speedup > 0),
+    regression INTEGER NOT NULL CHECK(regression IN (0, 1)),
+    regression_fraction REAL NOT NULL CHECK(regression_fraction >= 0),
+    aggregate_speedup REAL,
+    max_case_speedup REAL,
+    max_case_id TEXT,
+    receipt_id TEXT,
+    scope_best_sha TEXT NOT NULL,
+    PRIMARY KEY(experiment_id, case_id, metric_id)
+);
+`
+
+const schemaV22 = `
+CREATE TABLE commit_capability_receipts (
+    commit_sha TEXT PRIMARY KEY,
+    work_id TEXT NOT NULL REFERENCES works(id),
+    commit_key_sha256 TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(work_id, commit_key_sha256)
+);
+`
+
+const schemaV23 = `
+CREATE UNIQUE INDEX evidence_artifacts_work_relative_path
+	ON evidence_artifacts(work_id, relative_path);
+`
+
 var schemaMigrations = []struct {
 	version int
 	sql     string
@@ -698,6 +803,9 @@ var schemaMigrations = []struct {
 	{version: 18, sql: schemaV18},
 	{version: 19, sql: schemaV19},
 	{version: 20, sql: schemaV20},
+	{version: 21, sql: schemaV21},
+	{version: 22, sql: schemaV22},
+	{version: 23, sql: schemaV23},
 }
 
 func migrate(ctx context.Context, db *sql.DB, now string) error {

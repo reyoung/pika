@@ -28,6 +28,31 @@ type modelLister interface {
 	ListModels(context.Context, ModelRequest) ([]Model, error)
 }
 
+// ValidateCatalogMembership verifies a concrete model/effort pair against a
+// freshly obtained provider catalog. Adapter.Validate intentionally checks
+// only provider-independent syntax; it cannot establish that an account can
+// launch a particular catalog entry.
+func ValidateCatalogMembership(models []Model, configuration AgentConfiguration) error {
+	for _, model := range models {
+		if model.ID != configuration.Model {
+			continue
+		}
+		if len(model.ReasoningEfforts) == 0 {
+			if configuration.ReasoningEffort == "" {
+				return nil
+			}
+			return fmt.Errorf("model %q uses provider-selected reasoning and does not accept reasoning_effort %q", configuration.Model, configuration.ReasoningEffort)
+		}
+		for _, effort := range model.ReasoningEfforts {
+			if effort == configuration.ReasoningEffort {
+				return nil
+			}
+		}
+		return fmt.Errorf("model %q does not offer reasoning_effort %q in the provider catalog", configuration.Model, configuration.ReasoningEffort)
+	}
+	return fmt.Errorf("model %q is not available in the provider catalog", configuration.Model)
+}
+
 func (CodexAdapter) ListModels(_ context.Context, request ModelRequest) ([]Model, error) {
 	if request.ConfigRoot == "" || !filepath.IsAbs(request.ConfigRoot) {
 		return nil, errors.New("Codex config root must be absolute")
@@ -80,7 +105,7 @@ func (adapter CursorAdapter) ListModels(ctx context.Context, request ModelReques
 			return nil, fmt.Errorf("resolve Cursor executable: %w", err)
 		}
 	}
-	output, err := exec.CommandContext(ctx, executable, "--list-models").CombinedOutput()
+	output, err := providerCombinedOutput(ctx, executable, "--list-models")
 	if err != nil {
 		return nil, fmt.Errorf("list Cursor models: %s", strings.TrimSpace(string(output)))
 	}

@@ -247,7 +247,8 @@ func TestGracefulShutdownWaitsForRealHerdrAgentTerminalMCP(t *testing.T) {
 	t.Setenv("HERDR_PANE_ID", created.RootPane.PaneID)
 	t.Setenv("PIKA_GO_AGENT_PATH_PREFIX", binDir)
 	t.Setenv("CODEX_HOME", filepath.Join(configRoot, "codex-home"))
-	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/echo")
+	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", filepath.Join(binDir, "codex"))
+	writeHerdrIntegrationCodexModelsCache(t, configRoot)
 	daemonCtx, stopDaemon := context.WithCancel(context.Background())
 	t.Cleanup(stopDaemon)
 	daemonDone := make(chan int, 1)
@@ -667,6 +668,7 @@ func TestDaemonProcessCrashAfterTerminalCommitRecoversSingleSuccessor(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer reader.Close()
 	committed, err := reader.Inspect(ctx, symphony.Status{})
 	_ = reader.Close()
 	if err != nil || len(committed.Works) != 2 || committed.Works[0].Status != symphony.WorkCompleted ||
@@ -849,7 +851,7 @@ func TestDaemonProcessCrashAfterBestGitCommitRecoversIntegrationOnce(t *testing.
 		t.Fatalf("recovered Session is not Integration: %+v", recoveredSession)
 	}
 	deadline := time.Now().Add(20 * time.Second)
-	var recovered symphony.View
+	var recovered symphony.OperatorStatus
 	for time.Now().Before(deadline) {
 		recovered, err = control.Status(ctx, pikaSocket)
 		if err == nil && recovered.Best != nil && recovered.Best.Sequence == 1 {
@@ -935,15 +937,17 @@ func TestBaselineAcceptedEndToEndThroughMCP(t *testing.T) {
 	}
 	promptInitialBaselineFixture(t, ctx, client)
 	deadline := time.Now().Add(15 * time.Second)
-	var view symphony.View
+	var view symphony.OperatorStatus
 	for time.Now().Before(deadline) {
 		view, err = control.Status(ctx, pikaSocket)
-		if err == nil && view.Optimization.Status == symphony.OptimizationOptimizing {
+		if err == nil && view.Optimization.Status == symphony.OptimizationOptimizing && len(view.Works) == 7 &&
+			view.Works[0].Status == symphony.WorkCompleted && view.Works[1].Status == symphony.WorkCompleted &&
+			view.Works[2].Role == symphony.RoleDiagnosis && view.Works[2].Status == symphony.WorkCompleted {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err != nil || view.Optimization.Status != symphony.OptimizationOptimizing || view.Baseline == nil || view.Baseline.Status != symphony.BaselineAccepted || len(view.Works) != 6 || view.Works[0].Status != symphony.WorkCompleted || view.Works[1].Status != symphony.WorkCompleted {
+	if err != nil || view.Optimization.Status != symphony.OptimizationOptimizing || view.Baseline == nil || view.Baseline.Status != symphony.BaselineAccepted || len(view.Works) != 7 || view.Works[0].Status != symphony.WorkCompleted || view.Works[1].Status != symphony.WorkCompleted || view.Works[2].Role != symphony.RoleDiagnosis || view.Works[2].Status != symphony.WorkCompleted {
 		snapshot, _ := client.Snapshot(ctx)
 		var reads []json.RawMessage
 		for _, pane := range snapshot.Panes {
@@ -1068,6 +1072,7 @@ func TestFollowUpThroughRealHerdr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer reader.Close()
 	var targetSession symphony.AgentSession
 	for time.Now().Before(deadline) {
 		var found bool
@@ -1077,7 +1082,6 @@ func TestFollowUpThroughRealHerdr(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	_ = reader.Close()
 	if targetSession.ID == "" {
 		t.Fatal("target Agent Session did not bind")
 	}
@@ -1086,7 +1090,7 @@ func TestFollowUpThroughRealHerdr(t *testing.T) {
 	if err := control.IngestProviderEvent(ctx, pikaSocket, "codex", protocol.ProviderEventRequest{AgentSessionID: targetSession.ID, Event: hook}); err != nil {
 		t.Fatal(err)
 	}
-	var view symphony.View
+	var view symphony.OperatorStatus
 	deadline = time.Now().Add(12 * time.Second)
 	for time.Now().Before(deadline) {
 		view, err = control.Status(ctx, pikaSocket)
@@ -1095,8 +1099,12 @@ func TestFollowUpThroughRealHerdr(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if err != nil || len(view.FollowUps) != 1 || view.FollowUps[0].Status != "delivered" || view.FollowUps[0].Message == "" {
+	if err != nil || len(view.FollowUps) != 1 || view.FollowUps[0].Status != "delivered" {
 		t.Fatalf("Follow-up E2E view=%+v err=%v Herdr=%s", view, err, serverOutput.String())
+	}
+	persisted, err := reader.Inspect(ctx, symphony.Status{})
+	if err != nil || len(persisted.FollowUps) != 1 || persisted.FollowUps[0].Message == "" {
+		t.Fatalf("Follow-up message was not durably stored: view=%+v err=%v", persisted.FollowUps, err)
 	}
 	if targetAfter := func() symphony.WorkView {
 		for _, work := range view.Works {
@@ -1169,7 +1177,7 @@ func TestRejectedBaselineCreatesFreshDraftSession(t *testing.T) {
 	}
 	promptInitialBaselineFixture(t, ctx, client)
 	deadline := time.Now().Add(15 * time.Second)
-	var view symphony.View
+	var view symphony.OperatorStatus
 	for time.Now().Before(deadline) {
 		view, err = control.Status(ctx, pikaSocket)
 		if err == nil && view.Optimization.Status == symphony.OptimizationDraftingBaseline && view.Optimization.Revision == 3 {
@@ -1245,7 +1253,7 @@ func TestOptimizationFIFOThroughRealHerdr(t *testing.T) {
 	}
 	promptInitialBaselineFixture(t, ctx, client)
 	deadline := time.Now().Add(100 * time.Second)
-	var view symphony.View
+	var view symphony.OperatorStatus
 	for time.Now().Before(deadline) {
 		view, err = control.Status(ctx, pikaSocket)
 		if err == nil && view.Best != nil && view.Best.Sequence >= 3 {
@@ -1319,7 +1327,11 @@ func configureFakeHerdr(t *testing.T, root, fakeAgent string) (string, string, s
 	if err := os.Mkdir(binDir, 0o700); err != nil {
 		t.Fatalf("create bin dir: %v", err)
 	}
-	wrapper := "#!/bin/sh\nexec env HERDR_AGENT=codex PIKA_GO_FAKE_AGENT_OSC=1 \"" + fakeAgent + "\"\n"
+	wrapper := "#!/bin/sh\n" +
+		"if [ \"$1\" = --version ]; then echo codex-test; exit 0; fi\n" +
+		"if [ \"$1\" = login ] && [ \"$2\" = status ]; then echo Logged-in; exit 0; fi\n" +
+		"if [ \"$1\" = debug ] && [ \"$2\" = prompt-input ] && [ -L .agents/skills/pika-kda-kernelwiki ] && [ -L .agents/skills/pika-kda-ncu-report ]; then root=\"$(pwd)/.agents/skills\"; printf '[{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"<skills_instructions>\\\\n## Skills\\\\n### Skill roots\\\\n- `r0` = `%s`\\\\n### Available skills\\\\n- KernelWiki: probe (file: r0/pika-kda-kernelwiki/SKILL.md)\\\\n- ncu-report-skill: probe (file: r0/pika-kda-ncu-report/SKILL.md)\\\\n</skills_instructions>\"}]}]\\n' \"$root\"; exit 0; fi\n" +
+		"exec env HERDR_AGENT=codex PIKA_GO_FAKE_AGENT_OSC=1 \"" + fakeAgent + "\"\n"
 	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(wrapper), 0o700); err != nil {
 		t.Fatalf("write codex wrapper: %v", err)
 	}
@@ -1402,13 +1414,15 @@ func configureTestScheduler(t *testing.T, ctx context.Context, repository, state
 
 func startTestDaemon(t *testing.T, socketPath, stateRoot, configRoot string) func() {
 	t.Helper()
+	writeHerdrIntegrationCodexModelsCache(t, configRoot)
 	t.Setenv("CODEX_HOME", filepath.Join(configRoot, "codex-home"))
-	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", "/bin/echo")
+	t.Setenv("PIKA_GO_CODEX_EXECUTABLE", filepath.Join(os.Getenv("PIKA_GO_AGENT_PATH_PREFIX"), "codex"))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
+	var output bytes.Buffer
 	var stopOnce sync.Once
 	go func() {
-		done <- cli.Run(ctx, []string{"daemon", "--socket", socketPath, "--state-dir", stateRoot, "--config-dir", configRoot, "--instance", "integration-instance"}, nil, io.Discard, io.Discard)
+		done <- cli.Run(ctx, []string{"daemon", "--socket", socketPath, "--state-dir", stateRoot, "--config-dir", configRoot, "--instance", "integration-instance"}, nil, &output, &output)
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -1419,7 +1433,7 @@ func startTestDaemon(t *testing.T, socketPath, stateRoot, configRoot string) fun
 					select {
 					case code := <-done:
 						if code != 0 {
-							t.Errorf("daemon exit code = %d", code)
+							t.Errorf("daemon exit code = %d; output=%s", code, output.String())
 						}
 					case <-time.After(5 * time.Second):
 						t.Errorf("daemon did not stop")
@@ -1436,7 +1450,7 @@ func startTestDaemon(t *testing.T, socketPath, stateRoot, configRoot string) fun
 		time.Sleep(20 * time.Millisecond)
 	}
 	cancel()
-	t.Fatal("daemon socket did not become healthy")
+	t.Fatalf("daemon socket did not become healthy; output=%s", output.String())
 	return func() {}
 }
 
@@ -1449,6 +1463,7 @@ type daemonProcess struct {
 
 func startDaemonProcess(t *testing.T, pikaBinary, socketPath, stateRoot, configRoot, herdrSocket, symphonyPane, binDir string) *daemonProcess {
 	t.Helper()
+	writeHerdrIntegrationCodexModelsCache(t, configRoot)
 	process := &daemonProcess{done: make(chan error, 1), socketPath: socketPath}
 	process.command = exec.Command(
 		pikaBinary,
@@ -1464,7 +1479,7 @@ func startDaemonProcess(t *testing.T, pikaBinary, socketPath, stateRoot, configR
 		"HERDR_ENV":                 "1",
 		"PIKA_GO_AGENT_PATH_PREFIX": binDir,
 		"CODEX_HOME":                filepath.Join(configRoot, "codex-home"),
-		"PIKA_GO_CODEX_EXECUTABLE":  "/bin/echo",
+		"PIKA_GO_CODEX_EXECUTABLE":  filepath.Join(binDir, "codex"),
 		"PATH":                      binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 	})
 	process.command.Stdout = &process.output
@@ -1477,6 +1492,18 @@ func startDaemonProcess(t *testing.T, pikaBinary, socketPath, stateRoot, configR
 	}()
 	waitForPikaProcessHealth(t, socketPath, process)
 	return process
+}
+
+func writeHerdrIntegrationCodexModelsCache(t *testing.T, configRoot string) {
+	t.Helper()
+	codexHome := filepath.Join(configRoot, "codex-home")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatalf("create Codex model cache directory: %v", err)
+	}
+	cache := []byte(`{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]},{"slug":"gpt-5.6-terra","display_name":"GPT-5.6-Terra","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]}]}`)
+	if err := os.WriteFile(filepath.Join(codexHome, "models_cache.json"), cache, 0o600); err != nil {
+		t.Fatalf("write Codex model cache: %v", err)
+	}
 }
 
 func (process *daemonProcess) killAndWait() {
@@ -1499,8 +1526,12 @@ func (process *daemonProcess) killAndWait() {
 }
 
 func waitForPikaProcessHealth(t *testing.T, socketPath string, process *daemonProcess) {
+	waitForPikaProcessHealthWithin(t, socketPath, process, 15*time.Second)
+}
+
+func waitForPikaProcessHealthWithin(t *testing.T, socketPath string, process *daemonProcess, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if _, err := control.Health(context.Background(), socketPath); err == nil {
 			return

@@ -16,9 +16,11 @@ var contextBundleTemplate = template.Must(template.New("context-bundle").Option(
 var catalog = map[string]string{
 	"baseline":                  "baseline.md",
 	"baseline-verify":           "baseline-verify.md",
+	"diagnosis":                 "diagnosis.md",
 	"iteration":                 "iteration.md",
 	"integration":               "integration.md",
 	"follow-up/baseline-verify": "follow-up-baseline-verify.md",
+	"follow-up/diagnosis":       "follow-up-diagnosis.md",
 	"follow-up/iteration":       "follow-up-iteration.md",
 	"follow-up/integration":     "follow-up-integration.md",
 }

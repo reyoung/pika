@@ -11,6 +11,31 @@ import (
 	"testing"
 )
 
+func applyMigrationsThrough(t *testing.T, ctx context.Context, db *sql.DB, through int) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE migrations (version INTEGER PRIMARY KEY, checksum TEXT NOT NULL, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatalf("create migration ledger: %v", err)
+	}
+	for _, migration := range schemaMigrations[:through] {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin migration %d: %v", migration.version, err)
+		}
+		if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("apply migration %d: %v", migration.version, err)
+		}
+		digest := sha256.Sum256([]byte(migration.sql))
+		if _, err := tx.ExecContext(ctx, `INSERT INTO migrations(version, checksum, applied_at) VALUES (?, ?, 'test')`, migration.version, hex.EncodeToString(digest[:])); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("record migration %d: %v", migration.version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit migration %d: %v", migration.version, err)
+		}
+	}
+}
+
 func TestOpenConfiguresAndMigratesSQLite(t *testing.T) {
 	t.Parallel()
 
@@ -65,6 +90,7 @@ func TestOpenConfiguresAndMigratesSQLite(t *testing.T) {
 		"runtime_outbox": false, "session_grants": false, "works": false, "attempts": false,
 		"best_revisions": false, "iteration_rounds": false, "integrations": false, "git_intents": false,
 		"iteration_cases": false, "iteration_round_cases": false,
+		"skill_snapshots": false, "skill_snapshot_entries": false, "diagnoses": false, "iteration_experiments": false,
 		"workspace_identity": false, "git_worktrees": false,
 		"context_snapshots":        false,
 		"scheduler_control_cycles": false, "session_control_actions": false,
@@ -177,6 +203,50 @@ func TestOpenRejectsChangedAppliedMigration(t *testing.T) {
 	_, err = Open(ctx, path, Options{})
 	if err == nil || !strings.Contains(err.Error(), "migration 1 checksum mismatch") {
 		t.Fatalf("open error = %v", err)
+	}
+}
+
+func TestMigrationV21FailureRollsBackToRecoverableV20Database(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "pika.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyMigrationsThrough(t, ctx, db, 19)
+	// This collision occurs in v21. v20 should remain committed and v21 must
+	// roll back atomically.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE diagnoses (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(ctx, db, "test"); err == nil || !strings.Contains(err.Error(), "apply schema migration 21") {
+		t.Fatalf("v21 collision error = %v", err)
+	}
+	var flowVersionColumns int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('optimizations') WHERE name = 'flow_version'`).Scan(&flowVersionColumns); err != nil {
+		t.Fatal(err)
+	}
+	if flowVersionColumns != 0 {
+		t.Fatal("failed v21 migration left flow_version behind")
+	}
+	var latest int
+	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM migrations`).Scan(&latest); err != nil || latest != 20 {
+		t.Fatalf("migration ledger after rollback = %d, err=%v", latest, err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE diagnoses`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatalf("recover v20 database through v21: %v", err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	if _, err := engine.Apply(ctx, Init{Meta: CommandMeta{RequestID: "legacy"}, OptimizationID: "legacy", Repository: "/repo"}); err != nil {
+		t.Fatalf("recovered database cannot run flow-v1: %v", err)
 	}
 }
 

@@ -83,6 +83,64 @@ func (e *Engine) UpsertGitWorktree(ctx context.Context, record GitWorktreeRecord
 	return nil
 }
 
+// InitializeIterationRoundCheckpoint makes a Pika-prepared stale/back-off
+// merge the canonical start of its new Round. The compare-and-set keeps a
+// recovered start effect from adopting Agent work: only the checkpoint cursor
+// of an untouched Round can move, before any Experiment has been recorded. The
+// Round base remains the accepted Best that scopes benchmark receipts.
+func (e *Engine) InitializeIterationRoundCheckpoint(ctx context.Context, attemptID string, round int64, expectedBaseSHA, preparedSHA string) (string, error) {
+	if attemptID == "" || round < 1 || !isGitSHA(expectedBaseSHA) || !isGitSHA(preparedSHA) {
+		return "", errors.New("complete Iteration Round checkpoint identity is required")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin Iteration checkpoint initialization: %w", err)
+	}
+	defer tx.Rollback()
+	var baseSHA, currentSHA, status string
+	if err := tx.QueryRowContext(ctx, `SELECT base_sha, current_checkpoint_sha, status FROM iteration_rounds
+		WHERE attempt_id = ? AND round = ?`, attemptID, round).Scan(&baseSHA, &currentSHA, &status); errors.Is(err, sql.ErrNoRows) {
+		return "", domainError(CodeWorkNotFound, "Iteration Round was not found")
+	} else if err != nil {
+		return "", fmt.Errorf("read Iteration checkpoint: %w", err)
+	}
+	if baseSHA == expectedBaseSHA && currentSHA == preparedSHA {
+		return preparedSHA, nil
+	}
+	if baseSHA != expectedBaseSHA || currentSHA != expectedBaseSHA {
+		return "", domainError(CodeInvalidTransition, "Iteration Round checkpoint is no longer at the expected prepared base")
+	}
+	if status != "running" {
+		return "", domainError(CodeInvalidTransition, "Iteration Round checkpoint can be initialized only while running")
+	}
+	var experiments int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM iteration_experiments WHERE attempt_id = ? AND iteration_round = ?`, attemptID, round).Scan(&experiments); err != nil {
+		return "", fmt.Errorf("count Iteration Experiments before checkpoint initialization: %w", err)
+	}
+	if experiments != 0 {
+		return "", domainError(CodeInvalidTransition, "Iteration Round checkpoint cannot change after an Experiment")
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE iteration_rounds SET current_checkpoint_sha = ?
+		WHERE attempt_id = ? AND round = ? AND base_sha = ? AND current_checkpoint_sha = ?`,
+		preparedSHA, attemptID, round, expectedBaseSHA, expectedBaseSHA)
+	if err != nil {
+		return "", fmt.Errorf("initialize Iteration checkpoint: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("count Iteration checkpoint initialization: %w", err)
+	}
+	if changed != 1 {
+		return "", domainError(CodeRevisionConflict, "Iteration Round checkpoint changed during initialization")
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit Iteration checkpoint initialization: %w", err)
+	}
+	return preparedSHA, nil
+}
+
 func (e *Engine) GitWorktrees(ctx context.Context) ([]GitWorktreeRecord, error) {
 	rows, err := e.db.QueryContext(ctx, `SELECT role, attempt_id, iteration_round, branch, repository, head_sha, state, updated_at
 		FROM git_worktrees ORDER BY role, attempt_id, iteration_round`)

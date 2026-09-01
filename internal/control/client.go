@@ -53,12 +53,12 @@ func Health(ctx context.Context, socketPath string) (protocol.Health, error) {
 	return health, nil
 }
 
-func Status(ctx context.Context, socketPath string) (symphony.View, error) {
-	var view symphony.View
-	if err := doJSON(ctx, socketPath, http.MethodGet, "/v1/status", nil, &view); err != nil {
-		return symphony.View{}, err
+func Status(ctx context.Context, socketPath string) (symphony.OperatorStatus, error) {
+	var status symphony.OperatorStatus
+	if err := doJSON(ctx, socketPath, http.MethodGet, "/v1/status", nil, &status); err != nil {
+		return symphony.OperatorStatus{}, err
 	}
-	return view, nil
+	return status, nil
 }
 
 func Init(ctx context.Context, socketPath string, request protocol.InitRequest) (symphony.Receipt, error) {

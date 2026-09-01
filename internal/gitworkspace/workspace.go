@@ -21,6 +21,7 @@ import (
 var (
 	identityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	shaPattern      = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+	digestPattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 type Workspace struct {
@@ -52,20 +53,33 @@ type Intent struct {
 }
 
 type CommitResult struct {
-	CommitSHA string `json:"commit_sha"`
-	Clean     bool   `json:"clean"`
-	Status    string `json:"status,omitempty"`
+	CommitSHA       string `json:"commit_sha"`
+	CommitKeySHA256 string `json:"commit_key_sha256"`
+	RequestSHA256   string `json:"request_sha256"`
+	Clean           bool   `json:"clean"`
+	Status          string `json:"status,omitempty"`
+}
+
+type CommitAuthorization struct {
+	CommitSHA       string
+	CommitKeySHA256 string
+	RequestSHA256   string
 }
 
 type RuntimePreparer struct {
-	Repository string
-	Root       string
-	Namespace  string
-	Recorder   WorktreeRecorder
+	Repository            string
+	Root                  string
+	Namespace             string
+	Recorder              WorktreeRecorder
+	CheckpointInitializer IterationCheckpointInitializer
 }
 
 type WorktreeRecorder interface {
 	UpsertGitWorktree(context.Context, symphony.GitWorktreeRecord) error
+}
+
+type IterationCheckpointInitializer interface {
+	InitializeIterationRoundCheckpoint(context.Context, string, int64, string, string) (string, error)
 }
 
 func (p RuntimePreparer) PrepareWork(ctx context.Context, work symphony.RuntimeWork) (symphony.RuntimeWork, error) {
@@ -90,6 +104,34 @@ func (p RuntimePreparer) PrepareWork(ctx context.Context, work symphony.RuntimeW
 		}
 		if err != nil {
 			return symphony.RuntimeWork{}, err
+		}
+		if work.IterationKind != "initial" {
+			_, merging, mergeErr := workspace.currentMergeHead(ctx, round.Repository)
+			if mergeErr != nil {
+				return symphony.RuntimeWork{}, fmt.Errorf("inspect prepared stale Attempt merge: %w", mergeErr)
+			}
+			// A clean refresh merge is Pika-owned setup, not an Agent
+			// Experiment. Initialize it only while the durable checkpoint is
+			// still the original Best and only when HEAD is the exact merge Pika
+			// requested. On recovery, Agent commits may already follow that merge;
+			// those commits must never be adopted outside the Experiment ledger.
+			if !merging && work.CurrentCheckpointSHA == work.BaseSHA {
+				exact, exactErr := workspace.MergeCommitHasExactParents(ctx, round.Repository, round.HeadSHA, work.CandidateSHA, work.BaseSHA)
+				if exactErr != nil {
+					return symphony.RuntimeWork{}, fmt.Errorf("verify prepared stale Attempt merge: %w", exactErr)
+				}
+				if !exact {
+					return symphony.RuntimeWork{}, errors.New("stale Iteration HEAD is not the exact Pika-prepared Candidate+Best merge")
+				}
+				if p.CheckpointInitializer == nil {
+					return symphony.RuntimeWork{}, errors.New("stale Iteration checkpoint initializer is required")
+				}
+				checkpoint, checkpointErr := p.CheckpointInitializer.InitializeIterationRoundCheckpoint(ctx, round.AttemptID, round.Round, work.BaseSHA, round.HeadSHA)
+				if checkpointErr != nil {
+					return symphony.RuntimeWork{}, fmt.Errorf("initialize stale Iteration checkpoint: %w", checkpointErr)
+				}
+				work.CurrentCheckpointSHA = checkpoint
+			}
 		}
 		if p.Recorder != nil {
 			if err := p.Recorder.UpsertGitWorktree(ctx, symphony.GitWorktreeRecord{
@@ -179,7 +221,9 @@ func (w Workspace) CommitChanges(ctx context.Context, scope, idempotencyKey, mes
 		if err != nil || strings.TrimSpace(lastRequest) != requestDigest {
 			return CommitResult{}, errors.New("commit idempotency key was reused with a different request")
 		}
-		return w.commitResult(ctx)
+		result, err := w.commitResult(ctx)
+		result.CommitKeySHA256, result.RequestSHA256 = keyDigest, requestDigest
+		return result, err
 	}
 	staged, err := w.gitBytes(ctx, w.Repository, nil, "diff", "--cached", "--name-only", "-z")
 	if err != nil {
@@ -209,7 +253,9 @@ func (w Workspace) CommitChanges(ctx context.Context, scope, idempotencyKey, mes
 	if _, err := w.git(ctx, w.Repository, "commit", "-m", message, "-m", trailers); err != nil {
 		return CommitResult{}, fmt.Errorf("commit scoped changes: %w", err)
 	}
-	return w.commitResult(ctx)
+	result, err := w.commitResult(ctx)
+	result.CommitKeySHA256, result.RequestSHA256 = keyDigest, requestDigest
+	return result, err
 }
 
 func splitNULPaths(value []byte) []string {
@@ -256,6 +302,31 @@ func (w Workspace) CurrentBest(ctx context.Context) (string, error) {
 	return w.ref(ctx, w.bestBranch())
 }
 
+// MergeCommitHasExactParents reports whether commitSHA is precisely the
+// Pika-prepared Candidate+Best merge. Requiring two ordered parents prevents a
+// later Agent commit (or an unrelated/octopus merge) from becoming a Round
+// checkpoint during recovery.
+func (w Workspace) MergeCommitHasExactParents(ctx context.Context, repository, commitSHA, candidateSHA, bestSHA string) (bool, error) {
+	if err := w.validate(); err != nil {
+		return false, err
+	}
+	if err := validateSHA(commitSHA); err != nil {
+		return false, fmt.Errorf("merge commit: %w", err)
+	}
+	if err := validateSHA(candidateSHA); err != nil {
+		return false, fmt.Errorf("Candidate merge parent: %w", err)
+	}
+	if err := validateSHA(bestSHA); err != nil {
+		return false, fmt.Errorf("Best merge parent: %w", err)
+	}
+	parents, err := w.git(ctx, repository, "show", "-s", "--format=%P", commitSHA)
+	if err != nil {
+		return false, fmt.Errorf("inspect merge parents: %w", err)
+	}
+	fields := strings.Fields(parents)
+	return len(fields) == 2 && fields[0] == candidateSHA && fields[1] == bestSHA, nil
+}
+
 func (w Workspace) AttemptRepository(attemptID string, round int64) (string, error) {
 	if !identityPattern.MatchString(attemptID) || round < 1 {
 		return "", errors.New("invalid Attempt Round identity")
@@ -294,6 +365,55 @@ func (w Workspace) VerifyCandidate(ctx context.Context, repository, baseSHA, can
 	return nil
 }
 
+// VerifyExperimentCheckpoint adds the ledger-specific postcondition to a
+// Candidate check: each newly introduced commit must have been made through
+// Pika's scoped commit capability and may touch only the declared experiment
+// paths.  It deliberately checks just parent..checkpoint, allowing a stale
+// Round's already-authorized merge ancestry to remain intact.
+func (w Workspace) VerifyExperimentCheckpoint(ctx context.Context, repository, parentSHA, checkpointSHA string, allowedPaths []string) ([]CommitAuthorization, error) {
+	if err := w.VerifyCandidate(ctx, repository, parentSHA, checkpointSHA); err != nil {
+		return nil, err
+	}
+	if len(allowedPaths) == 0 {
+		return nil, errors.New("Experiment must declare changed paths")
+	}
+	allowed := make([]string, 0, len(allowedPaths))
+	for _, path := range allowedPaths {
+		if path == "" || filepath.IsAbs(path) {
+			return nil, errors.New("Experiment path is invalid")
+		}
+		clean := filepath.ToSlash(filepath.Clean(path))
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+			return nil, errors.New("Experiment path escapes repository")
+		}
+		allowed = append(allowed, clean)
+	}
+	changed, err := w.gitBytes(ctx, repository, nil, "diff", "--name-only", "-z", parentSHA, checkpointSHA)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Experiment changed paths: %w", err)
+	}
+	for _, path := range splitNULPaths(changed) {
+		if !authorizedCommitPath(filepath.ToSlash(path), allowed) {
+			return nil, fmt.Errorf("Experiment changed path %q was not declared", path)
+		}
+	}
+	commits, err := w.git(ctx, repository, "rev-list", "--reverse", parentSHA+".."+checkpointSHA)
+	if err != nil {
+		return nil, fmt.Errorf("inspect Experiment commit grants: %w", err)
+	}
+	authorizations := make([]CommitAuthorization, 0)
+	for _, commit := range strings.Fields(commits) {
+		key, keyErr := w.git(ctx, repository, "show", "-s", "--format=%(trailers:key=Pika-Commit-Key,valueonly)", commit)
+		request, requestErr := w.git(ctx, repository, "show", "-s", "--format=%(trailers:key=Pika-Commit-Request,valueonly)", commit)
+		key, request = strings.TrimSpace(key), strings.TrimSpace(request)
+		if keyErr != nil || requestErr != nil || !digestPattern.MatchString(key) || !digestPattern.MatchString(request) {
+			return nil, errors.New("Experiment contains a commit not made through commit_changes")
+		}
+		authorizations = append(authorizations, CommitAuthorization{CommitSHA: commit, CommitKeySHA256: key, RequestSHA256: request})
+	}
+	return authorizations, nil
+}
+
 // VerifyCandidateChangePolicy rejects every changed path that is protected by
 // the Baseline's canonical validation policy. --no-renames makes a rename
 // observable as a deletion and an addition.
@@ -323,6 +443,20 @@ func (w Workspace) VerifyCandidateChangePolicy(ctx context.Context, repository, 
 		if policy.Protects(path) {
 			return fmt.Errorf("Candidate changes protected validation path %q", path)
 		}
+	}
+	return nil
+}
+
+func (w Workspace) VerifyExperimentRestored(ctx context.Context, repository, parentSHA string) error {
+	if err := validateSHA(parentSHA); err != nil {
+		return fmt.Errorf("Experiment parent: %w", err)
+	}
+	snapshot, err := Workspace{Repository: repository, Root: w.Root, Namespace: w.Namespace}.SourceSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if !snapshot.Clean || snapshot.CommitSHA != parentSHA {
+		return errors.New("negative Experiment worktree is not restored to its parent checkpoint")
 	}
 	return nil
 }
@@ -422,6 +556,29 @@ func (w Workspace) RefreshFromBest(ctx context.Context, attemptID string, round 
 		return Round{}, fmt.Errorf("read refreshed Attempt HEAD: %w", err)
 	}
 	created.HeadSHA = strings.TrimSpace(head)
+	// When Best is already an ancestor of the prior Candidate (the common
+	// user-back-off case), git merge reports "Already up to date" and creates no
+	// setup boundary. Materialize an explicit Pika-owned two-parent commit with
+	// the unchanged Candidate tree so stale and back-off Rounds have the same
+	// exact, recoverable phase boundary.
+	if created.HeadSHA == candidateSHA && candidateSHA != bestSHA {
+		tree, err := w.git(ctx, created.Repository, "rev-parse", candidateSHA+"^{tree}")
+		if err != nil {
+			return Round{}, fmt.Errorf("read back-off Candidate tree: %w", err)
+		}
+		setup, err := w.git(ctx, created.Repository, "commit-tree", strings.TrimSpace(tree), "-p", candidateSHA, "-p", bestSHA, "-m", "Pika stale/back-off Round setup")
+		if err != nil {
+			return Round{}, fmt.Errorf("create back-off setup merge: %w", err)
+		}
+		setup = strings.TrimSpace(setup)
+		if err := validateSHA(setup); err != nil {
+			return Round{}, fmt.Errorf("back-off setup merge: %w", err)
+		}
+		if _, err := w.git(ctx, created.Repository, "update-ref", "HEAD", setup, candidateSHA); err != nil {
+			return Round{}, fmt.Errorf("advance back-off worktree to setup merge: %w", err)
+		}
+		created.HeadSHA = setup
+	}
 	return created, nil
 }
 

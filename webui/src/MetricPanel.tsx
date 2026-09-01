@@ -26,7 +26,7 @@ export function MetricPanel({ metrics, legacy }: { metrics: Metrics; legacy: boo
   const definitions = metrics.metrics || []
   const primary = definitions.find((metric) => metric.role === 'primary')
   const comparisons = useMemo(() => metrics.comparisons || [], [metrics.comparisons])
-  const aggregate = comparisons.filter((item) => !item.case_id && item.metric_id === primary?.metric_id && item.aggregate_speedup != null)
+  const aggregate = comparisons.filter((item) => item.integration_id && !item.case_id && item.metric_id === primary?.metric_id && item.aggregate_speedup != null)
   const latestIntegration = aggregate.at(-1)?.integration_id
   const cases = comparisons.filter((item) => item.integration_id === latestIntegration && item.case_id && item.metric_id === primary?.metric_id)
   const regressions = useMemo(() => [...comparisons].filter((item) => item.case_id && item.regression).sort((a, b) => b.regression_fraction - a.regression_fraction), [comparisons])
@@ -62,7 +62,7 @@ export function MetricPanel({ metrics, legacy }: { metrics: Metrics; legacy: boo
       </div>
       {tab === 'trend' && <Chart option={trendOption} label="Best primary metric trend" />}
       {tab === 'cases' && (cases.length ? <Chart option={caseOption} label="Integration per-case dumbbell comparison" /> : <div className="empty-state">尚无 Integration 配对测量。</div>)}
-      {tab === 'regressions' && <div className="regression-table"><table><thead><tr><th>Case</th><th>Metric</th><th>Ref</th><th>Candidate</th><th>Δ</th></tr></thead><tbody>{regressions.map((item) => <tr key={`${item.integration_id}-${item.case_id}-${item.metric_id}`}><td>{item.case_id}</td><td>{item.metric_id}</td><td>{item.reference_value}</td><td>{item.candidate_value}</td><td className="negative">-{(item.regression_fraction * 100).toFixed(1)}%</td></tr>)}</tbody></table>{!regressions.length && <div className="empty-state">当前记录中没有 per-Case regression。</div>}</div>}
+      {tab === 'regressions' && <div className="regression-table"><table><thead><tr><th>Case</th><th>Metric</th><th>Ref</th><th>Candidate</th><th>Δ</th></tr></thead><tbody>{regressions.map((item) => <tr key={`${item.integration_id || item.experiment_id}-${item.case_id}-${item.metric_id}`}><td>{item.case_id}</td><td>{item.metric_id}</td><td>{item.reference_value}</td><td>{item.candidate_value}</td><td className="negative">-{(item.regression_fraction * 100).toFixed(1)}%</td></tr>)}</tbody></table>{!regressions.length && <div className="empty-state">当前记录中没有 per-Case regression。</div>}</div>}
       <footer className="formula">weight: frozen per Case · statistic: {primary.sample_statistic} · aggregate: {primary.aggregation.replaceAll('_', ' ')}</footer>
     </section>
   )

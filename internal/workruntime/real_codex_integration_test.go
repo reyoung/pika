@@ -3,6 +3,8 @@ package workruntime_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,6 +19,7 @@ import (
 	"github.com/reyoung/pika-go/internal/control"
 	"github.com/reyoung/pika-go/internal/daemonupdate"
 	"github.com/reyoung/pika-go/internal/herdr"
+	"github.com/reyoung/pika-go/internal/kdacontract"
 	"github.com/reyoung/pika-go/internal/optimizationworkspace"
 	"github.com/reyoung/pika-go/internal/protocol"
 	"github.com/reyoung/pika-go/internal/symphony"
@@ -218,6 +221,7 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 	})
 
 	daemon := startRealCodexDaemon(t, pikaBinary, pikaSocket, workspace, stateRoot, configRoot, herdrSocket, created.RootPane.PaneID, codexHome, codexBinary, cursorBinary)
+	assertRealDaemonExecutableDigest(t, daemon, pikaBinary)
 	t.Cleanup(func() {
 		if daemon != nil {
 			daemon.killAndWait()
@@ -230,14 +234,14 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 	}); err != nil {
 		t.Fatalf("initialize disposable Optimization: %v", err)
 	}
-	promptInitialRealProviderBaseline(t, testCtx, client, pikaSocket, daemon, &serverOutput)
+	promptInitialRealProviderBaseline(t, testCtx, stateRoot, client, pikaSocket, daemon, &serverOutput)
 	if spec.promptSmoke {
-		exerciseRealSchedulerPauseResume(t, testCtx, stateRoot, client, pikaSocket, spec.requestTag)
+		exerciseRealSchedulerPauseResume(t, testCtx, client, pikaSocket, stateRoot, spec.requestTag)
 		t.Logf("focused real %s prompt smoke observed an active Agent and completed pause/resume", spec.name)
 		return
 	}
 	if !spec.simple {
-		exerciseRealSchedulerPauseResume(t, testCtx, stateRoot, client, pikaSocket, spec.requestTag)
+		exerciseRealSchedulerPauseResume(t, testCtx, client, pikaSocket, stateRoot, spec.requestTag)
 	}
 	if spec.simple {
 		followUpTarget := waitForRealProviderVerificationHold(t, testCtx, stateRoot, client, pikaSocket, daemon, &serverOutput)
@@ -247,7 +251,7 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 		}
 		exerciseRealProviderHotReload(t, testCtx, *workspace, hotBinary, followUpTarget, client, pikaSocket, daemon, &serverOutput)
 		releaseRealCodexHold(t, followUpHoldPath)
-		waitForRealProviderFollowUp(t, testCtx, followUpTarget, client, pikaSocket, daemon, &serverOutput)
+		waitForRealProviderFollowUp(t, testCtx, stateRoot, followUpTarget, client, pikaSocket, daemon, &serverOutput)
 		releaseRealCodexHold(t, iterationHoldPath)
 		releaseRealCodexHold(t, integrationHoldPath)
 		view := waitForRealCodexBest(t, testCtx, client, pikaSocket, daemon, &serverOutput)
@@ -277,13 +281,23 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 		t.Logf("simple real %s hot-reload flow advanced Best to sequence %d", spec.name, view.Best.Sequence)
 		return
 	}
-	followUpTarget := exerciseRealCodexFollowUp(t, testCtx, stateRoot, followUpHoldPath, client, pikaSocket, daemon, &serverOutput)
+	// Exercise a natural Follow-up while Verification is still live, then begin
+	// the bounded Diagnosis-session window only after Verification completes.
+	verificationTarget := exerciseRealCodexFollowUp(t, testCtx, stateRoot, followUpHoldPath, client, pikaSocket, daemon, &serverOutput)
+	t.Logf("real %s Verification Work %s completed a natural Follow-up; starting the bounded Diagnosis phase", verificationTarget.Session.AgentKind, verificationTarget.Work.ID)
+
+	// Crash a real active Diagnosis session, after Baseline acceptance has
+	// already projected it.  This is the flow-v2 recovery point required by the
+	// release contract.  Crashing Verification instead made a valid rejected
+	// baseline consume the Diagnosis budget before its work even existed.
+	diagnosisTarget := waitForRealCodexRoleSessions(t, testCtx, stateRoot, symphony.RoleDiagnosis, 1, client, pikaSocket, daemon, &serverOutput)[0]
 	crashedOutput := crashRealCodexDaemon(t, daemon)
 	daemon = nil
 	daemon = startRealCodexDaemon(t, pikaBinary, pikaSocket, workspace, stateRoot, configRoot, herdrSocket, created.RootPane.PaneID, codexHome, codexBinary, cursorBinary)
-	waitForRealCodexReplacement(t, testCtx, stateRoot, followUpTarget, client, pikaSocket, daemon, &serverOutput)
-	t.Logf("real Codex Verification recovered through a fresh Session after daemon crash; crashed daemon output bytes=%d", len(crashedOutput))
+	waitForRealCodexReplacement(t, testCtx, stateRoot, diagnosisTarget, client, pikaSocket, daemon, &serverOutput)
+	t.Logf("real provider Diagnosis recovered through a fresh Session after daemon crash; crashed daemon output bytes=%d", len(crashedOutput))
 
+	waitForRealDiagnosisComplete(t, testCtx, client, pikaSocket, daemon, &serverOutput)
 	exerciseRealCodexCancellation(t, testCtx, stateRoot, iterationHoldPath, client, pikaSocket, daemon, &serverOutput)
 	exerciseRealCodexIntegrationBackOff(t, testCtx, stateRoot, integrationHoldPath, client, pikaSocket, daemon, &serverOutput)
 
@@ -300,8 +314,9 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 	if acceptedIntegrations == 0 || view.Best == nil || view.Best.Sequence < 1 {
 		t.Fatalf("real Codex did not advance Best: best=%+v integrations=%+v", view.Best, view.Integrations)
 	}
-	if !hasCancelledAttempt(view) || !hasIntegrationBackOff(view, "real release-matrix back-off") {
-		t.Fatalf("real Codex release matrix omitted cancellation or Back-off: attempts=%+v rounds=%+v", view.Attempts, view.IterationRounds)
+	durableView := inspectRealProviderView(t, testCtx, realProviderDatabasePath(stateRoot))
+	if !hasCancelledAttempt(durableView) || !hasIntegrationBackOff(durableView, "real release-matrix back-off") {
+		t.Fatalf("real Codex release matrix omitted cancellation or Back-off: attempts=%+v rounds=%+v", durableView.Attempts, durableView.IterationRounds)
 	}
 	if view.Storage.ProviderEventBytes == 0 || view.Storage.ToolPayloadBytes == 0 {
 		t.Fatalf("Codex hooks did not persist observable journal payloads: %+v", view.Storage)
@@ -323,6 +338,7 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 	case <-time.After(90 * time.Second):
 		t.Fatalf("daemon did not finish draining: %s", diagnoseRealCodex(testCtx, client, pikaSocket, daemon, &serverOutput))
 	}
+	assertRealFlowV2Contract(t, testCtx, realProviderDatabasePath(stateRoot))
 
 	engine, err := symphony.Open(testCtx, realProviderDatabasePath(stateRoot), symphony.Options{})
 	if err != nil {
@@ -349,7 +365,39 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 	t.Logf("real Codex release matrix advanced Best to sequence %d with %d provider sessions and %d observable tool events", view.Best.Sequence, len(providerSessionIDs), toolEvents)
 }
 
-func promptInitialRealProviderBaseline(t *testing.T, ctx context.Context, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) {
+func assertRealDaemonExecutableDigest(t *testing.T, daemon *daemonProcess, expectedPath string) {
+	t.Helper()
+	if daemon == nil || daemon.command == nil || daemon.command.Process == nil {
+		t.Fatal("real daemon process is unavailable for executable digest verification")
+	}
+	executable, err := os.Readlink(filepath.Join("/proc", fmt.Sprintf("%d", daemon.command.Process.Pid), "exe"))
+	if err != nil {
+		t.Fatalf("read real daemon /proc executable: %v", err)
+	}
+	expected, err := executableSHA256(expectedPath)
+	if err != nil {
+		t.Fatalf("digest requested PIKA_GO_BIN: %v", err)
+	}
+	actual, err := executableSHA256(executable)
+	if err != nil {
+		t.Fatalf("digest real daemon executable %s: %v", executable, err)
+	}
+	if actual != expected {
+		t.Fatalf("real daemon executable digest=%s want PIKA_GO_BIN digest=%s (exe=%s)", actual, expected, executable)
+	}
+	t.Logf("real daemon pid=%d executable sha256=%s", daemon.command.Process.Pid, actual)
+}
+
+func executableSHA256(path string) (string, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(contents)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func promptInitialRealProviderBaseline(t *testing.T, ctx context.Context, stateRoot string, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) {
 	t.Helper()
 	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
@@ -373,8 +421,15 @@ func promptInitialRealProviderBaseline(t *testing.T, ctx context.Context, client
 				}
 				runtime := workruntime.NewHerdrRuntime(client, agent.PaneID)
 				message := "请读取仓库 README.md，并按其中给出的 target、case set、correctness oracle、benchmark protocol 和 stop condition 完成 Baseline Definition。"
+				before := int64(0)
+				if session.AgentKind == "cursor" {
+					before = latestRealProviderEventSequence(t, ctx, realProviderDatabasePath(stateRoot), session.ID)
+				}
 				if err := runtime.PromptForProvider(ctx, agent.PaneID, message, session.AgentKind); err != nil {
-					t.Fatalf("send operator Baseline configuration: %v; %s", err, diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
+					if session.AgentKind != "cursor" || !waitForRealCursorPromptHook(t, ctx, realProviderDatabasePath(stateRoot), session.ID, before, message, 10*time.Second) {
+						t.Fatalf("send operator Baseline configuration: %v; %s", err, diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
+					}
+					t.Logf("real Cursor operator prompt confirmed by a new matching durable beforeSubmitPrompt after Herdr missed the active transition")
 				}
 				return
 			}
@@ -384,16 +439,49 @@ func promptInitialRealProviderBaseline(t *testing.T, ctx context.Context, client
 	t.Fatalf("first Baseline Agent did not become ready for operator input: %s", diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
 }
 
-func exerciseRealSchedulerPauseResume(t *testing.T, ctx context.Context, stateRoot string, client *herdr.Client, socketPath, requestTag string) {
+func latestRealProviderEventSequence(t *testing.T, ctx context.Context, databasePath, sessionID string) int64 {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	engine, err := symphony.Open(ctx, filepath.Join(stateRoot, "instances", "real-codex", "pika.db"), symphony.Options{})
+	engine, err := symphony.Open(ctx, databasePath, symphony.Options{})
 	if err != nil {
-		t.Fatalf("open real provider journal before Scheduler pause: %v", err)
+		t.Fatalf("open real-provider journal before prompt: %v", err)
 	}
 	defer engine.Close()
-	var before symphony.View
+	sequence, err := engine.LatestProviderEventSequence(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("read real-provider event high-watermark before prompt: %v", err)
+	}
+	return sequence
+}
+
+func waitForRealCursorPromptHook(t *testing.T, ctx context.Context, databasePath, sessionID string, after int64, message string, timeout time.Duration) bool {
+	t.Helper()
+	engine, err := symphony.Open(ctx, databasePath, symphony.Options{})
+	if err != nil {
+		t.Fatalf("open real Cursor prompt journal: %v", err)
+	}
+	defer engine.Close()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		observed, err := engine.PromptSubmissionObservedAfter(ctx, sessionID, after, message)
+		if err != nil {
+			t.Fatalf("read normalized real Cursor prompt submission: %v", err)
+		}
+		if observed {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+func exerciseRealSchedulerPauseResume(t *testing.T, ctx context.Context, client *herdr.Client, socketPath, stateRoot, requestTag string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	var before symphony.OperatorStatus
+	var lastSnapshot herdr.Snapshot
 	var targetID string
+	var targetName string
+	var targetKind string
 	for time.Now().Before(deadline) {
 		view, err := control.Status(ctx, socketPath)
 		if err == nil {
@@ -403,17 +491,16 @@ func exerciseRealSchedulerPauseResume(t *testing.T, ctx context.Context, stateRo
 				if session.Status != symphony.AgentSessionStarting && session.Status != symphony.AgentSessionRunning {
 					continue
 				}
-				journal, journalErr := engine.ConversationJournal(ctx, session.WorkID)
-				if journalErr != nil || len(journal.Tools) == 0 {
-					continue
-				}
 				snapshot, snapshotErr := client.Snapshot(ctx)
 				if snapshotErr != nil {
 					break
 				}
+				lastSnapshot = snapshot
 				for _, agent := range snapshot.Agents {
 					if agent.Name != nil && *agent.Name == session.AgentName && (agent.AgentStatus == "working" || agent.AgentStatus == "blocked") {
 						targetID = session.ID
+						targetName = session.AgentName
+						targetKind = session.AgentKind
 						break
 					}
 				}
@@ -428,8 +515,15 @@ func exerciseRealSchedulerPauseResume(t *testing.T, ctx context.Context, stateRo
 		time.Sleep(100 * time.Millisecond)
 	}
 	if targetID == "" {
-		t.Fatalf("real provider did not expose an active runtime Agent before Scheduler pause: sessions=%+v", before.AgentSessions)
+		t.Fatalf("real provider did not expose an active runtime Agent before Scheduler pause: sessions=%+v snapshot_agents=%+v snapshot_panes=%+v", before.AgentSessions, lastSnapshot.Agents, lastSnapshot.Panes)
 	}
+	// Active UI state can occur during Cursor startup or while its delayed
+	// bracketed-paste Enter is still queued. Require a session-scoped submitted
+	// prompt and a completed/failed provider tool event, then re-observe active
+	// Herdr state. These are a sequencing barrier for the interrupt, not a
+	// substitute for the working|blocked lifecycle assertion.
+	waitForRealProviderExecutionBarrier(t, ctx, realProviderDatabasePath(stateRoot), targetID, targetKind, 30*time.Second)
+	waitForRealProviderActiveStatus(t, ctx, client, targetName, 15*time.Second, "after durable provider execution barrier")
 	pause, err := control.PauseScheduler(ctx, socketPath, protocol.SchedulerControlRequest{Mutation: protocol.Mutation{RequestID: requestTag + "-pause"}})
 	if err != nil {
 		t.Fatalf("pause real provider: %v", err)
@@ -437,6 +531,7 @@ func exerciseRealSchedulerPauseResume(t *testing.T, ctx context.Context, stateRo
 	if pause.Control.HasDeliveryFailure() || len(pause.Control.Actions) != 1 || pause.Control.Actions[0].Status != symphony.SchedulerActionSent || pause.Control.Actions[0].AgentSessionID != targetID {
 		t.Fatalf("real pause cycle=%+v", pause.Control)
 	}
+	waitForRealProviderAgentStatus(t, ctx, client, targetName, "idle", 15*time.Second, "after Scheduler pause")
 	resume, err := control.ResumeScheduler(ctx, socketPath, protocol.SchedulerControlRequest{Mutation: protocol.Mutation{RequestID: requestTag + "-resume"}})
 	if err != nil {
 		t.Fatalf("resume real provider: %v", err)
@@ -449,6 +544,102 @@ func exerciseRealSchedulerPauseResume(t *testing.T, ctx context.Context, stateRo
 		resumeAction.AgentSessionID != targetID || resumeAction.Message != "继续" {
 		t.Fatalf("real resume cycle=%+v target=%s", resume.Control, targetID)
 	}
+	waitForRealProviderActiveStatus(t, ctx, client, targetName, 15*time.Second, "after Scheduler resume")
+}
+
+func providerPromptHook(providerKind string) string {
+	if providerKind == "cursor" {
+		return "beforeSubmitPrompt"
+	}
+	return "UserPromptSubmit"
+}
+
+func waitForRealProviderExecutionBarrier(t *testing.T, ctx context.Context, databasePath, agentSessionID, providerKind string, timeout time.Duration) {
+	t.Helper()
+	engine, err := symphony.Open(ctx, databasePath, symphony.Options{})
+	if err != nil {
+		t.Fatalf("open real provider journal while waiting for execution barrier: %v", err)
+	}
+	defer engine.Close()
+	promptHook := providerPromptHook(providerKind)
+	deadline := time.Now().Add(timeout)
+	var last []symphony.ProviderEventView
+	for time.Now().Before(deadline) {
+		events, err := engine.ProviderEvents(ctx, agentSessionID)
+		if err == nil {
+			last = events
+			hasPrompt, hasTool := false, false
+			for _, event := range events {
+				if event.HookEventName == promptHook && event.ProviderSessionID != "" {
+					hasPrompt = true
+				}
+				if isRealProviderToolCompletion(providerKind, event) {
+					hasTool = true
+				}
+			}
+			if hasPrompt && hasTool {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("real provider Agent Session %s did not reach submitted-prompt plus tool-execution barrier before Scheduler pause: events=%+v", agentSessionID, last)
+}
+
+func isRealProviderToolCompletion(providerKind string, event symphony.ProviderEventView) bool {
+	if providerKind == "cursor" {
+		if event.HookEventName != "postToolUse" && event.HookEventName != "postToolUseFailure" {
+			return false
+		}
+	} else if event.HookEventName != "PostToolUse" && event.HookEventName != "PostToolUseFailure" {
+		return false
+	}
+	var raw struct {
+		ToolName string `json:"tool_name"`
+	}
+	return json.Unmarshal(event.Raw, &raw) == nil && raw.ToolName != ""
+}
+
+func waitForRealProviderAgentStatus(t *testing.T, ctx context.Context, client *herdr.Client, agentName, want string, timeout time.Duration, phase string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last herdr.Agent
+	for time.Now().Before(deadline) {
+		snapshot, err := client.Snapshot(ctx)
+		if err == nil {
+			for _, agent := range snapshot.Agents {
+				if agent.Name != nil && *agent.Name == agentName {
+					last = agent
+					if agent.AgentStatus == want {
+						return
+					}
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("real provider Agent %s did not become %s %s: last=%+v", agentName, want, phase, last)
+}
+
+func waitForRealProviderActiveStatus(t *testing.T, ctx context.Context, client *herdr.Client, agentName string, timeout time.Duration, phase string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last herdr.Agent
+	for time.Now().Before(deadline) {
+		snapshot, err := client.Snapshot(ctx)
+		if err == nil {
+			for _, agent := range snapshot.Agents {
+				if agent.Name != nil && *agent.Name == agentName {
+					last = agent
+					if agent.AgentStatus == "working" || agent.AgentStatus == "blocked" {
+						return
+					}
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("real provider Agent %s did not become working or blocked %s: last=%+v", agentName, phase, last)
 }
 
 func isolateRealCodexHome(t *testing.T, root, sourceHome string) string {
@@ -462,6 +653,18 @@ func isolateRealCodexHome(t *testing.T, root, sourceHome string) string {
 		t.Fatalf("real Codex authentication file is unavailable: %v", err)
 	}
 	if err := os.Symlink(sourceAuth, filepath.Join(isolated, "auth.json")); err != nil {
+		t.Fatal(err)
+	}
+	// Provider catalog membership is intentionally checked before the daemon
+	// starts. The credentialed fixture runs with an isolated CODEX_HOME, so
+	// expose the CLI's real, account-scoped catalog there as read-only input.
+	// This is not a test catalog: without the link the daemon cannot prove the
+	// requested real model is launchable.
+	sourceCatalog := filepath.Join(sourceHome, "models_cache.json")
+	if info, err := os.Stat(sourceCatalog); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("real Codex model catalog is unavailable: %v", err)
+	}
+	if err := os.Symlink(sourceCatalog, filepath.Join(isolated, "models_cache.json")); err != nil {
 		t.Fatal(err)
 	}
 	return isolated
@@ -492,7 +695,7 @@ func TestRealProviderVerificationInstructionsKeepWorkPendingForFollowUp(t *testi
 	}
 }
 
-func assertRealProviderJournal(t *testing.T, ctx context.Context, databasePath string, view symphony.View, minimumProviderSessions int) {
+func assertRealProviderJournal(t *testing.T, ctx context.Context, databasePath string, view symphony.OperatorStatus, minimumProviderSessions int) {
 	t.Helper()
 	engine, err := symphony.Open(ctx, databasePath, symphony.Options{})
 	if err != nil {
@@ -611,6 +814,7 @@ func configureRealProviderInstance(t *testing.T, ctx context.Context, workspace 
 
 func realProviderRoleInstructions() map[string]string {
 	roleInstructions := map[string]string{
+		"baseline.md":        "This is a strict flow-v2 release fixture. The Baseline Definition's benchmark_integrity must use exactly case_ids [\"small\",\"large\"], benchmark_repeats=1, warmup_invocations_per_repeat=0, measured_invocations_per_repeat=1, canonical_inputs_candidate_visible=false, and every other named benchmark_integrity boolean=true. The fixture's CPU execution domain is its device domain: do not describe input restoration, device validation, compact host transfer, or timing boundaries as not applicable. The evidence for each case must report warmup_invocations=0, measured_invocations=1, input_restores=1, checked_invocations=1, mismatches=0, nonfinite=0, canonical_input_mutations=0, tolerance_passed=true. If the Definition records the initial development baseline Git SHA, execute `git rev-list --max-parents=0 HEAD` and copy its exact 40-hex output: never guess, transpose, or invent it. Preserve this protocol exactly; it is the release gate, not an optional accelerator claim.\n",
 		"baseline-verify.md": "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate verification` and wait until it exits successfully. This is a test-instance synchronization requirement.\nAfter the gate exits, establish the Development Baseline. When the Context Bundle reports messages.records is zero, do not call `finish_baseline_verification` during this first turn: end the turn with the Work still pending and wait for Pika's Follow-up, then finish only after that Follow-up arrives. When messages.records is greater than zero, this is a recovered Session with prior Work history; do not deliberately request another Follow-up and proceed to the terminal operation when the evidence is ready.\n",
 		"iteration.md":       "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate iteration` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
 		"integration.md":     "At the beginning of this Session, immediately after fully reading the Context Bundle and before any other tool or shell work, run `pika-real-gate integration` and wait until it exits successfully. This is a test-instance synchronization requirement.\n",
@@ -693,7 +897,10 @@ func startRealCodexDaemon(t *testing.T, pikaBinary, socketPath string, workspace
 		t.Fatal(err)
 	}
 	go func() { process.done <- process.command.Wait() }()
-	waitForPikaProcessHealth(t, socketPath, process)
+	// Cursor's bounded preflight permits up to 15 seconds for its version and
+	// 45 seconds for authentication. The credentialed gate must not declare the
+	// daemon unhealthy before those production probe budgets can expire.
+	waitForPikaProcessHealthWithin(t, socketPath, process, 70*time.Second)
 	return process
 }
 
@@ -802,8 +1009,8 @@ func newRealProviderProgressWatch(now time.Time) *realProviderProgressWatch {
 	return &realProviderProgressWatch{stallBudget: realProviderStallBudget, lastProgress: now}
 }
 
-func (watch *realProviderProgressWatch) Observe(now time.Time, view symphony.View, snapshot herdr.Snapshot) error {
-	active := make(map[string]symphony.AgentSession)
+func (watch *realProviderProgressWatch) Observe(now time.Time, view symphony.OperatorStatus, snapshot herdr.Snapshot) error {
+	active := make(map[string]symphony.OperatorAgentSession)
 	for _, session := range view.AgentSessions {
 		if session.Status == symphony.AgentSessionStarting || session.Status == symphony.AgentSessionRunning {
 			active[session.AgentName] = session
@@ -842,17 +1049,17 @@ func (watch *realProviderProgressWatch) Observe(now time.Time, view symphony.Vie
 		panes = append(panes, paneProgress{PaneID: pane.PaneID, AgentStatus: pane.AgentStatus, Revision: pane.Revision})
 	}
 	fingerprint, err := json.Marshal(struct {
-		Optimization       symphony.OptimizationView `json:"optimization"`
-		Baseline           *symphony.BaselineView    `json:"baseline"`
-		Works              []symphony.WorkView       `json:"works"`
-		Sessions           []symphony.AgentSession   `json:"sessions"`
-		FollowUps          []symphony.FollowUpView   `json:"follow_ups"`
-		DomainEventCount   int64                     `json:"domain_event_count"`
-		PendingEffectCount int64                     `json:"pending_effect_count"`
-		ProviderEventBytes int64                     `json:"provider_event_bytes"`
-		ToolPayloadBytes   int64                     `json:"tool_payload_bytes"`
-		Agents             []agentProgress           `json:"agents"`
-		Panes              []paneProgress            `json:"panes"`
+		Optimization       symphony.OperatorOptimization   `json:"optimization"`
+		Baseline           *symphony.OperatorBaseline      `json:"baseline"`
+		Works              []symphony.WorkView             `json:"works"`
+		Sessions           []symphony.OperatorAgentSession `json:"sessions"`
+		FollowUps          []symphony.OperatorFollowUp     `json:"follow_ups"`
+		DomainEventCount   int64                           `json:"domain_event_count"`
+		PendingEffectCount int64                           `json:"pending_effect_count"`
+		ProviderEventBytes int64                           `json:"provider_event_bytes"`
+		ToolPayloadBytes   int64                           `json:"tool_payload_bytes"`
+		Agents             []agentProgress                 `json:"agents"`
+		Panes              []paneProgress                  `json:"panes"`
 	}{
 		Optimization: view.Optimization, Baseline: view.Baseline, Works: view.Works, Sessions: view.AgentSessions,
 		FollowUps: view.FollowUps, DomainEventCount: view.DomainEventCount, PendingEffectCount: view.PendingEffectCount,
@@ -875,7 +1082,7 @@ func (watch *realProviderProgressWatch) Observe(now time.Time, view symphony.Vie
 
 func TestRealProviderProgressWatchRejectsBlockedActiveSession(t *testing.T) {
 	name := "pika-baseline-draft"
-	view := symphony.View{AgentSessions: []symphony.AgentSession{{
+	view := symphony.OperatorStatus{AgentSessions: []symphony.OperatorAgentSession{{
 		ID: "session-1", WorkID: "work-1", Role: symphony.RoleBaselineDraft, AgentName: name, Status: symphony.AgentSessionRunning,
 	}}}
 	snapshot := herdr.Snapshot{Agents: []herdr.Agent{{Name: &name, AgentStatus: "blocked"}}}
@@ -887,7 +1094,7 @@ func TestRealProviderProgressWatchRejectsBlockedActiveSession(t *testing.T) {
 func TestRealProviderProgressWatchResetsOnlyForObservableProgress(t *testing.T) {
 	started := time.Unix(0, 0)
 	watch := newRealProviderProgressWatch(started)
-	view := symphony.View{DomainEventCount: 1}
+	view := symphony.OperatorStatus{DomainEventCount: 1}
 	if err := watch.Observe(started, view, herdr.Snapshot{}); err != nil {
 		t.Fatal(err)
 	}
@@ -908,7 +1115,7 @@ func exerciseRealCodexFollowUp(t *testing.T, ctx context.Context, stateRoot, hol
 	t.Helper()
 	target := waitForRealProviderVerificationHold(t, ctx, stateRoot, client, socketPath, daemon, serverOutput)
 	releaseRealCodexHold(t, holdPath)
-	return waitForRealProviderFollowUp(t, ctx, target, client, socketPath, daemon, serverOutput)
+	return waitForRealProviderFollowUp(t, ctx, stateRoot, target, client, socketPath, daemon, serverOutput)
 }
 
 func waitForRealProviderVerificationHold(t *testing.T, ctx context.Context, stateRoot string, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) realCodexSessionObservation {
@@ -976,7 +1183,7 @@ func waitForRealProviderVerificationHold(t *testing.T, ctx context.Context, stat
 	return realCodexSessionObservation{Work: target, Session: targetSession, ProviderSessionID: providerSessionID}
 }
 
-func waitForRealProviderFollowUp(t *testing.T, ctx context.Context, target realCodexSessionObservation, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) realCodexSessionObservation {
+func waitForRealProviderFollowUp(t *testing.T, ctx context.Context, stateRoot string, target realCodexSessionObservation, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) realCodexSessionObservation {
 	t.Helper()
 	watch := newRealProviderProgressWatch(time.Now())
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -994,7 +1201,7 @@ func waitForRealProviderFollowUp(t *testing.T, ctx context.Context, target realC
 			t.Fatalf("real-provider Follow-up failed: %v; %s", progressErr, diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
 		}
 		for _, followUp := range view.FollowUps {
-			if followUp.TargetWorkID == target.Work.ID && followUp.Status == "delivered" && followUp.Message != "" {
+			if followUp.TargetWorkID == target.Work.ID && followUp.Status == "delivered" {
 				for _, work := range view.Works {
 					if work.ID == target.Work.ID && work.Status != symphony.WorkPending {
 						t.Fatalf("real Follow-up completed target Work: %+v", work)
@@ -1003,8 +1210,16 @@ func waitForRealProviderFollowUp(t *testing.T, ctx context.Context, target realC
 				if followUp.TargetAgentSessionID != target.Session.ID {
 					t.Fatalf("real Follow-up changed target Session: got %s, want %s", followUp.TargetAgentSessionID, target.Session.ID)
 				}
-				if followUp.TargetProviderTurnID == "" || followUp.TargetProviderTurnID == "pika-real-follow-up-stopped-turn" {
-					t.Fatalf("real Follow-up was not armed by a natural provider Stop: %+v", followUp)
+				durable := inspectRealProviderView(t, ctx, realProviderDatabasePath(stateRoot))
+				var durableFollowUp symphony.FollowUpView
+				for _, candidate := range durable.FollowUps {
+					if candidate.ID == followUp.ID {
+						durableFollowUp = candidate
+						break
+					}
+				}
+				if durableFollowUp.Message == "" || durableFollowUp.TargetProviderTurnID == "" || durableFollowUp.TargetProviderTurnID == "pika-real-follow-up-stopped-turn" {
+					t.Fatalf("real Follow-up was not durably armed by a natural provider Stop: %+v", durableFollowUp)
 				}
 				t.Logf("real %s Follow-up request %s delivered to Verification Work %s", target.Session.AgentKind, followUp.ID, target.Work.ID)
 				return target
@@ -1090,6 +1305,36 @@ func waitForRealCodexReplacement(t *testing.T, ctx context.Context, stateRoot st
 	return realCodexSessionObservation{}
 }
 
+func waitForRealDiagnosisComplete(t *testing.T, ctx context.Context, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		view, err := control.Status(ctx, socketPath)
+		if err == nil && len(view.Diagnoses) == 1 {
+			diagnosis := view.Diagnoses[0]
+			if diagnosis.Status == symphony.DiagnosisReady || diagnosis.Status == symphony.DiagnosisUnavailable {
+				// Flow v2 explicitly permits a factual profiler/hardware failure to
+				// complete Diagnosis as unavailable.  Treating it as a test failure
+				// would contradict the contract and would make this CPU fixture
+				// fabricate profiler evidence merely to reach Iteration.
+				t.Logf("real %s Diagnosis %s completed as %s with %d hypotheses", diagnosis.WorkID, diagnosis.ID, diagnosis.Status, diagnosis.HypothesisCount)
+				return
+			}
+			if diagnosis.Status == symphony.DiagnosisCancelled {
+				t.Fatalf("real Diagnosis reached terminal non-ready state: %+v; %s", diagnosis, diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
+			}
+		}
+		select {
+		case err := <-daemon.done:
+			t.Fatalf("daemon exited while waiting for real Diagnosis: %v; output=%s", err, daemon.output.String())
+		case <-ctx.Done():
+			t.Fatalf("real Diagnosis context ended: %v; %s", ctx.Err(), diagnoseRealCodex(context.Background(), client, socketPath, daemon, serverOutput))
+		case <-time.After(time.Second):
+		}
+	}
+	t.Fatalf("real Diagnosis did not complete within its release budget: %s", diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
+}
+
 func exerciseRealCodexCancellation(t *testing.T, ctx context.Context, stateRoot, holdPath string, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) {
 	t.Helper()
 	sessions := waitForRealCodexRoleSessions(t, ctx, stateRoot, symphony.RoleIteration, 2, client, socketPath, daemon, serverOutput)
@@ -1124,6 +1369,11 @@ func exerciseRealCodexCancellation(t *testing.T, ctx context.Context, stateRoot,
 
 func exerciseRealCodexIntegrationBackOff(t *testing.T, ctx context.Context, stateRoot, holdPath string, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) {
 	t.Helper()
+	// An Integration session cannot start until the surviving Iteration has
+	// terminally projected its Candidate.  That is a separate real-provider
+	// phase, so do not spend the session-start budget while the Iteration is
+	// still making observable tool progress.
+	waitForRealCodexIntegrationProjection(t, ctx, client, socketPath, daemon, serverOutput)
 	target := waitForRealCodexRoleSessions(t, ctx, stateRoot, symphony.RoleIntegration, 1, client, socketPath, daemon, serverOutput)[0]
 	const message = "real release-matrix back-off"
 	if _, err := control.BackOff(ctx, socketPath, protocol.BackOffRequest{
@@ -1144,7 +1394,7 @@ func exerciseRealCodexIntegrationBackOff(t *testing.T, ctx context.Context, stat
 					successor = true
 				}
 			}
-			if backedOff && successor && hasIntegrationBackOff(view, message) {
+			if backedOff && successor && durableIntegrationBackOff(ctx, realProviderDatabasePath(stateRoot), message) {
 				releaseRealCodexHold(t, holdPath)
 				t.Logf("backed off real Integration Work %s to a fresh Iteration round", target.Work.ID)
 				return
@@ -1153,6 +1403,32 @@ func exerciseRealCodexIntegrationBackOff(t *testing.T, ctx context.Context, stat
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("real Integration Back-off did not create its successor Iteration: %s", diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
+}
+
+func waitForRealCodexIntegrationProjection(t *testing.T, ctx context.Context, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) {
+	t.Helper()
+	watch := newRealProviderProgressWatch(time.Now())
+	for {
+		view, statusErr := control.Status(ctx, socketPath)
+		snapshot, snapshotErr := client.Snapshot(ctx)
+		if statusErr == nil && snapshotErr == nil {
+			if progressErr := watch.Observe(time.Now(), view, snapshot); progressErr != nil {
+				t.Fatalf("real Iteration made no healthy progress before Integration projection: %v; %s", progressErr, diagnoseRealCodex(ctx, client, socketPath, daemon, serverOutput))
+			}
+			for _, work := range view.Works {
+				if work.Role == symphony.RoleIntegration && work.Status == symphony.WorkPending {
+					return
+				}
+			}
+		}
+		select {
+		case err := <-daemon.done:
+			t.Fatalf("daemon exited before Integration projection: %v; output=%s", err, daemon.output.String())
+		case <-ctx.Done():
+			t.Fatalf("real Integration projection timed out: %s", diagnoseRealCodex(context.Background(), client, socketPath, daemon, serverOutput))
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 func waitForRealCodexRoleSessions(t *testing.T, ctx context.Context, stateRoot string, role symphony.WorkRole, count int, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) []realCodexSessionObservation {
@@ -1251,6 +1527,202 @@ func hasIntegrationBackOff(view symphony.View, message string) bool {
 	return false
 }
 
+func inspectRealProviderView(t *testing.T, ctx context.Context, databasePath string) symphony.View {
+	t.Helper()
+	engine, err := symphony.Open(ctx, databasePath, symphony.Options{})
+	if err != nil {
+		t.Fatalf("open durable real-provider status: %v", err)
+	}
+	defer engine.Close()
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatalf("inspect durable real-provider status: %v", err)
+	}
+	return view
+}
+
+func durableIntegrationBackOff(ctx context.Context, databasePath, message string) bool {
+	engine, err := symphony.Open(ctx, databasePath, symphony.Options{})
+	if err != nil {
+		return false
+	}
+	defer engine.Close()
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	return err == nil && hasIntegrationBackOff(view, message)
+}
+
+// assertRealFlowV2Contract is deliberately run against the persisted daemon
+// database, not a fabricated View. It keeps the credentialed Codex, Cursor,
+// and mirror-provider gates honest about the immutable data that crosses
+// provider boundaries.
+func assertRealFlowV2Contract(t *testing.T, ctx context.Context, databasePath string) {
+	t.Helper()
+	view := inspectRealProviderView(t, ctx, databasePath)
+	if view.Optimization.FlowVersion != symphony.FlowVersion2 || view.SkillSnapshot == nil || len(view.SkillSnapshot.Entries) != 2 {
+		t.Fatalf("real provider did not retain flow-v2 frozen skills: flow=%d snapshot=%+v", view.Optimization.FlowVersion, view.SkillSnapshot)
+	}
+	if len(view.Diagnoses) != 1 || (view.Diagnoses[0].Status != symphony.DiagnosisReady && view.Diagnoses[0].Status != symphony.DiagnosisUnavailable) {
+		t.Fatalf("real provider did not complete Diagnosis: %+v", view.Diagnoses)
+	}
+	if view.Diagnoses[0].Status == symphony.DiagnosisReady && view.Diagnoses[0].HypothesisCount == 0 {
+		t.Fatalf("ready real Diagnosis has no hypotheses: %+v", view.Diagnoses[0])
+	}
+	kept := map[string]symphony.IterationExperimentView{}
+	ids := map[string]bool{}
+	for _, experiment := range view.IterationExperiments {
+		if experiment.ID == "" || ids[experiment.ID] || experiment.ParentCheckpointSHA == "" {
+			t.Fatalf("invalid real Experiment ledger: %+v", view.IterationExperiments)
+		}
+		ids[experiment.ID] = true
+		if experiment.Outcome == "kept" {
+			if experiment.CheckpointSHA == "" {
+				t.Fatalf("kept real Experiment has no checkpoint: %+v", experiment)
+			}
+			kept[experiment.CheckpointSHA] = experiment
+		}
+	}
+	if len(kept) == 0 {
+		t.Fatalf("real provider never recorded a kept Experiment: %+v", view.IterationExperiments)
+	}
+	accepted := false
+	for _, integration := range view.Integrations {
+		if integration.Status == "accepted" {
+			accepted = true
+			if _, found := kept[integration.CandidateSHA]; !found {
+				t.Fatalf("accepted Integration %s has no matching kept Experiment: %+v", integration.ID, view.IterationExperiments)
+			}
+		}
+	}
+	if !accepted {
+		t.Fatal("real provider recorded no accepted Integration")
+	}
+	engine, err := symphony.Open(ctx, databasePath, symphony.Options{})
+	if err != nil {
+		t.Fatalf("open real flow-v2 database for Context verification: %v", err)
+	}
+	defer engine.Close()
+	contextRoles := map[symphony.WorkRole]bool{}
+	workStatuses := map[string]symphony.WorkStatus{}
+	for _, work := range view.Works {
+		workStatuses[work.ID] = work.Status
+	}
+	for _, session := range view.AgentSessions {
+		snapshot, found, err := engine.ReadContextSnapshot(ctx, session.ID)
+		if err != nil {
+			t.Fatalf("real %s Context snapshot = %+v found=%v err=%v", session.Role, snapshot, found, err)
+		}
+		events, err := engine.ProviderEvents(ctx, session.ID)
+		if err != nil {
+			t.Fatalf("read real %s provider events for Context verification: %v", session.Role, err)
+		}
+		binding, bound, err := engine.AgentSessionBinding(ctx, session.ID)
+		if err != nil {
+			t.Fatalf("read real %s activation binding for Context verification: %v", session.Role, err)
+		}
+		if !found {
+			// EnsureAgentSession intentionally precedes activation so a scheduler
+			// cancellation can leave a never-launched starting record. Once any
+			// durable pane binding or provider event exists, however, Context must
+			// already be frozen.
+			if bound || len(events) != 0 {
+				t.Fatalf("real %s Session reached the provider without a Context v4 snapshot: bound=%v binding=%+v events=%d", session.Role, bound, binding, len(events))
+			}
+			continue
+		}
+		if snapshot.SchemaVersion != 4 {
+			t.Fatalf("real %s Context snapshot schema=%d, want 4", session.Role, snapshot.SchemaVersion)
+		}
+		if !bound && len(events) != 0 {
+			t.Fatalf("real %s Session journal has no durable activation binding: binding=%+v events=%d", session.Role, binding, len(events))
+		}
+		if bound && len(events) == 0 {
+			if workStatuses[session.WorkID] != symphony.WorkCancelled {
+				t.Fatalf("real %s Session activation has no provider journal outside a cancelled drain: binding=%+v work_status=%s", session.Role, binding, workStatuses[session.WorkID])
+			}
+		}
+		if bound && len(events) != 0 {
+			contextRoles[session.Role] = true
+		}
+		// ContextRelativePath is relative to the dedicated contexts root, not
+		// the SQLite directory. Keeping this explicit makes the credentialed
+		// assertion verify the same artifact layout Activation publishes.
+		contents, err := os.ReadFile(filepath.Join(filepath.Dir(databasePath), "contexts", snapshot.ContextRelativePath))
+		if err != nil {
+			t.Fatalf("read real %s Context file: %v", session.Role, err)
+		}
+		digest := sha256.Sum256(contents)
+		if hex.EncodeToString(digest[:]) != snapshot.ContextSHA256 {
+			t.Fatalf("real %s Context digest differs from persisted snapshot", session.Role)
+		}
+		var document struct {
+			SkillSnapshot *struct {
+				SnapshotID string `json:"snapshot_id"`
+				Entries    []struct {
+					Name string `json:"name"`
+					Path string `json:"path"`
+				} `json:"entries"`
+				Manifest struct {
+					Path   string `json:"path"`
+					SHA256 string `json:"sha256"`
+				} `json:"manifest"`
+			} `json:"skill_snapshot"`
+			Diagnosis *struct {
+				ID         string `json:"id"`
+				Status     string `json:"status"`
+				Hypotheses int64  `json:"hypothesis_count"`
+				Report     *struct {
+					Path string `json:"path"`
+				} `json:"report"`
+			} `json:"diagnosis"`
+		}
+		if err := json.Unmarshal(contents, &document); err != nil || document.SkillSnapshot == nil || document.SkillSnapshot.SnapshotID != view.SkillSnapshot.SnapshotID || len(document.SkillSnapshot.Entries) != 2 || document.SkillSnapshot.Manifest.Path == "" || len(document.SkillSnapshot.Manifest.SHA256) != 64 {
+			t.Fatalf("real %s Context does not reference the optimization's frozen skill snapshot: snapshot=%+v err=%v", session.Role, document.SkillSnapshot, err)
+		}
+		if document.SkillSnapshot.Entries[0].Name != "KernelWiki" || document.SkillSnapshot.Entries[0].Path != "skills/KernelWiki" || document.SkillSnapshot.Entries[1].Name != "ncu-report-skill" || document.SkillSnapshot.Entries[1].Path != "skills/ncu-report-skill" {
+			t.Fatalf("real %s Context skill provenance is not the canonical path wire contract: %+v", session.Role, document.SkillSnapshot.Entries)
+		}
+		if document.Diagnosis != nil && (document.Diagnosis.ID == "" || document.Diagnosis.Status == "") {
+			t.Fatalf("real %s Context has incomplete Diagnosis identity: %+v", session.Role, document.Diagnosis)
+		}
+		if document.Diagnosis != nil && document.Diagnosis.Report != nil {
+			report, err := os.ReadFile(document.Diagnosis.Report.Path)
+			if err != nil {
+				t.Fatalf("read real %s canonical Diagnosis artifact: %v", session.Role, err)
+			}
+			if err := kdacontract.ValidateDiagnosisReport(report); err != nil {
+				t.Fatalf("real %s Diagnosis artifact violates canonical schema: %v", session.Role, err)
+			}
+			var canonical struct {
+				Hypotheses []json.RawMessage `json:"hypotheses"`
+			}
+			if err := json.Unmarshal(report, &canonical); err != nil {
+				t.Fatalf("parse real %s canonical Diagnosis artifact: %v", session.Role, err)
+			}
+			if document.Diagnosis.Hypotheses != int64(len(canonical.Hypotheses)) {
+				t.Fatalf("real %s Context Diagnosis hypothesis_count=%d differs from canonical artifact count=%d", session.Role, document.Diagnosis.Hypotheses, len(canonical.Hypotheses))
+			}
+		}
+		var wire map[string]json.RawMessage
+		if err := json.Unmarshal(contents, &wire); err != nil {
+			t.Fatal(err)
+		}
+		var work map[string]json.RawMessage
+		if err := json.Unmarshal(wire["work"], &work); err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"skill_snapshot", "diagnosis", "iteration_experiments"} {
+			if _, found := work[forbidden]; found {
+				t.Fatalf("real %s context.json inlined %s instead of an artifact reference", session.Role, forbidden)
+			}
+		}
+	}
+	for _, role := range []symphony.WorkRole{symphony.RoleBaselineDraft, symphony.RoleBaselineVerification, symphony.RoleDiagnosis, symphony.RoleIteration, symphony.RoleIntegration} {
+		if !contextRoles[role] {
+			t.Fatalf("real provider matrix has no Context v4 snapshot for required role %s", role)
+		}
+	}
+}
+
 func trustRealCodexFixture(t *testing.T, codexHome, repository string) func() {
 	t.Helper()
 	configPath := filepath.Join(codexHome, "config.toml")
@@ -1286,7 +1758,7 @@ func trustRealCodexFixture(t *testing.T, codexHome, repository string) func() {
 	}
 }
 
-func waitForRealCodexBest(t *testing.T, ctx context.Context, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) symphony.View {
+func waitForRealCodexBest(t *testing.T, ctx context.Context, client *herdr.Client, socketPath string, daemon *daemonProcess, serverOutput *bytes.Buffer) symphony.OperatorStatus {
 	t.Helper()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -1408,11 +1880,12 @@ Canonical commands:
     python3 harness.py correctness --cases small large
     python3 harness.py benchmark --cases small large
 
-Correctness is exact integer equality for both cases. The primary metric is logical_operations, lower is better, reported independently for every case by the real Candidate implementation. There are no warmups or stochastic repeats because the metric is deterministic. Baseline Verification must establish the Development Baseline values (1000 and 10000 operations) and verify the protocol; it must not require the Development Baseline to improve over itself. Candidate acceptance during Iteration and Integration requires correctness plus at least 90% fewer logical operations than those baseline values on every case, with no guard regression. The stop condition is a Best implementation reporting at most one logical operation per case.
+Correctness is exact integer equality for both cases. The primary metric is logical_operations, lower is better, reported independently for every case by the real Candidate implementation. There are no warmups or stochastic repeats because the metric is deterministic. The CPU process is this fixture's device domain: harness.py owns immutable canonical inputs and oracle outputs, exposes only stable working buffers to Candidate, restores before every invocation, validates after every invocation, and emits compact integrity counters only after the run. Baseline Verification must establish the Development Baseline values (1000 and 10000 operations) and verify the protocol; it must not require the Development Baseline to improve over itself. Candidate acceptance during Iteration and Integration requires correctness plus at least 90% fewer logical operations than those baseline values on every case, with no guard regression. The stop condition is a Best implementation reporting at most one logical operation per case.
 
 The intended safe optimization is the arithmetic-series closed form. harness.py, its oracle, the cases, and the protocol are frozen after Baseline acceptance. Baseline Draft may add and commit a JSON Definition. Iteration must commit the Candidate and leave its worktree clean. Integration must use Pika's two-phase Git Intent. Preserve command output as evidence.
 `,
 		"candidate.py": `def sum_to_n(n):
+    n = int(n)
     total = 0
     for value in range(1, n + 1):
         total += value
@@ -1426,6 +1899,37 @@ import candidate
 CASES = {"small": 1000, "large": 10000}
 
 
+class WorkingInput:
+    """A stable CPU-device buffer; canonical input stays private to this harness."""
+    def __init__(self): self.value = 0
+    def __int__(self): return self.value
+    __index__ = __int__
+
+
+def invoke(name):
+    n, canonical, expected = CASES[name], (CASES[name],), (CASES[name] * (CASES[name] + 1) // 2,)
+    working = WorkingInput()
+    stats = {"warmup_invocations": 0, "measured_invocations": 1, "input_restores": 0, "checked_invocations": 0, "mismatches": 0, "nonfinite": 0, "canonical_input_mutations": 0, "tolerance_passed": True}
+    # The CPU process is this fixture's device domain. Candidate sees only the
+    # working buffer; compact counters are returned after validation.
+    working.value = canonical[0]
+    stats["input_restores"] += 1
+    actual, operations = candidate.sum_to_n(working)
+    if not isinstance(actual, int):
+        stats["nonfinite"] += 1
+        stats["tolerance_passed"] = False
+    elif actual != expected[0]:
+        stats["mismatches"] += 1
+        stats["tolerance_passed"] = False
+    stats["checked_invocations"] += 1
+    if canonical != (n,):
+        stats["canonical_input_mutations"] += 1
+        stats["tolerance_passed"] = False
+    if not stats["tolerance_passed"]:
+        raise SystemExit(1)
+    return actual, operations, stats
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["correctness", "benchmark"])
@@ -1433,19 +1937,15 @@ def main():
     args = parser.parse_args()
     if not args.cases or any(name not in CASES for name in args.cases):
         raise SystemExit("cases must be a non-empty subset of small, large")
-    rows = []
+    rows, integrity = [], {}
     for name in args.cases:
-        n = CASES[name]
-        actual, operations = candidate.sum_to_n(n)
-        expected = n * (n + 1) // 2
-        if actual != expected:
-            print(json.dumps({"case": name, "actual": actual, "expected": expected, "ok": False}))
-            raise SystemExit(1)
+        actual, operations, stats = invoke(name)
+        integrity[name] = stats
         if args.mode == "correctness":
             rows.append({"case": name, "ok": True, "actual": actual})
         else:
             rows.append({"case": name, "metric": "logical_operations", "unit": "operations", "direction": "lower", "value": operations})
-    print(json.dumps({"mode": args.mode, "results": rows}, sort_keys=True))
+    print(json.dumps({"mode": args.mode, "results": rows, "integrity": integrity}, sort_keys=True))
 
 
 if __name__ == "__main__":

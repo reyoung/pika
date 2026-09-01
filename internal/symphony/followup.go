@@ -13,6 +13,7 @@ const paneActivityNotice = "Follow-up inactivity uses provider activity and best
 
 var defaultFollowUpPolicies = map[WorkRole]FollowUpPolicy{
 	RoleBaselineVerification: {MaxMessages: 8, GeneratorMaxAttempts: 3},
+	RoleDiagnosis:            {MaxMessages: 5, GeneratorMaxAttempts: 3},
 	RoleIteration:            {MaxMessages: 5, GeneratorMaxAttempts: 3},
 	RoleIntegration:          {MaxMessages: 8, GeneratorMaxAttempts: 3},
 }
@@ -55,7 +56,8 @@ func (e *Engine) SetFollowUpPolicies(policies map[WorkRole]FollowUpPolicy) error
 }
 
 func followUpEligible(role WorkRole) bool {
-	return role == RoleBaselineVerification || role == RoleIteration || role == RoleIntegration
+	descriptor, ok := DescribeRole(role)
+	return ok && descriptor.FollowUpEligible
 }
 
 func (e *Engine) armFollowUpTx(ctx context.Context, tx *sql.Tx, workID, agentSessionID, providerTurnID string, role WorkRole, observed time.Time) error {
@@ -225,6 +227,20 @@ func (e *Engine) exhaustFollowUpTargetTx(ctx context.Context, tx *sql.Tx, workID
 			if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET status = ?, revision = ?, updated_at = ? WHERE id = ?`, OptimizationPaused, revision, now, optimizationID); err != nil {
 				return err
 			}
+		}
+	case RoleDiagnosis:
+		if _, err := tx.ExecContext(ctx, `UPDATE works SET status = ?, finished_at = ? WHERE id = ? AND status = ?`, WorkCancelled, now, workID, WorkPending); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE diagnoses SET status = ?, finished_at = ? WHERE work_id = ? AND status = ?`, DiagnosisCancelled, now, workID, DiagnosisPending); err != nil {
+			return err
+		}
+		if optimizationStatus == OptimizationDraining {
+			if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET revision = ?, updated_at = ? WHERE id = ?`, revision, now, optimizationID); err != nil {
+				return err
+			}
+		} else if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET status = ?, revision = ?, updated_at = ? WHERE id = ?`, OptimizationPaused, revision, now, optimizationID); err != nil {
+			return err
 		}
 	case RoleIteration:
 		if !attemptID.Valid {

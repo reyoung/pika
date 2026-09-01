@@ -3,14 +3,19 @@ package contextbundle_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/reyoung/pika-go/internal/contextbundle"
+	"github.com/reyoung/pika-go/internal/skillsnapshot"
 	"github.com/reyoung/pika-go/internal/symphony"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -227,6 +232,16 @@ func TestMaterializeFreezesRecentAttemptSummariesAndDetailedHistory(t *testing.T
 	if document.Iteration.RecentTerminalAttempts[1].Messages.Records != 0 {
 		t.Fatal("terminal Attempt with an empty journal did not retain a zero-record history file")
 	}
+	if bytes.Contains(contents, []byte(`"evidence_root"`)) || bytes.Contains(contents, []byte(`"experiments"`)) || bytes.Contains(contents, []byte(`"skill_snapshot"`)) {
+		t.Fatal("frozen flow-v1 Context leaked a v4-only field")
+	}
+	contextSchemaBytes, _, err := contextbundle.Schemas()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := compileSchema(t, "legacy-context-schema.json", contextSchemaBytes).Validate(unmarshalJSON(t, contents)); err != nil {
+		t.Fatalf("flow-v1 Iteration Context violates the frozen schema: %v", err)
+	}
 	tampered := document.Iteration.RecentTerminalAttempts[0].Summary.Path
 	if err := os.Chmod(tampered, 0o600); err != nil {
 		t.Fatal(err)
@@ -237,6 +252,315 @@ func TestMaterializeFreezesRecentAttemptSummariesAndDetailedHistory(t *testing.T
 	if _, err := materializer.Materialize(ctx, session); err == nil || !strings.Contains(err.Error(), "Attempt history digest") {
 		t.Fatalf("tampered Attempt history was accepted: %v", err)
 	}
+}
+
+func TestMaterializeFlowV2ArtifactFirstContextWithZeroHistory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	t.Cleanup(func() {
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err == nil {
+				_ = os.Chmod(path, 0o700)
+			}
+			return nil
+		})
+	})
+	snapshot := prepareContextSkillSnapshot(t, root)
+	session := symphony.AgentSession{ID: "v2-session", WorkID: "iteration-work", Generation: 1, Role: symphony.RoleIteration, AgentKind: "codex", AgentName: "agent", Status: symphony.AgentSessionStarting, ProviderCapabilities: json.RawMessage(`{"unmodeled":"must-not-inline"}`)}
+	experiment := json.RawMessage(`{"schema_version":1,"parent_checkpoint_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","hypothesis":{"summary":"fuse"},"change":{"summary":"fuse","paths":["target.txt"],"mechanism":"fusion"},"outcome":"rejected","artifacts":[{"path":"experiments/raw-path.json","kind":"benchmark"}],"summary":"negative"}`)
+	store := &staticContextStore{projection: symphony.ContextProjection{
+		Session: session,
+		View: symphony.View{Optimization: symphony.OptimizationView{ID: "optimization", Status: symphony.OptimizationOptimizing, Revision: 3, Repository: "/repo", FlowVersion: symphony.FlowVersion2, IterationHistoryLimit: 0},
+			Baseline:         &symphony.BaselineView{ID: "baseline", Number: 1, Status: symphony.BaselineAccepted, Definition: json.RawMessage(`{"unmodeled":"must-not-inline"}`), VerificationEvidence: json.RawMessage(`{"unmodeled":"must-not-inline"}`)},
+			IterationCaseSet: &symphony.IterationCaseSetView{Version: 1, CaseIDs: []string{"case-1"}},
+			IterationRounds:  []symphony.IterationRoundView{{AttemptID: "attempt", Round: 1, Kind: "iteration", BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: "running", IterationCaseSetVersion: 1, Evidence: json.RawMessage(`{"unmodeled":"must-not-inline"}`)}},
+			Integrations:     []symphony.IntegrationView{{Sequence: 1, FIFOPosition: 1, ID: "integration", AttemptID: "attempt", IterationRound: 1, Status: "rejected", CandidateSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", ExpectedBestSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", CandidateExperimentID: "experiment", RegressionCases: []symphony.RegressionCase{{CaseID: "case-1", Kind: "performance", Summary: "regressed", Evidence: json.RawMessage(`{"unmodeled":"must-not-inline"}`)}}}}},
+		TargetWork: symphony.RuntimeWork{Work: symphony.WorkView{ID: "iteration-work", Role: symphony.RoleIteration, AttemptID: "attempt", IterationRound: 1},
+			OptimizationID: "optimization", OptimizationRepository: "/repo", Repository: "/attempt", FlowVersion: symphony.FlowVersion2, BestSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", IterationHistoryLimit: 0,
+			IterationCaseSet:     &symphony.IterationCaseSetView{Version: 1, CaseIDs: []string{"case-1"}},
+			SkillSnapshot:        &symphony.SkillSnapshotView{SchemaVersion: snapshot.Input.SchemaVersion, SnapshotID: snapshot.Input.SnapshotID, RootPath: snapshot.Input.RootPath, ManifestSHA256: snapshot.Input.ManifestSHA256, Entries: snapshot.Input.Entries},
+			Diagnosis:            &symphony.DiagnosisView{ID: "diagnosis", WorkID: "diagnosis-work", Status: symphony.DiagnosisReady, HypothesisCount: 1, Report: json.RawMessage(`{"schema_version":1,"subject":{"baseline_revision_id":"baseline","best_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","hardware":{},"software":{}},"coverage":{"case_ids":["case-1"],"dispatch_paths":["kernel"]},"artifacts":[{"path":"evidence.txt","kind":"fixture-evidence"}],"observations":[{"id":"o","case_ids":["case-1"],"metric":"latency","value":1,"unit":"ms","source_artifacts":["evidence.txt"],"summary":"measured"}],"bottlenecks":[{"id":"b","class":"launch-overhead","confidence":"low","observation_ids":["o"],"summary":"launch"}],"hypotheses":[{"id":"h","rank":1,"bottleneck_ids":["b"],"target_case_ids":["case-1"],"summary":"fuse","mechanism":"remove launches","expected_effect":"lower latency","risk":"correctness","knowledge_refs":[]}],"limitations":[]}`)},
+			IterationExperiments: []symphony.IterationExperimentView{{ID: "experiment", AttemptID: "attempt", IterationRound: 1, Sequence: 1, Outcome: "rejected", ParentCheckpointSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ScopeBestSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ReceiptID: "receipt", ArtifactIDs: []string{"artifact-id"}, Experiment: experiment}}},
+		GeneratorWork:        symphony.WorkView{ID: "iteration-work", Role: symphony.RoleIteration, AttemptID: "attempt", IterationRound: 1},
+		KnowledgeExperiments: []symphony.IterationExperimentView{{ID: "experiment", AttemptID: "attempt", IterationRound: 1, Sequence: 1, Outcome: "rejected", ParentCheckpointSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ScopeBestSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ReceiptID: "receipt", ArtifactIDs: []string{"artifact-id"}, Experiment: experiment}},
+		PreviousRound:        &symphony.RoundHistoryProjection{Work: symphony.WorkView{ID: "previous-work", Role: symphony.RoleIteration, AttemptID: "attempt", IterationRound: 1}, Round: symphony.IterationRoundView{AttemptID: "attempt", Round: 1, Kind: "iteration", BaseSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Status: "completed", IterationCaseSetVersion: 1, Evidence: json.RawMessage(`{"unmodeled":"must-not-inline"}`)}},
+	}}
+	evidenceRoot := filepath.Join(root, "evidence")
+	bundle, err := (contextbundle.Materializer{Store: store, Root: filepath.Join(root, "contexts"), EvidenceRoot: evidenceRoot}).Materialize(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.SchemaVersion != contextbundle.SchemaVersion {
+		t.Fatalf("flow-v2 Context schema = %d", bundle.SchemaVersion)
+	}
+	contents, err := os.ReadFile(bundle.ContextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document contextbundle.Document
+	if err := json.Unmarshal(contents, &document); err != nil {
+		t.Fatal(err)
+	}
+	if document.SchemaVersion != 4 || document.TerminalOperation != "finish_iteration" || document.SkillSnapshot == nil || document.Diagnosis == nil || document.Diagnosis.Report == nil || document.Knowledge == nil || document.Iteration == nil || document.Iteration.Experiments == nil || len(document.Iteration.RecentTerminalAttempts) != 0 {
+		t.Fatalf("artifact-first v4 Context = %+v", document)
+	}
+	wantEvidenceRoot := filepath.Join(evidenceRoot, "iterations", "iteration-work")
+	if document.Iteration.EvidenceRoot != wantEvidenceRoot {
+		t.Fatalf("Iteration evidence root = %q, want %q", document.Iteration.EvidenceRoot, wantEvidenceRoot)
+	}
+	if info, err := os.Stat(wantEvidenceRoot); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("protected Iteration evidence root mode = %v, err=%v", info, err)
+	}
+	if document.Work.SkillSnapshot != nil || document.Work.Diagnosis != nil || len(document.Work.IterationExperiments) != 0 {
+		t.Fatalf("v4 context inlined an artifact payload in runtime work: %+v", document.Work)
+	}
+	if document.Diagnosis.ID != "diagnosis" || document.Diagnosis.WorkID != "diagnosis-work" || document.Diagnosis.Status != symphony.DiagnosisReady || document.Diagnosis.Hypotheses != 1 {
+		t.Fatalf("v4 diagnosis identity/status projection = %+v", document.Diagnosis)
+	}
+	experimentLedger, err := os.ReadFile(document.Iteration.Experiments.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(experimentLedger, []byte(`"artifact_ids":["experiments/raw-path.json"]`)) {
+		t.Fatalf("Experiment ledger treated an artifact path as a durable ID: %s", experimentLedger)
+	}
+	if !bytes.Contains(experimentLedger, []byte(`"artifact_ids":["artifact-id"]`)) {
+		t.Fatalf("Experiment ledger omitted durable receipt artifact ID: %s", experimentLedger)
+	}
+	if !bytes.Contains(experimentLedger, []byte(`"scope_best_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`)) {
+		t.Fatalf("Experiment ledger omitted persisted scope: %s", experimentLedger)
+	}
+	assertExperimentLedgerReceipt(t, document.Iteration.Experiments.Path, "receipt")
+
+	integrationSession := session
+	integrationSession.ID = "v2-integration-session"
+	integrationSession.WorkID = "integration-work"
+	integrationSession.Role = symphony.RoleIntegration
+	integrationProjection := store.projection
+	integrationProjection.Session = integrationSession
+	integrationProjection.TargetWork.Work = symphony.WorkView{ID: "integration-work", Role: symphony.RoleIntegration, AttemptID: "attempt", IterationRound: 1, IntegrationID: "integration"}
+	integrationProjection.GeneratorWork = integrationProjection.TargetWork.Work
+	integrationStore := &staticContextStore{projection: integrationProjection}
+	integrationBundle, err := (contextbundle.Materializer{Store: integrationStore, Root: filepath.Join(root, "integration-contexts"), EvidenceRoot: evidenceRoot}).Materialize(context.Background(), integrationSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	integrationContents, err := os.ReadFile(integrationBundle.ContextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var integrationDocument contextbundle.Document
+	if err := json.Unmarshal(integrationContents, &integrationDocument); err != nil {
+		t.Fatal(err)
+	}
+	if integrationDocument.Integration == nil || integrationDocument.Integration.CandidateExperimentID != "experiment" || integrationDocument.Integration.Experiments.Records != 1 {
+		t.Fatalf("Integration Context omitted candidate Experiment ledger: %+v", integrationDocument.Integration)
+	}
+	assertExperimentLedgerReceipt(t, integrationDocument.Integration.Experiments.Path, "receipt")
+	integrationSchemaBytes, _, err := contextbundle.SchemasForVersion(contextbundle.SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	integrationSchema := compileSchema(t, "integration-context-v4.schema.json", integrationSchemaBytes)
+	if err := integrationSchema.Validate(unmarshalJSON(t, integrationContents)); err != nil {
+		t.Fatalf("Integration context schema validation: %v", err)
+	}
+	// The unavailable path retains factual hypotheses too.  It must derive the
+	// count from the same strict artifact rather than treating unavailable as an
+	// empty diagnosis.
+	unavailable := session
+	unavailable.ID = "v2-unavailable-session"
+	unavailableProjection := store.projection
+	unavailableProjection.Session = unavailable
+	unavailableDiagnosis := *unavailableProjection.TargetWork.Diagnosis
+	unavailableDiagnosis.Status = symphony.DiagnosisUnavailable
+	unavailableProjection.TargetWork.Diagnosis = &unavailableDiagnosis
+	unavailableStore := &staticContextStore{projection: unavailableProjection}
+	unavailableBundle, err := (contextbundle.Materializer{Store: unavailableStore, Root: filepath.Join(root, "contexts"), EvidenceRoot: evidenceRoot}).Materialize(context.Background(), unavailable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unavailableContents, err := os.ReadFile(unavailableBundle.ContextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unavailableDocument contextbundle.Document
+	if err := json.Unmarshal(unavailableContents, &unavailableDocument); err != nil {
+		t.Fatal(err)
+	}
+	if unavailableDocument.Diagnosis == nil || unavailableDocument.Diagnosis.Status != symphony.DiagnosisUnavailable || unavailableDocument.Diagnosis.Hypotheses != 1 {
+		t.Fatalf("unavailable v4 Diagnosis count did not match artifact: %+v", unavailableDocument.Diagnosis)
+	}
+	contextSchemaBytes, _, err := contextbundle.SchemasForVersion(contextbundle.SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextSchema := compileSchema(t, "context-v4.schema.json", contextSchemaBytes)
+	if err := contextSchema.Validate(unmarshalJSON(t, contents)); err != nil {
+		t.Fatalf("flow-v2 context schema validation: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(contents, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := raw["skill_snapshot"].(map[string]any)["manifest"].(map[string]any)["records"]; found {
+		t.Fatal("skill manifest blob reference exposed JSONL records")
+	}
+	if _, found := raw["diagnosis"].(map[string]any)["report"].(map[string]any)["records"]; found {
+		t.Fatal("Diagnosis report blob reference exposed JSONL records")
+	}
+	if _, found := raw["knowledge"].(map[string]any)["records"]; !found {
+		t.Fatal("knowledge JSONL reference omitted records")
+	}
+	work := raw["work"].(map[string]any)
+	if _, found := work["skill_snapshot"]; found {
+		t.Fatal("v4 context.json inlined skill_snapshot instead of its manifest reference")
+	}
+	if _, found := work["diagnosis"]; found {
+		t.Fatal("v4 context.json inlined diagnosis report instead of its artifact reference")
+	}
+	if _, found := work["iteration_experiments"]; found {
+		t.Fatal("v4 context.json inlined Experiment ledger instead of its artifact reference")
+	}
+	if bytes.Contains(contents, []byte("must-not-inline")) {
+		t.Fatal("v4 context.json retained an unmodeled raw JSON payload")
+	}
+	raw["unexpected"] = true
+	if err := contextSchema.Validate(raw); err == nil {
+		t.Fatal("flow-v2 Context schema accepted an unknown top-level field")
+	}
+	raw = unmarshalJSON(t, contents).(map[string]any)
+	raw["session"].(map[string]any)["unexpected"] = true
+	if err := contextSchema.Validate(raw); err == nil {
+		t.Fatal("flow-v2 Context schema accepted an unknown nested session field")
+	}
+	raw = unmarshalJSON(t, contents).(map[string]any)
+	raw["optimization"].(map[string]any)["flow_version"] = float64(1)
+	if err := contextSchema.Validate(raw); err == nil {
+		t.Fatal("v4 Context schema accepted a flow-v1 optimization")
+	}
+	raw = unmarshalJSON(t, contents).(map[string]any)
+	raw["work"].(map[string]any)["flow_version"] = float64(1)
+	if err := contextSchema.Validate(raw); err == nil {
+		t.Fatal("v4 Context schema accepted a flow-v1 runtime work projection")
+	}
+	raw = unmarshalJSON(t, contents).(map[string]any)
+	delete(raw["iteration_context"].(map[string]any), "evidence_root")
+	if err := contextSchema.Validate(raw); err == nil {
+		t.Fatal("v4 Iteration Context schema accepted a missing evidence_root")
+	}
+	raw = unmarshalJSON(t, contents).(map[string]any)
+	raw["skill_snapshot"].(map[string]any)["entries"] = nil
+	if err := contextSchema.Validate(raw); err == nil {
+		t.Fatal("v4 Context schema accepted null skill snapshot entries")
+	}
+	raw = unmarshalJSON(t, contents).(map[string]any)
+	raw["skill_snapshot"].(map[string]any)["entries"].([]any)[0].(map[string]any)["branch"] = "main"
+	if err := contextSchema.Validate(raw); err == nil {
+		t.Fatal("v4 Context schema accepted a reordered or non-allowlisted skill provenance entry")
+	}
+	raw = unmarshalJSON(t, contents).(map[string]any)
+	raw["skill_snapshot"].(map[string]any)["entries"].([]any)[0].(map[string]any)["path"] = "skills/elsewhere"
+	if err := contextSchema.Validate(raw); err == nil {
+		t.Fatal("v4 Context schema accepted a non-canonical skill path")
+	}
+	raw = unmarshalJSON(t, contents).(map[string]any)
+	raw["skill_snapshot"].(map[string]any)["snapshot_id"] = "short"
+	if err := contextSchema.Validate(raw); err == nil {
+		t.Fatal("v4 Context schema accepted a non-SHA-256 snapshot_id")
+	}
+	drifted := store.projection
+	drifted.Session.ID = "v2-drifted-session"
+	drifted.TargetWork.SkillSnapshot = &symphony.SkillSnapshotView{}
+	*drifted.TargetWork.SkillSnapshot = *store.projection.TargetWork.SkillSnapshot
+	drifted.TargetWork.SkillSnapshot.Entries = append([]symphony.SkillSnapshotEntry{}, store.projection.TargetWork.SkillSnapshot.Entries...)
+	drifted.TargetWork.SkillSnapshot.Entries[1].ContentSHA256 = strings.Repeat("3", 64)
+	driftedSession := session
+	driftedSession.ID = drifted.Session.ID
+	if _, err := (contextbundle.Materializer{Store: &staticContextStore{projection: drifted}, Root: filepath.Join(root, "drifted-contexts"), EvidenceRoot: evidenceRoot}).Materialize(context.Background(), driftedSession); err == nil || !strings.Contains(err.Error(), "frozen skill") {
+		t.Fatalf("v4 Context accepted skill entries that drifted from the manifest: %v", err)
+	}
+}
+
+type contextSkillGit struct{ remotes map[string]string }
+
+func (g contextSkillGit) Run(ctx context.Context, directory string, arguments ...string) ([]byte, error) {
+	mapped := append([]string{}, arguments...)
+	if !(len(arguments) >= 3 && arguments[0] == "remote" && arguments[1] == "set-url") {
+		for index, value := range mapped {
+			if replacement, found := g.remotes[value]; found {
+				mapped[index] = replacement
+			}
+		}
+	}
+	command := exec.CommandContext(ctx, "git", mapped...)
+	command.Dir = directory
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("git %v: %w: %s", mapped, err, output)
+	}
+	if len(arguments) == 3 && arguments[0] == "remote" && arguments[1] == "get-url" && arguments[2] == "origin" {
+		for canonical, local := range g.remotes {
+			if string(output) == local+"\n" {
+				return []byte(canonical + "\n"), nil
+			}
+		}
+	}
+	return output, nil
+}
+
+func prepareContextSkillSnapshot(t *testing.T, workspace string) skillsnapshot.Snapshot {
+	t.Helper()
+	remotes := map[string]string{
+		symphony.KernelWikiRepository:     createContextSkillRepository(t, "master", "KernelWiki"),
+		symphony.NCUReportSkillRepository: createContextSkillRepository(t, "main", "ncu-report-skill"),
+	}
+	snapshot, err := (skillsnapshot.Manager{Git: contextSkillGit{remotes: remotes}}).Prepare(context.Background(), skillsnapshot.Request{WorkspaceRoot: workspace})
+	if err != nil {
+		t.Fatalf("prepare Context skill snapshot: %v", err)
+	}
+	return snapshot
+}
+
+func createContextSkillRepository(t *testing.T, branch, name string) string {
+	t.Helper()
+	repository := filepath.Join(t.TempDir(), name)
+	for _, arguments := range [][]string{{"init", "--quiet", "--initial-branch=" + branch, repository}, {"-C", repository, "config", "user.name", "Pika Test"}, {"-C", repository, "config", "user.email", "pika@example.invalid"}} {
+		if output, err := exec.Command("git", arguments...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repository, "SKILL.md"), []byte("---\nname: "+name+"\ndescription: Context fixture\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, arguments := range [][]string{{"-C", repository, "add", "SKILL.md"}, {"-C", repository, "commit", "--quiet", "-m", "fixture"}} {
+		if output, err := exec.Command("git", arguments...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+	}
+	return repository
+}
+
+func assertExperimentLedgerReceipt(t *testing.T, path, want string) {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		ReceiptID string `json:"receipt_id"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(contents), &envelope); err != nil {
+		t.Fatalf("decode Experiment ledger: %v", err)
+	}
+	if envelope.ReceiptID != want {
+		t.Fatalf("Experiment ledger receipt_id = %q, want %q: %s", envelope.ReceiptID, want, contents)
+	}
+}
+
+func sha256Hex(contents []byte) string {
+	value := sha256.Sum256(contents)
+	return hex.EncodeToString(value[:])
 }
 
 type staticContextStore struct {

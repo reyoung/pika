@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/reyoung/pika-go/internal/benchmarkintegrity/testcontract"
+	"github.com/reyoung/pika-go/internal/kdacontract"
 	"github.com/reyoung/pika-go/internal/mcp"
 )
 
@@ -42,9 +43,10 @@ func RunWithInterrupts(ctx context.Context, input io.Reader, output io.Writer, i
 	setTitle(output, "FAKE_AGENT_READY")
 	_, _ = fmt.Fprintln(output, "FAKE_AGENT_READY")
 	var autorun func(context.Context, io.Writer)
-	if strings.HasPrefix(os.Getenv("PIKA_GO_FAKE_AGENT_AUTORUN"), "baseline-") {
+	scenario := os.Getenv("PIKA_GO_FAKE_AGENT_AUTORUN")
+	if strings.HasPrefix(scenario, "baseline-") {
 		autorun = runBaselineAcceptedScenario
-	} else if os.Getenv("PIKA_GO_FAKE_AGENT_AUTORUN") == "optimization" {
+	} else if scenario == "optimization" {
 		autorun = runOptimizationScenario
 	}
 	var autorunOnce sync.Once
@@ -151,6 +153,8 @@ func runOptimizationScenario(ctx context.Context, output io.Writer) {
 		return
 	}
 	switch role {
+	case "diagnosis":
+		runOptimizationDiagnosis(ctx, output)
 	case "iteration":
 		runOptimizationIteration(ctx, output)
 	case "integration":
@@ -158,6 +162,66 @@ func runOptimizationScenario(ctx context.Context, output io.Writer) {
 	case "follow_up":
 		runFollowUp(ctx, output)
 	}
+}
+
+func runOptimizationDiagnosis(ctx context.Context, output io.Writer) {
+	contents, err := os.ReadFile(os.Getenv("PIKA_CONTEXT_PATH"))
+	if err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+		return
+	}
+	var contextValue struct {
+		Baseline struct {
+			ID string `json:"id"`
+		} `json:"baseline"`
+		Best struct {
+			CommitSHA string `json:"commit_sha"`
+		} `json:"best"`
+		IterationCaseSet struct {
+			CaseIDs []string `json:"case_ids"`
+		} `json:"iteration_case_set"`
+		Diagnosis struct {
+			EvidenceRoot string `json:"evidence_root"`
+		} `json:"diagnosis"`
+	}
+	if err := json.Unmarshal(contents, &contextValue); err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR decode Diagnosis Context: %q\n", err)
+		return
+	}
+	if contextValue.Baseline.ID == "" || contextValue.Best.CommitSHA == "" || len(contextValue.IterationCaseSet.CaseIDs) == 0 || contextValue.Diagnosis.EvidenceRoot == "" {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR incomplete Diagnosis Context: baseline_id=%t best_sha=%t case_ids=%d evidence_root=%t\n", contextValue.Baseline.ID != "", contextValue.Best.CommitSHA != "", len(contextValue.IterationCaseSet.CaseIDs), contextValue.Diagnosis.EvidenceRoot != "")
+		return
+	}
+	artifactPath := "profile.json"
+	artifactContents := []byte("{\"fake_profile\":true}\n")
+	if err := os.WriteFile(filepath.Join(contextValue.Diagnosis.EvidenceRoot, artifactPath), artifactContents, 0o600); err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+		return
+	}
+	report := kdacontract.DiagnosisReport{SchemaVersion: 1}
+	report.Subject.BaselineRevisionID = contextValue.Baseline.ID
+	report.Subject.BestSHA = contextValue.Best.CommitSHA
+	report.Subject.Hardware = map[string]any{"fixture": "fake"}
+	report.Subject.Software = map[string]any{"fixture": "fake"}
+	report.Coverage.CaseIDs = contextValue.IterationCaseSet.CaseIDs
+	report.Coverage.DispatchPaths = []string{"fake-kernel"}
+	report.Artifacts = []kdacontract.ArtifactRef{{Path: artifactPath, Kind: "profile"}}
+	report.Observations = []kdacontract.DiagnosisObservation{{ID: "observation-1", CaseIDs: contextValue.IterationCaseSet.CaseIDs, Metric: "latency", Value: 1.0, Unit: "ms", SourceArtifacts: []string{artifactPath}, Summary: "fake profile measured launch overhead"}}
+	report.Bottlenecks = []kdacontract.DiagnosisBottleneck{{ID: "bottleneck-1", Class: "launch-overhead", Confidence: "high", ObservationIDs: []string{"observation-1"}, Summary: "fake launch overhead"}}
+	report.Hypotheses = []kdacontract.DiagnosisHypothesis{{ID: "hypothesis-1", Rank: 1, Summary: "fuse fake launches", Mechanism: "remove one launch", TargetCaseIDs: contextValue.IterationCaseSet.CaseIDs, ExpectedEffect: "lower latency", Risk: "fixture correctness", BottleneckIDs: []string{"bottleneck-1"}, KnowledgeRefs: []string{}}}
+	report.Limitations = []kdacontract.DiagnosisLimitation{}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+		return
+	}
+	call := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"finish_diagnosis","arguments":{"idempotency_key":"fake-diagnosis-%s","outcome":"ready","report":%s}}}`, os.Getenv("PIKA_SESSION_ID"), encoded)
+	response, err := callMCPUntilActive(ctx, call)
+	if err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), response)
+		return
+	}
+	_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_RESPONSE %s\n", strings.TrimSpace(response))
 }
 
 func runFollowUp(ctx context.Context, output io.Writer) {
@@ -194,15 +258,112 @@ func runOptimizationIteration(ctx context.Context, output io.Writer) {
 		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), commitResponse)
 		return
 	}
-	sha, err := committedSHA(commitResponse)
+	commit, err := decodeScopedCommit(commitResponse)
 	if err != nil {
 		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), commitResponse)
 		return
 	}
-	call := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"finish_iteration","arguments":{"idempotency_key":"fake-iteration-%s","outcome":"candidate","candidate_sha":"%s","summary":"fake improvement round %s","evidence":%s}}}`, os.Getenv("PIKA_SESSION_ID"), sha, round, testcontract.Evidence())
+	sha := commit.CommitSHA
+	contextContents, err := os.ReadFile(os.Getenv("PIKA_CONTEXT_PATH"))
+	if err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+		return
+	}
+	var contextValue struct {
+		Work struct {
+			CurrentCheckpointSHA string `json:"current_checkpoint_sha"`
+		} `json:"work"`
+		Iteration struct {
+			EvidenceRoot    string `json:"evidence_root"`
+			RequiredCaseSet struct {
+				CaseIDs []string `json:"case_ids"`
+			} `json:"required_case_set"`
+		} `json:"iteration_context"`
+	}
+	if err := json.Unmarshal(contextContents, &contextValue); err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR decode Iteration Context: %q\n", err)
+		return
+	}
+	if commit.CurrentCheckpointSHA != "" {
+		contextValue.Work.CurrentCheckpointSHA = commit.CurrentCheckpointSHA
+	}
+	if contextValue.Work.CurrentCheckpointSHA == "" || contextValue.Iteration.EvidenceRoot == "" || len(contextValue.Iteration.RequiredCaseSet.CaseIDs) == 0 {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR incomplete Iteration Context: current_checkpoint_sha=%t evidence_root=%t case_ids=%d\n", contextValue.Work.CurrentCheckpointSHA != "", contextValue.Iteration.EvidenceRoot != "", len(contextValue.Iteration.RequiredCaseSet.CaseIDs))
+		return
+	}
+	artifactPath := filepath.ToSlash(filepath.Join("experiments", os.Getenv("PIKA_SESSION_ID")+".json"))
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(contextValue.Iteration.EvidenceRoot, artifactPath)), 0o700); err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+		return
+	}
+	if err := os.WriteFile(filepath.Join(contextValue.Iteration.EvidenceRoot, artifactPath), []byte("{\"fake_benchmark\":true}\n"), 0o600); err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+		return
+	}
+	comparisons := make([]any, 0, len(contextValue.Iteration.RequiredCaseSet.CaseIDs))
+	for _, caseID := range contextValue.Iteration.RequiredCaseSet.CaseIDs {
+		comparisons = append(comparisons, map[string]any{"case_id": caseID, "reference": map[string]any{"latency": 10.0}, "candidate": map[string]any{"latency": 9.0}})
+	}
+	var correctness struct {
+		BenchmarkIntegrity json.RawMessage `json:"benchmark_integrity"`
+	}
+	if err := json.Unmarshal(testcontract.Evidence(), &correctness); err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+		return
+	}
+	measurements, err := json.Marshal(map[string]any{"schema_version": 1, "comparisons": comparisons})
+	if err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+		return
+	}
+	experiment := kdacontract.Experiment{
+		SchemaVersion: 1, ParentCheckpointSHA: contextValue.Work.CurrentCheckpointSHA,
+		Hypothesis: kdacontract.ExperimentHypothesis{DiagnosisHypothesisID: "hypothesis-1", Summary: "fake fusion"},
+		Change:     kdacontract.ExperimentChange{Summary: "fake candidate", Paths: []string{name}, Mechanism: "reduce fake latency"},
+		Outcome:    "kept", CheckpointSHA: sha,
+		Correctness:           &kdacontract.ExperimentCorrectness{BenchmarkIntegrity: correctness.BenchmarkIntegrity},
+		BenchmarkMeasurements: measurements,
+		Artifacts:             []kdacontract.ArtifactRef{{Path: artifactPath, Kind: "benchmark"}}, Summary: "fake kept experiment",
+	}
+	experimentJSON, err := json.Marshal(experiment)
+	if err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q\n", err.Error())
+		return
+	}
+	recordCall := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"record_iteration_experiment","arguments":{"idempotency_key":"fake-experiment-%s","experiment":%s}}}`, os.Getenv("PIKA_SESSION_ID"), experimentJSON)
+	recordResponse, err := callMCPUntilActive(ctx, recordCall)
+	if err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), recordResponse)
+		return
+	}
+	experimentID, err := recordedExperimentID(recordResponse)
+	if err != nil {
+		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), recordResponse)
+		return
+	}
+	call := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"finish_iteration","arguments":{"idempotency_key":"fake-iteration-%s","outcome":"candidate","experiment_id":"%s","candidate_sha":"%s","summary":"fake improvement round %s","evidence":%s}}}`, os.Getenv("PIKA_SESSION_ID"), experimentID, sha, round, testcontract.Evidence())
 	if response, err := callMCPUntilActive(ctx, call); err != nil {
 		_, _ = fmt.Fprintf(output, "FAKE_AGENT_AUTORUN_ERROR %q response=%q\n", err.Error(), response)
 	}
+}
+
+func recordedExperimentID(response string) (string, error) {
+	text, err := decodeMCPText(response)
+	if err != nil {
+		return "", err
+	}
+	var receipt struct {
+		Result struct {
+			ExperimentID string `json:"experiment_id"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(text, &receipt); err != nil {
+		return "", fmt.Errorf("decode Experiment receipt: %w", err)
+	}
+	if receipt.Result.ExperimentID == "" {
+		return "", errors.New("decode Experiment receipt: experiment_id is missing")
+	}
+	return receipt.Result.ExperimentID, nil
 }
 
 func runOptimizationIntegration(ctx context.Context, output io.Writer) {
@@ -307,48 +468,63 @@ func acquireFakePosition() (int, bool) {
 }
 
 func preparedIntentID(response string) (string, error) {
-	var envelope struct {
-		Result struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(response), &envelope); err != nil || len(envelope.Result.Content) == 0 {
-		return "", fmt.Errorf("decode MCP envelope: %w", err)
+	text, err := decodeMCPText(response)
+	if err != nil {
+		return "", err
 	}
 	var value struct {
 		GitIntent struct {
 			ID string `json:"id"`
 		} `json:"git_intent"`
 	}
-	if err := json.Unmarshal([]byte(envelope.Result.Content[0].Text), &value); err != nil || value.GitIntent.ID == "" {
+	if err := json.Unmarshal(text, &value); err != nil {
 		return "", fmt.Errorf("decode Git intent: %w", err)
+	}
+	if value.GitIntent.ID == "" {
+		return "", errors.New("decode Git intent: id is missing")
 	}
 	return value.GitIntent.ID, nil
 }
 
 func appliedBestSHA(response string) (string, error) {
-	var envelope struct {
-		Result struct {
-			Content []struct {
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal([]byte(response), &envelope); err != nil || len(envelope.Result.Content) == 0 {
-		return "", fmt.Errorf("decode MCP envelope: %w", err)
+	text, err := decodeMCPText(response)
+	if err != nil {
+		return "", err
 	}
 	var value struct {
 		AppliedSHA string `json:"applied_sha"`
 	}
-	if err := json.Unmarshal([]byte(envelope.Result.Content[0].Text), &value); err != nil || value.AppliedSHA == "" {
+	if err := json.Unmarshal(text, &value); err != nil {
 		return "", fmt.Errorf("decode applied Best SHA: %w", err)
+	}
+	if value.AppliedSHA == "" {
+		return "", errors.New("decode applied Best SHA: applied_sha is missing")
 	}
 	return value.AppliedSHA, nil
 }
 
-func committedSHA(response string) (string, error) {
+type scopedCommitResult struct {
+	CommitSHA            string `json:"commit_sha"`
+	Clean                bool   `json:"clean"`
+	CurrentCheckpointSHA string `json:"current_checkpoint_sha"`
+}
+
+func decodeScopedCommit(response string) (scopedCommitResult, error) {
+	text, err := decodeMCPText(response)
+	if err != nil {
+		return scopedCommitResult{}, err
+	}
+	var value scopedCommitResult
+	if err := json.Unmarshal(text, &value); err != nil {
+		return scopedCommitResult{}, fmt.Errorf("decode clean scoped commit: %w", err)
+	}
+	if value.CommitSHA == "" || !value.Clean || value.CurrentCheckpointSHA == "" {
+		return scopedCommitResult{}, errors.New("decode clean scoped commit: commit_sha/current_checkpoint_sha is missing or worktree is dirty")
+	}
+	return value, nil
+}
+
+func decodeMCPText(response string) ([]byte, error) {
 	var envelope struct {
 		Result struct {
 			Content []struct {
@@ -356,17 +532,13 @@ func committedSHA(response string) (string, error) {
 			} `json:"content"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal([]byte(response), &envelope); err != nil || len(envelope.Result.Content) == 0 {
-		return "", fmt.Errorf("decode MCP envelope: %w", err)
+	if err := json.Unmarshal([]byte(response), &envelope); err != nil {
+		return nil, fmt.Errorf("decode MCP envelope: %w", err)
 	}
-	var value struct {
-		CommitSHA string `json:"commit_sha"`
-		Clean     bool   `json:"clean"`
+	if len(envelope.Result.Content) == 0 || strings.TrimSpace(envelope.Result.Content[0].Text) == "" {
+		return nil, errors.New("decode MCP envelope: text content is missing")
 	}
-	if err := json.Unmarshal([]byte(envelope.Result.Content[0].Text), &value); err != nil || value.CommitSHA == "" || !value.Clean {
-		return "", fmt.Errorf("decode clean scoped commit: %w", err)
-	}
-	return value.CommitSHA, nil
+	return []byte(envelope.Result.Content[0].Text), nil
 }
 
 func callMCPUntilActive(ctx context.Context, call string) (string, error) {
@@ -417,6 +589,9 @@ func runBaselineAcceptedScenario(ctx context.Context, output io.Writer) {
 		}
 	case "follow_up":
 		runFollowUp(ctx, output)
+		return
+	case "diagnosis":
+		runOptimizationDiagnosis(ctx, output)
 		return
 	default:
 		return

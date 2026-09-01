@@ -13,6 +13,7 @@ import (
 	"github.com/reyoung/pika-go/internal/candidatepolicy"
 	"github.com/reyoung/pika-go/internal/evidence"
 	"github.com/reyoung/pika-go/internal/gitworkspace"
+	"github.com/reyoung/pika-go/internal/kdacontract"
 	"github.com/reyoung/pika-go/internal/symphony"
 )
 
@@ -20,8 +21,16 @@ type Store interface {
 	ResolveAgentGrant(context.Context, string) (symphony.AgentGrant, error)
 	Apply(context.Context, symphony.Command) (symphony.Receipt, error)
 	Replay(context.Context, symphony.Command) (symphony.Receipt, bool, error)
+	ReplayDiagnosis(context.Context, string, string, symphony.DiagnosisStatus, json.RawMessage) (symphony.Receipt, bool, error)
+	ReplayIterationExperiment(context.Context, string, string, json.RawMessage) (symphony.Receipt, bool, error)
 	RuntimeWork(context.Context, string) (symphony.RuntimeWork, error)
 	GitIntent(context.Context, string) (symphony.GitIntentView, error)
+	RecordCommitCapability(context.Context, symphony.CommitCapabilityReceipt) error
+	CommitCapability(context.Context, string, string) (symphony.CommitCapabilityReceipt, error)
+}
+
+type iterationCheckpointInitializer interface {
+	InitializeIterationRoundCheckpoint(context.Context, string, int64, string, string) (string, error)
 }
 
 type Tool struct {
@@ -41,6 +50,14 @@ type Invocation struct {
 	Terminal bool
 }
 
+// CommitChangesResult is the MCP response for a scoped Git commit. Checkpoint
+// fields describe the flow-v2 control-plane side effect and therefore do not
+// belong to gitworkspace.CommitResult.
+type CommitChangesResult struct {
+	gitworkspace.CommitResult
+	CurrentCheckpointSHA string `json:"current_checkpoint_sha,omitempty"`
+}
+
 type Application struct {
 	Store            Store
 	MaxEvidenceBytes int64
@@ -48,6 +65,10 @@ type Application struct {
 	Repository       string
 	BranchNamespace  string
 	WorktreeRecorder gitworkspace.WorktreeRecorder
+	// EvidenceRoot is the Pika-owned Workspace evidence directory. KDA roles
+	// write raw artifacts there rather than into source worktrees whose clean
+	// Git state is independently verified.
+	EvidenceRoot string
 }
 
 func (a Application) Catalog(ctx context.Context, token string) ([]Tool, error) {
@@ -120,9 +141,33 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 				}
 			}
 		}
-		result, err := workspace.CommitChanges(ctx, grant.WorkID, input.IdempotencyKey, input.Message, input.Paths)
+		commitResult, err := workspace.CommitChanges(ctx, grant.WorkID, input.IdempotencyKey, input.Message, input.Paths)
 		if err != nil {
 			return Invocation{}, err
+		}
+		if err := a.Store.RecordCommitCapability(ctx, symphony.CommitCapabilityReceipt{WorkID: grant.WorkID, CommitSHA: commitResult.CommitSHA, CommitKeySHA256: commitResult.CommitKeySHA256, RequestSHA256: commitResult.RequestSHA256}); err != nil {
+			return Invocation{}, err
+		}
+		result := CommitChangesResult{CommitResult: commitResult}
+		if grant.Role == symphony.RoleIteration && work.FlowVersion == symphony.FlowVersion2 {
+			result.CurrentCheckpointSHA = work.CurrentCheckpointSHA
+			if work.IterationKind != "initial" && work.CurrentCheckpointSHA == work.BaseSHA {
+				mergeResolution, mergeErr := workspace.MergeCommitHasExactParents(ctx, repository, result.CommitSHA, work.CandidateSHA, work.BaseSHA)
+				if mergeErr != nil {
+					return Invocation{}, mergeErr
+				}
+				if mergeResolution {
+					initializer, ok := a.Store.(iterationCheckpointInitializer)
+					if !ok {
+						return Invocation{}, errors.New("stale Iteration checkpoint initializer is required")
+					}
+					checkpoint, checkpointErr := initializer.InitializeIterationRoundCheckpoint(ctx, work.Work.AttemptID, work.Work.IterationRound, work.CurrentCheckpointSHA, result.CommitSHA)
+					if checkpointErr != nil {
+						return Invocation{}, checkpointErr
+					}
+					result.CurrentCheckpointSHA = checkpoint
+				}
+			}
 		}
 		if a.WorktreeRecorder != nil {
 			record := symphony.GitWorktreeRecord{Repository: repository, HeadSHA: result.CommitSHA, State: "active"}
@@ -294,6 +339,138 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			return Invocation{}, err
 		}
 		return Invocation{Value: receipt, Mutated: true, Terminal: true}, nil
+	case "finish_diagnosis":
+		if grant.Role != symphony.RoleDiagnosis {
+			return Invocation{}, forbidden("Diagnosis result requires diagnosis role")
+		}
+		if err := kdacontract.ValidateDiagnosisInput(call.Arguments); err != nil {
+			return Invocation{}, fmt.Errorf("finish_diagnosis input does not satisfy Diagnosis v1 contract: %w", err)
+		}
+		var input struct {
+			IdempotencyKey string                   `json:"idempotency_key"`
+			Outcome        symphony.DiagnosisStatus `json:"outcome"`
+			Report         json.RawMessage          `json:"report"`
+		}
+		if err := decodeArguments(call.Arguments, &input); err != nil {
+			return Invocation{}, err
+		}
+		if input.IdempotencyKey == "" || len(input.Report) == 0 {
+			return Invocation{}, errors.New("idempotency_key and report are required")
+		}
+		if receipt, found, err := a.Store.ReplayDiagnosis(ctx, grant.WorkID, input.IdempotencyKey, input.Outcome, input.Report); err != nil {
+			return Invocation{}, err
+		} else if found {
+			return Invocation{Value: receipt, Terminal: true}, nil
+		}
+		if grant.Revoked {
+			return Invocation{}, forbidden("Diagnosis result requires an active diagnosis role")
+		}
+		if !agentSessionActive(grant.SessionStatus) {
+			return Invocation{}, forbidden("agent session is not active yet")
+		}
+		work, err := a.Store.RuntimeWork(ctx, grant.WorkID)
+		if err != nil {
+			return Invocation{}, err
+		}
+		workspace := a.gitWorkspace(work)
+		snapshot, err := workspace.SourceSnapshot(ctx)
+		if err != nil {
+			return Invocation{}, err
+		}
+		if work.BaselineRepositorySHA == "" || !snapshot.Clean || snapshot.CommitSHA != work.BaselineRepositorySHA {
+			return Invocation{}, fmt.Errorf("Diagnosis source repository changed: HEAD is %s, frozen Baseline snapshot is %s, status is %q", snapshot.CommitSHA, work.BaselineRepositorySHA, snapshot.Status)
+		}
+		artifactRoot, err := a.diagnosisEvidenceRoot(work)
+		if err != nil {
+			return Invocation{}, err
+		}
+		artifactPaths, err := diagnosisArtifactPaths(input.Report)
+		if err != nil {
+			return Invocation{}, err
+		}
+		artifacts, err := a.readArtifacts(artifactRoot, artifactPaths)
+		if err != nil {
+			return Invocation{}, err
+		}
+		receipt, err := a.applyTerminal(ctx, grant, symphony.FinishDiagnosis{Meta: symphony.CommandMeta{RequestID: input.IdempotencyKey}, WorkID: grant.WorkID, Outcome: input.Outcome, Report: input.Report, Artifacts: artifacts})
+		if err != nil {
+			return Invocation{}, err
+		}
+		return Invocation{Value: receipt, Mutated: true, Terminal: true}, nil
+	case "record_iteration_experiment":
+		if grant.Role != symphony.RoleIteration {
+			return Invocation{}, forbidden("Experiment recording requires an Iteration role")
+		}
+		if err := kdacontract.ValidateExperimentInput(call.Arguments); err != nil {
+			return Invocation{}, fmt.Errorf("record_iteration_experiment input does not satisfy Experiment v1 contract: %w", err)
+		}
+		var input struct {
+			IdempotencyKey string          `json:"idempotency_key"`
+			Experiment     json.RawMessage `json:"experiment"`
+		}
+		if err := decodeArguments(call.Arguments, &input); err != nil {
+			return Invocation{}, err
+		}
+		if input.IdempotencyKey == "" || len(input.Experiment) == 0 || !json.Valid(input.Experiment) {
+			return Invocation{}, errors.New("idempotency_key and a valid experiment are required")
+		}
+		if receipt, found, err := a.Store.ReplayIterationExperiment(ctx, grant.WorkID, input.IdempotencyKey, input.Experiment); err != nil {
+			return Invocation{}, err
+		} else if found {
+			return Invocation{Value: receipt}, nil
+		}
+		if grant.Revoked {
+			return Invocation{}, forbidden("Experiment recording requires an active Iteration role")
+		}
+		if !agentSessionActive(grant.SessionStatus) {
+			return Invocation{}, forbidden("agent session is not active yet")
+		}
+		work, err := a.Store.RuntimeWork(ctx, grant.WorkID)
+		if err != nil {
+			return Invocation{}, err
+		}
+		experiment, err := kdacontract.ParseExperiment(input.Experiment)
+		if err != nil {
+			return Invocation{}, fmt.Errorf("parse canonical Experiment: %w", err)
+		}
+		artifactPaths := contractArtifactPaths(experiment.Artifacts)
+		artifactRoot, err := evidence.EnsureWorkRoot(a.EvidenceRoot, evidence.IterationScope, work.Work.ID)
+		if err != nil {
+			return Invocation{}, err
+		}
+		workspace := a.gitWorkspace(work)
+		repository, err := workspace.AttemptRepository(work.Work.AttemptID, work.Work.IterationRound)
+		if err != nil {
+			return Invocation{}, err
+		}
+		if experiment.Outcome == "kept" {
+			authorizations, err := workspace.VerifyExperimentCheckpoint(ctx, repository, experiment.ParentCheckpointSHA, experiment.CheckpointSHA, experiment.Change.Paths)
+			if err != nil {
+				return Invocation{}, err
+			}
+			for _, authorization := range authorizations {
+				receipt, err := a.Store.CommitCapability(ctx, grant.WorkID, authorization.CommitSHA)
+				if err != nil {
+					return Invocation{}, err
+				}
+				if receipt.CommitKeySHA256 != authorization.CommitKeySHA256 || receipt.RequestSHA256 != authorization.RequestSHA256 {
+					return Invocation{}, errors.New("Experiment commit trailers do not match the durable commit_changes receipt")
+				}
+			}
+		} else if experiment.Outcome == "rejected" || experiment.Outcome == "inconclusive" {
+			if err := workspace.VerifyExperimentRestored(ctx, repository, experiment.ParentCheckpointSHA); err != nil {
+				return Invocation{}, err
+			}
+		}
+		artifacts, err := a.readArtifacts(artifactRoot, artifactPaths)
+		if err != nil {
+			return Invocation{}, err
+		}
+		receipt, err := a.Store.Apply(ctx, symphony.RecordIterationExperiment{Meta: symphony.CommandMeta{RequestID: input.IdempotencyKey}, WorkID: grant.WorkID, Experiment: input.Experiment, Artifacts: artifacts})
+		if err != nil {
+			return Invocation{}, err
+		}
+		return Invocation{Value: receipt, Mutated: true}, nil
 	case "finish_iteration":
 		if grant.Role != symphony.RoleIteration {
 			return Invocation{}, forbidden("Iteration result requires iteration role")
@@ -304,6 +481,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		var input struct {
 			IdempotencyKey string                    `json:"idempotency_key"`
 			Outcome        symphony.IterationOutcome `json:"outcome"`
+			ExperimentID   string                    `json:"experiment_id"`
 			CandidateSHA   string                    `json:"candidate_sha"`
 			Summary        string                    `json:"summary"`
 			Evidence       json.RawMessage           `json:"evidence"`
@@ -332,7 +510,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			}
 		}
 		command := symphony.FinishIteration{Meta: symphony.CommandMeta{RequestID: input.IdempotencyKey}, WorkID: grant.WorkID,
-			Outcome: input.Outcome, CandidateSHA: input.CandidateSHA, Summary: input.Summary, Evidence: input.Evidence}
+			Outcome: input.Outcome, ExperimentID: input.ExperimentID, CandidateSHA: input.CandidateSHA, Summary: input.Summary, Evidence: input.Evidence}
 		receipt, err := a.applyTerminal(ctx, grant, command)
 		if err != nil {
 			return Invocation{}, err
@@ -425,7 +603,24 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 				return Invocation{}, err
 			}
 		}
-		return Invocation{Value: map[string]any{"intent_id": stored.ID, "applied_sha": appliedSHA}, Mutated: true}, nil
+		return Invocation{Value: map[string]any{
+			"intent_id":   stored.ID,
+			"applied_sha": appliedSHA,
+			// Applying the bounded patch is deliberately non-terminal. Publish the
+			// exact required terminal transition so every MCP client can discover
+			// that Best is not accepted until finish_integration commits it.
+			"postcondition": map[string]any{
+				"required_tool": "finish_integration",
+				"terminal":      true,
+				"arguments": map[string]any{
+					"outcome":     "accepted",
+					"intent_id":   stored.ID,
+					"applied_sha": appliedSHA,
+				},
+				"missing_required_fields": []string{"idempotency_key", "result"},
+				"result_contract":         "result must be the verified Integration result object accepted by finish_integration",
+			},
+		}, Mutated: true}, nil
 	case "finish_integration":
 		if grant.Role != symphony.RoleIntegration {
 			return Invocation{}, forbidden("Integration result requires integration role")
@@ -505,6 +700,58 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 	}
 }
 
+type artifactPath struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+}
+
+func (a Application) readArtifacts(root string, requested []artifactPath) ([]symphony.ArtifactInput, error) {
+	if len(requested) == 0 {
+		return nil, nil
+	}
+	if root == "" || !filepath.IsAbs(root) {
+		return nil, errors.New("Pika evidence root is required")
+	}
+	artifacts := make([]symphony.ArtifactInput, 0, len(requested))
+	seen := map[string]bool{}
+	for _, requestedArtifact := range requested {
+		if requestedArtifact.Path == "" || requestedArtifact.Kind == "" || seen[requestedArtifact.Path] {
+			return nil, errors.New("artifact path and kind must be unique and non-empty")
+		}
+		_, metadata, err := evidence.ReadStable(root, requestedArtifact.Path, a.MaxEvidenceBytes)
+		if err != nil {
+			return nil, err
+		}
+		seen[requestedArtifact.Path] = true
+		artifacts = append(artifacts, metadata)
+	}
+	return artifacts, nil
+}
+
+// Diagnosis and Experiment artifacts are part of their canonical nested
+// contracts. The terminal MCP operation performs stable reads and creates the
+// durable receipts from that single declaration; it never accepts a duplicate
+// top-level artifact payload.
+func diagnosisArtifactPaths(report json.RawMessage) ([]artifactPath, error) {
+	value, err := kdacontract.ParseDiagnosisReport(report)
+	if err != nil {
+		return nil, errors.New("Diagnosis report must be a JSON object")
+	}
+	return contractArtifactPaths(value.Artifacts), nil
+}
+
+func contractArtifactPaths(artifacts []kdacontract.ArtifactRef) []artifactPath {
+	paths := make([]artifactPath, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		paths = append(paths, artifactPath{Path: artifact.Path, Kind: artifact.Kind})
+	}
+	return paths
+}
+
+func (a Application) diagnosisEvidenceRoot(work symphony.RuntimeWork) (string, error) {
+	return evidence.EnsureWorkRoot(a.EvidenceRoot, evidence.DiagnosisScope, work.Work.ID)
+}
+
 func (a Application) applyTerminal(ctx context.Context, grant symphony.AgentGrant, command symphony.Command) (symphony.Receipt, error) {
 	if !grant.Revoked {
 		return a.Store.Apply(ctx, command)
@@ -575,6 +822,7 @@ func toolByName(name string) (Tool, bool) {
 	finishIterationSchema := object(map[string]any{
 		"idempotency_key": map[string]any{"type": "string", "minLength": 1},
 		"outcome":         map[string]any{"type": "string", "enum": []string{"candidate", "rejected"}},
+		"experiment_id":   map[string]any{"type": "string", "minLength": 1},
 		"candidate_sha":   map[string]any{"type": "string"},
 		"summary":         map[string]any{"type": "string", "minLength": 1},
 		"evidence":        map[string]any{"type": "object"},
@@ -590,6 +838,14 @@ func toolByName(name string) (Tool, bool) {
 		"evidence": map[string]any{"type": "object"},
 	}, "case_id", "kind", "summary", "evidence")
 	tools := map[string]Tool{
+		"finish_diagnosis": {
+			Name: "finish_diagnosis", Description: "Complete the Baseline-owned profiler Diagnosis as ready or unavailable. report.artifacts paths are relative to the protected Diagnosis evidence directory; this terminal call stable-reads them and creates their durable receipts.",
+			InputSchema: kdacontract.DiagnosisInputSchema(),
+		},
+		"record_iteration_experiment": {
+			Name: "record_iteration_experiment", Description: "Durably record one measured Iteration experiment. experiment.artifacts paths are relative to iteration_context.evidence_root and are stable-read outside the source worktree. Only a kept record advances the Round checkpoint; negative outcomes must already be restored to their parent checkpoint.",
+			InputSchema: kdacontract.ExperimentInputSchema(),
+		},
 		"submit_baseline_definition": {
 			Name: "submit_baseline_definition", Description: "Submit the immutable Baseline definition and complete this Work. The daemon requires candidate_change_policy schema_version 1 and benchmark_integrity schema_version 1; implementation allowlists are not authoritative.",
 			InputSchema: object(map[string]any{
@@ -629,7 +885,7 @@ func toolByName(name string) (Tool, bool) {
 			InputSchema: object(map[string]any{"idempotency_key": map[string]any{"type": "string", "minLength": 1}, "validation": benchmarkintegrity.IntegrationSchema()}, "idempotency_key", "validation"),
 		},
 		"apply_best_update": {
-			Name: "apply_best_update", Description: "Apply exactly one active Integration's bounded Git intent inside the Pika control plane.",
+			Name: "apply_best_update", Description: "Apply exactly one active Integration's bounded Git intent inside the Pika control plane. A successful response is non-terminal and includes the required finish_integration accepted arguments; call that tool next to commit Best.",
 			InputSchema: object(map[string]any{
 				"intent_id": map[string]any{"type": "string", "minLength": 1},
 				"message":   map[string]any{"type": "string"},
@@ -656,18 +912,8 @@ func toolByName(name string) (Tool, bool) {
 }
 
 func CatalogForRole(role symphony.WorkRole) []string {
-	switch role {
-	case symphony.RoleBaselineDraft:
-		return []string{"commit_changes", "submit_baseline_definition"}
-	case symphony.RoleBaselineVerification:
-		return []string{"finish_baseline_verification"}
-	case symphony.RoleIteration:
-		return []string{"commit_changes", "finish_iteration"}
-	case symphony.RoleIntegration:
-		return []string{"prepare_best_update", "apply_best_update", "finish_integration"}
-	case symphony.RoleFollowUp:
-		return []string{"submit_followup_message"}
-	default:
-		return nil
+	if descriptor, ok := symphony.DescribeRole(role); ok {
+		return descriptor.ToolCatalog
 	}
+	return nil
 }

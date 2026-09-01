@@ -1,6 +1,6 @@
 # KDA-Inspired Agent Polish
 
-Status: proposed design, 2026-08-31.
+Status: implemented design baseline, 2026-09-01.
 
 This design improves Pika's optimization intelligence without replacing its
 transactional control plane. It adopts KDA's profile-first workflow,
@@ -71,6 +71,9 @@ Primary references:
 9. Provider injection is Session-scoped. Codex receives reserved repo-local
    discovery links and Cursor receives a local Agent Plugin; neither provider
    gets a user-global skill installation.
+10. Agents submit raw per-Case measurements. The daemon derives comparisons
+    against a frozen gate, records every Experiment's scope/receipt directly,
+    and promotes knowledge only through its audited Integration.
 
 ## 3. Flow v2
 

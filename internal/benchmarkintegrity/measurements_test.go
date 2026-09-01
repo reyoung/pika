@@ -22,7 +22,11 @@ func TestMeasurementContractComputesRatiosAndAggregates(t *testing.T) {
 			"metrics": [
 				{"id": "latency", "label": "Latency", "unit": "us", "role": "primary", "direction": "lower_is_better", "sample_statistic": "median", "aggregation": "weighted_geomean_of_ratios"},
 				{"id": "throughput", "label": "Throughput", "unit": "items/s", "role": "informational", "direction": "higher_is_better", "sample_statistic": "median", "aggregation": "ratio_of_weighted_arithmetic_means"}
-			]
+			],
+			"iteration_performance_gate": {
+				"schema_version": 1,
+				"metrics": [{"metric_id":"latency","minimum_aggregate_speedup":1.01,"maximum_case_regression_fraction":0.02}]
+			}
 		}
 	}`)
 	validation := json.RawMessage(`{
@@ -56,7 +60,7 @@ func TestMeasurementContractComputesRatiosAndAggregates(t *testing.T) {
 
 func TestMeasurementContractUsesComputedTenXGate(t *testing.T) {
 	t.Parallel()
-	definition := json.RawMessage(`{"benchmark_measurements":{"schema_version":1,"cases":[{"case_id":"case-a","weight":1}],"metrics":[{"id":"latency","label":"Latency","unit":"us","role":"primary","direction":"lower_is_better","sample_statistic":"median","aggregation":"weighted_geomean_of_ratios"}]}}`)
+	definition := json.RawMessage(`{"benchmark_measurements":{"schema_version":1,"cases":[{"case_id":"case-a","weight":1}],"metrics":[{"id":"latency","label":"Latency","unit":"us","role":"primary","direction":"lower_is_better","sample_statistic":"median","aggregation":"weighted_geomean_of_ratios"}],"iteration_performance_gate":{"schema_version":1,"metrics":[{"metric_id":"latency","minimum_aggregate_speedup":1.01,"maximum_case_regression_fraction":0.01}]}}}`)
 	contract, err := benchmarkintegrity.ParseMeasurementDefinition(definition)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +79,7 @@ func TestMeasurementContractUsesComputedTenXGate(t *testing.T) {
 
 func TestBaselineMeasurementsRequireExactFrozenMatrix(t *testing.T) {
 	t.Parallel()
-	definition := json.RawMessage(`{"benchmark_measurements":{"schema_version":1,"cases":[{"case_id":"case-a","weight":1}],"metrics":[{"id":"latency","label":"Latency","unit":"us","role":"primary","direction":"lower_is_better","sample_statistic":"median","aggregation":"weighted_geomean_of_ratios"}]}}`)
+	definition := json.RawMessage(`{"benchmark_measurements":{"schema_version":1,"cases":[{"case_id":"case-a","weight":1}],"metrics":[{"id":"latency","label":"Latency","unit":"us","role":"primary","direction":"lower_is_better","sample_statistic":"median","aggregation":"weighted_geomean_of_ratios"}],"iteration_performance_gate":{"schema_version":1,"metrics":[{"metric_id":"latency","minimum_aggregate_speedup":1.01,"maximum_case_regression_fraction":0.01}]}}}`)
 	contract, err := benchmarkintegrity.ParseMeasurementDefinition(definition)
 	if err != nil {
 		t.Fatal(err)
