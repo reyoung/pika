@@ -170,6 +170,23 @@ func (r *Runtime) GetPane(ctx context.Context, paneID string) (Pane, error) {
 	return result.Pane, nil
 }
 
+// ReadPane returns a bounded terminal transcript for diagnostics. It is not
+// a completion protocol; callers use it only to explain a failed observable
+// lifecycle transition.
+func (r *Runtime) ReadPane(ctx context.Context, paneID string) (string, error) {
+	var result struct {
+		Text    string `json:"text"`
+		Content string `json:"content"`
+	}
+	if err := r.client.Call(ctx, "pane.read", map[string]any{"pane_id": paneID, "source": "recent_unwrapped", "lines": 120}, &result); err != nil {
+		return "", err
+	}
+	if result.Text != "" {
+		return result.Text, nil
+	}
+	return result.Content, nil
+}
+
 func (r *Runtime) RenamePane(ctx context.Context, paneID, label string) error {
 	if paneID == "" || label == "" {
 		return errors.New("pane ID and label are required")

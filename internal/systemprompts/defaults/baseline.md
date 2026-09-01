@@ -48,7 +48,7 @@ Baseline Agent 可以使用当前环境提供的外部网络与远程计算资�
 
 调用 `submit_baseline_definition`，参数包含唯一且可重试的 `idempotency_key`，以及内联 `definition` JSON 对象或仓库内的 `definition_path`，二者只能选一个。Definition 应完整包含上面的合同、文件/命令身份以及 smoke 证据引用。
 
-daemon 会硬校验 Definition 中的 `benchmark_integrity` v1；缺失、字段不完整或语义为 false 都会拒绝。`case_ids` 必须恰好列出冻结的 Full Case Set；invocation 数是每个 Case、每次正式 benchmark repeat 的实际次数。至少提交以下结构（可在外层增加 workload 自有字段，但不能改写此对象）：
+daemon 会硬校验 Definition 中的 `benchmark_integrity` v1 和 `benchmark_measurements` v1；缺失、字段不完整或语义为 false 都会拒绝。`case_ids` 必须恰好列出冻结的 Full Case Set；invocation 数是每个 Case、每次正式 benchmark repeat 的实际次数。至少提交以下结构（可在外层增加 workload 自有字段，但不能改写这些对象）：
 
 ```json
 {
@@ -69,8 +69,26 @@ daemon 会硬校验 Definition 中的 `benchmark_integrity` v1；缺失、字段
     "deferred_compact_host_transfer": true,
     "kernel_timing_excludes_integrity": true,
     "end_to_end_timing_includes_integrity": true
+  },
+  "benchmark_measurements": {
+    "schema_version": 1,
+    "cases": [{
+      "case_id": "case-id",
+      "weight": 1.0
+    }],
+    "metrics": [{
+      "id": "latency",
+      "label": "Latency",
+      "unit": "us",
+      "role": "primary",
+      "direction": "lower_is_better",
+      "sample_statistic": "median",
+      "aggregation": "weighted_geomean_of_ratios"
+    }]
   }
 }
 ```
+
+`benchmark_measurements.cases` 必须与 `benchmark_integrity.case_ids` 恰好一致，每个 Case 使用有限正数 `weight`。每个 Metric 的 `id`、`label`、`unit` 和 `sample_statistic` 必须非空；`role` 只能是 `primary`、`guard` 或 `informational`，且必须恰有一个 primary；`direction` 只能是 `lower_is_better` 或 `higher_is_better`；`aggregation` 只能是 `weighted_geomean_of_ratios` 或 `ratio_of_weighted_arithmetic_means`。Case ID 和 Metric ID 必须唯一。
 
 讨论、自然语言总结、进程退出或 Agent idle 都不会完成 Work。仅当 terminal MCP 成功返回时才算完成；成功后不要再次提交。

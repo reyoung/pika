@@ -20,6 +20,12 @@ type HerdrRuntime struct {
 	SymphonyPane string
 	LaunchDir    string
 	OnEvent      func(context.Context, herdr.Event) error
+	// CursorPromptRetryDelays is an optional test seam for the bounded Cursor
+	// delivery confirmation loop. A nil value uses the production schedule.
+	CursorPromptRetryDelays []time.Duration
+	// CursorPromptTransitionTimeout is an optional test seam for the bounded
+	// post-Enter lifecycle poll. A zero value uses the production timeout.
+	CursorPromptTransitionTimeout time.Duration
 }
 
 func NewHerdrRuntime(client *herdr.Client, symphonyPane string) *HerdrRuntime {
@@ -269,14 +275,23 @@ func (r *HerdrRuntime) Prompt(ctx context.Context, target, message string) error
 }
 
 func (r *HerdrRuntime) PromptForProvider(ctx context.Context, target, message, providerKind string) error {
-	if err := r.Prompt(ctx, target, message); err != nil || providerKind != "cursor" {
+	if r.Runtime == nil {
+		return errors.New("Herdr runtime is required")
+	}
+	agent, err := r.Runtime.Prompt(ctx, target, message)
+	if err != nil || providerKind != "cursor" {
 		return err
+	}
+	if cursorPromptConfirmed(agent) {
+		return nil
 	}
 	// Cursor can render Herdr's bracketed-paste text while dropping the delayed
 	// synthetic Enter during TUI startup. Retry empty Enter at bounded intervals
-	// until Herdr observes a non-idle Cursor state. Empty Enter is a no-op after
-	// the original prompt has already started.
-	for _, delay := range []time.Duration{500 * time.Millisecond, 1500 * time.Millisecond, 3 * time.Second, 5 * time.Second} {
+	// until Herdr observes a verifiable active or terminal Cursor state. Empty
+	// Enter is a no-op after the original prompt has already started. An idle
+	// response alone is not transport confirmation: it previously made a prompt
+	// that Cursor never accepted look successful to the scheduler.
+	for _, delay := range r.cursorPromptRetryDelays() {
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -289,24 +304,81 @@ func (r *HerdrRuntime) PromptForProvider(ctx context.Context, target, message, p
 		if err := r.Runtime.SendKeys(ctx, target, []string{"enter"}); err != nil {
 			return err
 		}
-		settle := time.NewTimer(250 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			if !settle.Stop() {
-				<-settle.C
-			}
-			return ctx.Err()
-		case <-settle.C:
-		}
-		agent, err := r.Runtime.GetAgent(ctx, target)
+		agent, err = r.waitForCursorPromptTransition(ctx, target)
 		if err != nil {
 			return err
 		}
-		if agent.AgentStatus != "idle" {
+		if cursorPromptConfirmed(agent) {
 			return nil
 		}
 	}
-	return nil
+	return r.unconfirmedCursorPromptError(ctx, target, agent)
+}
+
+func (r *HerdrRuntime) cursorPromptRetryDelays() []time.Duration {
+	if r.CursorPromptRetryDelays != nil {
+		return r.CursorPromptRetryDelays
+	}
+	return []time.Duration{500 * time.Millisecond, 1500 * time.Millisecond, 3 * time.Second, 5 * time.Second}
+}
+
+func (r *HerdrRuntime) cursorPromptTransitionTimeout() time.Duration {
+	if r.CursorPromptTransitionTimeout != 0 {
+		return r.CursorPromptTransitionTimeout
+	}
+	return 3 * time.Second
+}
+
+// waitForCursorPromptTransition waits only for the lifecycle transition that
+// follows one synthetic Enter. Cursor can emit beforeSubmitPrompt shortly
+// after the key reaches its TUI, after a single immediate agent.get still
+// reports idle. This is not a relaxed completion rule: it returns once the
+// bounded window expires with the final observation, and callers still accept
+// only working, blocked, or done as proof of delivery.
+func (r *HerdrRuntime) waitForCursorPromptTransition(ctx context.Context, target string) (herdr.Agent, error) {
+	transitionCtx, cancel := context.WithTimeout(ctx, r.cursorPromptTransitionTimeout())
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var last herdr.Agent
+	for {
+		agent, err := r.Runtime.GetAgent(transitionCtx, target)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && last.PaneID != "" {
+				return last, nil
+			}
+			return herdr.Agent{}, err
+		}
+		last = agent
+		if cursorPromptConfirmed(agent) {
+			return agent, nil
+		}
+		select {
+		case <-ctx.Done():
+			return herdr.Agent{}, ctx.Err()
+		case <-transitionCtx.Done():
+			return last, nil
+		case <-ticker.C:
+		}
+	}
+}
+
+// cursorPromptConfirmed deliberately accepts only lifecycle states which
+// demonstrate that the prompt reached Cursor: active execution or an observed
+// terminal completion. In particular, idle and unknown are not evidence that a
+// text paste was submitted.
+func cursorPromptConfirmed(agent herdr.Agent) bool {
+	return agent.AgentStatus == "working" || agent.AgentStatus == "blocked" || agent.AgentStatus == "done"
+}
+
+func (r *HerdrRuntime) unconfirmedCursorPromptError(ctx context.Context, target string, agent herdr.Agent) error {
+	pane, paneErr := r.Runtime.GetPane(ctx, target)
+	transcript, transcriptErr := r.Runtime.ReadPane(ctx, target)
+	if len(transcript) > 8192 {
+		transcript = transcript[len(transcript)-8192:]
+	}
+	return fmt.Errorf("Cursor prompt delivery was not confirmed: agent_status=%q interactive_ready=%t pane_id=%q pane_revision=%d pane_status=%q pane_error=%v pane_text=%q pane_read_error=%v",
+		agent.AgentStatus, agent.InteractiveReady, target, pane.Revision, pane.AgentStatus, paneErr, transcript, transcriptErr)
 }
 
 func (r *HerdrRuntime) SendAgentKeys(ctx context.Context, target string, keys []string) error {

@@ -26,12 +26,13 @@ import (
 const realProviderStallBudget = 2 * time.Minute
 
 type realProviderSpec struct {
-	name       string
-	agents     map[string]configuration.Agent
-	modelEnv   string
-	keepEnv    string
-	requestTag string
-	simple     bool
+	name        string
+	agents      map[string]configuration.Agent
+	modelEnv    string
+	keepEnv     string
+	requestTag  string
+	simple      bool
+	promptSmoke bool
 }
 
 func TestRealCodexHotReloadCompletesSimpleOptimization(t *testing.T) {
@@ -60,6 +61,17 @@ func TestRealCursorCompletesDisposableOptimization(t *testing.T) {
 		t.Skip("set PIKA_GO_REAL_CURSOR_INTEGRATION=1 to run the quota-consuming real Cursor matrix")
 	}
 	runRealProviderOptimization(t, realProviderSpec{name: "cursor", agents: matrixAgents("cursor", "cursor", "cursor", "cursor", "cursor"), modelEnv: "PIKA_GO_REAL_CURSOR_MODEL", keepEnv: "PIKA_GO_REAL_CURSOR_KEEP", requestTag: "real-cursor"})
+}
+
+// TestRealCursorPromptDeliverySmoke is intentionally narrower than the
+// credentialed release matrix. It proves that a real Cursor pane accepts the
+// initial operator prompt and becomes observably active before spending quota
+// on the multi-phase lifecycle matrix.
+func TestRealCursorPromptDeliverySmoke(t *testing.T) {
+	if os.Getenv("PIKA_GO_REAL_CURSOR_PROMPT_SMOKE") != "1" {
+		t.Skip("set PIKA_GO_REAL_CURSOR_PROMPT_SMOKE=1 to run the focused real Cursor prompt smoke")
+	}
+	runRealProviderOptimization(t, realProviderSpec{name: "cursor-prompt", agents: matrixAgents("cursor", "cursor", "cursor", "cursor", "cursor"), modelEnv: "PIKA_GO_REAL_CURSOR_MODEL", keepEnv: "PIKA_GO_REAL_CURSOR_KEEP", requestTag: "real-cursor-prompt", promptSmoke: true})
 }
 
 func TestRealMixedProviderCompletesBothAlternatingMatrices(t *testing.T) {
@@ -151,6 +163,9 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 	}
 
 	herdrConfig, herdrState := configureRealCodexHerdr(t, root)
+	if hasAgentKind(spec.agents, "cursor") {
+		linkRealCursorAuthentication(t, filepath.Dir(herdrConfig))
+	}
 	serverCtx, stopServer := context.WithCancel(context.Background())
 	server := exec.CommandContext(serverCtx, herdrBinary, "server")
 	server.Env = replacedEnvironment(map[string]string{
@@ -216,6 +231,11 @@ func runRealProviderOptimization(t *testing.T, spec realProviderSpec) {
 		t.Fatalf("initialize disposable Optimization: %v", err)
 	}
 	promptInitialRealProviderBaseline(t, testCtx, client, pikaSocket, daemon, &serverOutput)
+	if spec.promptSmoke {
+		exerciseRealSchedulerPauseResume(t, testCtx, stateRoot, client, pikaSocket, spec.requestTag)
+		t.Logf("focused real %s prompt smoke observed an active Agent and completed pause/resume", spec.name)
+		return
+	}
 	if !spec.simple {
 		exerciseRealSchedulerPauseResume(t, testCtx, stateRoot, client, pikaSocket, spec.requestTag)
 	}
@@ -605,6 +625,34 @@ func realCursorMCPPath(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return filepath.Join(home, ".cursor", "mcp.json")
+}
+
+// linkRealCursorAuthentication deliberately carries only the pre-existing
+// credential into the disposable XDG config root. Herdr requires that root to
+// avoid colliding with a developer's running server; without this link Cursor
+// enters its interactive login UI and never receives the test prompt.
+func linkRealCursorAuthentication(t *testing.T, destinationConfigHome string) {
+	t.Helper()
+	sourceConfigHome := os.Getenv("XDG_CONFIG_HOME")
+	if sourceConfigHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sourceConfigHome = filepath.Join(home, ".config")
+	}
+	source := filepath.Join(sourceConfigHome, "cursor", "auth.json")
+	info, err := os.Stat(source)
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("real Cursor authentication file is unavailable at %s: %v", source, err)
+	}
+	destinationDir := filepath.Join(destinationConfigHome, "cursor")
+	if err := os.MkdirAll(destinationDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(source, filepath.Join(destinationDir, "auth.json")); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func realCursorHooksPath(t *testing.T) string {

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const CursorCandidateVersion = "2026.08.25-3e8eec8"
+const CursorCandidateVersion = "2026.08.31-4057e58"
 
 const (
 	cursorVersionProbeTimeout        = 15 * time.Second

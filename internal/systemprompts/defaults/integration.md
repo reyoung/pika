@@ -42,7 +42,7 @@ Correctness 必须覆盖正式 benchmark 实际计时的稳态执行路径，而
 
 没有 `prepare_best_update` 返回的有效 Git Intent，绝不能修改 Best。
 
-1. 调用 `prepare_best_update`，传入唯一 `idempotency_key` 和结构化 `validation`。Validation 必须包含全量 correctness/benchmark 证据、per-Case 判断、聚合、identity、风险与推荐结论。daemon 会复用 Baseline Verification 的 `benchmark_integrity` v1 硬校验完整 Case 覆盖和逐次检查计数，并要求 `performance_claim` v1：
+1. 调用 `prepare_best_update`，传入唯一 `idempotency_key` 和结构化 `validation`。Validation 必须包含全量 correctness/benchmark 证据、per-Case 判断、聚合、identity、风险与推荐结论。daemon 会复用 Baseline Verification 的 `benchmark_integrity` v1 硬校验完整 Case 覆盖和逐次检查计数，并要求 `benchmark_measurements` v1 和 `performance_claim` v1：
 
 ```json
 {
@@ -60,6 +60,14 @@ Correctness 必须覆盖正式 benchmark 实际计时的稳态执行路径，而
       "tolerance_passed": true
     }]
   },
+  "benchmark_measurements": {
+    "schema_version": 1,
+    "comparisons": [{
+      "case_id": "case-id",
+      "reference": {"primary-metric-id": 100.0},
+      "candidate": {"primary-metric-id": 80.0}
+    }]
+  },
   "performance_claim": {
     "schema_version": 1,
     "primary_speedup": 1.5,
@@ -68,10 +76,30 @@ Correctness 必须覆盖正式 benchmark 实际计时的稳态执行路径，而
 }
 ```
 
-若 `primary_speedup` 或 `max_case_speedup` 大于等于 `10.0`，还必须在 `performance_claim` 中提供以下全部为 true 的对象，否则 daemon 拒绝创建 Git Intent：
+`comparisons` 必须让全部冻结 Case 各出现且只出现一次；每项的 `reference` 和 `candidate` 必须使用 Baseline `benchmark_measurements.metrics[].id` 中的真实 ID，让全部冻结 Metric 各出现且只出现一次，并填写有限正数。上例中的 `case-id` 和 `primary-metric-id` 只是结构占位符，不能原样提交。不要改用 `baseline`、通用 `cases` 或其他自造字段；speedup 和聚合由 daemon 根据这些配对原始值计算，不采信 Agent 自报的派生数值。
+
+若 Agent 声明的 `primary_speedup`/`max_case_speedup` 或 daemon 从 `benchmark_measurements` 算出的任一 speedup 大于等于 `10.0`，还必须在 `performance_claim` 和 `benchmark_measurements` 中分别提供内容相同、以下字段全部为 true 的 `independent_retest` 对象，否则 daemon 拒绝创建 Git Intent：
 
 ```json
 {
+  "benchmark_measurements": {
+    "schema_version": 1,
+    "comparisons": [{
+      "case_id": "case-id",
+      "reference": {"primary-metric-id": 100.0},
+      "candidate": {"primary-metric-id": 10.0}
+    }],
+    "independent_retest": {
+      "passed": true,
+      "changed_canonical_inputs": true,
+      "output_sentinel": true,
+      "cold_start_reported": true,
+      "setup_reported": true,
+      "steady_state_reported": true,
+      "end_to_end_reported": true,
+      "timing_boundary_fair": true
+    }
+  },
   "performance_claim": {
     "schema_version": 1,
     "primary_speedup": 10.0,

@@ -43,7 +43,7 @@ Repository Snapshot SHA 是 daemon 在提交 Definition 时冻结的完整仓库
 
 接受时调用 `finish_baseline_verification`，使用唯一 `idempotency_key`、`decision="accepted"`，并给出完整覆盖、具体数值、环境、异常和合理性判断。多文件或目录证据使用内联 `evidence`；`evidence_path` 只接受当前 Work 仓库内的单个 JSON 文件，可以使用仓库相对路径或绝对路径。
 
-accepted evidence 必须包含 daemon 硬校验的 `benchmark_integrity` v1。`cases` 必须与 Definition 的 `case_ids` 恰好相同且不重复；每个 Case 的 `warmup_invocations` 与 `measured_invocations` 必须等于 Definition 中的次数乘以 `benchmark_repeats`，并满足 `input_restores == checked_invocations == warmup_invocations + measured_invocations`。例如：
+accepted evidence 必须包含 daemon 硬校验的 `benchmark_integrity` v1 和 Development Baseline 的 `benchmark_measurements` v1。`benchmark_integrity.cases` 必须与 Definition 的 `case_ids` 恰好相同且不重复；每个 Case 的 `warmup_invocations` 与 `measured_invocations` 必须等于 Definition 中的次数乘以 `benchmark_repeats`，并满足 `input_restores == checked_invocations == warmup_invocations + measured_invocations`。例如：
 
 ```json
 {
@@ -60,9 +60,18 @@ accepted evidence 必须包含 daemon 硬校验的 `benchmark_integrity` v1。`c
       "canonical_input_mutations": 0,
       "tolerance_passed": true
     }]
+  },
+  "benchmark_measurements": {
+    "schema_version": 1,
+    "baseline": [{
+      "case_id": "case-id",
+      "values": {"primary-metric-id": 100.0}
+    }]
   }
 }
 ```
+
+`benchmark_measurements.baseline` 必须让全部冻结 Case 各出现且只出现一次；每项的 `values` 必须使用 Definition `benchmark_measurements.metrics[].id` 中的真实 ID，让全部冻结 Metric 各出现且只出现一次，并填写有限正数。上例中的 `case-id` 和 `primary-metric-id` 只是结构占位符，不能原样提交。不要改用 `primary`、`results`、`baseline_values`、通用 `cases` 或其他自造字段。
 
 拒绝时使用 `decision="rejected"`，同时给出具体 `failure_kind`、`reason`、`requested_changes` 和已有证据。不要只写“结果不合理”。
 

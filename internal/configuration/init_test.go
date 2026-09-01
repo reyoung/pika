@@ -198,7 +198,7 @@ func TestPrepareInitCursorOnlyDoesNotRequireOrInstallCodex(t *testing.T) {
 	}
 	resolved, _ := filepath.EvalSymlinks(repository)
 	cursor := filepath.Join(t.TempDir(), "cursor-agent")
-	if err := os.WriteFile(cursor, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.25-3e8eec8; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
+	if err := os.WriteFile(cursor, []byte("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2026.08.31-4057e58; exit 0; fi\nif [ \"$1\" = status ]; then echo 'Logged in as test@example.com'; exit 0; fi\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	candidate := strings.ReplaceAll(configuration.RenderDefaults(resolved), `kind = "codex"`, `kind = "cursor"`)

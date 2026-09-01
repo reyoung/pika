@@ -282,7 +282,7 @@ Init also installs one static `pika_go` stdio entry in `~/.cursor/mcp.json`. Cur
 
 Except for the first Baseline Draft, the wrapper supplies the kickoff as Cursor's positional initial prompt, avoiding a startup `agent.prompt` race. With a positional prompt, Pika accepts Herdr's successful `agent.start` response without waiting for `interactive_ready` because Cursor may already be executing useful work. The first Baseline Draft omits that argument, waits for the interactive TUI, and leaves the initial User Turn to the operator. The Session grant is active in both `starting` and `running`, and the binding promotes it to `running` from the launch observation. Later Follow-up delivery uses Herdr `agent.prompt`; the adapter retries the pinned TUI's dropped synthetic Enter without terminal scraping. The `pane.updated` and provider-reported user message caused by Pika's own prompt are ignored while the request is durably `dispatching`, so delivery cannot supersede itself; user/observed activity during generation still supersedes the request.
 
-The pinned Cursor Adapter probes exact version `2026.08.25-3e8eec8` and authenticated `status`. Any mismatch is a startup/init failure. Runtime never falls back to Codex.
+The pinned Cursor Adapter probes exact version `2026.08.31-4057e58` and authenticated `status`. Any mismatch is a startup/init failure. Runtime never falls back to Codex.
 
 ## 10. Follow-up delivery ordering
 
