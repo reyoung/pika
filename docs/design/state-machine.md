@@ -133,7 +133,7 @@ stateDiagram-v2
     Closed --> [*]
 ```
 
-Herdr `working`, `blocked`, `idle`, `done`, and `unknown` are observations attached to these states, not substitutes for them.
+Herdr `working`, `blocked`, `idle`, `done`, and `unknown` are observations attached to these states, not substitutes for them. If a provider fails to emit the expected Turn stop, a settled-idle (`idle` or background-tab `done`) observation can make a still-running Turn Follow-up eligible only after provider activity has been quiet for the configured inactivity timeout; a settled-idle observation itself is not activity. After delivery, same-turn requalification waits until `max(last provider activity, latest delivered_at) + inactivity timeout`, while a genuinely unresponsive target remains retryable.
 
 A daemon process restart treats every persisted `Preparing`, `Running`, or `IdleIncomplete` Session as `Lost`, even if Herdr still reports its process. The old Pika-owned pane is closed through an ordered runtime effect before the replacement start effect. Provider-native session identity is journal evidence only and is never a resume key.
 
@@ -142,11 +142,11 @@ A daemon process restart treats every persisted `Preparing`, `Running`, or `Idle
 ```mermaid
 stateDiagram-v2
     [*] --> WaitingForInactivity: target turn stopped incomplete
-    WaitingForInactivity --> WaitingForInactivity: pane.updated resets deadline
+    WaitingForInactivity --> WaitingForInactivity: non-settled-idle pane.updated resets deadline
     WaitingForInactivity --> Generating: deadline reached
     WaitingForInactivity --> Cancelled: target terminal or user prompt observed
     Generating --> Ready: submit_followup_message
-    Generating --> Superseded: pane.updated
+    Generating --> Superseded: non-settled-idle pane.updated
     Generating --> Retrying: generator ended without terminal MCP
     Retrying --> Generating: fresh generator session
     Ready --> Delivered: agent.prompt accepted

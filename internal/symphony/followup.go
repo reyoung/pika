@@ -5,10 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
-const paneActivityNotice = "Follow-up inactivity uses best-effort Herdr pane.updated observations; it is not strict human-input detection."
+const paneActivityNotice = "Follow-up inactivity uses provider activity and best-effort Herdr pane.updated observations; settled-idle (idle or done) pane observations do not reset the deadline."
 
 var defaultFollowUpPolicies = map[WorkRole]FollowUpPolicy{
 	RoleBaselineVerification: {MaxMessages: 8, GeneratorMaxAttempts: 3},
@@ -58,6 +59,11 @@ func followUpEligible(role WorkRole) bool {
 }
 
 func (e *Engine) armFollowUpTx(ctx context.Context, tx *sql.Tx, workID, agentSessionID, providerTurnID string, role WorkRole, observed time.Time) error {
+	observed = observed.UTC()
+	return e.armFollowUpAtTx(ctx, tx, workID, agentSessionID, providerTurnID, role, observed, observed.Add(e.followUpInactivity), "")
+}
+
+func (e *Engine) armFollowUpAtTx(ctx context.Context, tx *sql.Tx, workID, agentSessionID, providerTurnID string, role WorkRole, createdAt, due time.Time, activitySource string) error {
 	if !followUpEligible(role) || workID == "" || agentSessionID == "" || providerTurnID == "" {
 		return nil
 	}
@@ -80,8 +86,8 @@ func (e *Engine) armFollowUpTx(ctx context.Context, tx *sql.Tx, workID, agentSes
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(request_sequence), 0) + 1 FROM followup_requests WHERE target_work_id = ?`, workID).Scan(&sequence); err != nil {
 		return fmt.Errorf("allocate Follow-up sequence: %w", err)
 	}
-	now := observed.UTC()
-	due := now.Add(e.followUpInactivity)
+	now := createdAt.UTC()
+	due = due.UTC()
 	policy := e.followUpPolicies[role]
 	var delivered int64
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM followup_requests WHERE target_work_id = ?
@@ -91,23 +97,105 @@ func (e *Engine) armFollowUpTx(ctx context.Context, tx *sql.Tx, workID, agentSes
 	if delivered >= policy.MaxMessages {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO followup_requests
 			(id, target_work_id, target_agent_session_id, target_provider_turn_id, target_role, request_sequence,
-			 status, inactivity_timeout_ms, due_at, target_max_messages, generator_max_attempts, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, 'target_exhausted', ?, ?, ?, ?, ?, ?)`, e.newID(), workID, agentSessionID,
+			 status, inactivity_timeout_ms, due_at, activity_source, target_max_messages, generator_max_attempts, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, 'target_exhausted', ?, ?, NULLIF(?, ''), ?, ?, ?, ?)`, e.newID(), workID, agentSessionID,
 			providerTurnID, role, sequence, e.followUpInactivity.Milliseconds(), now.Format(time.RFC3339Nano),
-			policy.MaxMessages, policy.GeneratorMaxAttempts, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+			activitySource, policy.MaxMessages, policy.GeneratorMaxAttempts, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 			return fmt.Errorf("record Follow-up target exhaustion: %w", err)
 		}
 		return e.exhaustFollowUpTargetTx(ctx, tx, workID, role, "target_message_budget_exhausted")
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO followup_requests
 		(id, target_work_id, target_agent_session_id, target_provider_turn_id, target_role, request_sequence,
-		 status, inactivity_timeout_ms, due_at, target_max_messages, generator_max_attempts, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?, ?)`, e.newID(), workID, agentSessionID, providerTurnID, role,
-		sequence, e.followUpInactivity.Milliseconds(), due.Format(time.RFC3339Nano), policy.MaxMessages, policy.GeneratorMaxAttempts,
+		 status, inactivity_timeout_ms, due_at, activity_source, target_max_messages, generator_max_attempts, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?, ?, NULLIF(?, ''), ?, ?, ?, ?)`, e.newID(), workID, agentSessionID, providerTurnID, role,
+		sequence, e.followUpInactivity.Milliseconds(), due.Format(time.RFC3339Nano), activitySource, policy.MaxMessages, policy.GeneratorMaxAttempts,
 		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("arm Follow-up Request: %w", err)
 	}
 	return nil
+}
+
+// ObserveAgentStatus consumes Herdr's current Agent state. An idle or done Agent is
+// only Follow-up eligible when its current provider Turn is still running and
+// provider activity has gone quiet for the configured timeout. Pane
+// observations from a settled-idle Agent never reset a waiting Follow-up deadline.
+func (e *Engine) ObserveAgentStatus(ctx context.Context, paneID, agentStatus string) error {
+	if paneID == "" {
+		return errors.New("pane ID is required")
+	}
+	settledIdle := strings.EqualFold(agentStatus, "idle") || strings.EqualFold(agentStatus, "done")
+	if !settledIdle {
+		return e.ObservePaneActivity(ctx, paneID)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin idle Agent observation: %w", err)
+	}
+	defer tx.Rollback()
+	var workID, sessionID string
+	var role WorkRole
+	var workStatus WorkStatus
+	err = tx.QueryRowContext(ctx, `SELECT s.work_id, s.id, s.role, w.status
+		FROM pane_bindings b JOIN agent_sessions s ON s.id = b.agent_session_id
+		JOIN works w ON w.id = s.work_id
+		WHERE b.pane_id = ? AND b.current = 1 AND s.status IN ('starting', 'running')`, paneID).
+		Scan(&workID, &sessionID, &role, &workStatus)
+	if errors.Is(err, sql.ErrNoRows) || !followUpEligible(role) || workStatus != WorkPending {
+		return tx.Commit()
+	}
+	if err != nil {
+		return fmt.Errorf("resolve idle Agent target: %w", err)
+	}
+	var providerSessionID, providerTurnID string
+	err = tx.QueryRowContext(ctx, `SELECT provider_session_id, provider_turn_id
+		FROM conversation_turns WHERE agent_session_id = ? AND status = 'running'
+		ORDER BY started_at DESC, id DESC LIMIT 1`, sessionID).Scan(&providerSessionID, &providerTurnID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return tx.Commit()
+	}
+	if err != nil {
+		return fmt.Errorf("read idle Agent provider Turn: %w", err)
+	}
+	var lastActivityText sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(observed_at) FROM provider_events
+		WHERE agent_session_id = ? AND provider_session_id = ? AND provider_turn_id = ?`,
+		sessionID, providerSessionID, providerTurnID).Scan(&lastActivityText); err != nil {
+		return fmt.Errorf("read idle Agent provider activity: %w", err)
+	}
+	if !lastActivityText.Valid {
+		return tx.Commit()
+	}
+	lastActivity, err := time.Parse(time.RFC3339Nano, lastActivityText.String)
+	if err != nil {
+		return domainError(CodeStateCorrupt, "provider activity timestamp is invalid")
+	}
+	var latestDeliveryText sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(delivered_at) FROM followup_requests
+		WHERE target_work_id = ? AND delivered_at IS NOT NULL`, workID).Scan(&latestDeliveryText); err != nil {
+		return fmt.Errorf("read latest Follow-up delivery: %w", err)
+	}
+	anchor := lastActivity
+	if latestDeliveryText.Valid {
+		latestDelivery, parseErr := time.Parse(time.RFC3339Nano, latestDeliveryText.String)
+		if parseErr != nil {
+			return domainError(CodeStateCorrupt, "Follow-up delivery timestamp is invalid")
+		}
+		if latestDelivery.After(anchor) {
+			anchor = latestDelivery
+		}
+	}
+	now := e.now().UTC()
+	if now.Before(anchor.Add(e.followUpInactivity)) {
+		return tx.Commit()
+	}
+	if err := e.armFollowUpAtTx(ctx, tx, workID, sessionID, providerTurnID, role, now, anchor.Add(e.followUpInactivity), "provider_activity_timeout"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (e *Engine) exhaustFollowUpTargetTx(ctx context.Context, tx *sql.Tx, workID string, role WorkRole, reason string) error {

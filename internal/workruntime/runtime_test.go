@@ -237,6 +237,216 @@ func TestReconcileTracksMoveButNeverCompletesWorkFromAgentStatus(t *testing.T) {
 	}
 }
 
+func TestReconcileSettledIdleProviderTurnArmsFollowUpAfterProviderSilence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, 9, 1, 2, 0, 0, 0, time.UTC)
+	engine, err := symphony.Open(ctx, filepath.Join(t.TempDir(), "pika.db"), symphony.Options{
+		Now: func() time.Time { return now }, FollowUpInactivity: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	if _, err := engine.Apply(ctx, symphony.Init{
+		Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: "optimization-1", Repository: "/repo",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Apply(ctx, symphony.SubmitBaselineDefinition{
+		Meta: symphony.CommandMeta{RequestID: "submit-baseline"}, WorkID: view.Works[0].ID, Definition: testcontract.Definition(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target symphony.WorkView
+	for _, work := range view.Works {
+		if work.Role == symphony.RoleBaselineVerification && work.Status == symphony.WorkPending {
+			target = work
+			break
+		}
+	}
+	if target.ID == "" {
+		t.Fatal("baseline verification target was not created")
+	}
+	session := symphony.AgentSession{
+		ID: "target-session", WorkID: target.ID, Generation: target.Generation, Role: target.Role,
+		AgentKind: "codex", AgentName: "target-agent", Status: symphony.AgentSessionStarting,
+	}
+	if err := engine.EnsureAgentSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.BindPane(ctx, session.ID, symphony.PaneBinding{
+		WorkspaceID: "workspace", TabID: "tab", PaneID: "target-pane", TerminalID: "target-terminal",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.IngestProviderEvent(ctx, "codex", session.ID, json.RawMessage(
+		`{"session_id":"codex-target","turn_id":"turn-1","hook_event_name":"UserPromptSubmit","prompt":"continue"}`,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := engine.ConversationJournal(ctx, target.ID)
+	if err != nil || len(journal.Turns) != 1 || journal.Turns[0].Status != "running" {
+		t.Fatalf("provider turn = %+v err=%v", journal.Turns, err)
+	}
+
+	now = now.Add(2 * time.Minute)
+	if err := (workruntime.Reconciler{Store: engine}).ReconcileSnapshot(ctx, workruntime.Snapshot{Sessions: []workruntime.Observation{{
+		AgentName: "target-agent", AgentKind: "codex", WorkspaceID: "workspace", TabID: "tab", PaneID: "target-pane", TerminalID: "target-terminal", Status: "done",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.FollowUps) != 1 || view.FollowUps[0].Status != "waiting" {
+		t.Fatalf("idle provider turn did not arm Follow-up: %+v", view.FollowUps)
+	}
+	request := view.FollowUps[0]
+	if request.ActivitySource != "provider_activity_timeout" || request.DueAt == "" {
+		t.Fatalf("idle timeout provenance = %+v", request)
+	}
+
+	now = now.Add(30 * time.Second)
+	if err := (workruntime.Reconciler{Store: engine}).ReconcileSnapshot(ctx, workruntime.Snapshot{Sessions: []workruntime.Observation{{
+		AgentName: "target-agent", AgentKind: "codex", WorkspaceID: "workspace", TabID: "tab", PaneID: "target-pane", TerminalID: "target-terminal", Status: "done",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.FollowUps) != 1 || view.FollowUps[0].Status != "waiting" || view.FollowUps[0].DueAt != request.DueAt {
+		t.Fatalf("idle pane observation reset Follow-up deadline: %+v", view.FollowUps)
+	}
+	if promoted, err := engine.PromoteDueFollowUps(ctx); err != nil || !promoted {
+		t.Fatalf("promote timed-out Follow-up: promoted=%v err=%v", promoted, err)
+	}
+	if promoted, err := engine.PromoteDueFollowUps(ctx); err != nil || promoted {
+		t.Fatalf("promoted duplicate Follow-up: promoted=%v err=%v", promoted, err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = view.FollowUps[0]
+	var generator symphony.WorkView
+	for _, work := range view.Works {
+		if work.ID == request.GeneratorWorkID {
+			generator = work
+			break
+		}
+	}
+	if generator.ID == "" {
+		t.Fatalf("Follow-up generator was not created: %+v", request)
+	}
+	generatorSession := symphony.AgentSession{
+		ID: "follow-up-generator", WorkID: generator.ID, Generation: generator.Generation, Role: generator.Role,
+		AgentKind: "codex", AgentName: "follow-up-generator", Status: symphony.AgentSessionStarting,
+	}
+	if err := engine.EnsureAgentSession(ctx, generatorSession); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.BindPane(ctx, generatorSession.ID, symphony.PaneBinding{
+		WorkspaceID: "workspace", TabID: "generator-tab", PaneID: "generator-pane", TerminalID: "generator-terminal",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	grant, err := engine.MintAgentGrant(ctx, generatorSession.ID, toolapp.CatalogForRole(generator.Role), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (toolapp.Application{Store: engine}).Invoke(ctx, grant.Token, toolapp.Call{
+		Name:      "submit_followup_message",
+		Arguments: json.RawMessage(`{"idempotency_key":"idle-timeout-message","message":"continue the incomplete work"}`),
+	})
+	if err != nil || !result.Terminal {
+		t.Fatalf("submit Follow-up: result=%+v err=%v", result, err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil || len(view.FollowUps) != 1 || view.FollowUps[0].Status != "ready" {
+		t.Fatalf("ready Follow-up = %+v err=%v", view.FollowUps, err)
+	}
+	var delivery symphony.RuntimeEffect
+	effects, err := engine.PendingEffects(ctx, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, effect := range effects {
+		if effect.Type == "followup.deliver_requested" {
+			delivery = effect
+			break
+		}
+	}
+	if delivery.ID == "" {
+		t.Fatal("Follow-up delivery effect was not created")
+	}
+	runtime := &fakeRuntime{}
+	if err := (workruntime.Sink{Store: engine, Runtime: runtime}).Dispatch(ctx, delivery); err != nil {
+		t.Fatal(err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil || view.FollowUps[0].Status != "delivered" || len(runtime.prompts) != 1 {
+		t.Fatalf("delivered Follow-up = %+v prompts=%+v err=%v", view.FollowUps, runtime.prompts, err)
+	}
+	expectedRetryDueAt := now.Add(time.Minute).Format(time.RFC3339Nano)
+
+	// The first delivery may emit pane updates before the target's next
+	// UserPromptSubmit arrives. Re-observing the same settled Agent must not
+	// arm a second request for the already-delivered provider Turn.
+	now = now.Add(30 * time.Second)
+	if err := (workruntime.Reconciler{Store: engine, Runtime: runtime}).ReconcileSnapshot(ctx, workruntime.Snapshot{Sessions: []workruntime.Observation{{
+		AgentName: "target-agent", AgentKind: "codex", WorkspaceID: "workspace", TabID: "tab", PaneID: "target-pane", TerminalID: "target-terminal", Status: "done",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil || len(view.FollowUps) != 1 || view.FollowUps[0].Status != "delivered" {
+		t.Fatalf("duplicate settled-idle arm after delivery: followups=%+v err=%v", view.FollowUps, err)
+	}
+	if promoted, err := engine.PromoteDueFollowUps(ctx); err != nil || promoted {
+		t.Fatalf("started duplicate Follow-up generator before delivery quiet period: promoted=%v err=%v", promoted, err)
+	}
+	generatorCount := 0
+	for _, work := range view.Works {
+		if work.Role == symphony.RoleFollowUp {
+			generatorCount++
+		}
+	}
+	if generatorCount != 1 || len(runtime.prompts) != 1 {
+		t.Fatalf("duplicate Follow-up generator after delivery: generators=%d prompts=%d", generatorCount, len(runtime.prompts))
+	}
+
+	// A genuinely unresponsive target remains eligible after the delivery-based
+	// quiet period; the delivery timestamp delays, but does not disable, retry.
+	now = now.Add(5 * time.Minute)
+	if err := (workruntime.Reconciler{Store: engine, Runtime: runtime}).ReconcileSnapshot(ctx, workruntime.Snapshot{Sessions: []workruntime.Observation{{
+		AgentName: "target-agent", AgentKind: "codex", WorkspaceID: "workspace", TabID: "tab", PaneID: "target-pane", TerminalID: "target-terminal", Status: "done",
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	view, err = engine.Inspect(ctx, symphony.Status{})
+	if err != nil || len(view.FollowUps) != 2 || view.FollowUps[1].Status != "waiting" {
+		t.Fatalf("settled-idle retry was disabled: followups=%+v err=%v", view.FollowUps, err)
+	}
+	if view.FollowUps[1].DueAt != expectedRetryDueAt {
+		t.Fatalf("retry due_at did not use latest delivery anchor: got=%s want=%s", view.FollowUps[1].DueAt, expectedRetryDueAt)
+	}
+	if promoted, err := engine.PromoteDueFollowUps(ctx); err != nil || !promoted {
+		t.Fatalf("promote settled-idle retry: promoted=%v err=%v", promoted, err)
+	}
+}
+
 func TestReconcileLostPaneEnqueuesOrderedCloseAndFreshSession(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

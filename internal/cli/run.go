@@ -760,7 +760,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				if payload.Pane.PaneID == "" {
 					return errors.New("decode Herdr pane.updated: pane_id is required")
 				}
-				return engine.ObservePaneActivity(eventCtx, payload.Pane.PaneID)
+				return engine.ObserveAgentStatus(eventCtx, payload.Pane.PaneID, payload.Pane.AgentStatus)
 			}
 			runtimeAdapter.LaunchDir = runtimeRoot
 			pane, err := herdr.NewRuntime(client).GetPane(ctx, symphonyPane)

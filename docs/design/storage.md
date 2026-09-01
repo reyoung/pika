@@ -124,7 +124,7 @@ Definition identity and repository identity are not conflated. Submission stores
 
 ## 6. Follow-up activity data
 
-For each eligible stopped Turn, persist:
+For each eligible stopped Turn, or provider-silent Turn whose bound Herdr Agent is observed settled-idle (`idle` or background-tab `done`) after the inactivity timeout, persist:
 
 ```text
 target_session_id
@@ -132,10 +132,10 @@ target_turn_id
 last_observed_pane_activity_at
 inactivity_timeout_ms
 followup_due_at
-activity_source = pane.updated
+activity_source = pane.updated | provider_activity_timeout
 ```
 
-Because `pane.updated` is approximate, the database stores the observed source rather than asserting that a human acted. A status/debug view can therefore explain why a deadline moved.
+Because `pane.updated` is approximate, the database stores the observed source rather than asserting that a human acted. A settled-idle pane observation never moves a deadline; a `provider_activity_timeout` source records recovery from a missing provider Stop. After delivery, same-turn requalification uses `max(last provider activity, latest delivered_at) + inactivity timeout`. A status/debug view can therefore explain why a deadline moved or was recovered.
 
 ## 7. Security and retention
 

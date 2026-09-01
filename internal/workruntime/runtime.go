@@ -79,6 +79,7 @@ type Store interface {
 	RuntimeWork(context.Context, string) (symphony.RuntimeWork, error)
 	EnsureAgentSession(context.Context, symphony.AgentSession) error
 	BindPane(context.Context, string, symphony.PaneBinding) error
+	ObserveAgentStatus(context.Context, string, string) error
 	CurrentAgentSession(context.Context, string) (symphony.AgentSession, symphony.PaneBinding, bool, error)
 	MarkAgentSessionEnded(context.Context, string, symphony.AgentSessionStatus) error
 	ActiveAgentSessions(context.Context) ([]symphony.ActiveAgentSession, error)
@@ -644,6 +645,9 @@ func (r Reconciler) ReconcileSnapshot(ctx context.Context, snapshot Snapshot) er
 			}); err != nil {
 				return err
 			}
+			if err := r.Store.ObserveAgentStatus(ctx, observation.PaneID, observation.Status); err != nil {
+				return fmt.Errorf("observe Agent status for pane %s: %w", observation.PaneID, err)
+			}
 			continue
 		}
 		if record.Session.Status == symphony.AgentSessionStarting {
@@ -671,6 +675,9 @@ func (r Reconciler) ReconcileSnapshot(ctx context.Context, snapshot Snapshot) er
 				WorkspaceID: observation.WorkspaceID, TabID: observation.TabID, PaneID: observation.PaneID, TerminalID: observation.TerminalID,
 			}); err != nil {
 				return err
+			}
+			if err := r.Store.ObserveAgentStatus(ctx, observation.PaneID, observation.Status); err != nil {
+				return fmt.Errorf("observe Agent status for pane %s: %w", observation.PaneID, err)
 			}
 			continue
 		}

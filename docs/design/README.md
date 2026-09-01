@@ -44,5 +44,5 @@ Pika-Go is a Herdr plugin for long-running automatic optimization. A visible `pi
 6. Baseline, Baseline Verification, and Integration are single-concurrency; Iteration has one concurrent slot per independently configured Agent entry; Integration is FIFO.
 7. Follow-up is a dedicated Role with one Agent Configuration, multiple target-specific System Prompts, and matching user instruction overlays.
 8. Codex hooks capture session/turn/message/tool data. All observable shell and tool output is kept in SQLite.
-9. Follow-up inactivity defaults to five minutes and is reset from best-effort Herdr pane activity. `pane.updated` is deliberately accepted despite not being a strict human-input signal.
+9. Follow-up inactivity defaults to five minutes. A provider Stop arms the deadline directly; when a provider fails to emit Stop, a settled-idle Herdr Agent (`idle` or background-tab `done`) with a still-running, provider-silent Turn arms it after the same timeout. Non-settled-idle `pane.updated` remains a best-effort activity reset, while settled-idle observations never reset the deadline. After delivery, same-turn eligibility is anchored at `max(last provider activity, latest delivered_at) + inactivity timeout`.
 10. Graceful daemon shutdown drains existing Agents and never kills them merely to make shutdown finish.
