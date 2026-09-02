@@ -126,6 +126,40 @@ func TestHerdrRuntimeClassifiesLaunchSubmissionBoundaryAndCleansOwnedPane(t *tes
 	})
 }
 
+func TestHerdrRuntimeRetriesTransientBusyPreferredPane(t *testing.T) {
+	repository := t.TempDir()
+	socket, done := startHerdrRPCScript(t, []herdrRPCStep{
+		{method: "pane.rename", result: map[string]any{}},
+		{method: "pane.send_input", result: map[string]any{}},
+		{method: "pane.get", result: map[string]any{"pane": map[string]any{
+			"pane_id": "w1:p1", "foreground_cwd": repository,
+		}}},
+		{method: "agent.start", apiErr: &herdr.APIError{Code: "agent_pane_busy", Message: "pane is not an available shell"}},
+		{method: "agent.start", result: map[string]any{"agent": map[string]any{
+			"name": "pika-baseline", "agent": "codex", "agent_status": "working",
+			"interactive_ready": false, "pane_id": "w1:p1", "terminal_id": "term-1",
+			"workspace_id": "w1", "tab_id": "w1:t1",
+		}}},
+	})
+	submissions := 0
+	runtime := workruntime.NewHerdrRuntime(herdr.NewClient(socket), "w1:p2")
+	runtime.AgentStartBusyRetryDelays = []time.Duration{0}
+	observation, err := runtime.Start(context.Background(), workruntime.StartSpec{
+		AgentName: "pika-baseline", AgentKind: "codex", PreferredPaneID: "w1:p1",
+		Repository: repository, PaneLabel: "Baseline", ReturnOnLaunch: true,
+		BeforeSubmit: func(context.Context) error { submissions++; return nil },
+	})
+	if err != nil {
+		t.Fatalf("start agent after transient pane busy response: %v", err)
+	}
+	if observation.PaneID != "w1:p1" || submissions != 1 {
+		t.Fatalf("observation=%+v submissions=%d", observation, submissions)
+	}
+	if scriptErr := <-done; scriptErr != nil {
+		t.Fatal(scriptErr)
+	}
+}
+
 func TestHerdrRuntimePreparesPreferredPaneInAssignedRepository(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "pika-herdr-pane-name-")
 	if err != nil {

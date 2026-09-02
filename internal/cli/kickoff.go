@@ -240,6 +240,12 @@ func runKickOffMode(ctx context.Context, args []string, input io.Reader, stdout,
 			return 2
 		}
 	}
+	if !existedBeforeLease {
+		if err := mutationLease.DowngradeToShared(); err != nil {
+			_, _ = fmt.Fprintf(stderr, "kick-off: downgrade Workspace mutation lease after creation: %v\n", err)
+			return 1
+		}
+	}
 	authorizeWorkspace := func() bool {
 		if _, _, authorizeErr := authorizeWorkspaceDirectMutation(workspace.Root); authorizeErr != nil {
 			_, _ = fmt.Fprintf(stderr, "kick-off: direct Workspace mutation rejected: %v\n", authorizeErr)

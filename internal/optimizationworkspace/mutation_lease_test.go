@@ -170,3 +170,31 @@ func TestMutationLeaseBlocksWriterUntilMaintenanceStateIsDurable(t *testing.T) {
 		t.Fatal("writer did not acquire after maintenance activation")
 	}
 }
+
+func TestMutationLeaseDowngradeAllowsWritersAndStillBlocksMaintenance(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "workspace")
+	creator, err := optimizationworkspace.AcquireExclusiveMutationLease(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = creator.Close() })
+
+	if err := creator.DowngradeToShared(); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := optimizationworkspace.AcquireSharedMutationLease(context.Background(), root)
+	if err != nil {
+		t.Fatalf("shared writer did not cross downgraded creation lease: %v", err)
+	}
+	defer writer.Close()
+
+	maintenanceCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	maintenance, err := optimizationworkspace.AcquireExclusiveMutationLease(maintenanceCtx, root)
+	if maintenance != nil {
+		_ = maintenance.Close()
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("exclusive maintenance lease crossed downgraded creation lease: %v", err)
+	}
+}

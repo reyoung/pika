@@ -924,6 +924,8 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 		Params map[string]any
 	}
 	herdrRequests := make(chan herdrRequest, 16)
+	daemonLeaseReady := make(chan struct{})
+	var daemonLeaseErr error
 	herdrDone := make(chan error, 1)
 	go func() {
 		for {
@@ -959,6 +961,20 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 					"root_pane": map[string]any{"pane_id": "w-new:p1", "workspace_id": "w-new", "tab_id": "w-new:t1", "terminal_id": "term-root", "agent_status": "idle", "revision": 1},
 				}
 			case "plugin.pane.open":
+				workspaceRoot, ok := request.Params["cwd"].(string)
+				if !ok || workspaceRoot == "" {
+					_ = connection.Close()
+					herdrDone <- fmt.Errorf("plugin.pane.open cwd = %#v", request.Params["cwd"])
+					return
+				}
+				go func() {
+					lease, leaseErr := optimizationworkspace.AcquireSharedMutationLease(context.Background(), workspaceRoot)
+					daemonLeaseErr = leaseErr
+					if lease != nil {
+						_ = lease.Close()
+					}
+					close(daemonLeaseReady)
+				}()
 				result = map[string]any{"plugin_pane": map[string]any{
 					"plugin_id": "pika-go", "entrypoint": "symphony",
 					"pane": map[string]any{"pane_id": "w-new:p2", "workspace_id": "w-new", "tab_id": "w-new:t1", "terminal_id": "term-daemon", "agent_status": "working", "revision": 1},
@@ -1003,7 +1019,16 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 	})
 	initRequests := make(chan protocol.InitRequest, 1)
 	pikaMux := http.NewServeMux()
-	pikaMux.HandleFunc("GET /v1/health", func(response http.ResponseWriter, _ *http.Request) {
+	pikaMux.HandleFunc("GET /v1/health", func(response http.ResponseWriter, request *http.Request) {
+		select {
+		case <-daemonLeaseReady:
+		case <-request.Context().Done():
+			return
+		}
+		if daemonLeaseErr != nil {
+			http.Error(response, daemonLeaseErr.Error(), http.StatusInternalServerError)
+			return
+		}
 		_ = json.NewEncoder(response).Encode(protocol.Health{Status: "ok", Version: "test", ProtocolVersion: protocol.Version})
 	})
 	pikaMux.HandleFunc("GET /v1/init/options", func(response http.ResponseWriter, _ *http.Request) {
@@ -1039,7 +1064,7 @@ func TestKickOffCreatesWorkspaceStartsDaemonAndInitializesRootPane(t *testing.T)
 	}
 	t.Setenv("HERDR_CONFIG_PATH", herdrConfig)
 	var stdout, stderr bytes.Buffer
-	if code := cli.Run(context.Background(), []string{"kick-off", "--repository", repository}, strings.NewReader("yes\n"), &stdout, &stderr); code != 0 {
+	if code := cli.Run(context.Background(), []string{"kick-off", "--repository", repository, "--timeout", "750ms"}, strings.NewReader("yes\n"), &stdout, &stderr); code != 0 {
 		t.Fatalf("kick-off exit = %d, stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if stderr.Len() != 0 {

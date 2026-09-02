@@ -26,6 +26,10 @@ type HerdrRuntime struct {
 	// CursorPromptTransitionTimeout is an optional test seam for the bounded
 	// post-Enter lifecycle poll. A zero value uses the production timeout.
 	CursorPromptTransitionTimeout time.Duration
+	// AgentStartBusyRetryDelays is an optional test seam for the bounded retry
+	// used while Herdr is returning a freshly prepared pane to its shell. A nil
+	// value uses the production schedule.
+	AgentStartBusyRetryDelays []time.Duration
 }
 
 func NewHerdrRuntime(client *herdr.Client, symphonyPane string) *HerdrRuntime {
@@ -148,12 +152,51 @@ func (r *HerdrRuntime) Start(ctx context.Context, spec StartSpec) (Observation, 
 			return failBeforeSubmit(fmt.Errorf("record agent launch submission: %w", err))
 		}
 	}
-	agent, err := r.Runtime.Start(ctx, herdr.StartSpec{Name: spec.AgentName, Kind: spec.AgentKind, PaneID: paneID, TimeoutMS: timeoutMS, ReturnOnLaunch: spec.ReturnOnLaunch})
+	agent, err := r.startAgentWhenPaneAvailable(ctx, herdr.StartSpec{
+		Name: spec.AgentName, Kind: spec.AgentKind, PaneID: paneID,
+		TimeoutMS: timeoutMS, ReturnOnLaunch: spec.ReturnOnLaunch,
+	})
 	if err != nil {
 		return Observation{}, &LaunchError{Err: err}
 	}
 	observation := observationFromAgent(agent)
 	return observation, nil
+}
+
+func (r *HerdrRuntime) startAgentWhenPaneAvailable(ctx context.Context, spec herdr.StartSpec) (herdr.Agent, error) {
+	agent, err := r.Runtime.Start(ctx, spec)
+	for _, delay := range r.agentStartBusyRetryDelays() {
+		if err == nil || !isAgentPaneBusy(err) {
+			return agent, err
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return herdr.Agent{}, errors.Join(err, ctx.Err())
+		case <-timer.C:
+		}
+		agent, err = r.Runtime.Start(ctx, spec)
+	}
+	return agent, err
+}
+
+func (r *HerdrRuntime) agentStartBusyRetryDelays() []time.Duration {
+	if r.AgentStartBusyRetryDelays != nil {
+		return r.AgentStartBusyRetryDelays
+	}
+	return []time.Duration{
+		25 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond,
+		200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond,
+		1600 * time.Millisecond, 2 * time.Second, 2 * time.Second, 2 * time.Second,
+	}
+}
+
+func isAgentPaneBusy(err error) bool {
+	var apiErr *herdr.APIError
+	return errors.As(err, &apiErr) && apiErr.Code == "agent_pane_busy"
 }
 
 func (r *HerdrRuntime) prepareWorkingDirectory(ctx context.Context, paneID, repository string) error {

@@ -62,6 +62,26 @@ func (lease *MutationLease) ownsExclusive(root string) bool {
 	return err == nil && resolved == lease.root
 }
 
+// DowngradeToShared keeps the lease held while allowing other normal Workspace
+// processes to acquire shared leases. Callers must reauthorize their mutation
+// after this returns because a waiting exclusive lease may win the conversion.
+func (lease *MutationLease) DowngradeToShared() error {
+	if lease == nil || lease.file == nil {
+		return errors.New("workspace mutation lease is not held")
+	}
+	if lease.mode == syscall.LOCK_SH {
+		return nil
+	}
+	if lease.mode != syscall.LOCK_EX {
+		return errors.New("workspace mutation lease has an unsupported mode")
+	}
+	if err := syscall.Flock(int(lease.file.Fd()), syscall.LOCK_SH); err != nil {
+		return fmt.Errorf("downgrade Workspace mutation lease: %w", err)
+	}
+	lease.mode = syscall.LOCK_SH
+	return nil
+}
+
 func (lease *MutationLease) Close() error {
 	if lease == nil || lease.file == nil {
 		return nil
