@@ -5,4 +5,7 @@
 /webui/node_modules/
 /webui/test-results/
 /webui/playwright-report/
+/_build/
+/deps/
+/assets/node_modules/
 *.sock
