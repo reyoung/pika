@@ -38,24 +38,7 @@ func TestCodexModelCatalogUsesOnlyVisibleSupportedChoices(t *testing.T) {
 }
 
 func TestCursorModelCatalogDerivesOnlyLaunchableBaseAndEffortPairs(t *testing.T) {
-	executable := filepath.Join(t.TempDir(), "cursor-agent")
-	script := `#!/bin/sh
-	if [ "$1" = --list-models ]; then
-	  printf '%s\n' \
-	    'Available models' \
-	    'auto - Auto (default)' \
-	    'gpt-5.6-sol-low - GPT-5.6 Sol Low' \
-    'gpt-5.6-sol-high - GPT-5.6 Sol High' \
-    'gpt-5.6-sol-high-fast - GPT-5.6 Sol High Fast' \
-    'gpt-5.5-extra-high - GPT-5.5 Extra High' \
-    'gpt-5.6-terra-medium - GPT-5.6 Terra Medium'
-  exit 0
-fi
-exit 1
-`
-	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	executable := cursorFixtureExecutable(t, "model-catalog")
 	registry, err := provider.NewRegistry(provider.NewCursorAdapter())
 	if err != nil {
 		t.Fatal(err)

@@ -3,6 +3,7 @@ package symphony
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/reyoung/pika-go/internal/candidatepolicy"
@@ -62,6 +63,57 @@ const (
 	WorkCompleted WorkStatus = "completed"
 	WorkCancelled WorkStatus = "cancelled"
 )
+
+type AgentStartIntent string
+
+const (
+	AgentStartInitial         AgentStartIntent = "initial"
+	AgentStartLostReplacement AgentStartIntent = "lost_session_replacement"
+)
+
+type AgentStartRequest struct {
+	EffectID             string
+	WorkID               string
+	Intent               AgentStartIntent
+	PredecessorSessionID string
+}
+
+type AgentStartPayload struct {
+	WorkID               string `json:"work_id"`
+	PreferredPaneID      string `json:"preferred_pane_id,omitempty"`
+	Reason               string `json:"reason,omitempty"`
+	PredecessorSessionID string `json:"predecessor_session_id,omitempty"`
+	LaunchSubmitted      bool   `json:"launch_submitted,omitempty"`
+}
+
+func DecodeAgentStartPayload(payload json.RawMessage) (AgentStartPayload, AgentStartIntent, error) {
+	var decoded AgentStartPayload
+	if err := json.Unmarshal(payload, &decoded); err != nil || decoded.WorkID == "" {
+		return AgentStartPayload{}, "", errors.New("work_id is required")
+	}
+	switch decoded.Reason {
+	case "", "follow_up_due":
+		if decoded.PredecessorSessionID != "" {
+			return AgentStartPayload{}, "", errors.New("initial start must not name a predecessor Session")
+		}
+		return decoded, AgentStartInitial, nil
+	case string(AgentStartLostReplacement):
+		if decoded.PredecessorSessionID == "" {
+			return AgentStartPayload{}, "", errors.New("lost replacement requires predecessor_session_id")
+		}
+		return decoded, AgentStartLostReplacement, nil
+	default:
+		return AgentStartPayload{}, "", fmt.Errorf("unsupported reason %q", decoded.Reason)
+	}
+}
+
+type AgentStartReservation interface {
+	Stage(context.Context, AgentSession) error
+	MarkSubmitted(context.Context) error
+	Submitted() bool
+	Commit(context.Context) error
+	Abort() error
+}
 
 type CommandMeta struct {
 	RequestID        string `json:"request_id"`
@@ -647,8 +699,9 @@ type RuntimeWork struct {
 }
 
 type ActiveAgentSession struct {
-	Session AgentSession `json:"session"`
-	Binding PaneBinding  `json:"binding"`
+	Session         AgentSession `json:"session"`
+	Binding         PaneBinding  `json:"binding"`
+	LaunchSubmitted bool         `json:"launch_submitted,omitempty"`
 }
 
 type AgentGrant struct {

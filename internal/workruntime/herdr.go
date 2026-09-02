@@ -84,28 +84,38 @@ func snapshotFromHerdr(snapshot herdr.Snapshot) Snapshot {
 
 func (r *HerdrRuntime) Start(ctx context.Context, spec StartSpec) (Observation, error) {
 	if r.Runtime == nil {
-		return Observation{}, errors.New("Herdr runtime is required")
+		return Observation{}, &LaunchError{DefinitelyNotSubmitted: true, Err: errors.New("Herdr runtime is required")}
 	}
 	paneID := spec.PreferredPaneID
+	ownedPaneID := ""
+	failBeforeSubmit := func(err error) (Observation, error) {
+		if ownedPaneID != "" {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			err = errors.Join(err, r.Runtime.ClosePane(cleanupCtx, ownedPaneID))
+		}
+		return Observation{}, &LaunchError{DefinitelyNotSubmitted: true, Err: err}
+	}
 	if paneID == "" {
 		if r.SymphonyPane == "" {
-			return Observation{}, errors.New("Symphony pane is required when no preferred pane is supplied")
+			return failBeforeSubmit(errors.New("Symphony pane is required when no preferred pane is supplied"))
 		}
 		var pane herdr.Pane
 		var err error
 		if spec.DedicatedTab {
 			controlPane, getErr := r.Runtime.GetPane(ctx, r.SymphonyPane)
 			if getErr != nil {
-				return Observation{}, fmt.Errorf("resolve Symphony workspace: %w", getErr)
+				return failBeforeSubmit(fmt.Errorf("resolve Symphony workspace: %w", getErr))
 			}
 			pane, err = r.Runtime.CreateTab(ctx, controlPane.WorkspaceID, spec.Repository, spec.TabLabel)
 		} else {
 			pane, err = r.Runtime.SplitPane(ctx, r.SymphonyPane, "down", spec.Repository)
 		}
 		if err != nil {
-			return Observation{}, err
+			return failBeforeSubmit(err)
 		}
 		paneID = pane.PaneID
+		ownedPaneID = paneID
 	}
 	paneLabel := spec.PaneLabel
 	shortID := shortPaneID(paneID)
@@ -116,26 +126,31 @@ func (r *HerdrRuntime) Start(ctx context.Context, spec StartSpec) (Observation, 
 	}
 	if paneLabel != "" {
 		if err := r.Runtime.RenamePane(ctx, paneID, paneLabel); err != nil {
-			return Observation{}, fmt.Errorf("name agent pane %s: %w", paneID, err)
+			return failBeforeSubmit(fmt.Errorf("name agent pane %s: %w", paneID, err))
 		}
 	}
 	if spec.PreferredPaneID != "" {
 		if err := r.prepareWorkingDirectory(ctx, paneID, spec.Repository); err != nil {
-			return Observation{}, err
+			return failBeforeSubmit(err)
 		}
 	}
 	cleanup, err := r.prepareEnvironment(ctx, paneID, spec.Environment)
 	if err != nil {
-		return Observation{}, err
+		return failBeforeSubmit(err)
 	}
 	defer cleanup()
 	var timeoutMS uint64
 	if spec.StartupTimeout > 0 {
 		timeoutMS = uint64(spec.StartupTimeout.Milliseconds())
 	}
+	if spec.BeforeSubmit != nil {
+		if err := spec.BeforeSubmit(ctx); err != nil {
+			return failBeforeSubmit(fmt.Errorf("record agent launch submission: %w", err))
+		}
+	}
 	agent, err := r.Runtime.Start(ctx, herdr.StartSpec{Name: spec.AgentName, Kind: spec.AgentKind, PaneID: paneID, TimeoutMS: timeoutMS, ReturnOnLaunch: spec.ReturnOnLaunch})
 	if err != nil {
-		return Observation{}, err
+		return Observation{}, &LaunchError{Err: err}
 	}
 	observation := observationFromAgent(agent)
 	return observation, nil

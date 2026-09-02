@@ -45,6 +45,9 @@ type Engine struct {
 	now                func() time.Time
 	newID              func() string
 	mu                 sync.Mutex
+	workStartLocksMu   sync.Mutex
+	workStartLocks     map[string]*workStartLock
+	startReservations  map[string]struct{}
 	followUpInactivity time.Duration
 	followUpPolicies   map[WorkRole]FollowUpPolicy
 	applyCheckpoint    func(ApplyCheckpoint, string) error
@@ -298,25 +301,41 @@ func (e *Engine) MarkEffectDispatched(ctx context.Context, id string) error {
 }
 
 func (e *Engine) EnsureAgentSession(ctx context.Context, session AgentSession) error {
+	if err := validateNewAgentSession(session); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return ensureAgentSession(ctx, e.db, session, e.timestamp())
+}
+
+type agentSessionStore interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func validateNewAgentSession(session AgentSession) error {
 	if session.ID == "" || session.WorkID == "" || session.Generation < 1 || session.Role == "" || session.AgentKind == "" || session.AgentName == "" {
 		return errors.New("complete agent session identity is required")
 	}
 	if session.Status != AgentSessionStarting && session.Status != AgentSessionRunning {
 		return errors.New("new agent session must be starting or running")
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	_, err := e.db.ExecContext(ctx, `INSERT INTO agent_sessions
+	return nil
+}
+
+func ensureAgentSession(ctx context.Context, store agentSessionStore, session AgentSession, createdAt string) error {
+	_, err := store.ExecContext(ctx, `INSERT INTO agent_sessions
 		(id, work_id, generation, role, agent_kind, agent_name, provider_version, provider_capabilities_json, status, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?)
 		ON CONFLICT(id) DO NOTHING`, session.ID, session.WorkID, session.Generation, session.Role, session.AgentKind, session.AgentName,
-		session.ProviderVersion, []byte(session.ProviderCapabilities), session.Status, e.timestamp())
+		session.ProviderVersion, []byte(session.ProviderCapabilities), session.Status, createdAt)
 	if err != nil {
 		return fmt.Errorf("ensure agent session: %w", err)
 	}
 	var stored AgentSession
 	var providerVersion sql.NullString
-	if err := e.db.QueryRowContext(ctx, `SELECT id, work_id, generation, role, agent_kind, agent_name,
+	if err := store.QueryRowContext(ctx, `SELECT id, work_id, generation, role, agent_kind, agent_name,
 		COALESCE(provider_capabilities_json, X''), provider_version, status FROM agent_sessions WHERE id = ?`, session.ID).Scan(
 		&stored.ID, &stored.WorkID, &stored.Generation, &stored.Role, &stored.AgentKind, &stored.AgentName,
 		&stored.ProviderCapabilities, &providerVersion, &stored.Status,
@@ -335,6 +354,307 @@ func (e *Engine) EnsureAgentSession(ctx context.Context, session AgentSession) e
 		return domainError(CodeStateCorrupt, "agent session ID is already bound to incompatible status")
 	}
 	return nil
+}
+
+type agentStartReservation struct {
+	engine      *Engine
+	request     AgentStartRequest
+	work        WorkView
+	releaseWork func()
+	session     AgentSession
+	submitted   bool
+	staged      bool
+	finished    bool
+}
+
+func (e *Engine) ReserveAgentStart(ctx context.Context, request AgentStartRequest) (AgentStartReservation, bool, error) {
+	if request.EffectID == "" || request.WorkID == "" {
+		return nil, false, errors.New("start effect and Work IDs are required")
+	}
+	if request.Intent != AgentStartInitial && request.Intent != AgentStartLostReplacement {
+		return nil, false, errors.New("recognized agent start intent is required")
+	}
+	if request.Intent == AgentStartInitial && request.PredecessorSessionID != "" {
+		return nil, false, errors.New("initial start must not name a predecessor Session")
+	}
+	if request.Intent == AgentStartLostReplacement && request.PredecessorSessionID == "" {
+		return nil, false, nil
+	}
+	releaseWork := e.acquireWorkStartLock(request.WorkID)
+	e.mu.Lock()
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		e.mu.Unlock()
+		releaseWork()
+		return nil, false, fmt.Errorf("begin agent start reservation: %w", err)
+	}
+	fail := func(err error) (AgentStartReservation, bool, error) {
+		_ = tx.Rollback()
+		e.mu.Unlock()
+		releaseWork()
+		return nil, false, err
+	}
+	work, payload, eligible, err := validateAgentStartReservation(ctx, tx, request)
+	if err != nil || !eligible {
+		return fail(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		e.mu.Unlock()
+		releaseWork()
+		return nil, false, fmt.Errorf("close agent start reservation read: %w", err)
+	}
+	e.workStartLocksMu.Lock()
+	if e.startReservations == nil {
+		e.startReservations = make(map[string]struct{})
+	}
+	e.startReservations[request.EffectID] = struct{}{}
+	e.workStartLocksMu.Unlock()
+	e.mu.Unlock()
+	releaseReservation := func() {
+		e.workStartLocksMu.Lock()
+		delete(e.startReservations, request.EffectID)
+		e.workStartLocksMu.Unlock()
+		releaseWork()
+	}
+	return &agentStartReservation{
+		engine: e, request: request, work: work, releaseWork: releaseReservation, submitted: payload.LaunchSubmitted,
+	}, true, nil
+}
+
+type workStartLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (e *Engine) acquireWorkStartLock(workID string) func() {
+	e.workStartLocksMu.Lock()
+	if e.workStartLocks == nil {
+		e.workStartLocks = make(map[string]*workStartLock)
+	}
+	lock := e.workStartLocks[workID]
+	if lock == nil {
+		lock = &workStartLock{}
+		e.workStartLocks[workID] = lock
+	}
+	lock.refs++
+	e.workStartLocksMu.Unlock()
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		e.workStartLocksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 && e.workStartLocks[workID] == lock {
+			delete(e.workStartLocks, workID)
+		}
+		e.workStartLocksMu.Unlock()
+	}
+}
+
+func (e *Engine) AgentStartReservationInFlight(sessionID string) bool {
+	e.workStartLocksMu.Lock()
+	defer e.workStartLocksMu.Unlock()
+	_, found := e.startReservations[sessionID]
+	return found
+}
+
+func validateAgentStartReservation(
+	ctx context.Context,
+	tx *sql.Tx,
+	request AgentStartRequest,
+) (WorkView, AgentStartPayload, bool, error) {
+	var effectType, effectStatus string
+	var effectPayload []byte
+	if err := tx.QueryRowContext(ctx, `SELECT effect_type, payload_json, status FROM runtime_outbox
+		WHERE id = ?`, request.EffectID).Scan(&effectType, &effectPayload, &effectStatus); errors.Is(err, sql.ErrNoRows) {
+		return WorkView{}, AgentStartPayload{}, false, domainError(CodeStateCorrupt, "start reservation effect was not found")
+	} else if err != nil {
+		return WorkView{}, AgentStartPayload{}, false, fmt.Errorf("read start reservation effect: %w", err)
+	}
+	durablePayload, durableIntent, err := DecodeAgentStartPayload(effectPayload)
+	if err != nil {
+		return WorkView{}, AgentStartPayload{}, false, domainError(CodeStateCorrupt, "decode durable start effect: "+err.Error())
+	}
+	if effectType != "work.start_requested" || (effectStatus != "pending" && effectStatus != "dispatching") ||
+		durablePayload.WorkID != request.WorkID || durableIntent != request.Intent ||
+		durablePayload.PredecessorSessionID != request.PredecessorSessionID {
+		return WorkView{}, AgentStartPayload{}, false, domainError(CodeStateCorrupt, "start reservation does not match durable effect identity")
+	}
+	var workStatus WorkStatus
+	var generation int64
+	var role WorkRole
+	if err := tx.QueryRowContext(ctx, `SELECT status, generation, role FROM works WHERE id = ?`,
+		request.WorkID).Scan(&workStatus, &generation, &role); errors.Is(err, sql.ErrNoRows) {
+		return WorkView{}, AgentStartPayload{}, false, domainError(CodeWorkNotFound, "work was not found")
+	} else if err != nil {
+		return WorkView{}, AgentStartPayload{}, false, fmt.Errorf("read Work before agent start: %w", err)
+	}
+	if workStatus != WorkPending {
+		return WorkView{}, durablePayload, false, nil
+	}
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_sessions
+		WHERE work_id = ? AND id != ? AND status IN ('starting', 'running')`,
+		request.WorkID, request.EffectID).Scan(&active); err != nil {
+		return WorkView{}, AgentStartPayload{}, false, fmt.Errorf("inspect current agent session before start: %w", err)
+	}
+	if active != 0 {
+		return WorkView{}, durablePayload, false, nil
+	}
+	if request.Intent == AgentStartLostReplacement {
+		var predecessor int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_sessions
+			WHERE id = ? AND work_id = ? AND generation = ? AND role = ? AND status = 'lost'`,
+			request.PredecessorSessionID, request.WorkID, generation, role).Scan(&predecessor); err != nil {
+			return WorkView{}, AgentStartPayload{}, false, fmt.Errorf("inspect exact lost predecessor Session: %w", err)
+		}
+		if predecessor != 1 {
+			return WorkView{}, durablePayload, false, nil
+		}
+	}
+	return WorkView{ID: request.WorkID, Status: workStatus, Generation: generation, Role: role}, durablePayload, true, nil
+}
+
+func (r *agentStartReservation) Stage(ctx context.Context, session AgentSession) error {
+	if r == nil || r.finished {
+		return errors.New("agent start reservation is no longer active")
+	}
+	if r.staged {
+		return errors.New("agent start reservation is already staged")
+	}
+	if session.ID != r.request.EffectID || session.WorkID != r.work.ID ||
+		session.Generation != r.work.Generation || session.Role != r.work.Role {
+		return domainError(CodeStateCorrupt, "agent session does not match reserved start identity")
+	}
+	if err := validateNewAgentSession(session); err != nil {
+		return err
+	}
+	r.engine.mu.Lock()
+	defer r.engine.mu.Unlock()
+	tx, err := r.engine.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin agent start staging: %w", err)
+	}
+	defer tx.Rollback()
+	work, _, eligible, err := validateAgentStartReservation(ctx, tx, r.request)
+	if err != nil {
+		return err
+	}
+	if !eligible || work.ID != r.work.ID || work.Generation != r.work.Generation || work.Role != r.work.Role {
+		return domainError(CodeInvalidTransition, "agent start reservation is no longer eligible")
+	}
+	if err := ensureAgentSession(ctx, tx, session, r.engine.timestamp()); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("stage agent start reservation: %w", err)
+	}
+	r.session = session
+	r.staged = true
+	return nil
+}
+
+func (r *agentStartReservation) MarkSubmitted(ctx context.Context) error {
+	if r == nil || r.finished || !r.staged {
+		return errors.New("staged agent start reservation is required")
+	}
+	if r.submitted {
+		return nil
+	}
+	r.engine.mu.Lock()
+	defer r.engine.mu.Unlock()
+	tx, err := r.engine.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin launch submission record: %w", err)
+	}
+	defer tx.Rollback()
+	_, _, eligible, err := validateAgentStartReservation(ctx, tx, r.request)
+	if err != nil {
+		return err
+	}
+	if !eligible {
+		return domainError(CodeInvalidTransition, "agent start reservation is no longer eligible")
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE runtime_outbox
+		SET payload_json = json_set(payload_json, '$.launch_submitted', json('true'))
+		WHERE id = ? AND status IN ('pending', 'dispatching')`, r.request.EffectID)
+	if err != nil {
+		return fmt.Errorf("record launch submission: %w", err)
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		return domainError(CodeInvalidTransition, "launch effect could not be marked submitted")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit launch submission: %w", err)
+	}
+	r.submitted = true
+	return nil
+}
+
+func (r *agentStartReservation) Submitted() bool {
+	return r != nil && r.submitted
+}
+
+func (r *agentStartReservation) Commit(ctx context.Context) error {
+	if r == nil || r.finished || !r.staged {
+		return errors.New("staged agent start reservation is required")
+	}
+	defer r.release()
+	r.engine.mu.Lock()
+	defer r.engine.mu.Unlock()
+	tx, err := r.engine.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin agent start finalization: %w", err)
+	}
+	defer tx.Rollback()
+	work, payload, eligible, err := validateAgentStartReservation(ctx, tx, r.request)
+	if err != nil {
+		return err
+	}
+	if !eligible || !payload.LaunchSubmitted || work.ID != r.work.ID || work.Generation != r.work.Generation || work.Role != r.work.Role {
+		return domainError(CodeInvalidTransition, "agent start reservation is no longer eligible")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("finalize agent start reservation: %w", err)
+	}
+	return nil
+}
+
+func (r *agentStartReservation) Abort() error {
+	if r == nil || r.finished {
+		return nil
+	}
+	defer r.release()
+	if !r.staged {
+		return nil
+	}
+	r.engine.mu.Lock()
+	defer r.engine.mu.Unlock()
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := r.engine.db.BeginTx(cleanupCtx, nil)
+	if err != nil {
+		return fmt.Errorf("begin agent start abort: %w", err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`DELETE FROM context_snapshots WHERE agent_session_id = ?`,
+		`DELETE FROM session_grants WHERE agent_session_id = ?`,
+		`DELETE FROM instruction_snapshots WHERE agent_session_id = ?`,
+		`DELETE FROM agent_sessions WHERE id = ? AND status = 'starting'`,
+	} {
+		if _, err := tx.ExecContext(cleanupCtx, statement, r.session.ID); err != nil {
+			return fmt.Errorf("abort staged agent start: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit agent start abort: %w", err)
+	}
+	return nil
+}
+
+func (r *agentStartReservation) release() {
+	r.finished = true
+	r.releaseWork()
 }
 
 func (e *Engine) BindPane(ctx context.Context, sessionID string, binding PaneBinding) error {
@@ -705,9 +1025,11 @@ type activeAgentSessionQueryer interface {
 func queryActiveAgentSessions(ctx context.Context, queryer activeAgentSessionQueryer) ([]ActiveAgentSession, error) {
 	rows, err := queryer.QueryContext(ctx, `SELECT s.id, s.work_id, s.generation, s.role, s.agent_kind, s.agent_name,
 		COALESCE(s.provider_version, ''), COALESCE(s.provider_capabilities_json, X''), s.status,
-        b.workspace_id, b.tab_id, b.pane_id, b.terminal_id
+        b.workspace_id, b.tab_id, b.pane_id, b.terminal_id,
+        COALESCE(json_extract(o.payload_json, '$.launch_submitted'), 0)
         FROM agent_sessions s
         LEFT JOIN pane_bindings b ON b.agent_session_id = s.id AND b.current = 1
+        LEFT JOIN runtime_outbox o ON o.id = s.id AND o.effect_type = 'work.start_requested'
         WHERE s.status IN ('starting', 'running') ORDER BY s.created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("read active agent sessions: %w", err)
@@ -722,6 +1044,7 @@ func queryActiveAgentSessions(ctx context.Context, queryer activeAgentSessionQue
 			&record.Session.AgentKind, &record.Session.AgentName, &record.Session.ProviderVersion,
 			&record.Session.ProviderCapabilities, &record.Session.Status,
 			&workspaceID, &tabID, &paneID, &terminalID,
+			&record.LaunchSubmitted,
 		); err != nil {
 			return nil, fmt.Errorf("scan active agent session: %w", err)
 		}
@@ -894,7 +1217,9 @@ func (e *Engine) ReplaceLostAgentSession(ctx context.Context, sessionID string) 
 		}
 	}
 	effectID := e.newID()
-	if err := insertEffect(ctx, tx, effectID, optimizationID, "work.start_requested", mustJSON(map[string]string{"work_id": workID, "reason": "lost_session_replacement"}), e.timestamp()); err != nil {
+	if err := insertEffect(ctx, tx, effectID, optimizationID, "work.start_requested", mustJSON(map[string]string{
+		"work_id": workID, "reason": "lost_session_replacement", "predecessor_session_id": sessionID,
+	}), e.timestamp()); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(); err != nil {
@@ -942,6 +1267,10 @@ func (e *Engine) Apply(ctx context.Context, command Command) (Receipt, error) {
 		return Receipt{}, domainError(CodeInvalidCommand, err.Error())
 	}
 
+	if workID := commandTargetWorkID(command); workID != "" {
+		releaseWork := e.acquireWorkStartLock(workID)
+		defer releaseWork()
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	tx, err := e.db.BeginTx(ctx, nil)
@@ -1014,6 +1343,33 @@ func (e *Engine) Apply(ctx context.Context, command Command) (Receipt, error) {
 		}
 	}
 	return receipt, nil
+}
+
+func commandTargetWorkID(command Command) string {
+	switch typed := command.(type) {
+	case SubmitBaselineDefinition:
+		return typed.WorkID
+	case FinishBaselineVerification:
+		return typed.WorkID
+	case FinishDiagnosis:
+		return typed.WorkID
+	case RecordIterationExperiment:
+		return typed.WorkID
+	case FinishIteration:
+		return typed.WorkID
+	case PrepareBestUpdate:
+		return typed.WorkID
+	case FinishIntegration:
+		return typed.WorkID
+	case SubmitFollowUpMessage:
+		return typed.WorkID
+	case BackOff:
+		return typed.WorkID
+	case CancelWork:
+		return typed.WorkID
+	default:
+		return ""
+	}
 }
 
 func (e *Engine) Replay(ctx context.Context, command Command) (Receipt, bool, error) {

@@ -4,15 +4,127 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/reyoung/pika-go/internal/herdr"
 	"github.com/reyoung/pika-go/internal/workruntime"
 )
+
+type herdrRPCStep struct {
+	method string
+	result map[string]any
+	apiErr *herdr.APIError
+	drop   bool
+}
+
+func startHerdrRPCScript(t *testing.T, steps []herdrRPCStep) (string, <-chan error) {
+	t.Helper()
+	directory := t.TempDir()
+	listener, err := net.Listen("unix", filepath.Join(directory, "herdr.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	done := make(chan error, 1)
+	go func() {
+		for _, step := range steps {
+			connection, err := listener.Accept()
+			if err != nil {
+				done <- err
+				return
+			}
+			line, err := bufio.NewReader(connection).ReadBytes('\n')
+			if err != nil {
+				_ = connection.Close()
+				done <- err
+				return
+			}
+			var request struct {
+				ID     string `json:"id"`
+				Method string `json:"method"`
+			}
+			if err := json.Unmarshal(line, &request); err != nil {
+				_ = connection.Close()
+				done <- err
+				return
+			}
+			if request.Method != step.method {
+				_ = connection.Close()
+				done <- &fixtureMethodError{want: step.method, got: request.Method}
+				return
+			}
+			if step.drop {
+				_ = connection.Close()
+				continue
+			}
+			response := map[string]any{"id": request.ID, "result": step.result}
+			if step.apiErr != nil {
+				delete(response, "result")
+				response["error"] = step.apiErr
+			}
+			err = json.NewEncoder(connection).Encode(response)
+			_ = connection.Close()
+			if err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	return listener.Addr().String(), done
+}
+
+func TestHerdrRuntimeClassifiesLaunchSubmissionBoundaryAndCleansOwnedPane(t *testing.T) {
+	t.Run("deterministic pre-RPC failure", func(t *testing.T) {
+		socket, done := startHerdrRPCScript(t, []herdrRPCStep{
+			{method: "pane.split", result: map[string]any{"pane": map[string]any{"pane_id": "w1:p9"}}},
+			{method: "pane.rename", apiErr: &herdr.APIError{Code: "rename_failed", Message: "injected"}},
+			{method: "pane.close", result: map[string]any{}},
+		})
+		submitted := false
+		runtime := workruntime.NewHerdrRuntime(herdr.NewClient(socket), "w1:p1")
+		_, err := runtime.Start(context.Background(), workruntime.StartSpec{
+			AgentName: "pika-test", AgentKind: "codex", Repository: "/repo", PaneLabel: "Test",
+			BeforeSubmit: func(context.Context) error { submitted = true; return nil },
+		})
+		if err == nil || !workruntime.LaunchDefinitelyNotSubmitted(err) || submitted {
+			t.Fatalf("pre-RPC outcome submitted=%v err=%v", submitted, err)
+		}
+		if scriptErr := <-done; scriptErr != nil {
+			t.Fatal(scriptErr)
+		}
+	})
+
+	t.Run("post-RPC response loss", func(t *testing.T) {
+		socket, done := startHerdrRPCScript(t, []herdrRPCStep{
+			{method: "pane.split", result: map[string]any{"pane": map[string]any{"pane_id": "w1:p9"}}},
+			{method: "pane.rename", result: map[string]any{}},
+			{method: "agent.start", drop: true},
+		})
+		submitted := false
+		runtime := workruntime.NewHerdrRuntime(herdr.NewClient(socket), "w1:p1")
+		_, err := runtime.Start(context.Background(), workruntime.StartSpec{
+			AgentName: "pika-test", AgentKind: "codex", Repository: "/repo", PaneLabel: "Test",
+			BeforeSubmit: func(context.Context) error { submitted = true; return nil },
+		})
+		if err == nil || workruntime.LaunchDefinitelyNotSubmitted(err) || !submitted {
+			t.Fatalf("post-RPC outcome submitted=%v err=%v", submitted, err)
+		}
+		if !errors.Is(err, io.EOF) && !strings.Contains(err.Error(), "read Herdr response") {
+			t.Fatalf("unexpected response-loss error: %v", err)
+		}
+		if scriptErr := <-done; scriptErr != nil {
+			t.Fatal(scriptErr)
+		}
+	})
+}
 
 func TestHerdrRuntimePreparesPreferredPaneInAssignedRepository(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "pika-herdr-pane-name-")

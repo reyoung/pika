@@ -39,7 +39,13 @@ type Preparer struct {
 	Providers       *provider.Registry
 }
 
-func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, work symphony.RuntimeWork) (workruntime.Preparation, error) {
+func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, work symphony.RuntimeWork) (result workruntime.Preparation, resultErr error) {
+	contextDirectory := ""
+	defer func() {
+		if resultErr != nil && contextDirectory != "" {
+			resultErr = errors.Join(resultErr, os.RemoveAll(contextDirectory))
+		}
+	}()
 	if p.Store == nil || p.InstructionRoot == "" || p.ContextsRoot == "" {
 		return workruntime.Preparation{}, errors.New("activation store, instruction root, and contexts root are required")
 	}
@@ -92,6 +98,7 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 	if err != nil {
 		return workruntime.Preparation{}, fmt.Errorf("materialize Agent Session Context Bundle: %w", err)
 	}
+	contextDirectory = filepath.Dir(bundle.ContextPath)
 	contextSchema, messageSchema, err := contextbundle.SchemasForVersion(bundle.SchemaVersion)
 	if err != nil {
 		return workruntime.Preparation{}, err
@@ -179,7 +186,17 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 	if launch.HandlesInitialPrompt {
 		kickoff = ""
 	}
-	return workruntime.Preparation{Prompt: kickoff, Environment: launch.Environment, EphemeralPath: launch.EphemeralPath, StartupTimeout: launch.StartupTimeout, ReturnOnLaunch: launch.ReturnOnLaunch, Cleanup: launch.Cleanup}, nil
+	cleanup := func() error {
+		var providerErr error
+		if launch.Cleanup != nil {
+			providerErr = launch.Cleanup()
+		}
+		return errors.Join(providerErr, os.RemoveAll(contextDirectory))
+	}
+	return workruntime.Preparation{
+		Prompt: kickoff, Environment: launch.Environment, EphemeralPath: launch.EphemeralPath,
+		StartupTimeout: launch.StartupTimeout, ReturnOnLaunch: launch.ReturnOnLaunch, Cleanup: cleanup,
+	}, nil
 }
 
 func agentConfigRole(role symphony.WorkRole) string {

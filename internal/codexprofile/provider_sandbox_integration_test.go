@@ -14,12 +14,9 @@ import (
 
 func TestCodexAndCursorDefaultToYoloWhileCursorSandboxRemainsConfigurable(t *testing.T) {
 	root := t.TempDir()
-	recorder := filepath.Join(root, "record-argv")
-	if err := os.WriteFile(recorder, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	pikaExecutable := filepath.Join(root, "pika-go")
-	if err := os.WriteFile(pikaExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	recorder := providerFixtureExecutable(t, "provider-argv-recorder")
+	pikaExecutable, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
 

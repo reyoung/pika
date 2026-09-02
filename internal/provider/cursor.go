@@ -1,10 +1,12 @@
 package provider
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -240,7 +242,11 @@ func (adapter CursorAdapter) PrepareSession(_ context.Context, activation Sessio
 			return Launch{}, err
 		}
 	}
-	if err := writeProviderFile(filepath.Join(adapter.options.InstanceBin, "cursor-agent"), []byte(renderCursorWrapper(adapter.options.Executable)), 0o700); err != nil {
+	err := ensureProviderSymlink(
+		filepath.Join(adapter.options.InstanceBin, "cursor-agent"),
+		adapter.options.PikaExecutable,
+	)
+	if err != nil {
 		return Launch{}, err
 	}
 	environment := make(map[string]string, len(activation.Environment)+6)
@@ -264,6 +270,7 @@ func (adapter CursorAdapter) PrepareSession(_ context.Context, activation Sessio
 	}
 	environment["PIKA_CURSOR_SYSTEM_PROMPT_PATH"] = filepath.Join(sessionDir, "system-prompt.md")
 	environment["PIKA_GO_EXECUTABLE"] = adapter.options.PikaExecutable
+	environment["PIKA_CURSOR_EXECUTABLE"] = adapter.options.Executable
 	return Launch{AgentKind: "cursor", Environment: environment, EphemeralPath: sessionDir, StartupTimeout: 2 * time.Minute, HandlesInitialPrompt: handlesInitialPrompt, ReturnOnLaunch: handlesInitialPrompt, Cleanup: func() error {
 		return CleanupCursorSession(adapter.options.RuntimeRoot, activation.AgentSessionID)
 	}}, nil
@@ -339,29 +346,6 @@ func cursorArgsTerminator(args []string) string {
 	return "\n"
 }
 
-func renderCursorWrapper(cursorExecutable string) string {
-	return "#!/bin/sh\n" +
-		"# Managed by pika-go for this instance.\n" +
-		"export HERDR_AGENT=cursor\n" +
-		"for pika_arg in \"$@\"; do\n" +
-		"  case \"$pika_arg\" in --resume|--resume=*|--continue|resume|ls) echo 'pika-go: native Cursor resume is disabled' >&2; exit 64;; esac\n" +
-		"done\n" +
-		": \"${PIKA_CURSOR_ARGS_FILE:?}\" \"${PIKA_CURSOR_WORKSPACE:?}\" \"${PIKA_CURSOR_MODEL:?}\"\n" +
-		"pika_cursor_sandbox_policy=\n" +
-		"while IFS= read -r pika_arg || [ -n \"$pika_arg\" ]; do\n" +
-		"  case \"$pika_arg\" in --yolo|--sandbox|--sandbox=*) pika_cursor_sandbox_policy=explicit;; esac\n" +
-		"  set -- \"$@\" \"$pika_arg\"\n" +
-		"done < \"$PIKA_CURSOR_ARGS_FILE\"\n" +
-		"if [ -z \"$pika_cursor_sandbox_policy\" ]; then\n" +
-		"  set -- \"$@\" --yolo\n" +
-		"fi\n" +
-		"set -- \"$@\" --workspace \"$PIKA_CURSOR_WORKSPACE\" --model \"$PIKA_CURSOR_MODEL\"\n" +
-		"if [ -n \"${PIKA_CURSOR_INITIAL_PROMPT:-}\" ]; then\n" +
-		"  set -- \"$@\" \"$PIKA_CURSOR_INITIAL_PROMPT\"\n" +
-		"fi\n" +
-		"exec " + shellQuote(cursorExecutable) + " \"$@\"\n"
-}
-
 func writeProviderFile(path string, contents []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create provider file directory: %w", err)
@@ -375,9 +359,6 @@ func writeProviderFile(path string, contents []byte, mode os.FileMode) error {
 		_ = temporary.Close()
 		_ = os.Remove(temporaryPath)
 	}()
-	if err := temporary.Chmod(mode); err != nil {
-		return err
-	}
 	if _, err := temporary.Write(contents); err != nil {
 		return err
 	}
@@ -387,14 +368,110 @@ func writeProviderFile(path string, contents []byte, mode os.FileMode) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
+	// Never mark an inode executable while it still has a writable descriptor.
+	// Linux rejects exec with ETXTBSY if publication races a lingering writer.
+	if err := os.Chmod(temporaryPath, mode); err != nil {
+		return err
+	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("commit provider file %s: %w", path, err)
 	}
 	return nil
 }
 
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+func ensureProviderSymlink(path, target string) error {
+	if existing, err := os.Readlink(path); err == nil && existing == target {
+		return nil
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".pika-provider-link-*")
+	if err != nil {
+		return fmt.Errorf("reserve provider symlink: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(temporaryPath); err != nil {
+		return err
+	}
+	defer os.Remove(temporaryPath)
+	if err := os.Symlink(target, temporaryPath); err != nil {
+		return fmt.Errorf("create provider symlink: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("commit provider symlink %s: %w", path, err)
+	}
+	return nil
+}
+
+func RunCursorWrapper(arguments []string, environment []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	values := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		if separator := strings.IndexByte(entry, '='); separator >= 0 {
+			values[entry[:separator]] = entry[separator+1:]
+		}
+	}
+	for _, argument := range arguments {
+		if argument == "--resume" || strings.HasPrefix(argument, "--resume=") ||
+			argument == "--continue" || argument == "resume" || argument == "ls" {
+			fmt.Fprintln(stderr, "pika-go: native Cursor resume is disabled")
+			return 64
+		}
+	}
+	argsPath, workspace, model, executable := values["PIKA_CURSOR_ARGS_FILE"], values["PIKA_CURSOR_WORKSPACE"], values["PIKA_CURSOR_MODEL"], values["PIKA_CURSOR_EXECUTABLE"]
+	if argsPath == "" || workspace == "" || model == "" || executable == "" {
+		fmt.Fprintln(stderr, "pika-go: incomplete Cursor launch environment")
+		return 64
+	}
+	file, err := os.Open(argsPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	scanner := bufio.NewScanner(file)
+	launchArguments := append([]string{}, arguments...)
+	explicitSandbox := false
+	for scanner.Scan() {
+		argument := scanner.Text()
+		if argument == "--yolo" || argument == "--sandbox" || strings.HasPrefix(argument, "--sandbox=") {
+			explicitSandbox = true
+		}
+		launchArguments = append(launchArguments, argument)
+	}
+	closeErr := file.Close()
+	if err := errors.Join(scanner.Err(), closeErr); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if !explicitSandbox {
+		launchArguments = append(launchArguments, "--yolo")
+	}
+	launchArguments = append(launchArguments, "--workspace", workspace, "--model", model)
+	if prompt := values["PIKA_CURSOR_INITIAL_PROMPT"]; prompt != "" {
+		launchArguments = append(launchArguments, prompt)
+	}
+	command := exec.Command(executable, launchArguments...)
+	command.Env = replaceEnvironmentValue(environment, "HERDR_AGENT", "cursor")
+	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
+	if err := command.Run(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			return exit.ExitCode()
+		}
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return 0
+}
+
+func replaceEnvironmentValue(environment []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, prefix) {
+			result = append(result, entry)
+		}
+	}
+	return append(result, prefix+value)
 }
 
 type cursorHookEnvelope struct {

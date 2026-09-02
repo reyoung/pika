@@ -42,6 +42,20 @@ type StartSpec struct {
 	Environment      map[string]string
 	StartupTimeout   time.Duration
 	ReturnOnLaunch   bool
+	BeforeSubmit     func(context.Context) error
+}
+
+type LaunchError struct {
+	DefinitelyNotSubmitted bool
+	Err                    error
+}
+
+func (e *LaunchError) Error() string { return e.Err.Error() }
+func (e *LaunchError) Unwrap() error { return e.Err }
+
+func LaunchDefinitelyNotSubmitted(err error) bool {
+	var launchErr *LaunchError
+	return errors.As(err, &launchErr) && launchErr.DefinitelyNotSubmitted
 }
 
 type Preparation struct {
@@ -83,7 +97,7 @@ type AgentKeySender interface {
 
 type Store interface {
 	RuntimeWork(context.Context, string) (symphony.RuntimeWork, error)
-	EnsureAgentSession(context.Context, symphony.AgentSession) error
+	ReserveAgentStart(context.Context, symphony.AgentStartRequest) (symphony.AgentStartReservation, bool, error)
 	BindPane(context.Context, string, symphony.PaneBinding) error
 	ObserveAgentStatus(context.Context, string, string) error
 	CurrentAgentSession(context.Context, string) (symphony.AgentSession, symphony.PaneBinding, bool, error)
@@ -420,24 +434,30 @@ func waitForDeliveryAgent(ctx context.Context, runtime Runtime, agentName, termi
 	}
 }
 
-func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
-	var payload struct {
-		WorkID          string `json:"work_id"`
-		PreferredPaneID string `json:"preferred_pane_id"`
-	}
-	if err := json.Unmarshal(effect.Payload, &payload); err != nil || payload.WorkID == "" {
-		return fmt.Errorf("decode start effect %s: work_id is required", effect.ID)
+func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) (resultErr error) {
+	payload, intent, err := symphony.DecodeAgentStartPayload(effect.Payload)
+	if err != nil {
+		return fmt.Errorf("decode start effect %s: %w", effect.ID, err)
 	}
 	work, err := s.Store.RuntimeWork(ctx, payload.WorkID)
 	if err != nil {
 		return err
 	}
-	if s.WorkspacePreparer != nil {
-		work, err = s.WorkspacePreparer.PrepareWork(ctx, work)
-		if err != nil {
-			return fmt.Errorf("prepare Work workspace %s: %w", payload.WorkID, err)
-		}
+	if work.Work.Status != symphony.WorkPending {
+		return nil
 	}
+	reservation, eligible, err := s.Store.ReserveAgentStart(ctx, symphony.AgentStartRequest{
+		EffectID: effect.ID, WorkID: payload.WorkID, Intent: intent, PredecessorSessionID: payload.PredecessorSessionID,
+	})
+	if err != nil {
+		return err
+	}
+	if !eligible {
+		return nil
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, reservation.Abort())
+	}()
 	kind := s.AgentKind
 	if kind == "" {
 		kind = "codex"
@@ -479,22 +499,49 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		ProviderCapabilities: capabilitiesJSON,
 		Status:               symphony.AgentSessionStarting,
 	}
-	if err := s.Store.EnsureAgentSession(ctx, session); err != nil {
+	if err := reservation.Stage(ctx, session); err != nil {
 		return err
+	}
+	if s.WorkspacePreparer != nil {
+		work, err = s.WorkspacePreparer.PrepareWork(ctx, work)
+		if err != nil {
+			return fmt.Errorf("prepare Work workspace %s: %w", payload.WorkID, err)
+		}
 	}
 	snapshot, err := s.Runtime.Snapshot(ctx)
 	if err != nil {
 		return fmt.Errorf("snapshot runtime before start: %w", err)
 	}
 	if observation, found := findObservation(snapshot, session.AgentName, ""); found {
-		return s.bind(ctx, session.ID, observation)
+		if !reservation.Submitted() {
+			if err := reservation.MarkSubmitted(context.WithoutCancel(ctx)); err != nil {
+				return err
+			}
+		}
+		if bindErr := s.bind(ctx, session.ID, observation); bindErr != nil {
+			return errors.Join(bindErr, reservation.Commit(context.WithoutCancel(ctx)))
+		}
+		return reservation.Commit(ctx)
+	}
+	if reservation.Submitted() {
+		if err := reservation.Commit(context.WithoutCancel(ctx)); err != nil {
+			return err
+		}
+		return errors.New("agent launch was previously submitted and is awaiting runtime reconciliation")
 	}
 	var preparation Preparation
+	cleanupPreparation := false
+	defer func() {
+		if cleanupPreparation && preparation.Cleanup != nil {
+			resultErr = errors.Join(resultErr, preparation.Cleanup())
+		}
+	}()
 	if s.Preparer != nil {
 		preparation, err = s.Preparer.Prepare(ctx, session, work)
 		if err != nil {
 			return fmt.Errorf("prepare agent session %s: %w", session.ID, err)
 		}
+		cleanupPreparation = true
 	}
 	observation, err := s.Runtime.Start(ctx, StartSpec{
 		AgentName:        session.AgentName,
@@ -508,11 +555,33 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) error {
 		Environment:      preparation.Environment,
 		StartupTimeout:   preparation.StartupTimeout,
 		ReturnOnLaunch:   preparation.ReturnOnLaunch,
+		BeforeSubmit:     reservation.MarkSubmitted,
 	})
 	if err != nil {
+		if LaunchDefinitelyNotSubmitted(err) {
+			return fmt.Errorf("start agent session %s: %w", session.ID, err)
+		}
+		cleanupPreparation = false
+		if !reservation.Submitted() {
+			if markErr := reservation.MarkSubmitted(context.WithoutCancel(ctx)); markErr != nil {
+				return errors.Join(fmt.Errorf("start agent session %s: %w", session.ID, err), markErr)
+			}
+		}
+		if commitErr := reservation.Commit(context.WithoutCancel(ctx)); commitErr != nil {
+			return errors.Join(fmt.Errorf("start agent session %s: %w", session.ID, err), commitErr)
+		}
 		return fmt.Errorf("start agent session %s: %w", session.ID, err)
 	}
-	if err := s.bind(ctx, session.ID, observation); err != nil {
+	cleanupPreparation = false
+	if !reservation.Submitted() {
+		if err := reservation.MarkSubmitted(context.WithoutCancel(ctx)); err != nil {
+			return err
+		}
+	}
+	if bindErr := s.bind(ctx, session.ID, observation); bindErr != nil {
+		return errors.Join(bindErr, reservation.Commit(context.WithoutCancel(ctx)))
+	}
+	if err := reservation.Commit(context.WithoutCancel(ctx)); err != nil {
 		return err
 	}
 	if preparation.Prompt != "" {
@@ -721,6 +790,10 @@ type Reconciler struct {
 	ProviderRuntimeRoot string
 }
 
+type agentStartReservationObserver interface {
+	AgentStartReservationInFlight(string) bool
+}
+
 func (r Reconciler) Reconcile(ctx context.Context) error {
 	if r.Store == nil || r.Runtime == nil {
 		return errors.New("work runtime store and adapter are required")
@@ -756,7 +829,11 @@ func (r Reconciler) ReconcileSnapshot(ctx context.Context, snapshot Snapshot) er
 			}
 			continue
 		}
-		if record.Session.Status == symphony.AgentSessionStarting {
+		if observer, ok := r.Store.(agentStartReservationObserver); ok &&
+			observer.AgentStartReservationInFlight(record.Session.ID) {
+			continue
+		}
+		if record.Session.Status == symphony.AgentSessionStarting && !record.LaunchSubmitted {
 			continue
 		}
 		delay := r.LossConfirmation
@@ -785,6 +862,10 @@ func (r Reconciler) ReconcileSnapshot(ctx context.Context, snapshot Snapshot) er
 			if err := r.Store.ObserveAgentStatus(ctx, observation.PaneID, observation.Status); err != nil {
 				return fmt.Errorf("observe Agent status for pane %s: %w", observation.PaneID, err)
 			}
+			continue
+		}
+		if observer, ok := r.Store.(agentStartReservationObserver); ok &&
+			observer.AgentStartReservationInFlight(record.Session.ID) {
 			continue
 		}
 		work, err := r.Store.RuntimeWork(ctx, record.Session.WorkID)

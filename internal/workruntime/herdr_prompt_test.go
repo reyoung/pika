@@ -166,7 +166,11 @@ func TestHerdrRuntimeRejectsUnconfirmedIdleCursorPromptWithPaneDiagnostics(t *te
 	defer cancel()
 	runtime := workruntime.NewHerdrRuntime(herdr.NewClient(listener.Addr().String()), "w1:p1")
 	runtime.CursorPromptRetryDelays = []time.Duration{0}
-	runtime.CursorPromptTransitionTimeout = time.Millisecond
+	// Leave enough time for the first Unix-socket round trip under the race
+	// detector, while still expiring before the 100 ms transition poll. The
+	// previous 1 ms budget could time out in DialContext before this fixture had
+	// a chance to return its deliberately idle Agent observation.
+	runtime.CursorPromptTransitionTimeout = 50 * time.Millisecond
 	err = runtime.PromptForProvider(ctx, "w1:p2", "continue", "cursor")
 	if err == nil {
 		t.Fatal("idle Cursor prompt unexpectedly counted as delivered")
