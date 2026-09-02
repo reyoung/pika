@@ -43,7 +43,7 @@ func (e *Engine) applyFinishDiagnosis(ctx context.Context, tx *sql.Tx, command F
 	if err != nil {
 		return Receipt{}, err
 	}
-	if optimization.FlowVersion != FlowVersion2 {
+	if optimization.FlowVersion < FlowVersion2 {
 		return Receipt{}, domainError(CodeInvalidTransition, "Diagnosis is a flow v2 operation")
 	}
 	if err := checkExpectedRevision(command.Meta.ExpectedRevision, optimization.Revision); err != nil {

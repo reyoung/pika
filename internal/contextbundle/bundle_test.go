@@ -482,6 +482,77 @@ func TestMaterializeFlowV2ArtifactFirstContextWithZeroHistory(t *testing.T) {
 	}
 }
 
+func TestMaterializeFlowV3BenchmarkContextAndSchema(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	t.Cleanup(func() {
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err == nil {
+				_ = os.Chmod(path, 0o700)
+			}
+			return nil
+		})
+	})
+	snapshot := prepareContextSkillSnapshot(t, root)
+	cycle := symphony.ExperimentCycleView{
+		ID: "cycle", AttemptID: "attempt", IterationRound: 1, Sequence: 1,
+		CheckpointSHA: strings.Repeat("a", 40), BaselineDefinitionSHA: strings.Repeat("b", 64),
+		CaseSnapshotSHA: strings.Repeat("c", 64), Status: "benchmark_pending", BenchmarkWorkID: "benchmark-work",
+	}
+	session := symphony.AgentSession{ID: "v3-benchmark-session", WorkID: "benchmark-work", Generation: 1, Role: symphony.RoleBenchmark, AgentKind: "codex", AgentName: "benchmark-agent", Status: symphony.AgentSessionStarting}
+	work := symphony.RuntimeWork{
+		Work:       symphony.WorkView{ID: "benchmark-work", BaselineRevisionID: "baseline", Role: symphony.RoleBenchmark, Status: symphony.WorkPending, Generation: 1, AttemptID: "attempt", IterationRound: 1, ExperimentCycleID: cycle.ID},
+		Repository: "/benchmark", OptimizationRepository: "/repo", OptimizationID: "optimization", OptimizationStatus: symphony.OptimizationOptimizing,
+		OptimizationRevision: 4, BaselineNumber: 1, BaselineStatus: symphony.BaselineAccepted, BaselineDefinitionSHA256: strings.Repeat("b", 64),
+		BaseSHA: strings.Repeat("a", 40), BestSHA: strings.Repeat("a", 40), FlowVersion: symphony.FlowVersion3,
+		CurrentCheckpointSHA: strings.Repeat("a", 40), IterationCaseSet: &symphony.IterationCaseSetView{Version: 1, CaseIDs: []string{"case-1"}},
+		SkillSnapshot:   &symphony.SkillSnapshotView{SchemaVersion: snapshot.Input.SchemaVersion, SnapshotID: snapshot.Input.SnapshotID, RootPath: snapshot.Input.RootPath, ManifestSHA256: snapshot.Input.ManifestSHA256, Entries: snapshot.Input.Entries},
+		ExperimentCycle: &cycle,
+	}
+	store := &staticContextStore{projection: symphony.ContextProjection{
+		Session: session,
+		View: symphony.View{
+			Optimization: symphony.OptimizationView{ID: "optimization", Status: symphony.OptimizationOptimizing, Revision: 4, Repository: "/repo", FlowVersion: symphony.FlowVersion3},
+			Baseline:     &symphony.BaselineView{ID: "baseline", Number: 1, Status: symphony.BaselineAccepted}, Best: &symphony.BestView{ID: "best", CommitSHA: strings.Repeat("a", 40)},
+			IterationCaseSet: &symphony.IterationCaseSetView{Version: 1, CaseIDs: []string{"case-1"}}, ExperimentCycles: []symphony.ExperimentCycleView{cycle},
+		},
+		TargetWork: work, GeneratorWork: work.Work,
+	}}
+	evidenceRoot := filepath.Join(root, "evidence")
+	bundle, err := (contextbundle.Materializer{Store: store, Root: filepath.Join(root, "contexts"), EvidenceRoot: evidenceRoot}).Materialize(context.Background(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.SchemaVersion != contextbundle.FlowV3SchemaVersion {
+		t.Fatalf("flow-v3 Context schema = %d", bundle.SchemaVersion)
+	}
+	contents, err := os.ReadFile(bundle.ContextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextSchemaBytes, messageSchemaBytes, err := contextbundle.SchemasForVersion(contextbundle.FlowV3SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := compileSchema(t, "context-v5.schema.json", contextSchemaBytes).Validate(unmarshalJSON(t, contents)); err != nil {
+		t.Fatalf("flow-v3 Context schema validation: %v\n%s", err, contents)
+	}
+	_ = compileSchema(t, "message-v5.schema.json", messageSchemaBytes)
+	summarySchema, err := contextbundle.SummarySchemaForVersion(contextbundle.FlowV3SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = compileSchema(t, "summary-v5.schema.json", summarySchema)
+	var document contextbundle.Document
+	if err := json.Unmarshal(contents, &document); err != nil {
+		t.Fatal(err)
+	}
+	wantEvidenceRoot := filepath.Join(evidenceRoot, "benchmarks", "benchmark-work")
+	if document.Benchmark == nil || document.Benchmark.EvidenceRoot != wantEvidenceRoot || document.ExperimentCycle == nil || document.ExperimentCycle.ID != cycle.ID || !slices.Equal(document.AllowedTerminals, []string{"finish_iteration_benchmark"}) {
+		t.Fatalf("flow-v3 Benchmark Context omitted gate identity: %+v", document)
+	}
+}
+
 type contextSkillGit struct{ remotes map[string]string }
 
 func (g contextSkillGit) Run(ctx context.Context, directory string, arguments ...string) ([]byte, error) {

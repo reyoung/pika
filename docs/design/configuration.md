@@ -13,6 +13,7 @@ Normal operation uses one first-class Optimization Workspace, independent of Her
   repo/
   best/repo/
   attempts/<attempt>/rounds/<round>/repo/
+  benchmarks/<benchmark-work>/repo/
   instructions/
     baseline.md
     baseline-verify.md
@@ -101,13 +102,26 @@ description = "Known-correct implementation"
 
 This example deliberately mixes providers, including independent Codex and Cursor Iteration slots; the shipped `--defaults` configuration contains one Codex `[[agents.iteration]]` entry. The ordered Iteration Agent list is the concurrency: each entry owns one durable scheduler slot, and an Attempt's `slot_index` selects that entry across fresh Session recovery. Cursor accepts reasoning effort `low`, `medium`, `high`, `xhigh`, or `max`; `ultra` is Codex-only. Its explicit provider-default configuration is `model = "auto"` with `reasoning_effort = ""`; init displays that real Cursor model as `auto-routing (default)` and does not ask for an effort. Codex's explicit provider default uses empty model and effort strings, leaving both choices to the Codex CLI configuration. Cursor `args` is an argv array, never a shell string. Pika supplies workspace, Plugin, and model. It defaults unattended Cursor Sessions to `--yolo`; an explicit `--sandbox enabled` in the Role's `args` selects the restricted sandbox instead. Configuration cannot request `--resume`, `--continue`, `--print`, an initial prompt, or disabled sandboxing.
 
+The example above remains configuration version 1 and creates a flow-v2 Optimization. To require a fresh reference measurement before every Experiment, change the root version and add the optional singleton Benchmark Agent:
+
+```toml
+version = 2
+
+[agents.benchmark]
+kind = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+```
+
+This selects flow v3 only when creating a new Optimization. Each active Attempt slot alternates between one reference-only Benchmark Work and one fresh candidate-only Iteration Work; the latter may record at most one Experiment before finishing or requesting another gated cycle. Benchmark unavailability pauses the Optimization, and `pika-go resume` retries the same Cycle, checkpoint, and frozen Case Snapshot while retaining earlier Run failures. Removing the Benchmark section from an existing flow-v3 Workspace, or adding it to an existing flow-v1/v2 Workspace, is rejected rather than changing the frozen workflow.
+
 Exact defaults beyond the accepted five-minute inactivity timeout remain implementation choices and are printed by interactive `pika-go init` before commit.
 
 If `pika.toml` already exists, init treats it as user-owned input: it validates version and repository identity, preserves the file byte-for-byte, and rejects invalid scheduler, Context, Follow-up, or Role Agent fields. The Iteration Agent list length and `max_pending_attempts` are copied into the durable Optimization during init. A later Iteration list edit applies on the next cold daemon restart; adding entries creates slots, while removing entries atomically cancels active Attempts in removed slots with reason `iteration_agent_removed` before recovery. An old `[agents.iteration]` plus `scheduler.iteration_concurrency = N` remains readable as N identical slots, but new configuration never emits that independent field. Every Attempt freezes the current history limit when it is created; later history-limit edits affect only a future Optimization rather than silently changing running work. A limit of `0` disables cross-Attempt history injection.
 
 ## 3. Static Agent selection
 
-Baseline, Baseline Verification, and Integration each have one Agent Configuration. Iteration has an ordered non-empty list with one configuration per scheduler slot. Follow-up has one shared Agent Configuration even though it has three target-specific System Prompts and three matching user-instruction overlays.
+Baseline, Baseline Verification, and Integration each have one Agent Configuration. Iteration has an ordered non-empty list with one configuration per scheduler slot. Configuration version 2 may add one Benchmark Agent Configuration; it is reference-only and uses the Attempt's existing Iteration slot rather than adding concurrency. Follow-up has one shared Agent Configuration even though it has three target-specific System Prompts and three matching user-instruction overlays.
 
 Commands that create a fresh Session may accept `--agent <configured-name>` as an explicit one-shot override, including Back-off. There is no automatic provider fallback chain. If launch fails, the Work remains recoverable and the error is surfaced.
 
@@ -115,7 +129,7 @@ Pika rejects configuration that enables automatic Follow-up for an Agent adapter
 
 ## 4. Initialization
 
-`pika-go init` performs an interactive flow similar to the old Pika initializer but excludes Web concerns. For a new interactive instance, it asks independently for backend, model, reasoning effort, and Cursor launch permissions for each Agent Configuration. After each Iteration Agent is complete, it asks whether to configure another; answering no ends the ordered list, whose length becomes the concurrency. All choices are numbered lists. The backend list contains only providers that passed daemon probing; Codex model choices come from its visible local model cache, and Cursor choices are derived from the pinned CLI's `--list-models` output. Effort choices are narrowed to the selected model, and arbitrary provider or model IDs are not accepted. Cursor command approval offers automatic allow (`--force`, the unattended default), Cursor auto-review, or interactive approval; MCP approval and persistent workspace trust are separate choices. The default remains `--force --approve-mcps` without changing workspace trust. Raw Cursor argv is available only through a complete `--config` file for advanced use.
+`pika-go init` performs an interactive flow similar to the old Pika initializer but excludes Web concerns. For a new interactive instance, it asks independently for backend, model, reasoning effort, and Cursor launch permissions for each default Agent Configuration. After each Iteration Agent is complete, it asks whether to configure another; answering no ends the ordered list, whose length becomes the concurrency. Interactive init and `--defaults` intentionally create version-1 flow-v2 configurations; opt-in flow v3 currently requires a complete version-2 file supplied with `--config PATH`. All choices are numbered lists. The backend list contains only providers that passed daemon probing; Codex model choices come from its visible local model cache, and Cursor choices are derived from the pinned CLI's `--list-models` output. Effort choices are narrowed to the selected model, and arbitrary provider or model IDs are not accepted. Cursor command approval offers automatic allow (`--force`, the unattended default), Cursor auto-review, or interactive approval; MCP approval and persistent workspace trust are separate choices. The default remains `--force --approve-mcps` without changing workspace trust. Raw Cursor argv is available only through a complete `--config` file for advanced use.
 
 New non-interactive or `--json` initialization requires exactly one of:
 
@@ -128,6 +142,7 @@ It configures:
 
 - repository and writable worktree roots;
 - one Agent Configuration for each non-Iteration core Role;
+- optionally one Benchmark Agent Configuration in version 2, which freezes flow v3 for the new Optimization;
 - an ordered, non-empty Iteration Agent list whose length is the concurrency;
 - one Follow-up Agent Configuration;
 - Iteration queue limits;
@@ -199,6 +214,7 @@ Before committing init or configuration edits, validate:
 - Agent kinds resolve through the Provider Adapter registry;
 - referenced executables exist, are authenticated, and report the required exact-compatible capabilities;
 - the Iteration Agent list is non-empty and Follow-up counts are bounded positive integers;
+- `[agents.benchmark]`, when present, is a single valid Agent section and the root configuration version is exactly 2;
 - duration values parse and are not negative;
 - every static embedded Role System Prompt is non-empty and its matching instruction overlay exists and is readable;
 - Codex profile ownership and hook feature are valid when Codex is referenced;

@@ -24,6 +24,7 @@ const (
 	// SchemaVersion is the flow-v2 artifact-first Context contract. Existing
 	// flow-v1 sessions are still materialized as LegacySchemaVersion.
 	SchemaVersion       int64 = 4
+	FlowV3SchemaVersion int64 = 5
 	LegacySchemaVersion int64 = 3
 )
 
@@ -84,6 +85,10 @@ type IntegrationContext struct {
 	Experiments           FileReference `json:"experiments"`
 }
 
+type BenchmarkContext struct {
+	EvidenceRoot string `json:"evidence_root"`
+}
+
 type SkillSnapshotReference struct {
 	SchemaVersion int64                         `json:"schema_version"`
 	SnapshotID    string                        `json:"snapshot_id"`
@@ -108,25 +113,31 @@ type RoundHistory struct {
 }
 
 type Document struct {
-	SchemaVersion     int64                          `json:"schema_version"`
-	Session           symphony.AgentSession          `json:"session"`
-	Optimization      symphony.OptimizationView      `json:"optimization"`
-	Baseline          *symphony.BaselineView         `json:"baseline,omitempty"`
-	Best              *symphony.BestView             `json:"best,omitempty"`
-	IterationCaseSet  *symphony.IterationCaseSetView `json:"iteration_case_set,omitempty"`
-	Attempts          []symphony.AttemptView         `json:"attempts"`
-	IterationRounds   []symphony.IterationRoundView  `json:"iteration_rounds"`
-	Integrations      []symphony.IntegrationView     `json:"integrations"`
-	BackOffs          []symphony.BackOffView         `json:"back_offs"`
-	Work              symphony.RuntimeWork           `json:"work"`
-	GeneratorWork     symphony.WorkView              `json:"generator_work"`
-	TerminalOperation string                         `json:"terminal_operation"`
-	Messages          FileReference                  `json:"messages"`
-	Iteration         *IterationContext              `json:"iteration_context,omitempty"`
-	Integration       *IntegrationContext            `json:"integration_context,omitempty"`
-	SkillSnapshot     *SkillSnapshotReference        `json:"skill_snapshot,omitempty"`
-	Diagnosis         *DiagnosisReference            `json:"diagnosis,omitempty"`
-	Knowledge         *FileReference                 `json:"knowledge,omitempty"`
+	SchemaVersion     int64                           `json:"schema_version"`
+	Session           symphony.AgentSession           `json:"session"`
+	Optimization      symphony.OptimizationView       `json:"optimization"`
+	Baseline          *symphony.BaselineView          `json:"baseline,omitempty"`
+	Best              *symphony.BestView              `json:"best,omitempty"`
+	IterationCaseSet  *symphony.IterationCaseSetView  `json:"iteration_case_set,omitempty"`
+	Attempts          []symphony.AttemptView          `json:"attempts"`
+	IterationRounds   []symphony.IterationRoundView   `json:"iteration_rounds"`
+	Integrations      []symphony.IntegrationView      `json:"integrations"`
+	BackOffs          []symphony.BackOffView          `json:"back_offs"`
+	Work              symphony.RuntimeWork            `json:"work"`
+	GeneratorWork     symphony.WorkView               `json:"generator_work"`
+	TerminalOperation string                          `json:"terminal_operation"`
+	Messages          FileReference                   `json:"messages"`
+	Iteration         *IterationContext               `json:"iteration_context,omitempty"`
+	Integration       *IntegrationContext             `json:"integration_context,omitempty"`
+	SkillSnapshot     *SkillSnapshotReference         `json:"skill_snapshot,omitempty"`
+	Diagnosis         *DiagnosisReference             `json:"diagnosis,omitempty"`
+	Knowledge         *FileReference                  `json:"knowledge,omitempty"`
+	AllowedTerminals  []string                        `json:"allowed_terminal_operations,omitempty"`
+	ExperimentCycles  []symphony.ExperimentCycleView  `json:"experiment_cycles,omitempty"`
+	ReferenceReceipts []symphony.ReferenceReceiptView `json:"reference_receipts,omitempty"`
+	ExperimentCycle   *symphony.ExperimentCycleView   `json:"experiment_cycle,omitempty"`
+	ReferenceReceipt  *symphony.ReferenceReceiptView  `json:"reference_receipt,omitempty"`
+	Benchmark         *BenchmarkContext               `json:"benchmark_context,omitempty"`
 }
 
 // v3Document freezes the legacy wire surface independently from the
@@ -372,6 +383,32 @@ type v4SkillSnapshotRef struct {
 	Manifest      BlobReference          `json:"manifest"`
 }
 
+// v5 adds the flow-v3 benchmark gate without changing the frozen v4 wire
+// surface. The embedded v4 fields retain their reviewed projection; every new
+// field is explicit here.
+type v5Document struct {
+	v4Document
+	AllowedTerminals  []string                        `json:"allowed_terminal_operations"`
+	ExperimentCycles  []symphony.ExperimentCycleView  `json:"experiment_cycles"`
+	ReferenceReceipts []symphony.ReferenceReceiptView `json:"reference_receipts"`
+	ExperimentCycle   *symphony.ExperimentCycleView   `json:"experiment_cycle,omitempty"`
+	ReferenceReceipt  *symphony.ReferenceReceiptView  `json:"reference_receipt,omitempty"`
+	Benchmark         *BenchmarkContext               `json:"benchmark_context,omitempty"`
+}
+
+func v5DocumentFrom(value Document) (v5Document, error) {
+	base, err := v4DocumentFrom(value)
+	if err != nil {
+		return v5Document{}, err
+	}
+	return v5Document{
+		v4Document: base, AllowedTerminals: append([]string{}, value.AllowedTerminals...),
+		ExperimentCycles:  append([]symphony.ExperimentCycleView{}, value.ExperimentCycles...),
+		ReferenceReceipts: append([]symphony.ReferenceReceiptView{}, value.ReferenceReceipts...),
+		ExperimentCycle:   value.ExperimentCycle, ReferenceReceipt: value.ReferenceReceipt, Benchmark: value.Benchmark,
+	}, nil
+}
+
 func v4WorkFrom(value symphony.WorkView) v4Work {
 	return v4Work{ID: value.ID, BaselineRevisionID: value.BaselineRevisionID, Role: value.Role, Status: value.Status, Generation: value.Generation, AttemptID: value.AttemptID, IterationRound: value.IterationRound, IntegrationID: value.IntegrationID, ParentWorkID: value.ParentWorkID, FollowUpRequestID: value.FollowUpRequestID}
 }
@@ -482,7 +519,7 @@ func SchemasForVersion(version int64) (contextSchema, messageSchema []byte, err 
 	contextName, messageName := "schemas/context-v4.schema.json", "schemas/message-v4.schema.json"
 	if version == LegacySchemaVersion {
 		contextName, messageName = "schemas/context.schema.json", "schemas/message.schema.json"
-	} else if version != SchemaVersion {
+	} else if version != SchemaVersion && version != FlowV3SchemaVersion {
 		return nil, nil, fmt.Errorf("unsupported Context Bundle schema version %d", version)
 	}
 	contextSchema, err = schemaFiles.ReadFile(contextName)
@@ -493,6 +530,16 @@ func SchemasForVersion(version int64) (contextSchema, messageSchema []byte, err 
 	if err != nil {
 		return nil, nil, fmt.Errorf("read embedded message schema: %w", err)
 	}
+	if version == FlowV3SchemaVersion {
+		contextSchema, err = flowV3ContextSchema(contextSchema)
+		if err != nil {
+			return nil, nil, err
+		}
+		messageSchema, err = rewriteSchemaVersion(messageSchema, FlowV3SchemaVersion, "message-v5")
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	return contextSchema, messageSchema, nil
 }
 
@@ -501,18 +548,111 @@ func SummarySchema() ([]byte, error) {
 }
 
 func SummarySchemaForVersion(version int64) ([]byte, error) {
-	if version != LegacySchemaVersion && version != SchemaVersion {
+	if version != LegacySchemaVersion && version != SchemaVersion && version != FlowV3SchemaVersion {
 		return nil, fmt.Errorf("unsupported Context Bundle schema version %d", version)
 	}
 	name := "schemas/summary.schema.json"
-	if version == SchemaVersion {
+	if version == SchemaVersion || version == FlowV3SchemaVersion {
 		name = "schemas/summary-v4.schema.json"
 	}
 	contents, err := schemaFiles.ReadFile(name)
 	if err != nil {
 		return nil, fmt.Errorf("read embedded summary schema: %w", err)
 	}
+	if version == FlowV3SchemaVersion {
+		return rewriteSchemaVersion(contents, FlowV3SchemaVersion, "attempt-summary-v5")
+	}
 	return contents, nil
+}
+
+func rewriteSchemaVersion(contents []byte, version int64, idSuffix string) ([]byte, error) {
+	var schema map[string]any
+	if err := json.Unmarshal(contents, &schema); err != nil {
+		return nil, fmt.Errorf("decode embedded schema: %w", err)
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return nil, errors.New("embedded schema has no properties")
+	}
+	properties["schema_version"] = map[string]any{"const": version}
+	schema["$id"] = "https://pika-go.local/schemas/" + idSuffix + ".json"
+	encoded, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode schema version %d: %w", version, err)
+	}
+	return append(encoded, '\n'), nil
+}
+
+func flowV3ContextSchema(contents []byte) ([]byte, error) {
+	var schema map[string]any
+	if err := json.Unmarshal(contents, &schema); err != nil {
+		return nil, fmt.Errorf("decode v4 Context schema: %w", err)
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return nil, errors.New("v4 Context schema has no properties")
+	}
+	properties["schema_version"] = map[string]any{"const": FlowV3SchemaVersion}
+	properties["allowed_terminal_operations"] = map[string]any{"type": "array", "minItems": 1, "uniqueItems": true, "items": map[string]any{"type": "string", "minLength": 1}}
+	properties["experiment_cycles"] = map[string]any{"type": "array", "items": experimentCycleSchema()}
+	properties["reference_receipts"] = map[string]any{"type": "array", "items": referenceReceiptSchema()}
+	properties["experiment_cycle"] = experimentCycleSchema()
+	properties["reference_receipt"] = referenceReceiptSchema()
+	properties["benchmark_context"] = strictSchema(map[string]any{"evidence_root": map[string]any{"type": "string", "minLength": 1}}, "evidence_root")
+	definitions, ok := schema["$defs"].(map[string]any)
+	if !ok {
+		return nil, errors.New("v4 Context schema has no definitions")
+	}
+	for _, name := range []string{"optimization", "runtimeWork"} {
+		definition, ok := definitions[name].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("v4 Context schema has no %s definition", name)
+		}
+		definitionProperties, ok := definition["properties"].(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("v4 Context %s definition has no properties", name)
+		}
+		definitionProperties["flow_version"] = map[string]any{"const": 3}
+	}
+	required, ok := schema["required"].([]any)
+	if !ok {
+		return nil, errors.New("v4 Context schema has no required fields")
+	}
+	schema["required"] = append(required, "allowed_terminal_operations", "experiment_cycles", "reference_receipts")
+	schema["$id"] = "https://pika-go.local/schemas/context-v5.json"
+	schema["title"] = "Pika Benchmark-Gated Agent Session Context"
+	encoded, err := json.MarshalIndent(schema, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode v5 Context schema: %w", err)
+	}
+	return append(encoded, '\n'), nil
+}
+
+func strictSchema(properties map[string]any, required ...string) map[string]any {
+	return map[string]any{"type": "object", "additionalProperties": false, "properties": properties, "required": required}
+}
+
+func experimentCycleSchema() map[string]any {
+	return strictSchema(map[string]any{
+		"id": map[string]any{"type": "string"}, "attempt_id": map[string]any{"type": "string"},
+		"iteration_round": map[string]any{"type": "integer", "minimum": 1}, "sequence": map[string]any{"type": "integer", "minimum": 1},
+		"checkpoint_sha": map[string]any{"type": "string"}, "baseline_definition_sha256": map[string]any{"type": "string"},
+		"case_snapshot_sha256": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"},
+		"benchmark_work_id": map[string]any{"type": "string"}, "iteration_work_id": map[string]any{"type": "string"},
+		"reference_receipt_id": map[string]any{"type": "string"}, "failure_reason": map[string]any{"type": "string"},
+	}, "id", "attempt_id", "iteration_round", "sequence", "checkpoint_sha", "baseline_definition_sha256", "case_snapshot_sha256", "status")
+}
+
+func referenceReceiptSchema() map[string]any {
+	jsonValue := map[string]any{}
+	return strictSchema(map[string]any{
+		"id": map[string]any{"type": "string"}, "experiment_cycle_id": map[string]any{"type": "string"},
+		"benchmark_run_id": map[string]any{"type": "string"}, "benchmark_work_id": map[string]any{"type": "string"},
+		"checkpoint_sha": map[string]any{"type": "string"}, "baseline_definition_sha256": map[string]any{"type": "string"},
+		"case_snapshot_sha256": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"},
+		"model": map[string]any{"type": "string"}, "measurements": jsonValue, "environment": jsonValue,
+		"consumed_experiment_id": map[string]any{"type": "string"},
+	}, "id", "experiment_cycle_id", "benchmark_run_id", "benchmark_work_id", "checkpoint_sha", "baseline_definition_sha256", "case_snapshot_sha256", "measurements")
 }
 
 func (m Materializer) Materialize(ctx context.Context, session symphony.AgentSession) (Bundle, error) {
@@ -538,6 +678,8 @@ func (m Materializer) Materialize(ctx context.Context, session symphony.AgentSes
 	schemaVersion := LegacySchemaVersion
 	if projection.TargetWork.FlowVersion == symphony.FlowVersion2 {
 		schemaVersion = SchemaVersion
+	} else if projection.TargetWork.FlowVersion == symphony.FlowVersion3 {
+		schemaVersion = FlowV3SchemaVersion
 	}
 	records := recordsFor(schemaVersion, projection.Journal)
 	messages, err := encodeJSONL(records)
@@ -556,6 +698,16 @@ func (m Materializer) Materialize(ctx context.Context, session symphony.AgentSes
 		Work: projection.TargetWork, GeneratorWork: projection.GeneratorWork,
 		TerminalOperation: terminalOperation(projection.Session.Role),
 		Messages:          FileReference{Path: messagesPath, SHA256: messagesDigest, Bytes: int64(len(messages)), Records: int64(len(records))},
+	}
+	if schemaVersion == FlowV3SchemaVersion {
+		document.AllowedTerminals = []string{document.TerminalOperation}
+		if projection.Session.Role == symphony.RoleIteration {
+			document.AllowedTerminals = append(document.AllowedTerminals, "start_next_experiment")
+		}
+		document.ExperimentCycles = append([]symphony.ExperimentCycleView{}, projection.View.ExperimentCycles...)
+		document.ReferenceReceipts = append([]symphony.ReferenceReceiptView{}, projection.View.ReferenceReceipts...)
+		document.ExperimentCycle = projection.TargetWork.ExperimentCycle
+		document.ReferenceReceipt = projection.TargetWork.ReferenceReceipt
 	}
 	files := map[string][]byte{messagesRelative: messages}
 	if projection.TargetWork.Work.Role == symphony.RoleIteration {
@@ -596,16 +748,22 @@ func (m Materializer) Materialize(ctx context.Context, session symphony.AgentSes
 			})
 		}
 	}
-	if schemaVersion == SchemaVersion {
+	if schemaVersion == SchemaVersion || schemaVersion == FlowV3SchemaVersion {
 		if m.EvidenceRoot == "" || !filepath.IsAbs(m.EvidenceRoot) {
-			return Bundle{}, errors.New("absolute evidence root is required for flow v2 Context")
+			return Bundle{}, errors.New("absolute evidence root is required for flow v2+ Context")
 		}
 		if err := m.addV4Artifacts(&document, projection, session, files); err != nil {
 			return Bundle{}, err
 		}
 	}
 	var contextBytes []byte
-	if schemaVersion == SchemaVersion {
+	if schemaVersion == FlowV3SchemaVersion {
+		v5, err := v5DocumentFrom(document)
+		if err != nil {
+			return Bundle{}, err
+		}
+		contextBytes, err = json.MarshalIndent(v5, "", "  ")
+	} else if schemaVersion == SchemaVersion {
 		v4, err := v4DocumentFrom(document)
 		if err != nil {
 			return Bundle{}, err
@@ -706,6 +864,13 @@ func (m Materializer) addV4Artifacts(document *Document, projection symphony.Con
 			return errors.New("flow v2 Iteration has no Iteration Context")
 		}
 		document.Iteration.Experiments = &reference
+	}
+	if work.Work.Role == symphony.RoleBenchmark {
+		root, err := evidence.EnsureWorkRoot(m.EvidenceRoot, evidence.BenchmarkScope, work.Work.ID)
+		if err != nil {
+			return fmt.Errorf("prepare Benchmark evidence root: %w", err)
+		}
+		document.Benchmark = &BenchmarkContext{EvidenceRoot: root}
 	}
 	if work.Work.Role == symphony.RoleIntegration {
 		var candidateExperimentID string
@@ -917,7 +1082,7 @@ func writeFile(path string, contents []byte) error {
 }
 
 func (m Materializer) verifyStored(snapshot symphony.ContextSnapshot) (Bundle, error) {
-	if (snapshot.SchemaVersion < 2 || snapshot.SchemaVersion > SchemaVersion) || filepath.Clean(snapshot.ContextRelativePath) != filepath.Join(snapshot.AgentSessionID, "context.json") ||
+	if (snapshot.SchemaVersion < 2 || snapshot.SchemaVersion > FlowV3SchemaVersion) || filepath.Clean(snapshot.ContextRelativePath) != filepath.Join(snapshot.AgentSessionID, "context.json") ||
 		filepath.Clean(snapshot.MessagesRelativePath) != filepath.Join(snapshot.AgentSessionID, "messages.jsonl") {
 		return Bundle{}, errors.New("stored Context Snapshot has an unsupported contract")
 	}
@@ -960,7 +1125,7 @@ func (m Materializer) verifyStored(snapshot symphony.ContextSnapshot) (Bundle, e
 			}
 		}
 	}
-	if snapshot.SchemaVersion == SchemaVersion {
+	if snapshot.SchemaVersion == SchemaVersion || snapshot.SchemaVersion == FlowV3SchemaVersion {
 		if document.SkillSnapshot != nil {
 			if err := verifyBlobReference(document.SkillSnapshot.Manifest); err != nil {
 				return Bundle{}, fmt.Errorf("frozen skill manifest digest does not match its file: %w", err)

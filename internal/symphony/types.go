@@ -26,6 +26,7 @@ type FlowVersion int64
 const (
 	FlowVersion1 FlowVersion = 1
 	FlowVersion2 FlowVersion = 2
+	FlowVersion3 FlowVersion = 3
 )
 
 type SchedulerStatus string
@@ -51,6 +52,7 @@ const (
 	RoleBaselineDraft        WorkRole = "baseline_draft"
 	RoleBaselineVerification WorkRole = "baseline_verification"
 	RoleDiagnosis            WorkRole = "diagnosis"
+	RoleBenchmark            WorkRole = "benchmark"
 	RoleIteration            WorkRole = "iteration"
 	RoleIntegration          WorkRole = "integration"
 	RoleFollowUp             WorkRole = "follow_up"
@@ -237,6 +239,42 @@ type RecordIterationExperiment struct {
 func (RecordIterationExperiment) commandName() string        { return "record_iteration_experiment" }
 func (c RecordIterationExperiment) commandMeta() CommandMeta { return c.Meta }
 
+type BenchmarkOutcome string
+
+const (
+	BenchmarkMeasured    BenchmarkOutcome = "measured"
+	BenchmarkUnavailable BenchmarkOutcome = "unavailable"
+)
+
+// FinishIterationBenchmark is the sole terminal operation for Benchmark Work.
+// Measurements are reference-only; candidate measurements remain owned by the
+// following Iteration Work.
+type FinishIterationBenchmark struct {
+	Meta         CommandMeta      `json:"meta"`
+	WorkID       string           `json:"work_id"`
+	Outcome      BenchmarkOutcome `json:"outcome"`
+	Measurements json.RawMessage  `json:"measurements,omitempty"`
+	Environment  json.RawMessage  `json:"environment,omitempty"`
+	Provider     string           `json:"provider,omitempty"`
+	Model        string           `json:"model,omitempty"`
+	Reason       string           `json:"reason,omitempty"`
+	Artifacts    []ArtifactInput  `json:"artifacts,omitempty"`
+}
+
+func (FinishIterationBenchmark) commandName() string        { return "finish_iteration_benchmark" }
+func (c FinishIterationBenchmark) commandMeta() CommandMeta { return c.Meta }
+
+// StartNextExperiment closes one flow-v3 Iteration Work without terminating
+// its Attempt and schedules a fresh Experiment Cycle at the current checkpoint.
+type StartNextExperiment struct {
+	Meta   CommandMeta `json:"meta"`
+	WorkID string      `json:"work_id"`
+	Reason string      `json:"reason,omitempty"`
+}
+
+func (StartNextExperiment) commandName() string        { return "start_next_experiment" }
+func (c StartNextExperiment) commandMeta() CommandMeta { return c.Meta }
+
 type IterationOutcome string
 
 const (
@@ -416,6 +454,7 @@ type WorkView struct {
 	IntegrationID      string     `json:"integration_id,omitempty"`
 	ParentWorkID       string     `json:"parent_work_id,omitempty"`
 	FollowUpRequestID  string     `json:"followup_request_id,omitempty"`
+	ExperimentCycleID  string     `json:"experiment_cycle_id,omitempty"`
 }
 
 type AttemptView struct {
@@ -512,9 +551,41 @@ type IterationExperimentView struct {
 	CheckpointSHA       string                    `json:"checkpoint_sha,omitempty"`
 	ScopeBestSHA        string                    `json:"scope_best_sha,omitempty"`
 	ReceiptID           string                    `json:"receipt_id,omitempty"`
+	WorkID              string                    `json:"work_id,omitempty"`
+	ReferenceReceiptID  string                    `json:"reference_receipt_id,omitempty"`
 	DerivedComparisons  []BenchmarkComparisonView `json:"derived_comparisons,omitempty"`
 	ArtifactIDs         []string                  `json:"artifact_ids,omitempty"`
 	Experiment          json.RawMessage           `json:"experiment"`
+}
+
+type ExperimentCycleView struct {
+	ID                    string `json:"id"`
+	AttemptID             string `json:"attempt_id"`
+	IterationRound        int64  `json:"iteration_round"`
+	Sequence              int64  `json:"sequence"`
+	CheckpointSHA         string `json:"checkpoint_sha"`
+	BaselineDefinitionSHA string `json:"baseline_definition_sha256"`
+	CaseSnapshotSHA       string `json:"case_snapshot_sha256"`
+	Status                string `json:"status"`
+	BenchmarkWorkID       string `json:"benchmark_work_id,omitempty"`
+	IterationWorkID       string `json:"iteration_work_id,omitempty"`
+	ReferenceReceiptID    string `json:"reference_receipt_id,omitempty"`
+	FailureReason         string `json:"failure_reason,omitempty"`
+}
+
+type ReferenceReceiptView struct {
+	ID                    string          `json:"id"`
+	ExperimentCycleID     string          `json:"experiment_cycle_id"`
+	BenchmarkRunID        string          `json:"benchmark_run_id"`
+	BenchmarkWorkID       string          `json:"benchmark_work_id"`
+	CheckpointSHA         string          `json:"checkpoint_sha"`
+	BaselineDefinitionSHA string          `json:"baseline_definition_sha256"`
+	CaseSnapshotSHA       string          `json:"case_snapshot_sha256"`
+	Provider              string          `json:"provider,omitempty"`
+	Model                 string          `json:"model,omitempty"`
+	Measurements          json.RawMessage `json:"measurements"`
+	Environment           json.RawMessage `json:"environment,omitempty"`
+	ConsumedExperimentID  string          `json:"consumed_experiment_id,omitempty"`
 }
 
 type GitIntentView struct {
@@ -696,6 +767,8 @@ type RuntimeWork struct {
 	Diagnosis                       *DiagnosisView            `json:"diagnosis,omitempty"`
 	IterationExperiments            []IterationExperimentView `json:"iteration_experiments,omitempty"`
 	CurrentCheckpointSHA            string                    `json:"current_checkpoint_sha,omitempty"`
+	ExperimentCycle                 *ExperimentCycleView      `json:"experiment_cycle,omitempty"`
+	ReferenceReceipt                *ReferenceReceiptView     `json:"reference_receipt,omitempty"`
 }
 
 type ActiveAgentSession struct {
@@ -711,6 +784,8 @@ type AgentGrant struct {
 	WorkID         string             `json:"work_id"`
 	Generation     int64              `json:"generation"`
 	Role           WorkRole           `json:"role"`
+	AgentKind      string             `json:"agent_kind,omitempty"`
+	AgentName      string             `json:"agent_name,omitempty"`
 	SessionStatus  AgentSessionStatus `json:"session_status"`
 	Catalog        json.RawMessage    `json:"catalog"`
 	ExpiresAt      string             `json:"expires_at"`
@@ -779,6 +854,8 @@ type View struct {
 	SkillSnapshot        *SkillSnapshotView        `json:"skill_snapshot,omitempty"`
 	Diagnoses            []DiagnosisView           `json:"diagnoses,omitempty"`
 	IterationExperiments []IterationExperimentView `json:"iteration_experiments,omitempty"`
+	ExperimentCycles     []ExperimentCycleView     `json:"experiment_cycles,omitempty"`
+	ReferenceReceipts    []ReferenceReceiptView    `json:"reference_receipts,omitempty"`
 	Knowledge            KnowledgeSummary          `json:"knowledge"`
 	FollowUps            []FollowUpView            `json:"follow_ups,omitempty"`
 	PaneActivityNotice   string                    `json:"pane_activity_notice,omitempty"`

@@ -8,7 +8,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 23
+const schemaVersion = 24
 
 func CurrentSchemaVersion() int { return schemaVersion }
 
@@ -779,6 +779,83 @@ CREATE UNIQUE INDEX evidence_artifacts_work_relative_path
 	ON evidence_artifacts(work_id, relative_path);
 `
 
+// flow_version_override avoids rebuilding the heavily referenced
+// optimizations table whose historical flow_version CHECK accepts only 1/2.
+// NULL means the original column remains authoritative.
+const schemaV24 = `
+ALTER TABLE optimizations ADD COLUMN flow_version_override INTEGER CHECK(flow_version_override IS NULL OR flow_version_override = 3);
+ALTER TABLE works ADD COLUMN experiment_cycle_id TEXT;
+ALTER TABLE iteration_experiments ADD COLUMN work_id TEXT REFERENCES works(id);
+ALTER TABLE iteration_experiments ADD COLUMN reference_receipt_id TEXT;
+
+CREATE TABLE experiment_cycles (
+    id TEXT PRIMARY KEY,
+    optimization_id TEXT NOT NULL REFERENCES optimizations(id),
+    baseline_revision_id TEXT NOT NULL REFERENCES baseline_revisions(id),
+    attempt_id TEXT NOT NULL REFERENCES attempts(id),
+    iteration_round INTEGER NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence >= 1),
+    checkpoint_sha TEXT NOT NULL,
+    baseline_definition_sha256 TEXT NOT NULL,
+    case_snapshot_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('benchmark_pending', 'benchmark_unavailable', 'iteration_active', 'completed', 'abandoned')),
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(attempt_id, iteration_round, sequence),
+    FOREIGN KEY(attempt_id, iteration_round) REFERENCES iteration_rounds(attempt_id, round)
+);
+CREATE UNIQUE INDEX experiment_cycles_one_open_per_attempt
+    ON experiment_cycles(attempt_id)
+    WHERE status IN ('benchmark_pending', 'benchmark_unavailable', 'iteration_active');
+
+CREATE TABLE benchmark_runs (
+    id TEXT PRIMARY KEY,
+    experiment_cycle_id TEXT NOT NULL REFERENCES experiment_cycles(id),
+    work_id TEXT NOT NULL UNIQUE REFERENCES works(id),
+    run_number INTEGER NOT NULL CHECK(run_number >= 1),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'measured', 'unavailable')),
+    failure_reason TEXT,
+    measurements_json BLOB,
+    environment_json BLOB,
+    provider TEXT,
+    model TEXT,
+    created_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE(experiment_cycle_id, run_number)
+);
+
+CREATE TABLE reference_receipts (
+    id TEXT PRIMARY KEY,
+    experiment_cycle_id TEXT NOT NULL UNIQUE REFERENCES experiment_cycles(id),
+    benchmark_run_id TEXT NOT NULL UNIQUE REFERENCES benchmark_runs(id),
+    benchmark_work_id TEXT NOT NULL UNIQUE REFERENCES works(id),
+    optimization_id TEXT NOT NULL REFERENCES optimizations(id),
+    baseline_revision_id TEXT NOT NULL REFERENCES baseline_revisions(id),
+    attempt_id TEXT NOT NULL REFERENCES attempts(id),
+    iteration_round INTEGER NOT NULL,
+    cycle_sequence INTEGER NOT NULL,
+    checkpoint_sha TEXT NOT NULL,
+    baseline_definition_sha256 TEXT NOT NULL,
+    case_snapshot_sha256 TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    measurements_json BLOB NOT NULL,
+    environment_json BLOB,
+    consumed_experiment_id TEXT UNIQUE REFERENCES iteration_experiments(id),
+    created_at TEXT NOT NULL,
+    consumed_at TEXT,
+    FOREIGN KEY(attempt_id, iteration_round) REFERENCES iteration_rounds(attempt_id, round)
+);
+CREATE UNIQUE INDEX iteration_experiments_reference_receipt
+    ON iteration_experiments(reference_receipt_id)
+    WHERE reference_receipt_id IS NOT NULL;
+CREATE UNIQUE INDEX iteration_experiments_flow3_work
+    ON iteration_experiments(work_id)
+    WHERE work_id IS NOT NULL;
+CREATE INDEX works_experiment_cycle ON works(experiment_cycle_id);
+`
+
 var schemaMigrations = []struct {
 	version int
 	sql     string
@@ -806,6 +883,7 @@ var schemaMigrations = []struct {
 	{version: 21, sql: schemaV21},
 	{version: 22, sql: schemaV22},
 	{version: 23, sql: schemaV23},
+	{version: 24, sql: schemaV24},
 }
 
 func migrate(ctx context.Context, db *sql.DB, now string) error {

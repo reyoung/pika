@@ -49,7 +49,7 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 	if p.Store == nil || p.InstructionRoot == "" || p.ContextsRoot == "" {
 		return workruntime.Preparation{}, errors.New("activation store, instruction root, and contexts root are required")
 	}
-	if work.FlowVersion == symphony.FlowVersion2 && (p.EvidenceRoot == "" || !filepath.IsAbs(p.EvidenceRoot)) {
+	if work.FlowVersion >= symphony.FlowVersion2 && (p.EvidenceRoot == "" || !filepath.IsAbs(p.EvidenceRoot)) {
 		return workruntime.Preparation{}, errors.New("absolute evidence root is required for flow v2 activation")
 	}
 	logicalName, err := logicalNameForRole(session.Role)
@@ -139,7 +139,7 @@ func (p Preparer) Prepare(ctx context.Context, session symphony.AgentSession, wo
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
-	grant, err := p.Store.MintAgentGrant(ctx, session.ID, toolapp.CatalogForRole(session.Role), ttl)
+	grant, err := p.Store.MintAgentGrant(ctx, session.ID, toolapp.CatalogForWork(work), ttl)
 	if err != nil {
 		return workruntime.Preparation{}, err
 	}
@@ -214,8 +214,12 @@ func kickoffPrompt(work symphony.RuntimeWork) string {
 	if work.Work.Role == symphony.RoleBaselineDraft && work.BaselineNumber == 1 && work.Work.Generation == 1 {
 		return ""
 	}
-	return fmt.Sprintf("开始 Pika Work `%s`。先按 System Prompt 完整读取并核对只读 Context Bundle，再开始工作；完成时必须调用 `%s`。",
-		work.Work.ID, terminalOperation(work.Work.Role))
+	terminal := "`" + terminalOperation(work.Work.Role) + "`"
+	if work.FlowVersion == symphony.FlowVersion3 && work.Work.Role == symphony.RoleIteration {
+		terminal = "`finish_iteration` 或 `start_next_experiment`"
+	}
+	return fmt.Sprintf("开始 Pika Work `%s`。先按 System Prompt 完整读取并核对只读 Context Bundle，再开始工作；完成时必须调用 %s。",
+		work.Work.ID, terminal)
 }
 
 func logicalNameForRole(role symphony.WorkRole) (string, error) {
@@ -243,7 +247,7 @@ func terminalOperation(role symphony.WorkRole) string {
 
 func frozenSkillsFor(work symphony.RuntimeWork) (*provider.FrozenSkillSnapshot, error) {
 	descriptor, ok := symphony.DescribeRole(work.Work.Role)
-	if !ok || !descriptor.InjectSkills || work.FlowVersion != symphony.FlowVersion2 {
+	if !ok || !descriptor.InjectSkills || work.FlowVersion < symphony.FlowVersion2 {
 		return nil, nil
 	}
 	if work.SkillSnapshot == nil {

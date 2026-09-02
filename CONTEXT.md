@@ -54,6 +54,18 @@ _Avoid_: Full Case Set, validation cases
 The immutable copy of the Iteration Case Set assigned to one Iteration Round when that Round is created.
 _Avoid_: Live case set, mutable selection
 
+**Experiment Cycle**:
+One reference-measurement phase at an immutable checkpoint followed by at most one writable Experiment against that same checkpoint and Iteration Case Snapshot.
+_Avoid_: Iteration Round, benchmark retry, Agent Session
+
+**Benchmark Work**:
+The read-only Work at the start of an Experiment Cycle that measures the reference implementation before any candidate change is allowed.
+_Avoid_: Baseline Verification, candidate benchmark, Integration
+
+**Reference Receipt**:
+Immutable, single-use evidence that binds a successful Benchmark Work to its Experiment Cycle, checkpoint, Baseline Definition, Iteration Case Snapshot, execution environment, and reference measurements.
+_Avoid_: Baseline result, mutable benchmark output, Experiment receipt
+
 **Integration**:
 The serialized evaluation that decides whether an Attempt may update Best.
 _Avoid_: Merge, verification

@@ -2,11 +2,16 @@
 
 Pika-Go is a Herdr plugin for long-running automatic optimization. The implementation is being delivered in the vertical slices defined by [the development plan](docs/design/development-plan.md).
 
-Current implementation status: the Phase 0–9 provider-neutral release and KDA
-flow v2 trusted-evidence loop are implemented. Flow v2 freezes benchmark gates
-and skill commits, records raw per-Case Experiment measurements, derives
-comparisons transactionally, promotes knowledge only through audited
-Integration, and exposes the resulting lineage in the read-only Workbench.
+Current implementation status: the Phase 0–9 provider-neutral release, KDA
+flow v2 trusted-evidence loop, and opt-in flow v3 benchmark gate are implemented.
+Flow v2 freezes benchmark gates and skill commits, records raw per-Case
+Experiment measurements, derives comparisons transactionally, promotes
+knowledge only through audited Integration, and exposes the resulting lineage
+in the read-only Workbench. Configuration version 2 plus `[agents.benchmark]`
+selects flow v3 for a new Optimization: every Experiment Cycle first measures
+the exact reference checkpoint in an independent detached checkout, then lets
+one fresh Iteration Work consume that Reference Receipt for at most one
+candidate Experiment.
 Credentialed real-model gates remain explicit because they consume model quota;
 see the development plan for recorded evidence and commands.
 
@@ -57,6 +62,7 @@ kernel-pika-workspace/
   repo/                 Pika base linked worktree
   best/repo/            accepted Best linked worktree
   attempts/.../repo/    isolated Attempt linked worktrees
+  benchmarks/<work>/repo/ detached reference-only checkpoint worktrees
   instructions/         user-owned Role overlays
   contexts/<session-id>/
     context.json        committed domain projection
@@ -66,7 +72,7 @@ kernel-pika-workspace/
   herdr/binding.json    current replaceable Herdr layout binding
 ```
 
-Each Agent reads its Context Bundle before acting. `messages.jsonl` spans all observed Sessions for the relevant Work and preserves complete normalized messages, shell/tool inputs and outputs, and MCP receipts; provider-specific raw hook events remain in SQLite and are not duplicated. A later Iteration Round receives the immediately preceding Round's full history for recovery while running in its own branch and Git worktree. Iteration bundles also expose the frozen N most-recent terminal Attempt summaries and digest-addressed detail files for selective reading. Context v3 includes the Round-frozen Iteration Case Snapshot: an accepted Baseline deterministically seeds at most 10 Cases, and rejected Integrations may append at most 3 previously unseen ranked Regression Cases for future Rounds. Retrying one Agent Session verifies and reuses byte-identical files, while a replacement Session receives a new reviewable snapshot.
+Each Agent reads its Context Bundle before acting. `messages.jsonl` spans all observed Sessions for the relevant Work and preserves complete normalized messages, shell/tool inputs and outputs, and MCP receipts; provider-specific raw hook events remain in SQLite and are not duplicated. A later Iteration Round receives the immediately preceding Round's full history for recovery while running in its own branch and Git worktree. Iteration bundles also expose the frozen N most-recent terminal Attempt summaries and digest-addressed detail files for selective reading. Context v3 includes the Round-frozen Iteration Case Snapshot: an accepted Baseline deterministically seeds at most 10 Cases, and rejected Integrations may append at most 3 previously unseen ranked Regression Cases for future Rounds. Flow-v3 Context v5 additionally exposes Experiment Cycles, the current single-use Reference Receipt, and protected Benchmark evidence roots. Retrying one Agent Session verifies and reuses byte-identical files, while a replacement Session receives a new reviewable snapshot.
 
 Run `pika-go open /path/to/kernel-pika-workspace`, or run `pika-go kick-off` anywhere inside it, to open existing durable state. Existing configuration is reused and init is not repeated. A Workspace is intentionally not relocatable because it records the absolute source repository and Git common-directory filesystem identity.
 

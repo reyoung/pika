@@ -501,6 +501,39 @@ func TestVerifyExperimentCheckpointPreservesWhitespaceInPaths(t *testing.T) {
 	}
 }
 
+func TestEnsureBenchmarkCreatesIndependentPinnedDetachedCheckout(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repository, baselineSHA := fixtureRepository(t)
+	workspace := gitworkspace.Workspace{Repository: repository, Root: filepath.Join(t.TempDir(), "worktrees")}
+	attempt, err := workspace.CreateAttempt(ctx, "attempt", 1, baselineSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(attempt.Repository, "kernel.txt"), "candidate\n")
+	git(t, attempt.Repository, "add", "kernel.txt")
+	git(t, attempt.Repository, "commit", "-m", "candidate")
+	candidateSHA := strings.TrimSpace(git(t, attempt.Repository, "rev-parse", "HEAD"))
+
+	benchmark, err := workspace.EnsureBenchmark(ctx, "benchmark-work", candidateSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if benchmark.Repository == attempt.Repository || benchmark.HeadSHA != candidateSHA {
+		t.Fatalf("Benchmark checkout is not independently pinned: %+v", benchmark)
+	}
+	if branch := strings.TrimSpace(git(t, benchmark.Repository, "branch", "--show-current")); branch != "" {
+		t.Fatalf("Benchmark checkout is attached to branch %q", branch)
+	}
+	writeFile(t, filepath.Join(attempt.Repository, "kernel.txt"), "new candidate work\n")
+	if got := strings.TrimSpace(git(t, benchmark.Repository, "show", "HEAD:kernel.txt")); got != "candidate" {
+		t.Fatalf("Benchmark checkout observed candidate worktree mutation: %q", got)
+	}
+	if replayed, err := workspace.EnsureBenchmark(ctx, "benchmark-work", candidateSHA); err != nil || replayed.Repository != benchmark.Repository {
+		t.Fatalf("idempotent Benchmark checkout = %+v err=%v", replayed, err)
+	}
+}
+
 func fixtureRepository(t *testing.T) (string, string) {
 	t.Helper()
 	repository := filepath.Join(t.TempDir(), "repository")

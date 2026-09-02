@@ -103,6 +103,7 @@ type Experiment struct {
 	CheckpointSHA         string                 `json:"checkpoint_sha,omitempty"`
 	Correctness           *ExperimentCorrectness `json:"correctness,omitempty"`
 	BenchmarkMeasurements json.RawMessage        `json:"benchmark_measurements,omitempty"`
+	ReferenceReceiptID    string                 `json:"reference_receipt_id,omitempty"`
 	Artifacts             []ArtifactRef          `json:"artifacts"`
 	Summary               string                 `json:"summary"`
 }
@@ -136,6 +137,17 @@ func ParseDiagnosisReport(raw json.RawMessage) (DiagnosisReport, error) {
 func ParseExperiment(raw json.RawMessage) (Experiment, error) {
 	var experiment Experiment
 	if err := ValidateExperiment(raw); err != nil {
+		return experiment, err
+	}
+	if err := json.Unmarshal(raw, &experiment); err != nil {
+		return experiment, fmt.Errorf("decode Experiment contract: %w", err)
+	}
+	return experiment, nil
+}
+
+func ParseExperimentForFlow(raw json.RawMessage, flowVersion int64) (Experiment, error) {
+	var experiment Experiment
+	if err := ValidateExperimentForFlow(raw, flowVersion); err != nil {
 		return experiment, err
 	}
 	if err := json.Unmarshal(raw, &experiment); err != nil {
@@ -214,9 +226,45 @@ func ExperimentSchema() map[string]any {
 	return experiment
 }
 
-// ExperimentInputSchema is the complete v1 MCP request contract.
+// ExperimentV2Schema carries only candidate measurements and binds them to a
+// Pika-issued reference receipt from the immediately preceding Benchmark Work.
+func ExperimentV2Schema() map[string]any {
+	hypothesis := strict(map[string]any{"diagnosis_hypothesis_id": str(), "summary": str()})
+	hypothesis["anyOf"] = []any{map[string]any{"required": []string{"diagnosis_hypothesis_id"}}, map[string]any{"required": []string{"summary"}}}
+	change := strict(map[string]any{"summary": str(), "paths": map[string]any{"type": "array", "minItems": 1, "uniqueItems": true, "items": str()}, "mechanism": str()}, "summary", "paths", "mechanism")
+	correctness := strict(map[string]any{"benchmark_integrity": benchmarkintegrity.StrictEvidenceSchema()}, "benchmark_integrity")
+	experiment := strict(map[string]any{
+		"schema_version":         map[string]any{"type": "integer", "const": 2},
+		"reference_receipt_id":   str(),
+		"parent_checkpoint_sha":  str(),
+		"hypothesis":             hypothesis,
+		"change":                 change,
+		"outcome":                map[string]any{"type": "string", "enum": []string{"kept", "rejected", "inconclusive"}},
+		"checkpoint_sha":         str(),
+		"correctness":            correctness,
+		"benchmark_measurements": benchmarkintegrity.StrictMeasurementSetSchema(),
+		"artifacts":              map[string]any{"type": "array", "minItems": 1, "items": artifact()},
+		"summary":                str(),
+	}, "schema_version", "reference_receipt_id", "parent_checkpoint_sha", "hypothesis", "change", "outcome", "artifacts", "summary")
+	experiment["allOf"] = []any{map[string]any{
+		"if":   map[string]any{"properties": map[string]any{"outcome": map[string]any{"const": "kept"}}, "required": []string{"outcome"}},
+		"then": map[string]any{"required": []string{"checkpoint_sha", "correctness", "benchmark_measurements"}},
+		"else": map[string]any{"not": map[string]any{"required": []string{"checkpoint_sha"}}},
+	}}
+	return experiment
+}
+
+// ExperimentInputSchema preserves the frozen flow-v2 MCP request contract.
 func ExperimentInputSchema() map[string]any {
-	return strict(map[string]any{"idempotency_key": str(), "experiment": ExperimentSchema()}, "idempotency_key", "experiment")
+	return ExperimentInputSchemaForFlow(2)
+}
+
+func ExperimentInputSchemaForFlow(flowVersion int64) map[string]any {
+	experiment := ExperimentSchema()
+	if flowVersion == 3 {
+		experiment = ExperimentV2Schema()
+	}
+	return strict(map[string]any{"idempotency_key": str(), "experiment": experiment}, "idempotency_key", "experiment")
 }
 
 // ValidateDiagnosisInput and ValidateExperimentInput use the same strict
@@ -227,10 +275,19 @@ func ValidateDiagnosisReport(raw json.RawMessage) error {
 	return validate(raw, DiagnosisReportSchema())
 }
 func ValidateExperiment(raw json.RawMessage) error {
-	return validate(raw, ExperimentSchema())
+	return validate(raw, map[string]any{"oneOf": []any{ExperimentSchema(), ExperimentV2Schema()}})
+}
+func ValidateExperimentForFlow(raw json.RawMessage, flowVersion int64) error {
+	if flowVersion == 2 {
+		return validate(raw, ExperimentSchema())
+	}
+	if flowVersion == 3 {
+		return validate(raw, ExperimentV2Schema())
+	}
+	return fmt.Errorf("Experiments are unsupported for flow version %d", flowVersion)
 }
 func ValidateExperimentInput(raw json.RawMessage) error {
-	return validate(raw, ExperimentInputSchema())
+	return validate(raw, strict(map[string]any{"idempotency_key": str(), "experiment": map[string]any{"oneOf": []any{ExperimentSchema(), ExperimentV2Schema()}}}, "idempotency_key", "experiment"))
 }
 
 func validate(raw []byte, schema map[string]any) error {

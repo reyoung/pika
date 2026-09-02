@@ -139,6 +139,32 @@ func TestPrepareInitRejectsNonGitRepositoryWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestPrepareInitRejectsBenchmarkAgentInConfigurationVersionOne(t *testing.T) {
+	t.Parallel()
+	repository := filepath.Join(t.TempDir(), "repository")
+	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	agents := configuration.DefaultAgents()
+	agents["benchmark"] = configuration.Agent{Kind: "codex", Model: "gpt-5.6-sol", ReasoningEffort: "high"}
+	candidate, err := configuration.RenderConfiguration(repository, agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate = strings.Replace(candidate, "version = 2", "version = 1", 1)
+	configRoot := filepath.Join(t.TempDir(), "config")
+	initializer := configuration.Initializer{
+		ConfigRoot: configRoot, StateRoot: filepath.Join(t.TempDir(), "state"), InstanceID: "invalid-v1",
+		ConfigurationTOML: &candidate, RequireConfigurationTOML: true,
+	}
+	if _, err := initializer.Prepare(context.Background(), repository); err == nil || !strings.Contains(err.Error(), "agents.benchmark requires configuration version 2") {
+		t.Fatalf("version-1 benchmark configuration error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(configRoot, "instances", "invalid-v1", "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("invalid configuration was written: %v", err)
+	}
+}
+
 func TestPrepareInitPreservesExistingUserConfiguration(t *testing.T) {
 	t.Parallel()
 

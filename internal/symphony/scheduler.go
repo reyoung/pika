@@ -11,11 +11,13 @@ import (
 const schedulerResumeMessage = "继续"
 
 type schedulerCommandResult struct {
-	SchedulerStatus SchedulerStatus `json:"scheduler_status"`
-	Epoch           int64           `json:"epoch"`
-	CycleID         string          `json:"cycle_id,omitempty"`
-	EffectID        string          `json:"effect_id,omitempty"`
-	Noop            bool            `json:"noop,omitempty"`
+	SchedulerStatus   SchedulerStatus `json:"scheduler_status"`
+	Epoch             int64           `json:"epoch"`
+	CycleID           string          `json:"cycle_id,omitempty"`
+	EffectID          string          `json:"effect_id,omitempty"`
+	ExperimentCycleID string          `json:"experiment_cycle_id,omitempty"`
+	WorkID            string          `json:"work_id,omitempty"`
+	Noop              bool            `json:"noop,omitempty"`
 }
 
 func (e *Engine) applyPauseScheduler(ctx context.Context, tx *sql.Tx, command PauseScheduler) (Receipt, error) {
@@ -48,44 +50,129 @@ func (e *Engine) applySchedulerControl(ctx context.Context, tx *sql.Tx, meta Com
 	if action == "resume" {
 		want = SchedulerRunning
 	}
-	if status == want {
-		result := mustJSON(schedulerCommandResult{SchedulerStatus: status, Epoch: epoch, Noop: true})
-		return Receipt{ID: e.newID(), Revision: optimization.Revision, Result: result}, nil
-	}
 	if action != "pause" && action != "resume" {
 		return Receipt{}, domainError(CodeInvalidCommand, "scheduler action must be pause or resume")
+	}
+	retry, err := unavailableBenchmarkRetry(ctx, tx, optimization, action)
+	if err != nil {
+		return Receipt{}, err
+	}
+	if status == want && retry == nil {
+		result := mustJSON(schedulerCommandResult{SchedulerStatus: status, Epoch: epoch, Noop: true})
+		return Receipt{ID: e.newID(), Revision: optimization.Revision, Result: result}, nil
 	}
 
 	nowTime := e.now().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
-	nextRevision, nextEpoch := optimization.Revision+1, epoch+1
+	nextRevision, nextEpoch := optimization.Revision+1, epoch
+	var cycleID, effectID string
 	if action == "resume" {
-		if !pausedAt.Valid {
-			return Receipt{}, domainError(CodeStateCorrupt, "paused Scheduler has no pause timestamp")
-		}
-		if err := shiftWaitingFollowUps(ctx, tx, pausedAt.String, nowTime); err != nil {
-			return Receipt{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET scheduler_status = ?, scheduler_paused_at = NULL,
-			scheduler_epoch = ?, revision = ?, updated_at = ? WHERE id = ?`, SchedulerRunning, nextEpoch, nextRevision, now, optimization.ID); err != nil {
-			return Receipt{}, fmt.Errorf("resume Scheduler: %w", err)
+		if status != SchedulerRunning {
+			if !pausedAt.Valid {
+				return Receipt{}, domainError(CodeStateCorrupt, "paused Scheduler has no pause timestamp")
+			}
+			if err := shiftWaitingFollowUps(ctx, tx, pausedAt.String, nowTime); err != nil {
+				return Receipt{}, err
+			}
+			nextEpoch++
+			if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET scheduler_status = ?, scheduler_paused_at = NULL,
+				scheduler_epoch = ?, revision = ?, updated_at = ? WHERE id = ?`, SchedulerRunning, nextEpoch, nextRevision, now, optimization.ID); err != nil {
+				return Receipt{}, fmt.Errorf("resume Scheduler: %w", err)
+			}
+			cycleID, effectID, err = e.createSchedulerControlCycle(ctx, tx, optimization.ID, nextEpoch, action, now)
+			if err != nil {
+				return Receipt{}, err
+			}
+		} else if retry != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET revision = ?, updated_at = ? WHERE id = ?`, nextRevision, now, optimization.ID); err != nil {
+				return Receipt{}, err
+			}
 		}
 	} else {
+		nextEpoch++
 		if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET scheduler_status = ?, scheduler_paused_at = ?,
 			scheduler_epoch = ?, revision = ?, updated_at = ? WHERE id = ?`, SchedulerPaused, now, nextEpoch, nextRevision, now, optimization.ID); err != nil {
 			return Receipt{}, fmt.Errorf("pause Scheduler: %w", err)
 		}
+		cycleID, effectID, err = e.createSchedulerControlCycle(ctx, tx, optimization.ID, nextEpoch, action, now)
+		if err != nil {
+			return Receipt{}, err
+		}
 	}
-	cycleID, effectID, err := e.createSchedulerControlCycle(ctx, tx, optimization.ID, nextEpoch, action, now)
+	eventType := "scheduler." + action + "d"
+	payloadValues := map[string]any{"cycle_id": cycleID, "action": action, "epoch": nextEpoch}
+	result := schedulerCommandResult{SchedulerStatus: want, Epoch: nextEpoch, CycleID: cycleID, EffectID: effectID}
+	if retry != nil {
+		optimizationResult, err := tx.ExecContext(ctx, `UPDATE optimizations SET status = ?, updated_at = ? WHERE id = ? AND status = ?`, OptimizationOptimizing, now, optimization.ID, OptimizationPaused)
+		if err != nil {
+			return Receipt{}, fmt.Errorf("resume Optimization for Benchmark retry: %w", err)
+		}
+		if changed, _ := optimizationResult.RowsAffected(); changed != 1 {
+			return Receipt{}, domainError(CodeRevisionConflict, "paused Optimization changed before Benchmark retry")
+		}
+		cycleResult, err := tx.ExecContext(ctx, `UPDATE experiment_cycles SET status = 'benchmark_pending', failure_reason = NULL WHERE id = ? AND status = 'benchmark_unavailable'`, retry.CycleID)
+		if err != nil {
+			return Receipt{}, fmt.Errorf("reopen Experiment Cycle Benchmark: %w", err)
+		}
+		if changed, _ := cycleResult.RowsAffected(); changed != 1 {
+			return Receipt{}, domainError(CodeRevisionConflict, "unavailable Benchmark Cycle changed before retry")
+		}
+		if err := e.startBenchmarkRun(ctx, tx, optimization.ID, retry.BaselineID, retry.AttemptID, retry.Round, retry.CycleID, now); err != nil {
+			return Receipt{}, err
+		}
+		if err := e.fillIterationSlots(ctx, tx, optimization.ID, retry.BaselineID, now); err != nil {
+			return Receipt{}, fmt.Errorf("fill Iteration slots after Benchmark retry: %w", err)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT work_id FROM benchmark_runs WHERE experiment_cycle_id = ? ORDER BY run_number DESC LIMIT 1`, retry.CycleID).Scan(&result.WorkID); err != nil {
+			return Receipt{}, fmt.Errorf("read retried Benchmark Work: %w", err)
+		}
+		eventType = "experiment_cycle.benchmark_retry_requested"
+		payloadValues["experiment_cycle_id"] = retry.CycleID
+		payloadValues["work_id"] = result.WorkID
+		result.ExperimentCycleID = retry.CycleID
+	}
+	payload := mustJSON(payloadValues)
+	if err := insertEvent(ctx, tx, e.newID(), optimization.ID, nextRevision, eventType, payload, now); err != nil {
+		return Receipt{}, err
+	}
+	return Receipt{ID: e.newID(), Revision: nextRevision, Result: mustJSON(result)}, nil
+}
+
+type benchmarkRetry struct {
+	CycleID    string
+	BaselineID string
+	AttemptID  string
+	Round      int64
+}
+
+func unavailableBenchmarkRetry(ctx context.Context, tx *sql.Tx, optimization optimizationRecord, action string) (*benchmarkRetry, error) {
+	if action != "resume" || optimization.FlowVersion != FlowVersion3 || optimization.Status != OptimizationPaused {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, baseline_revision_id, attempt_id, iteration_round
+		FROM experiment_cycles WHERE optimization_id = ? AND status = 'benchmark_unavailable' ORDER BY created_at, id`, optimization.ID)
 	if err != nil {
-		return Receipt{}, err
+		return nil, fmt.Errorf("read unavailable Benchmark Cycle: %w", err)
 	}
-	payload := mustJSON(map[string]any{"cycle_id": cycleID, "action": action, "epoch": nextEpoch})
-	if err := insertEvent(ctx, tx, e.newID(), optimization.ID, nextRevision, "scheduler."+action+"d", payload, now); err != nil {
-		return Receipt{}, err
+	defer rows.Close()
+	var retries []benchmarkRetry
+	for rows.Next() {
+		var retry benchmarkRetry
+		if err := rows.Scan(&retry.CycleID, &retry.BaselineID, &retry.AttemptID, &retry.Round); err != nil {
+			return nil, fmt.Errorf("scan unavailable Benchmark Cycle: %w", err)
+		}
+		retries = append(retries, retry)
 	}
-	result := mustJSON(schedulerCommandResult{SchedulerStatus: want, Epoch: nextEpoch, CycleID: cycleID, EffectID: effectID})
-	return Receipt{ID: e.newID(), Revision: nextRevision, Result: result}, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(retries) == 0 {
+		return nil, nil
+	}
+	if len(retries) != 1 {
+		return nil, domainError(CodeStateCorrupt, "paused flow v3 Optimization must have exactly one unavailable Benchmark Cycle")
+	}
+	return &retries[0], nil
 }
 
 func (e *Engine) createSchedulerControlCycle(ctx context.Context, tx *sql.Tx, optimizationID string, epoch int64, action, now string) (string, string, error) {

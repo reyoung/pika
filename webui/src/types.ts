@@ -29,7 +29,7 @@ export type PrimarySummary = {
 }
 
 export type WorkbenchNode = {
-  kind: 'baseline' | 'best' | 'attempt' | 'round' | 'integration'
+  kind: 'baseline' | 'best' | 'attempt' | 'round' | 'experiment_cycle' | 'reference_receipt' | 'experiment' | 'integration' | 'artifact'
   id: string
   label: string
   domain_status: string

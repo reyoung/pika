@@ -158,6 +158,14 @@ func (e *Engine) InitializeIterationRoundCheckpoint(ctx context.Context, attempt
 		return "", fmt.Errorf("read Iteration checkpoint: %w", err)
 	}
 	if baseSHA == expectedBaseSHA && currentSHA == preparedSHA {
+		if _, err := tx.ExecContext(ctx, `UPDATE experiment_cycles SET checkpoint_sha = ?
+			WHERE attempt_id = ? AND iteration_round = ? AND status = 'benchmark_pending' AND checkpoint_sha = ?`,
+			preparedSHA, attemptID, round, expectedBaseSHA); err != nil {
+			return "", fmt.Errorf("align Experiment Cycle checkpoint: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return "", fmt.Errorf("commit idempotent Iteration checkpoint initialization: %w", err)
+		}
 		return preparedSHA, nil
 	}
 	if baseSHA != expectedBaseSHA || currentSHA != expectedBaseSHA {
@@ -185,6 +193,11 @@ func (e *Engine) InitializeIterationRoundCheckpoint(ctx context.Context, attempt
 	}
 	if changed != 1 {
 		return "", domainError(CodeRevisionConflict, "Iteration Round checkpoint changed during initialization")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE experiment_cycles SET checkpoint_sha = ?
+		WHERE attempt_id = ? AND iteration_round = ? AND status = 'benchmark_pending' AND checkpoint_sha = ?`,
+		preparedSHA, attemptID, round, expectedBaseSHA); err != nil {
+		return "", fmt.Errorf("initialize Experiment Cycle checkpoint: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit Iteration checkpoint initialization: %w", err)

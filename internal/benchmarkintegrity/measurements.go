@@ -74,7 +74,104 @@ type measurementBaselineCase struct {
 }
 
 type MeasurementSet struct {
-	Cases []MeasurementSetCase `json:"cases"`
+	SchemaVersion     int                  `json:"schema_version,omitempty"`
+	Cases             []MeasurementSetCase `json:"cases"`
+	IndependentRetest bool                 `json:"independent_retest,omitempty"`
+}
+
+type measurementSetEnvelope struct {
+	SchemaVersion     int                       `json:"schema_version"`
+	Cases             []measurementBaselineCase `json:"cases"`
+	IndependentRetest *independentRetest        `json:"independent_retest,omitempty"`
+}
+
+// ParseMeasurementSet validates one unpaired reference or candidate set.
+func ParseMeasurementSet(definition MeasurementDefinition, raw json.RawMessage) (MeasurementSet, error) {
+	var envelope measurementSetEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return MeasurementSet{}, fmt.Errorf("decode benchmark measurement set: %w", err)
+	}
+	if envelope.SchemaVersion != MeasurementSchemaVersion {
+		return MeasurementSet{}, fmt.Errorf("benchmark measurement set schema_version must be %d", MeasurementSchemaVersion)
+	}
+	if len(envelope.Cases) != len(definition.Cases) {
+		return MeasurementSet{}, fmt.Errorf("benchmark measurement set must cover exactly %d frozen cases", len(definition.Cases))
+	}
+	wantedCases := make(map[string]MeasurementCase, len(definition.Cases))
+	for _, item := range definition.Cases {
+		wantedCases[item.CaseID] = item
+	}
+	metricIDs := make(map[string]struct{}, len(definition.Metrics))
+	for _, metric := range definition.Metrics {
+		metricIDs[metric.ID] = struct{}{}
+	}
+	result := MeasurementSet{SchemaVersion: envelope.SchemaVersion, IndependentRetest: retestPassed(envelope.IndependentRetest), Cases: make([]MeasurementSetCase, 0, len(envelope.Cases))}
+	seen := make(map[string]struct{}, len(envelope.Cases))
+	for index, item := range envelope.Cases {
+		caseDefinition, exists := wantedCases[item.CaseID]
+		if !exists {
+			return MeasurementSet{}, fmt.Errorf("benchmark measurement set cases[%d].case_id %q is not frozen", index, item.CaseID)
+		}
+		if _, duplicate := seen[item.CaseID]; duplicate {
+			return MeasurementSet{}, fmt.Errorf("benchmark measurement set contains duplicate %q", item.CaseID)
+		}
+		seen[item.CaseID] = struct{}{}
+		if len(item.Values) != len(metricIDs) {
+			return MeasurementSet{}, fmt.Errorf("benchmark measurement set cases[%d].values must contain every frozen metric exactly once", index)
+		}
+		for metricID := range metricIDs {
+			value, present := item.Values[metricID]
+			if !present || !finitePositive(value) {
+				return MeasurementSet{}, fmt.Errorf("benchmark measurement set cases[%d].values.%s must be finite and greater than zero", index, metricID)
+			}
+		}
+		result.Cases = append(result.Cases, MeasurementSetCase{CaseID: item.CaseID, Weight: caseDefinition.Weight, Values: item.Values})
+	}
+	return result, nil
+}
+
+// CompareMeasurementSets derives the authoritative comparison from separately
+// recorded reference and candidate values. Neither Agent supplies speedups.
+func CompareMeasurementSets(definition MeasurementDefinition, reference, candidate MeasurementSet) (MeasurementComparison, error) {
+	if len(reference.Cases) != len(definition.Cases) || len(candidate.Cases) != len(definition.Cases) {
+		return MeasurementComparison{}, fmt.Errorf("reference and candidate measurement sets must cover the frozen cases")
+	}
+	referenceByCase := make(map[string]MeasurementSetCase, len(reference.Cases))
+	for _, item := range reference.Cases {
+		referenceByCase[item.CaseID] = item
+	}
+	comparison := MeasurementComparison{
+		PrimaryMetricID: definition.PrimaryMetricID, Cases: make([]DerivedMeasurementCase, 0, len(candidate.Cases)),
+		Metrics: make(map[string]DerivedMeasurementMetric, len(definition.Metrics)), IndependentRetest: candidate.IndependentRetest,
+	}
+	for _, candidateCase := range candidate.Cases {
+		referenceCase, found := referenceByCase[candidateCase.CaseID]
+		if !found {
+			return MeasurementComparison{}, fmt.Errorf("candidate case %q has no reference measurement", candidateCase.CaseID)
+		}
+		derived := DerivedMeasurementCase{CaseID: candidateCase.CaseID, Weight: candidateCase.Weight, Metrics: make(map[string]DerivedMeasurementValue, len(definition.Metrics))}
+		for _, metric := range definition.Metrics {
+			referenceValue, referenceFound := referenceCase.Values[metric.ID]
+			candidateValue, candidateFound := candidateCase.Values[metric.ID]
+			if !referenceFound || !candidateFound || !finitePositive(referenceValue) || !finitePositive(candidateValue) {
+				return MeasurementComparison{}, fmt.Errorf("case %q metric %q requires finite reference and candidate values", candidateCase.CaseID, metric.ID)
+			}
+			speedup := referenceValue / candidateValue
+			if metric.Direction == HigherIsBetter {
+				speedup = candidateValue / referenceValue
+			}
+			derived.Metrics[metric.ID] = DerivedMeasurementValue{Reference: referenceValue, Candidate: candidateValue, Speedup: speedup, Regression: speedup < 1, RegressionFraction: math.Max(0, 1-speedup)}
+		}
+		comparison.Cases = append(comparison.Cases, derived)
+	}
+	for _, metric := range definition.Metrics {
+		value := aggregateMetric(metric, comparison.Cases)
+		comparison.Metrics[metric.ID] = value
+		if math.Max(value.AggregateSpeedup, value.MaxCaseSpeedup) >= SuspiciousSpeedupThreshold && !comparison.IndependentRetest {
+			return MeasurementComparison{}, fmt.Errorf("benchmark_measurements.independent_retest is required for computed speedups >= %.0fx", SuspiciousSpeedupThreshold)
+		}
+	}
+	return comparison, nil
 }
 
 type MeasurementSetCase struct {

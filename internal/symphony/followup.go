@@ -255,6 +255,12 @@ func (e *Engine) exhaustFollowUpTargetTx(ctx context.Context, tx *sql.Tx, workID
 		if _, err := tx.ExecContext(ctx, `UPDATE attempts SET status = 'rejected', summary = ?, failure_reason = 'followup_exhausted', updated_at = ? WHERE id = ?`, reason, now, attemptID.String); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE experiment_cycles
+			SET status = CASE WHEN EXISTS (SELECT 1 FROM iteration_experiments e WHERE e.work_id = ?) THEN 'completed' ELSE 'abandoned' END,
+			failure_reason = 'followup_exhausted', completed_at = ?
+			WHERE id = (SELECT experiment_cycle_id FROM works WHERE id = ?) AND status = 'iteration_active'`, workID, now, workID); err != nil {
+			return fmt.Errorf("close exhausted flow v3 Experiment Cycle: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET revision = ?, updated_at = ? WHERE id = ?`, revision, now, optimizationID); err != nil {
 			return err
 		}

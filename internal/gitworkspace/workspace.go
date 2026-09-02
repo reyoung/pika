@@ -45,6 +45,12 @@ type Round struct {
 	HeadSHA    string `json:"head_sha"`
 }
 
+type BenchmarkCheckout struct {
+	WorkID     string `json:"work_id"`
+	Repository string `json:"repository"`
+	HeadSHA    string `json:"head_sha"`
+}
+
 type Intent struct {
 	ID              string `json:"id"`
 	ExpectedBestSHA string `json:"expected_best_sha"`
@@ -83,7 +89,7 @@ type IterationCheckpointInitializer interface {
 }
 
 func (p RuntimePreparer) PrepareWork(ctx context.Context, work symphony.RuntimeWork) (symphony.RuntimeWork, error) {
-	if work.Work.Role != symphony.RoleIteration && work.Work.Role != symphony.RoleIntegration {
+	if work.Work.Role != symphony.RoleIteration && work.Work.Role != symphony.RoleBenchmark && work.Work.Role != symphony.RoleIntegration {
 		if p.Repository != "" {
 			work.Repository = p.Repository
 		}
@@ -94,7 +100,7 @@ func (p RuntimePreparer) PrepareWork(ctx context.Context, work symphony.RuntimeW
 		repository = work.OptimizationRepository
 	}
 	workspace := Workspace{Repository: repository, Root: p.Root, Namespace: p.Namespace}
-	if work.Work.Role == symphony.RoleIteration {
+	if work.Work.Role == symphony.RoleIteration || work.Work.Role == symphony.RoleBenchmark {
 		var round Round
 		var err error
 		if work.IterationKind == "initial" {
@@ -131,6 +137,9 @@ func (p RuntimePreparer) PrepareWork(ctx context.Context, work symphony.RuntimeW
 					return symphony.RuntimeWork{}, fmt.Errorf("initialize stale Iteration checkpoint: %w", checkpointErr)
 				}
 				work.CurrentCheckpointSHA = checkpoint
+				if work.ExperimentCycle != nil {
+					work.ExperimentCycle.CheckpointSHA = checkpoint
+				}
 			}
 		}
 		if p.Recorder != nil {
@@ -139,6 +148,26 @@ func (p RuntimePreparer) PrepareWork(ctx context.Context, work symphony.RuntimeW
 				Repository: round.Repository, HeadSHA: round.HeadSHA, State: "active",
 			}); err != nil {
 				return symphony.RuntimeWork{}, err
+			}
+		}
+		if work.Work.Role == symphony.RoleBenchmark {
+			if work.Work.ExperimentCycleID == "" || work.CurrentCheckpointSHA == "" {
+				return symphony.RuntimeWork{}, errors.New("Benchmark Work has no pinned Experiment Cycle checkpoint")
+			}
+			checkout, err := workspace.EnsureBenchmark(ctx, work.Work.ID, work.CurrentCheckpointSHA)
+			if err != nil {
+				return symphony.RuntimeWork{}, err
+			}
+			work.Repository = checkout.Repository
+			return work, nil
+		}
+		if work.FlowVersion == symphony.FlowVersion3 {
+			snapshot, err := (Workspace{Repository: round.Repository, Root: p.Root, Namespace: p.Namespace}).SourceSnapshot(ctx)
+			if err != nil {
+				return symphony.RuntimeWork{}, fmt.Errorf("inspect flow v3 Iteration checkpoint: %w", err)
+			}
+			if !snapshot.Clean || snapshot.CommitSHA != work.CurrentCheckpointSHA {
+				return symphony.RuntimeWork{}, fmt.Errorf("flow v3 Iteration worktree is not the exact measured checkpoint: HEAD=%s checkpoint=%s status=%q", snapshot.CommitSHA, work.CurrentCheckpointSHA, snapshot.Status)
 			}
 		}
 		work.Repository = round.Repository
@@ -514,6 +543,42 @@ func (w Workspace) CreateAttempt(ctx context.Context, attemptID string, round in
 		return Round{}, fmt.Errorf("create Attempt worktree: %w", err)
 	}
 	return Round{AttemptID: attemptID, Round: round, Branch: branch, Repository: repository, BaseSHA: baseSHA, HeadSHA: baseSHA}, nil
+}
+
+// EnsureBenchmark creates an independent detached checkout pinned to the
+// Experiment Cycle checkpoint. Recovery accepts only the exact clean checkout;
+// Benchmark Work can never observe or mutate the candidate branch worktree.
+func (w Workspace) EnsureBenchmark(ctx context.Context, workID, checkpointSHA string) (BenchmarkCheckout, error) {
+	if err := w.validate(); err != nil {
+		return BenchmarkCheckout{}, err
+	}
+	if !identityPattern.MatchString(workID) {
+		return BenchmarkCheckout{}, errors.New("Benchmark Work ID contains unsafe characters")
+	}
+	if err := validateSHA(checkpointSHA); err != nil {
+		return BenchmarkCheckout{}, fmt.Errorf("Benchmark checkpoint: %w", err)
+	}
+	if _, err := w.git(ctx, w.Repository, "rev-parse", "--verify", checkpointSHA+"^{commit}"); err != nil {
+		return BenchmarkCheckout{}, fmt.Errorf("resolve Benchmark checkpoint: %w", err)
+	}
+	repository := filepath.Join(w.Root, "benchmarks", workID, "repo")
+	if err := os.MkdirAll(filepath.Dir(repository), 0o700); err != nil {
+		return BenchmarkCheckout{}, fmt.Errorf("create Benchmark directory: %w", err)
+	}
+	if _, err := os.Stat(repository); err == nil {
+		snapshot, snapshotErr := (Workspace{Repository: repository, Root: w.Root, Namespace: w.Namespace}).SourceSnapshot(ctx)
+		branch, branchErr := w.git(ctx, repository, "branch", "--show-current")
+		if snapshotErr == nil && branchErr == nil && snapshot.Clean && snapshot.CommitSHA == checkpointSHA && strings.TrimSpace(branch) == "" {
+			return BenchmarkCheckout{WorkID: workID, Repository: repository, HeadSHA: checkpointSHA}, nil
+		}
+		return BenchmarkCheckout{}, fmt.Errorf("Benchmark worktree path already exists with different identity: %s", repository)
+	} else if !os.IsNotExist(err) {
+		return BenchmarkCheckout{}, fmt.Errorf("inspect Benchmark worktree: %w", err)
+	}
+	if _, err := w.git(ctx, w.Repository, "worktree", "add", "--detach", repository, checkpointSHA); err != nil {
+		return BenchmarkCheckout{}, fmt.Errorf("create Benchmark worktree: %w", err)
+	}
+	return BenchmarkCheckout{WorkID: workID, Repository: repository, HeadSHA: checkpointSHA}, nil
 }
 
 func (w Workspace) RefreshFromBest(ctx context.Context, attemptID string, round int64, candidateSHA, bestSHA string) (Round, error) {

@@ -6,10 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,138 @@ type checkpointChainStore struct {
 	grant        symphony.AgentGrant
 	runtime      symphony.RuntimeWork
 	capabilities map[string]symphony.CommitCapabilityReceipt
+}
+
+type benchmarkCaptureStore struct {
+	grant   symphony.AgentGrant
+	runtime symphony.RuntimeWork
+	command symphony.Command
+}
+
+func (s *benchmarkCaptureStore) ResolveAgentGrant(context.Context, string) (symphony.AgentGrant, error) {
+	return s.grant, nil
+}
+func (s *benchmarkCaptureStore) Apply(_ context.Context, command symphony.Command) (symphony.Receipt, error) {
+	s.command = command
+	return symphony.Receipt{ID: "receipt", Revision: 2}, nil
+}
+func (s *benchmarkCaptureStore) Replay(context.Context, symphony.Command) (symphony.Receipt, bool, error) {
+	return symphony.Receipt{}, false, nil
+}
+func (s *benchmarkCaptureStore) ReplayDiagnosis(context.Context, string, string, symphony.DiagnosisStatus, json.RawMessage) (symphony.Receipt, bool, error) {
+	return symphony.Receipt{}, false, nil
+}
+func (s *benchmarkCaptureStore) ReplayIterationExperiment(context.Context, string, string, json.RawMessage) (symphony.Receipt, bool, error) {
+	return symphony.Receipt{}, false, nil
+}
+func (s *benchmarkCaptureStore) RuntimeWork(context.Context, string) (symphony.RuntimeWork, error) {
+	return s.runtime, nil
+}
+func (s *benchmarkCaptureStore) GitIntent(context.Context, string) (symphony.GitIntentView, error) {
+	return symphony.GitIntentView{}, errors.New("unexpected GitIntent")
+}
+func (s *benchmarkCaptureStore) RecordCommitCapability(context.Context, symphony.CommitCapabilityReceipt) error {
+	return errors.New("unexpected commit capability")
+}
+func (s *benchmarkCaptureStore) CommitCapability(context.Context, string, string) (symphony.CommitCapabilityReceipt, error) {
+	return symphony.CommitCapabilityReceipt{}, errors.New("unexpected commit capability")
+}
+
+func TestFlowV3BenchmarkToolStableReadsArtifactsAndBindsProvider(t *testing.T) {
+	t.Parallel()
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.MkdirAll(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repository, "init", "--quiet", "--initial-branch=main")
+	runGit(t, repository, "config", "user.name", "Pika Test")
+	runGit(t, repository, "config", "user.email", "pika@example.invalid")
+	if err := os.WriteFile(filepath.Join(repository, "target.txt"), []byte("reference\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repository, "add", "target.txt")
+	runGit(t, repository, "commit", "-m", "reference")
+	checkpoint := strings.TrimSpace(runGit(t, repository, "rev-parse", "HEAD"))
+	worktreeRoot := filepath.Join(t.TempDir(), "worktrees")
+	checkout, err := (gitworkspace.Workspace{Repository: repository, Root: worktreeRoot}).EnsureBenchmark(context.Background(), "benchmark-work", checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceRoot := filepath.Join(t.TempDir(), "evidence")
+	workRoot := filepath.Join(evidenceRoot, "benchmarks", "benchmark-work")
+	if err := os.MkdirAll(workRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workRoot, "raw.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := &benchmarkCaptureStore{
+		grant: symphony.AgentGrant{WorkID: "benchmark-work", Role: symphony.RoleBenchmark, AgentKind: "codex", SessionStatus: symphony.AgentSessionRunning, Catalog: json.RawMessage(`["finish_iteration_benchmark"]`)},
+		runtime: symphony.RuntimeWork{
+			Work:                   symphony.WorkView{ID: "benchmark-work", Role: symphony.RoleBenchmark, ExperimentCycleID: "cycle"},
+			OptimizationRepository: repository, FlowVersion: symphony.FlowVersion3, CurrentCheckpointSHA: checkpoint,
+			ExperimentCycle: &symphony.ExperimentCycleView{ID: "cycle", CheckpointSHA: checkpoint},
+		},
+	}
+	app := toolapp.Application{Store: store, Repository: repository, WorktreeRoot: worktreeRoot, EvidenceRoot: evidenceRoot, MaxEvidenceBytes: 1024}
+	catalog, err := app.Catalog(context.Background(), "grant")
+	if err != nil || len(catalog) != 1 || catalog[0].Name != "finish_iteration_benchmark" {
+		t.Fatalf("Benchmark catalog = %+v err=%v", catalog, err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout.Repository, "target.txt"), []byte("mutated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirtyArguments := json.RawMessage(`{
+		"idempotency_key":"dirty","outcome":"measured","model":"gpt-test",
+		"measurements":{"schema_version":1,"cases":[{"case_id":"case-1","values":{"latency":10}}]},
+		"artifacts":[{"path":"raw.json","kind":"benchmark"}]
+	}`)
+	if _, err := app.Invoke(context.Background(), "grant", toolapp.Call{Name: "finish_iteration_benchmark", Arguments: dirtyArguments}); err == nil || !strings.Contains(err.Error(), "exact clean Cycle checkpoint") {
+		t.Fatalf("dirty Benchmark checkout error = %v", err)
+	}
+	runGit(t, checkout.Repository, "restore", "target.txt")
+	invocation, err := app.Invoke(context.Background(), "grant", toolapp.Call{Name: "finish_iteration_benchmark", Arguments: json.RawMessage(`{
+		"idempotency_key":"measure","outcome":"measured","model":"gpt-test","environment":{"gpu":"test"},
+		"measurements":{"schema_version":1,"cases":[{"case_id":"case-1","values":{"latency":10}}]},
+		"artifacts":[{"path":"raw.json","kind":"benchmark"}]
+	}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, ok := store.command.(symphony.FinishIterationBenchmark)
+	if !ok || !invocation.Terminal || command.Provider != "codex" || command.Model != "gpt-test" || len(command.Artifacts) != 1 || command.Artifacts[0].RelativePath != "raw.json" || command.Artifacts[0].ByteSize != 3 {
+		t.Fatalf("captured Benchmark command = %+v invocation=%+v", store.command, invocation)
+	}
+}
+
+func TestFlowV3IterationCatalogUsesExperimentV2AndNextCycleTerminal(t *testing.T) {
+	t.Parallel()
+	runtime := symphony.RuntimeWork{Work: symphony.WorkView{ID: "iteration-work", Role: symphony.RoleIteration}, FlowVersion: symphony.FlowVersion3}
+	names := toolapp.CatalogForWork(runtime)
+	if !slices.Contains(names, "start_next_experiment") {
+		t.Fatalf("flow v3 Iteration catalog = %v", names)
+	}
+	encoded, _ := json.Marshal(names)
+	store := &benchmarkCaptureStore{
+		grant:   symphony.AgentGrant{WorkID: "iteration-work", Role: symphony.RoleIteration, SessionStatus: symphony.AgentSessionRunning, Catalog: encoded},
+		runtime: runtime,
+	}
+	catalog, err := (toolapp.Application{Store: store}).Catalog(context.Background(), "grant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range catalog {
+		if tool.Name != "record_iteration_experiment" {
+			continue
+		}
+		experiment := tool.InputSchema["properties"].(map[string]any)["experiment"].(map[string]any)
+		version := experiment["properties"].(map[string]any)["schema_version"].(map[string]any)["const"]
+		if version != 2 {
+			t.Fatalf("flow v3 Experiment schema version = %v", version)
+		}
+		return
+	}
+	t.Fatal("flow v3 Iteration catalog omitted record_iteration_experiment")
 }
 
 func (s *checkpointChainStore) ResolveAgentGrant(context.Context, string) (symphony.AgentGrant, error) {

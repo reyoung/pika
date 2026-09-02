@@ -91,6 +91,7 @@ func TestOpenConfiguresAndMigratesSQLite(t *testing.T) {
 		"best_revisions": false, "iteration_rounds": false, "integrations": false, "git_intents": false,
 		"iteration_cases": false, "iteration_round_cases": false,
 		"skill_snapshots": false, "skill_snapshot_entries": false, "diagnoses": false, "iteration_experiments": false,
+		"experiment_cycles": false, "benchmark_runs": false, "reference_receipts": false,
 		"workspace_identity": false, "git_worktrees": false,
 		"context_snapshots":        false,
 		"scheduler_control_cycles": false, "session_control_actions": false,

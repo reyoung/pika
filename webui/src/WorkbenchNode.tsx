@@ -2,10 +2,10 @@ import { Handle, Position, type NodeProps } from '@xyflow/react'
 import type { FlowNodeData } from './graph'
 
 const statusGlyph = (status: string) => {
-  if (status === 'accepted' || status === 'completed') return '✓'
+  if (status === 'accepted' || status === 'completed' || status === 'consumed' || status === 'available') return '✓'
   if (status === 'rejected' || status === 'cancelled') return '×'
-  if (status === 'stale' || status === 'backed_off' || status === 'refresh_pending') return '↻'
-  if (status === 'running' || status === 'iterating' || status === 'integrating') return '●'
+  if (status === 'stale' || status === 'backed_off' || status === 'refresh_pending' || status === 'benchmark_unavailable') return '↻'
+  if (status === 'running' || status === 'iterating' || status === 'integrating' || status === 'benchmark_pending' || status === 'iteration_active') return '●'
   return '◇'
 }
 

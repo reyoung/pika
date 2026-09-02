@@ -812,14 +812,14 @@ func (e *Engine) AgentSessionHistory(ctx context.Context, workID string) ([]Agen
 
 func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, error) {
 	var runtimeWork RuntimeWork
-	var attemptID, integrationID, parentWorkID, followUpRequestID, baseSHA, candidateSHA, iterationKind, backOffMessage, currentCheckpoint sql.NullString
+	var attemptID, integrationID, parentWorkID, followUpRequestID, experimentCycleID, baseSHA, candidateSHA, iterationKind, backOffMessage, currentCheckpoint sql.NullString
 	var expectedBestSHA, integrationStatus, gitIntentID, gitIntentState sql.NullString
 	var predecessorBaselineID, baselineRepositorySHA sql.NullString
 	var iterationRound, fifoPosition, historyLimit, iterationSlotIndex sql.NullInt64
 	var baselineDefinition []byte
 	err := e.db.QueryRowContext(ctx, `SELECT w.id, w.baseline_revision_id, w.role, w.status, w.generation,
-		w.attempt_id, w.iteration_round, w.integration_id, w.parent_work_id, w.followup_request_id,
-		o.id, o.status, o.revision, o.flow_version, o.repository, b.number, b.status, b.definition_json, b.repository_sha, b.predecessor_id,
+		w.attempt_id, w.iteration_round, w.integration_id, w.parent_work_id, w.followup_request_id, w.experiment_cycle_id,
+		o.id, o.status, o.revision, COALESCE(o.flow_version_override, o.flow_version), o.repository, b.number, b.status, b.definition_json, b.repository_sha, b.predecessor_id,
 		a.base_sha, a.candidate_sha, a.slot_index, a.history_limit, r.kind, r.back_off_message, r.current_checkpoint_sha,
 		i.expected_best_sha, i.fifo_position, i.status, g.id, g.state
 		FROM works w JOIN optimizations o ON o.id = w.optimization_id
@@ -830,7 +830,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		LEFT JOIN git_intents g ON g.integration_id = i.id
 		WHERE w.id = ?`, workID).Scan(
 		&runtimeWork.Work.ID, &runtimeWork.Work.BaselineRevisionID, &runtimeWork.Work.Role,
-		&runtimeWork.Work.Status, &runtimeWork.Work.Generation, &attemptID, &iterationRound, &integrationID, &parentWorkID, &followUpRequestID,
+		&runtimeWork.Work.Status, &runtimeWork.Work.Generation, &attemptID, &iterationRound, &integrationID, &parentWorkID, &followUpRequestID, &experimentCycleID,
 		&runtimeWork.OptimizationID, &runtimeWork.OptimizationStatus, &runtimeWork.OptimizationRevision, &runtimeWork.FlowVersion, &runtimeWork.Repository,
 		&runtimeWork.BaselineNumber, &runtimeWork.BaselineStatus, &baselineDefinition, &baselineRepositorySHA, &predecessorBaselineID,
 		&baseSHA, &candidateSHA, &iterationSlotIndex, &historyLimit, &iterationKind, &backOffMessage, &currentCheckpoint,
@@ -848,6 +848,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 	runtimeWork.Work.IntegrationID = integrationID.String
 	runtimeWork.Work.ParentWorkID = parentWorkID.String
 	runtimeWork.Work.FollowUpRequestID = followUpRequestID.String
+	runtimeWork.Work.ExperimentCycleID = experimentCycleID.String
 	runtimeWork.BaseSHA = baseSHA.String
 	runtimeWork.CandidateSHA = candidateSHA.String
 	runtimeWork.IterationSlotIndex = iterationSlotIndex.Int64
@@ -887,7 +888,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		runtimeWork.PredecessorRequestedChanges = requestedChanges.String
 		runtimeWork.PredecessorVerificationEvidence = evidence
 	}
-	if runtimeWork.FlowVersion == FlowVersion2 {
+	if runtimeWork.FlowVersion >= FlowVersion2 {
 		snapshot, snapshotErr := e.readSkillSnapshot(ctx, runtimeWork.OptimizationID)
 		if snapshotErr != nil {
 			return RuntimeWork{}, snapshotErr
@@ -912,7 +913,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 			return RuntimeWork{}, fmt.Errorf("read runtime Diagnosis: %w", diagnosisErr)
 		}
 	}
-	if runtimeWork.Work.Role == RoleIteration || runtimeWork.Work.Role == RoleIntegration || runtimeWork.Work.Role == RoleDiagnosis {
+	if runtimeWork.Work.Role == RoleIteration || runtimeWork.Work.Role == RoleBenchmark || runtimeWork.Work.Role == RoleIntegration || runtimeWork.Work.Role == RoleDiagnosis {
 		if err := e.db.QueryRowContext(ctx, `SELECT sequence, commit_sha FROM best_revisions
 			WHERE optimization_id = (SELECT optimization_id FROM works WHERE id = ?)
 			ORDER BY sequence DESC LIMIT 1`, workID).Scan(&runtimeWork.BestSequence, &runtimeWork.BestSHA); err != nil {
@@ -920,7 +921,7 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		}
 		var caseSet IterationCaseSetView
 		var err error
-		if runtimeWork.Work.Role == RoleIteration {
+		if runtimeWork.Work.Role == RoleIteration || runtimeWork.Work.Role == RoleBenchmark {
 			caseSet, err = roundIterationCaseSet(ctx, e.db, runtimeWork.Work.AttemptID, runtimeWork.Work.IterationRound)
 		} else {
 			caseSet, err = currentIterationCaseSet(ctx, e.db, runtimeWork.OptimizationID)
@@ -930,12 +931,35 @@ func (e *Engine) RuntimeWork(ctx context.Context, workID string) (RuntimeWork, e
 		}
 		runtimeWork.IterationCaseSet = &caseSet
 	}
-	if (runtimeWork.Work.Role == RoleIteration || runtimeWork.Work.Role == RoleIntegration) && runtimeWork.FlowVersion == FlowVersion2 {
+	if (runtimeWork.Work.Role == RoleIteration || runtimeWork.Work.Role == RoleIntegration) && runtimeWork.FlowVersion >= FlowVersion2 {
 		experiments, experimentsErr := e.readIterationExperiments(ctx, runtimeWork.Work.AttemptID, runtimeWork.Work.IterationRound)
 		if experimentsErr != nil {
 			return RuntimeWork{}, experimentsErr
 		}
 		runtimeWork.IterationExperiments = experiments
+	}
+	if runtimeWork.FlowVersion == FlowVersion3 && runtimeWork.Work.ExperimentCycleID != "" {
+		cycle, err := e.readExperimentCycle(ctx, runtimeWork.Work.ExperimentCycleID)
+		if err != nil {
+			return RuntimeWork{}, err
+		}
+		runtimeWork.ExperimentCycle = &cycle
+		reference, found, err := e.readReferenceReceiptForCycle(ctx, runtimeWork.Work.ExperimentCycleID)
+		if err != nil {
+			return RuntimeWork{}, err
+		}
+		if found {
+			runtimeWork.ReferenceReceipt = &reference
+		}
+		if runtimeWork.Work.Role == RoleIteration {
+			current := runtimeWork.IterationExperiments[:0]
+			for _, experiment := range runtimeWork.IterationExperiments {
+				if experiment.WorkID == runtimeWork.Work.ID {
+					current = append(current, experiment)
+				}
+			}
+			runtimeWork.IterationExperiments = current
+		}
 	}
 	if runtimeWork.Work.Role == RoleFollowUp {
 		if err := e.db.QueryRowContext(ctx, `SELECT target_work_id, target_role, request_sequence, due_at,
@@ -1294,8 +1318,12 @@ func (e *Engine) Apply(ctx context.Context, command Command) (Receipt, error) {
 		receipt, err = e.applyFinishBaselineVerification(ctx, tx, typed)
 	case FinishDiagnosis:
 		receipt, err = e.applyFinishDiagnosis(ctx, tx, typed)
+	case FinishIterationBenchmark:
+		receipt, err = e.applyFinishIterationBenchmark(ctx, tx, typed)
 	case RecordIterationExperiment:
 		receipt, err = e.applyRecordIterationExperiment(ctx, tx, typed)
+	case StartNextExperiment:
+		receipt, err = e.applyStartNextExperiment(ctx, tx, typed)
 	case BackOff:
 		receipt, err = e.applyBackOff(ctx, tx, typed)
 	case CancelWork:
@@ -1353,7 +1381,11 @@ func commandTargetWorkID(command Command) string {
 		return typed.WorkID
 	case FinishDiagnosis:
 		return typed.WorkID
+	case FinishIterationBenchmark:
+		return typed.WorkID
 	case RecordIterationExperiment:
+		return typed.WorkID
+	case StartNextExperiment:
 		return typed.WorkID
 	case FinishIteration:
 		return typed.WorkID
@@ -1456,7 +1488,7 @@ func (e *Engine) applySubmitBaselineDefinition(ctx context.Context, tx *sql.Tx, 
 		if err != nil {
 			return Receipt{}, domainError(CodeInvalidCommand, "invalid benchmark measurement contract: "+err.Error())
 		}
-		if optimization.FlowVersion == FlowVersion2 {
+		if optimization.FlowVersion >= FlowVersion2 {
 			if err := benchmarkintegrity.RequireIterationGate(measurementDefinition); err != nil {
 				return Receipt{}, domainError(CodeInvalidCommand, "invalid benchmark measurement contract: "+err.Error())
 			}
@@ -1804,7 +1836,7 @@ func (e *Engine) applyCancelWork(ctx context.Context, tx *sql.Tx, command Cancel
 	if status != WorkPending {
 		return Receipt{}, domainError(CodeWorkTerminal, "work is already terminal")
 	}
-	if role == RoleIteration || role == RoleIntegration {
+	if role == RoleBenchmark || role == RoleIteration || role == RoleIntegration {
 		return e.applyAttemptCancellation(ctx, tx, optimization, command, role, baselineID, attemptID.String, integrationID.String)
 	}
 	receiptID := e.newID()
@@ -1975,7 +2007,7 @@ func (e *Engine) applyInit(ctx context.Context, tx *sql.Tx, command Init) (Recei
 	if flowVersion == FlowVersion1 && command.SkillSnapshot != nil {
 		return Receipt{}, domainError(CodeInvalidCommand, "flow v1 cannot receive a skill snapshot")
 	}
-	if flowVersion == FlowVersion2 {
+	if flowVersion >= FlowVersion2 {
 		if err := validateSkillSnapshotInput(command.SkillSnapshot); err != nil {
 			return Receipt{}, domainError(CodeInvalidCommand, err.Error())
 		}
@@ -1994,13 +2026,17 @@ func (e *Engine) applyInit(ctx context.Context, tx *sql.Tx, command Init) (Recei
 	eventID := e.newID()
 	effectID := e.newID()
 	now := e.timestamp()
+	persistedFlowVersion, flowVersionOverride := flowVersion, any(nil)
+	if flowVersion == FlowVersion3 {
+		persistedFlowVersion, flowVersionOverride = FlowVersion2, FlowVersion3
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO optimizations
-		(id, status, revision, repository, iteration_concurrency, max_pending_attempts, iteration_history_limit, flow_version, created_at, updated_at)
-		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`, command.OptimizationID, OptimizationDraftingBaseline, command.Repository,
-		command.IterationConcurrency, command.MaxPendingAttempts, command.IterationHistoryLimit, flowVersion, now, now); err != nil {
+		(id, status, revision, repository, iteration_concurrency, max_pending_attempts, iteration_history_limit, flow_version, flow_version_override, created_at, updated_at)
+		VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`, command.OptimizationID, OptimizationDraftingBaseline, command.Repository,
+		command.IterationConcurrency, command.MaxPendingAttempts, command.IterationHistoryLimit, persistedFlowVersion, flowVersionOverride, now, now); err != nil {
 		return Receipt{}, fmt.Errorf("create optimization: %w", err)
 	}
-	if flowVersion == FlowVersion2 {
+	if flowVersion >= FlowVersion2 {
 		snapshot := command.SkillSnapshot
 		if _, err := tx.ExecContext(ctx, `INSERT INTO skill_snapshots
 			(optimization_id, schema_version, snapshot_id, root_path, manifest_json, manifest_sha256, created_at)
@@ -2049,7 +2085,7 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	var schedulerPausedAt sql.NullString
 	var iterationCaseSetVersion sql.NullInt64
 	if err := e.db.QueryRowContext(ctx, `SELECT id, status, revision, repository, iteration_concurrency, max_pending_attempts,
-		iteration_history_limit, flow_version, scheduler_status, scheduler_paused_at, scheduler_epoch, iteration_case_set_version FROM optimizations LIMIT 1`).Scan(
+		iteration_history_limit, COALESCE(flow_version_override, flow_version), scheduler_status, scheduler_paused_at, scheduler_epoch, iteration_case_set_version FROM optimizations LIMIT 1`).Scan(
 		&view.Optimization.ID, &view.Optimization.Status, &view.Optimization.Revision, &view.Optimization.Repository,
 		&view.Optimization.IterationConcurrency, &view.Optimization.MaxPendingAttempts, &view.Optimization.IterationHistoryLimit, &view.Optimization.FlowVersion,
 		&view.Scheduler.Status, &schedulerPausedAt, &view.Scheduler.Epoch, &iterationCaseSetVersion,
@@ -2059,7 +2095,7 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 		return View{}, fmt.Errorf("read optimization: %w", err)
 	}
 	view.Scheduler.PausedAt = schedulerPausedAt.String
-	if view.Optimization.FlowVersion == FlowVersion2 {
+	if view.Optimization.FlowVersion >= FlowVersion2 {
 		snapshot, err := e.readSkillSnapshot(ctx, view.Optimization.ID)
 		if err != nil {
 			return View{}, err
@@ -2120,7 +2156,7 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	}
 	currentBaseline := view.Baselines[len(view.Baselines)-1]
 	view.Baseline = &currentBaseline
-	rows, err := e.db.QueryContext(ctx, `SELECT id, baseline_revision_id, role, status, generation, attempt_id, iteration_round, integration_id, parent_work_id, followup_request_id
+	rows, err := e.db.QueryContext(ctx, `SELECT id, baseline_revision_id, role, status, generation, attempt_id, iteration_round, integration_id, parent_work_id, followup_request_id, experiment_cycle_id
         FROM works WHERE optimization_id = ? ORDER BY rowid`, view.Optimization.ID)
 	if err != nil {
 		return View{}, fmt.Errorf("read works: %w", err)
@@ -2128,13 +2164,14 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var work WorkView
-		var attemptID, integrationID, parentWorkID, followUpRequestID sql.NullString
+		var attemptID, integrationID, parentWorkID, followUpRequestID, experimentCycleID sql.NullString
 		var iterationRound sql.NullInt64
-		if err := rows.Scan(&work.ID, &work.BaselineRevisionID, &work.Role, &work.Status, &work.Generation, &attemptID, &iterationRound, &integrationID, &parentWorkID, &followUpRequestID); err != nil {
+		if err := rows.Scan(&work.ID, &work.BaselineRevisionID, &work.Role, &work.Status, &work.Generation, &attemptID, &iterationRound, &integrationID, &parentWorkID, &followUpRequestID, &experimentCycleID); err != nil {
 			return View{}, fmt.Errorf("scan work: %w", err)
 		}
 		work.AttemptID, work.IterationRound, work.IntegrationID = attemptID.String, iterationRound.Int64, integrationID.String
 		work.ParentWorkID, work.FollowUpRequestID = parentWorkID.String, followUpRequestID.String
+		work.ExperimentCycleID = experimentCycleID.String
 		view.Works = append(view.Works, work)
 	}
 	if err := rows.Err(); err != nil {
@@ -2274,23 +2311,37 @@ func (e *Engine) Inspect(ctx context.Context, query Query) (View, error) {
 	if err := diagnosisRows.Close(); err != nil {
 		return View{}, fmt.Errorf("close Diagnosis rows: %w", err)
 	}
-	experimentRows, err := e.db.QueryContext(ctx, `SELECT id, attempt_id, iteration_round, sequence, outcome, parent_checkpoint_sha, checkpoint_sha, scope_best_sha, receipt_id, experiment_json
+	experimentRows, err := e.db.QueryContext(ctx, `SELECT id, attempt_id, iteration_round, sequence, outcome, parent_checkpoint_sha, checkpoint_sha, scope_best_sha, receipt_id, experiment_json, work_id, reference_receipt_id
 		FROM iteration_experiments WHERE optimization_id = ? ORDER BY attempt_id, iteration_round, sequence`, view.Optimization.ID)
 	if err != nil {
 		return View{}, fmt.Errorf("read Iteration Experiments: %w", err)
 	}
 	for experimentRows.Next() {
 		var experiment IterationExperimentView
-		var checkpoint sql.NullString
-		if err := experimentRows.Scan(&experiment.ID, &experiment.AttemptID, &experiment.IterationRound, &experiment.Sequence, &experiment.Outcome, &experiment.ParentCheckpointSHA, &checkpoint, &experiment.ScopeBestSHA, &experiment.ReceiptID, &experiment.Experiment); err != nil {
+		var checkpoint, workID, referenceReceiptID sql.NullString
+		if err := experimentRows.Scan(&experiment.ID, &experiment.AttemptID, &experiment.IterationRound, &experiment.Sequence, &experiment.Outcome, &experiment.ParentCheckpointSHA, &checkpoint, &experiment.ScopeBestSHA, &experiment.ReceiptID, &experiment.Experiment, &workID, &referenceReceiptID); err != nil {
 			_ = experimentRows.Close()
 			return View{}, fmt.Errorf("scan Iteration Experiment: %w", err)
 		}
 		experiment.CheckpointSHA = checkpoint.String
+		experiment.WorkID = workID.String
+		experiment.ReferenceReceiptID = referenceReceiptID.String
 		view.IterationExperiments = append(view.IterationExperiments, experiment)
 	}
 	if err := experimentRows.Close(); err != nil {
 		return View{}, fmt.Errorf("close Iteration Experiment rows: %w", err)
+	}
+	if view.Optimization.FlowVersion == FlowVersion3 {
+		cycles, err := e.readExperimentCycles(ctx, view.Optimization.ID)
+		if err != nil {
+			return View{}, err
+		}
+		view.ExperimentCycles = cycles
+		references, err := e.readReferenceReceipts(ctx, view.Optimization.ID)
+		if err != nil {
+			return View{}, err
+		}
+		view.ReferenceReceipts = references
 	}
 	if err := summarizeKnowledge(&view); err != nil {
 		return View{}, err
@@ -2390,7 +2441,7 @@ func validateOnlineState(ctx context.Context, db *sql.DB, allowIterationCaseMigr
 	var invalidCount int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM optimizations
         WHERE status NOT IN ('drafting_baseline', 'verifying_baseline', 'optimizing', 'paused', 'draining') OR revision < 1
-        OR flow_version NOT IN (1, 2)`).Scan(&invalidCount); err != nil {
+        OR COALESCE(flow_version_override, flow_version) NOT IN (1, 2, 3)`).Scan(&invalidCount); err != nil {
 		return fmt.Errorf("validate optimization state: %w", err)
 	}
 	if invalidCount != 0 {
@@ -2453,7 +2504,7 @@ func validateOnlineState(ctx context.Context, db *sql.DB, allowIterationCaseMigr
 		return domainError(CodeStateCorrupt, "baseline revision has an invalid status or number")
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM works
-		WHERE role NOT IN ('baseline_draft', 'baseline_verification', 'diagnosis', 'iteration', 'integration', 'follow_up') OR status NOT IN ('pending', 'completed', 'cancelled') OR generation < 1`).Scan(&invalidCount); err != nil {
+		WHERE role NOT IN ('baseline_draft', 'baseline_verification', 'diagnosis', 'benchmark', 'iteration', 'integration', 'follow_up') OR status NOT IN ('pending', 'completed', 'cancelled') OR generation < 1`).Scan(&invalidCount); err != nil {
 		return fmt.Errorf("validate work state: %w", err)
 	}
 	if invalidCount != 0 {
@@ -2520,15 +2571,85 @@ func validateOnlineState(ctx context.Context, db *sql.DB, allowIterationCaseMigr
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM works w
 		LEFT JOIN attempts a ON a.id = w.attempt_id
 		LEFT JOIN integrations i ON i.id = w.integration_id
+		LEFT JOIN experiment_cycles c ON c.id = w.experiment_cycle_id
+		JOIN optimizations o ON o.id = w.optimization_id
 		WHERE (w.role IN ('baseline_draft', 'baseline_verification') AND (w.attempt_id IS NOT NULL OR w.iteration_round IS NOT NULL OR w.integration_id IS NOT NULL))
-		   OR (w.role = 'iteration' AND (a.id IS NULL OR w.iteration_round IS NULL OR w.integration_id IS NOT NULL))
+		   OR (w.role = 'iteration' AND (a.id IS NULL OR w.iteration_round IS NULL OR w.integration_id IS NOT NULL
+		       OR (COALESCE(o.flow_version_override, o.flow_version) = 3 AND c.id IS NULL)
+		       OR (COALESCE(o.flow_version_override, o.flow_version) != 3 AND w.experiment_cycle_id IS NOT NULL)))
+		   OR (w.role = 'benchmark' AND (COALESCE(o.flow_version_override, o.flow_version) != 3 OR a.id IS NULL
+		       OR w.iteration_round IS NULL OR w.integration_id IS NOT NULL OR c.id IS NULL
+		       OR c.optimization_id != w.optimization_id OR c.baseline_revision_id != w.baseline_revision_id
+		       OR c.attempt_id != w.attempt_id OR c.iteration_round != w.iteration_round))
 		   OR (w.role = 'integration' AND (a.id IS NULL OR i.id IS NULL OR w.iteration_round IS NULL OR i.attempt_id != w.attempt_id))
 		   OR (w.role = 'follow_up' AND (w.parent_work_id IS NULL OR w.followup_request_id IS NULL OR w.attempt_id IS NOT NULL OR w.iteration_round IS NOT NULL OR w.integration_id IS NOT NULL))
-		   OR (w.role != 'follow_up' AND (w.parent_work_id IS NOT NULL OR w.followup_request_id IS NOT NULL))`).Scan(&invalidCount); err != nil {
+		   OR (w.role != 'follow_up' AND (w.parent_work_id IS NOT NULL OR w.followup_request_id IS NOT NULL))
+		   OR (w.role NOT IN ('benchmark', 'iteration') AND w.experiment_cycle_id IS NOT NULL)`).Scan(&invalidCount); err != nil {
 		return fmt.Errorf("validate Work aggregate identity: %w", err)
 	}
 	if invalidCount != 0 {
 		return domainError(CodeStateCorrupt, "Work has inconsistent Attempt or Integration identity")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_cycles c
+		JOIN optimizations o ON o.id = c.optimization_id
+		JOIN iteration_rounds r ON r.attempt_id = c.attempt_id AND r.round = c.iteration_round
+		WHERE COALESCE(o.flow_version_override, o.flow_version) != 3
+		   OR length(c.checkpoint_sha) != 40 OR c.checkpoint_sha GLOB '*[^0-9a-fA-F]*'
+		   OR length(c.baseline_definition_sha256) != 64 OR c.baseline_definition_sha256 GLOB '*[^0-9a-f]*'
+		   OR length(c.case_snapshot_sha256) != 64 OR c.case_snapshot_sha256 GLOB '*[^0-9a-f]*'
+		   OR (c.status IN ('benchmark_pending', 'benchmark_unavailable') AND c.checkpoint_sha != r.current_checkpoint_sha)
+		   OR (c.status = 'benchmark_pending' AND (
+		       (SELECT COUNT(*) FROM benchmark_runs br JOIN works bw ON bw.id = br.work_id
+		        WHERE br.experiment_cycle_id = c.id AND br.status = 'pending' AND bw.status = 'pending') != 1
+		       OR EXISTS (SELECT 1 FROM reference_receipts rr WHERE rr.experiment_cycle_id = c.id)
+		       OR EXISTS (SELECT 1 FROM works iw WHERE iw.experiment_cycle_id = c.id AND iw.role = 'iteration')))
+		   OR (c.status = 'benchmark_unavailable' AND (
+		       o.status NOT IN ('paused', 'draining')
+		       OR EXISTS (SELECT 1 FROM benchmark_runs br WHERE br.experiment_cycle_id = c.id AND br.status = 'pending')
+		       OR EXISTS (SELECT 1 FROM reference_receipts rr WHERE rr.experiment_cycle_id = c.id)
+		       OR EXISTS (SELECT 1 FROM works iw WHERE iw.experiment_cycle_id = c.id AND iw.role = 'iteration')))
+		   OR (c.status = 'iteration_active' AND (
+		       (SELECT COUNT(*) FROM reference_receipts rr WHERE rr.experiment_cycle_id = c.id) != 1
+		       OR (SELECT COUNT(*) FROM works iw WHERE iw.experiment_cycle_id = c.id AND iw.role = 'iteration' AND iw.status = 'pending') != 1
+		       OR EXISTS (SELECT 1 FROM benchmark_runs br WHERE br.experiment_cycle_id = c.id AND br.status = 'pending')))
+		   OR (c.status IN ('completed', 'abandoned') AND (
+		       EXISTS (SELECT 1 FROM benchmark_runs br WHERE br.experiment_cycle_id = c.id AND br.status = 'pending')
+		       OR EXISTS (SELECT 1 FROM works cw WHERE cw.experiment_cycle_id = c.id AND cw.status = 'pending')))
+		   OR (c.status = 'completed' AND NOT EXISTS (SELECT 1 FROM reference_receipts rr WHERE rr.experiment_cycle_id = c.id))`).Scan(&invalidCount); err != nil {
+		return fmt.Errorf("validate flow v3 Experiment Cycles: %w", err)
+	}
+	if invalidCount != 0 {
+		return domainError(CodeStateCorrupt, "flow v3 Experiment Cycle state is inconsistent")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM reference_receipts rr
+		JOIN experiment_cycles c ON c.id = rr.experiment_cycle_id
+		JOIN benchmark_runs br ON br.id = rr.benchmark_run_id
+		WHERE rr.optimization_id != c.optimization_id OR rr.baseline_revision_id != c.baseline_revision_id
+		   OR rr.attempt_id != c.attempt_id OR rr.iteration_round != c.iteration_round OR rr.cycle_sequence != c.sequence
+		   OR rr.checkpoint_sha != c.checkpoint_sha OR rr.baseline_definition_sha256 != c.baseline_definition_sha256
+		   OR rr.case_snapshot_sha256 != c.case_snapshot_sha256 OR br.experiment_cycle_id != c.id
+		   OR br.work_id != rr.benchmark_work_id OR br.status != 'measured'
+		   OR COALESCE(rr.provider, '') = '' OR COALESCE(rr.model, '') = '' OR NOT json_valid(rr.measurements_json)
+		   OR rr.environment_json IS NULL OR NOT json_valid(rr.environment_json) OR json_type(rr.environment_json) != 'object'
+		   OR NOT EXISTS (SELECT 1 FROM evidence_artifacts ea
+		       WHERE ea.work_id = rr.benchmark_work_id AND ea.receipt_id = rr.id)`).Scan(&invalidCount); err != nil {
+		return fmt.Errorf("validate flow v3 Reference Receipts: %w", err)
+	}
+	if invalidCount != 0 {
+		return domainError(CodeStateCorrupt, "flow v3 Reference Receipt provenance is inconsistent")
+	}
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM iteration_experiments e
+		JOIN optimizations o ON o.id = e.optimization_id
+		LEFT JOIN works w ON w.id = e.work_id
+		LEFT JOIN reference_receipts rr ON rr.id = e.reference_receipt_id
+		WHERE (COALESCE(o.flow_version_override, o.flow_version) = 3 AND (
+		       w.id IS NULL OR rr.id IS NULL OR w.role != 'iteration'
+		       OR w.experiment_cycle_id != rr.experiment_cycle_id OR rr.consumed_experiment_id != e.id))
+		   OR (COALESCE(o.flow_version_override, o.flow_version) != 3 AND (e.work_id IS NOT NULL OR e.reference_receipt_id IS NOT NULL))`).Scan(&invalidCount); err != nil {
+		return fmt.Errorf("validate flow v3 Experiment provenance: %w", err)
+	}
+	if invalidCount != 0 {
+		return domainError(CodeStateCorrupt, "flow v3 Experiment provenance is inconsistent")
 	}
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM integrations WHERE status IN ('running', 'best_update_prepared')`).Scan(&invalidCount); err != nil {
 		return fmt.Errorf("validate Integration concurrency: %w", err)
@@ -2730,7 +2851,7 @@ func (e *Engine) readSkillSnapshot(ctx context.Context, optimizationID string) (
 
 func readOptimization(ctx context.Context, tx *sql.Tx) (optimizationRecord, error) {
 	var optimization optimizationRecord
-	err := tx.QueryRowContext(ctx, `SELECT id, status, revision, flow_version FROM optimizations LIMIT 1`).Scan(&optimization.ID, &optimization.Status, &optimization.Revision, &optimization.FlowVersion)
+	err := tx.QueryRowContext(ctx, `SELECT id, status, revision, COALESCE(flow_version_override, flow_version) FROM optimizations LIMIT 1`).Scan(&optimization.ID, &optimization.Status, &optimization.Revision, &optimization.FlowVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return optimizationRecord{}, domainError(CodeNotInitialized, "optimization is not initialized")
 	}

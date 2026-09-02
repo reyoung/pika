@@ -90,6 +90,13 @@ func (a Application) Catalog(ctx context.Context, token string) ([]Tool, error) 
 		if !ok {
 			return nil, fmt.Errorf("grant contains unsupported tool %q", name)
 		}
+		if name == "record_iteration_experiment" {
+			work, err := a.Store.RuntimeWork(ctx, grant.WorkID)
+			if err != nil {
+				return nil, err
+			}
+			tool.InputSchema = kdacontract.ExperimentInputSchemaForFlow(int64(work.FlowVersion))
+		}
 		tools = append(tools, tool)
 	}
 	return tools, nil
@@ -134,6 +141,9 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		work, err := a.Store.RuntimeWork(ctx, grant.WorkID)
 		if err != nil {
 			return Invocation{}, err
+		}
+		if grant.Role == symphony.RoleIteration && work.FlowVersion == symphony.FlowVersion3 && len(work.IterationExperiments) != 0 {
+			return Invocation{}, errors.New("flow v3 Iteration Work is locked after its single Experiment is recorded")
 		}
 		repository, err := a.repositoryFor(work)
 		if err != nil {
@@ -408,7 +418,7 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			return Invocation{}, forbidden("Experiment recording requires an Iteration role")
 		}
 		if err := kdacontract.ValidateExperimentInput(call.Arguments); err != nil {
-			return Invocation{}, fmt.Errorf("record_iteration_experiment input does not satisfy Experiment v1 contract: %w", err)
+			return Invocation{}, fmt.Errorf("record_iteration_experiment input does not satisfy the Experiment contract: %w", err)
 		}
 		var input struct {
 			IdempotencyKey string          `json:"idempotency_key"`
@@ -435,9 +445,9 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 		if err != nil {
 			return Invocation{}, err
 		}
-		experiment, err := kdacontract.ParseExperiment(input.Experiment)
+		experiment, err := kdacontract.ParseExperimentForFlow(input.Experiment, int64(work.FlowVersion))
 		if err != nil {
-			return Invocation{}, fmt.Errorf("parse canonical Experiment: %w", err)
+			return Invocation{}, fmt.Errorf("parse flow v%d Experiment contract: %w", work.FlowVersion, err)
 		}
 		artifactPaths := contractArtifactPaths(experiment.Artifacts)
 		artifactRoot, err := evidence.EnsureWorkRoot(a.EvidenceRoot, evidence.IterationScope, work.Work.ID)
@@ -477,6 +487,100 @@ func (a Application) Invoke(ctx context.Context, token string, call Call) (Invoc
 			return Invocation{}, err
 		}
 		return Invocation{Value: receipt, Mutated: true}, nil
+	case "finish_iteration_benchmark":
+		if grant.Role != symphony.RoleBenchmark {
+			return Invocation{}, forbidden("Benchmark result requires benchmark role")
+		}
+		if !grant.Revoked && !agentSessionActive(grant.SessionStatus) {
+			return Invocation{}, forbidden("agent session is not active yet")
+		}
+		var input struct {
+			IdempotencyKey string                    `json:"idempotency_key"`
+			Outcome        symphony.BenchmarkOutcome `json:"outcome"`
+			Measurements   json.RawMessage           `json:"measurements"`
+			Environment    json.RawMessage           `json:"environment"`
+			Model          string                    `json:"model"`
+			Reason         string                    `json:"reason"`
+			Artifacts      []artifactPath            `json:"artifacts"`
+		}
+		if err := decodeArguments(call.Arguments, &input); err != nil {
+			return Invocation{}, err
+		}
+		if input.IdempotencyKey == "" {
+			return Invocation{}, errors.New("idempotency_key is required")
+		}
+		work, err := a.Store.RuntimeWork(ctx, grant.WorkID)
+		if err != nil {
+			return Invocation{}, err
+		}
+		if input.Outcome == symphony.BenchmarkMeasured {
+			if work.ExperimentCycle == nil || work.CurrentCheckpointSHA == "" || work.ExperimentCycle.CheckpointSHA != work.CurrentCheckpointSHA {
+				return Invocation{}, errors.New("Benchmark Work has no exact Experiment Cycle checkpoint")
+			}
+			if _, err := a.gitWorkspace(work).EnsureBenchmark(ctx, grant.WorkID, work.CurrentCheckpointSHA); err != nil {
+				return Invocation{}, fmt.Errorf("Benchmark reference checkout is not the exact clean Cycle checkpoint: %w", err)
+			}
+		}
+		artifactRoot, err := evidence.EnsureWorkRoot(a.EvidenceRoot, evidence.BenchmarkScope, work.Work.ID)
+		if err != nil {
+			return Invocation{}, err
+		}
+		artifacts, err := a.readArtifacts(artifactRoot, input.Artifacts)
+		if err != nil {
+			return Invocation{}, err
+		}
+		command := symphony.FinishIterationBenchmark{
+			Meta: symphony.CommandMeta{RequestID: input.IdempotencyKey}, WorkID: grant.WorkID, Outcome: input.Outcome,
+			Measurements: input.Measurements, Environment: input.Environment, Provider: grant.AgentKind, Model: input.Model,
+			Reason: input.Reason, Artifacts: artifacts,
+		}
+		receipt, err := a.applyTerminal(ctx, grant, command)
+		if err != nil {
+			return Invocation{}, err
+		}
+		return Invocation{Value: receipt, Mutated: true, Terminal: true}, nil
+	case "start_next_experiment":
+		if grant.Role != symphony.RoleIteration {
+			return Invocation{}, forbidden("next Experiment requires iteration role")
+		}
+		if !grant.Revoked && !agentSessionActive(grant.SessionStatus) {
+			return Invocation{}, forbidden("agent session is not active yet")
+		}
+		var input struct {
+			IdempotencyKey string `json:"idempotency_key"`
+			Reason         string `json:"reason"`
+		}
+		if err := decodeArguments(call.Arguments, &input); err != nil {
+			return Invocation{}, err
+		}
+		if input.IdempotencyKey == "" {
+			return Invocation{}, errors.New("idempotency_key is required")
+		}
+		if !grant.Revoked {
+			work, err := a.Store.RuntimeWork(ctx, grant.WorkID)
+			if err != nil {
+				return Invocation{}, err
+			}
+			workspace := a.gitWorkspace(work)
+			repository, err := workspace.AttemptRepository(work.Work.AttemptID, work.Work.IterationRound)
+			if err != nil {
+				return Invocation{}, err
+			}
+			snapshot, err := (gitworkspace.Workspace{Repository: repository, Root: a.WorktreeRoot, Namespace: a.BranchNamespace}).SourceSnapshot(ctx)
+			if err != nil {
+				return Invocation{}, err
+			}
+			if !snapshot.Clean || snapshot.CommitSHA != work.CurrentCheckpointSHA {
+				return Invocation{}, fmt.Errorf("next Experiment requires the exact clean current checkpoint: HEAD=%s checkpoint=%s status=%q", snapshot.CommitSHA, work.CurrentCheckpointSHA, snapshot.Status)
+			}
+		}
+		receipt, err := a.applyTerminal(ctx, grant, symphony.StartNextExperiment{
+			Meta: symphony.CommandMeta{RequestID: input.IdempotencyKey}, WorkID: grant.WorkID, Reason: input.Reason,
+		})
+		if err != nil {
+			return Invocation{}, err
+		}
+		return Invocation{Value: receipt, Mutated: true, Terminal: true}, nil
 	case "finish_iteration":
 		if grant.Role != symphony.RoleIteration {
 			return Invocation{}, forbidden("Iteration result requires iteration role")
@@ -837,6 +941,37 @@ func toolByName(name string) (Tool, bool) {
 		"if":   map[string]any{"properties": map[string]any{"outcome": map[string]any{"const": "candidate"}}},
 		"then": map[string]any{"required": []string{"candidate_sha", "evidence"}, "properties": map[string]any{"evidence": benchmarkintegrity.EvidenceSchema()}},
 	}}
+	finishBenchmarkSchema := object(map[string]any{
+		"idempotency_key": map[string]any{"type": "string", "minLength": 1},
+		"outcome":         map[string]any{"type": "string", "enum": []string{"measured", "unavailable"}},
+		"measurements":    benchmarkintegrity.StrictMeasurementSetSchema(),
+		"environment":     map[string]any{"type": "object"},
+		"model":           map[string]any{"type": "string", "minLength": 1},
+		"reason":          map[string]any{"type": "string"},
+		"artifacts": map[string]any{
+			"type": "array", "items": object(map[string]any{
+				"path": map[string]any{"type": "string", "minLength": 1},
+				"kind": map[string]any{"type": "string", "minLength": 1},
+			}, "path", "kind"),
+		},
+	}, "idempotency_key", "outcome")
+	finishBenchmarkSchema["allOf"] = []any{
+		map[string]any{
+			"if": map[string]any{"properties": map[string]any{"outcome": map[string]any{"const": "measured"}}, "required": []string{"outcome"}},
+			"then": map[string]any{"required": []string{"measurements", "environment", "model", "artifacts"}, "properties": map[string]any{
+				"artifacts": map[string]any{"type": "array", "minItems": 1, "items": object(map[string]any{
+					"path": map[string]any{"type": "string", "minLength": 1},
+					"kind": map[string]any{"type": "string", "minLength": 1},
+				}, "path", "kind")},
+			}},
+		},
+		map[string]any{
+			"if": map[string]any{"properties": map[string]any{"outcome": map[string]any{"const": "unavailable"}}, "required": []string{"outcome"}},
+			"then": map[string]any{"required": []string{"reason"}, "properties": map[string]any{
+				"reason": map[string]any{"type": "string", "minLength": 1},
+			}},
+		},
+	}
 	regressionCaseSchema := object(map[string]any{
 		"case_id":  map[string]any{"type": "string", "minLength": 1},
 		"kind":     map[string]any{"type": "string", "enum": []string{"correctness", "performance"}},
@@ -844,6 +979,10 @@ func toolByName(name string) (Tool, bool) {
 		"evidence": map[string]any{"type": "object"},
 	}, "case_id", "kind", "summary", "evidence")
 	tools := map[string]Tool{
+		"finish_iteration_benchmark": {
+			Name: "finish_iteration_benchmark", Description: "Finish reference-only Benchmark Work. measured requires a complete reference Measurement Set plus protected artifacts; unavailable pauses the Optimization and is retried by pika-go resume.",
+			InputSchema: finishBenchmarkSchema,
+		},
 		"finish_diagnosis": {
 			Name: "finish_diagnosis", Description: "Complete the Baseline-owned profiler Diagnosis as ready or unavailable. report.artifacts paths are relative to the protected Diagnosis evidence directory; this terminal call stable-reads them and creates their durable receipts.",
 			InputSchema: kdacontract.DiagnosisInputSchema(),
@@ -886,6 +1025,13 @@ func toolByName(name string) (Tool, bool) {
 			Name: "finish_iteration", Description: "Submit a verified candidate or reject this Iteration Attempt. Candidate evidence must exactly cover the Round-frozen Iteration Case Snapshot; rejected evidence may be incomplete.",
 			InputSchema: finishIterationSchema,
 		},
+		"start_next_experiment": {
+			Name: "start_next_experiment", Description: "Close this flow v3 Iteration Work and require a fresh Benchmark Work before another Experiment. A reason is required when abandoning an unused Reference Receipt.",
+			InputSchema: object(map[string]any{
+				"idempotency_key": map[string]any{"type": "string", "minLength": 1},
+				"reason":          map[string]any{"type": "string"},
+			}, "idempotency_key"),
+		},
 		"prepare_best_update": {
 			Name: "prepare_best_update", Description: "Validate Integration evidence and issue a bounded Git intent. Requires benchmark_integrity and performance_claim schema_version 1; >=10x claims require independent_retest.",
 			InputSchema: object(map[string]any{"idempotency_key": map[string]any{"type": "string", "minLength": 1}, "validation": benchmarkintegrity.IntegrationSchema()}, "idempotency_key", "validation"),
@@ -922,4 +1068,12 @@ func CatalogForRole(role symphony.WorkRole) []string {
 		return descriptor.ToolCatalog
 	}
 	return nil
+}
+
+func CatalogForWork(work symphony.RuntimeWork) []string {
+	catalog := CatalogForRole(work.Work.Role)
+	if work.FlowVersion == symphony.FlowVersion3 && work.Work.Role == symphony.RoleIteration {
+		catalog = append(catalog, "start_next_experiment")
+	}
+	return catalog
 }

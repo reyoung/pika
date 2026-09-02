@@ -1,0 +1,11 @@
+# Require a fresh reference measurement before each Experiment
+
+New Optimizations may opt into flow v3 by configuring a Benchmark Agent. In flow v3, Pika creates an Experiment Cycle for every writable Experiment: a read-only Benchmark Work measures the exact checkpoint and frozen Iteration Case Snapshot, then a fresh Iteration Work may record at most one Experiment using the resulting single-use Reference Receipt. Benchmark Work occupies the same durable Attempt slot as its successor Iteration Work, so benchmark concurrency follows configured Iteration concurrency.
+
+The Benchmark Agent measures only the reference. The Iteration Agent measures only the candidate, and Pika joins both measurement sets and derives the existing performance gate. Environment facts are retained for audit but are not an equality gate. A reported benchmark unavailability pauses the Optimization; `pika-go resume` creates a new Benchmark Work for the same Cycle, checkpoint, and Case Snapshot while preserving failed runs.
+
+We considered keeping both measurements in one Iteration Agent Session and running benchmarks inside the Pika process. The former cannot prove that the reference preceded candidate mutation; the latter would make Pika own workload-specific execution and credentials. Alternating durable Work keeps the causal rule in the control plane and leaves benchmark execution in an Agent adapter. This guarantee establishes Pika-controlled ordering and receipt provenance, not cryptographic truth of arbitrary Agent output.
+
+Flow behavior is frozen per Optimization. Configuration version 2 plus `[agents.benchmark]` selects flow v3 only at creation; absent Benchmark configuration keeps flow v2. Existing flow-v1/v2 Optimizations are never upgraded or downgraded dynamically, and a flow-v3 workspace whose Benchmark configuration is later removed fails validation instead of silently weakening the rule.
+
+SQLite's historical `optimizations.flow_version` column has a `CHECK` constraint limited to versions 1 and 2. Rebuilding that heavily referenced table would make an otherwise additive migration risky, so schema v24 stores flow v3 in a nullable override column and all domain reads expose the effective version. Existing rows and foreign keys remain untouched.

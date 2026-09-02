@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/reyoung/pika-go/internal/evidence"
 	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/workruntime"
 )
@@ -37,6 +38,7 @@ type Store interface {
 	WorkbenchRecords(context.Context) (symphony.WorkbenchRecords, error)
 	EvidenceArtifact(context.Context, string) (symphony.EvidenceArtifact, error)
 	WorkRepository(context.Context, string) (string, error)
+	RuntimeWork(context.Context, string) (symphony.RuntimeWork, error)
 }
 
 type RuntimeSnapshot func(context.Context) (workruntime.Snapshot, error)
@@ -44,13 +46,18 @@ type RuntimeSnapshot func(context.Context) (workruntime.Snapshot, error)
 type Service struct {
 	store             Store
 	runtime           RuntimeSnapshot
+	evidenceRoot      string
 	mu                sync.Mutex
 	runtimeDigest     string
 	runtimeGeneration int64
 }
 
-func New(store Store, runtime RuntimeSnapshot) *Service {
-	return &Service{store: store, runtime: runtime}
+func New(store Store, runtime RuntimeSnapshot, evidenceRoot ...string) *Service {
+	service := &Service{store: store, runtime: runtime}
+	if len(evidenceRoot) != 0 {
+		service.evidenceRoot = evidenceRoot[0]
+	}
+	return service
 }
 
 type Version struct {
@@ -219,9 +226,11 @@ func project(view symphony.View, records symphony.WorkbenchRecords, runtime work
 	}
 	workByAttemptRound := make(map[string]symphony.WorkView)
 	workByIntegration := make(map[string]symphony.WorkView)
+	workByID := make(map[string]symphony.WorkView)
 	worksByBaseline := make(map[string][]string)
 	worksByAttempt := make(map[string][]string)
 	for _, work := range view.Works {
+		workByID[work.ID] = work
 		worksByBaseline[work.BaselineRevisionID] = append(worksByBaseline[work.BaselineRevisionID], work.ID)
 		if work.AttemptID != "" {
 			worksByAttempt[work.AttemptID] = append(worksByAttempt[work.AttemptID], work.ID)
@@ -378,6 +387,48 @@ func project(view symphony.View, records symphony.WorkbenchRecords, runtime work
 	for _, artifact := range records.Artifacts {
 		artifactsByReceipt[artifact.ReceiptID] = append(artifactsByReceipt[artifact.ReceiptID], artifact)
 	}
+	for _, cycle := range view.ExperimentCycles {
+		if !selectedIDs[cycle.AttemptID] {
+			continue
+		}
+		node := Node{
+			Kind: "experiment_cycle", ID: cycle.ID, Label: fmt.Sprintf("Cycle %d", cycle.Sequence),
+			DomainStatus: cycle.Status, Subtitle: shortSHA(cycle.CheckpointSHA), detail: cycle,
+		}
+		for _, workID := range []string{cycle.BenchmarkWorkID, cycle.IterationWorkID} {
+			if workID == "" {
+				continue
+			}
+			node.workIDs = append(node.workIDs, workID)
+			if node.Runtime == nil {
+				node.Runtime = runtimeForWork(workID, sessionByWork, runtimeByAgent)
+			}
+		}
+		nodes = append(nodes, node)
+		addEdge(roundKey(cycle.AttemptID, cycle.IterationRound), cycle.ID, "benchmark_gate", false)
+	}
+	for _, receipt := range view.ReferenceReceipts {
+		status := "available"
+		if receipt.ConsumedExperimentID != "" {
+			status = "consumed"
+		}
+		node := Node{
+			Kind: "reference_receipt", ID: receipt.ID, Label: "Reference " + shortID(receipt.ID), DomainStatus: status,
+			Subtitle: shortSHA(receipt.CheckpointSHA), detail: receipt, workIDs: []string{receipt.BenchmarkWorkID},
+		}
+		for _, artifact := range artifactsByReceipt[receipt.ID] {
+			node.artifactIDs = append(node.artifactIDs, artifact.ID)
+		}
+		nodes = append(nodes, node)
+		addEdge(receipt.ExperimentCycleID, receipt.ID, "reference", false)
+		for _, artifact := range artifactsByReceipt[receipt.ID] {
+			if !artifactNodeAdded[artifact.ID] {
+				nodes = append(nodes, Node{Kind: "artifact", ID: artifact.ID, Label: "Evidence " + shortID(artifact.ID), DomainStatus: "verified", Subtitle: artifact.RelativePath, detail: artifact, artifactIDs: []string{artifact.ID}})
+				artifactNodeAdded[artifact.ID] = true
+			}
+			addEdge(receipt.ID, artifact.ID, "evidence", true)
+		}
+	}
 	for _, experiment := range view.IterationExperiments {
 		if !selectedIDs[experiment.AttemptID] {
 			continue
@@ -386,7 +437,9 @@ func project(view symphony.View, records symphony.WorkbenchRecords, runtime work
 			Kind: "experiment", ID: experiment.ID, Label: fmt.Sprintf("Experiment %d", experiment.Sequence),
 			DomainStatus: experiment.Outcome, Subtitle: shortSHA(experiment.CheckpointSHA), detail: experiment,
 		}
-		if work, exists := workByAttemptRound[roundKey(experiment.AttemptID, experiment.IterationRound)]; exists {
+		if work, exists := workByID[experiment.WorkID]; exists {
+			node.workIDs = []string{work.ID}
+		} else if work, exists := workByAttemptRound[roundKey(experiment.AttemptID, experiment.IterationRound)]; exists {
 			node.workIDs = []string{work.ID}
 		}
 		if aggregates := aggregatesByExperiment[experiment.ID]; len(aggregates) != 0 {
@@ -398,7 +451,9 @@ func project(view symphony.View, records symphony.WorkbenchRecords, runtime work
 		}
 		nodes = append(nodes, node)
 		source := roundKey(experiment.AttemptID, experiment.IterationRound)
-		if owner := checkpointOwner[experiment.ParentCheckpointSHA]; owner != "" {
+		if experiment.ReferenceReceiptID != "" {
+			source = experiment.ReferenceReceiptID
+		} else if owner := checkpointOwner[experiment.ParentCheckpointSHA]; owner != "" {
 			source = owner
 		}
 		addEdge(source, experiment.ID, "checkpoint", false)
@@ -583,9 +638,31 @@ func (s *Service) Artifact(ctx context.Context, artifactID string) (Artifact, er
 	if err != nil {
 		return Artifact{}, err
 	}
-	repository, err := s.store.WorkRepository(ctx, metadata.WorkID)
-	if err != nil {
-		return Artifact{}, err
+	repository := ""
+	if s.evidenceRoot != "" {
+		work, err := s.store.RuntimeWork(ctx, metadata.WorkID)
+		if err != nil {
+			return Artifact{}, err
+		}
+		scope := evidence.WorkScope("")
+		switch work.Work.Role {
+		case symphony.RoleDiagnosis:
+			scope = evidence.DiagnosisScope
+		case symphony.RoleBenchmark:
+			scope = evidence.BenchmarkScope
+		case symphony.RoleIteration:
+			scope = evidence.IterationScope
+		}
+		if scope != "" {
+			repository = filepath.Join(s.evidenceRoot, string(scope), metadata.WorkID)
+		}
+	}
+	if repository == "" {
+		var err error
+		repository, err = s.store.WorkRepository(ctx, metadata.WorkID)
+		if err != nil {
+			return Artifact{}, err
+		}
 	}
 	root, err := filepath.EvalSymlinks(repository)
 	if err != nil {

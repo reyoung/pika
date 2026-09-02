@@ -15,6 +15,7 @@ func TestRoleSystemPromptsAreEmbeddedAndMatchCurrentContracts(t *testing.T) {
 	}{
 		{"baseline", "submit_baseline_definition"},
 		{"baseline-verify", "finish_baseline_verification"},
+		{"benchmark", "finish_iteration_benchmark"},
 		{"iteration", "finish_iteration"},
 		{"integration", "finish_integration"},
 		{"follow-up/baseline-verify", "submit_followup_message"},
@@ -42,6 +43,13 @@ func TestRoleSystemPromptsAreEmbeddedAndMatchCurrentContracts(t *testing.T) {
 			}
 			if test.logicalName == "integration" && !strings.Contains(prompt, "apply_best_update") {
 				t.Fatalf("Integration prompt omits scoped Best application MCP: %q", prompt)
+			}
+			if test.logicalName == "benchmark" {
+				for _, requirement := range []string{"reference-only", "detached", "benchmark_context.evidence_root", "outcome=\"unavailable\"", "pika-go resume", "外部网络", "远程计算资源", "当前环境能力"} {
+					if !strings.Contains(prompt, requirement) {
+						t.Fatalf("Benchmark prompt omits requirement %q: %q", requirement, prompt)
+					}
+				}
 			}
 			if test.logicalName == "baseline" || test.logicalName == "baseline-verify" || test.logicalName == "iteration" || test.logicalName == "integration" {
 				for _, requirement := range []string{"candidate_change_policy", "allowed_candidate_surface", "implementation allowlist", "冻结验证资产"} {

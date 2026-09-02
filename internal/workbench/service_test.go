@@ -134,6 +134,51 @@ func TestSnapshotProjectsVersionedLegacyLatencyGeomeanWithoutInventingAccuracy(t
 	}
 }
 
+func TestSnapshotProjectsFlowV3BenchmarkGateAndReferenceReceipt(t *testing.T) {
+	t.Parallel()
+	store := fixtureStore{view: symphony.View{
+		Optimization:    symphony.OptimizationView{ID: "optimization", Revision: 7, FlowVersion: symphony.FlowVersion3},
+		Baselines:       []symphony.BaselineView{{ID: "baseline", Number: 1, Status: symphony.BaselineAccepted}},
+		Bests:           []symphony.BestView{{ID: "best", Sequence: 0, CommitSHA: "aaaaaaaa"}},
+		Attempts:        []symphony.AttemptView{{ID: "attempt", Status: "iterating", BaseBestSequence: 0}},
+		IterationRounds: []symphony.IterationRoundView{{AttemptID: "attempt", Round: 1, Status: "running"}},
+		Works: []symphony.WorkView{
+			{ID: "benchmark-work", BaselineRevisionID: "baseline", Role: symphony.RoleBenchmark, AttemptID: "attempt", IterationRound: 1, ExperimentCycleID: "cycle", Status: symphony.WorkCompleted},
+			{ID: "iteration-work", BaselineRevisionID: "baseline", Role: symphony.RoleIteration, AttemptID: "attempt", IterationRound: 1, ExperimentCycleID: "cycle", Status: symphony.WorkPending},
+		},
+		ExperimentCycles: []symphony.ExperimentCycleView{{
+			ID: "cycle", AttemptID: "attempt", IterationRound: 1, Sequence: 1, CheckpointSHA: "aaaaaaaa",
+			Status: "iteration_active", BenchmarkWorkID: "benchmark-work", IterationWorkID: "iteration-work", ReferenceReceiptID: "reference",
+		}},
+		ReferenceReceipts: []symphony.ReferenceReceiptView{{
+			ID: "reference", ExperimentCycleID: "cycle", BenchmarkWorkID: "benchmark-work", CheckpointSHA: "aaaaaaaa", ConsumedExperimentID: "experiment",
+		}},
+		IterationExperiments: []symphony.IterationExperimentView{{
+			ID: "experiment", AttemptID: "attempt", IterationRound: 1, Sequence: 1, Outcome: "kept", WorkID: "iteration-work",
+			ReferenceReceiptID: "reference", ParentCheckpointSHA: "aaaaaaaa", CheckpointSHA: "bbbbbbbb", ReceiptID: "experiment-receipt",
+		}},
+	}, records: symphony.WorkbenchRecords{Artifacts: []symphony.EvidenceArtifact{{
+		ID: "reference-artifact", WorkID: "benchmark-work", ReceiptID: "reference", RelativePath: "raw.json",
+	}}}}
+	snapshot, err := workbench.New(store, nil).Snapshot(context.Background(), 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findNode(t, snapshot, "experiment_cycle", "cycle").DomainStatus != "iteration_active" || findNode(t, snapshot, "reference_receipt", "reference").DomainStatus != "consumed" {
+		t.Fatalf("flow v3 gate nodes = %+v", snapshot.Nodes)
+	}
+	for _, edge := range [][3]string{
+		{"attempt:round:1", "cycle", "benchmark_gate"},
+		{"cycle", "reference", "reference"},
+		{"reference", "experiment", "checkpoint"},
+		{"reference", "reference-artifact", "evidence"},
+	} {
+		if !hasEdge(snapshot, edge[0], edge[1], edge[2]) {
+			t.Fatalf("flow v3 lineage omitted edge %v: %+v", edge, snapshot.Edges)
+		}
+	}
+}
+
 func TestArtifactRevalidatesRegistrationAndNeverBrowsesOutsideWork(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -197,6 +242,32 @@ func TestArtifactUsesDurableWorktreeInsteadOfOptimizationSource(t *testing.T) {
 	}
 	if string(artifact.Content) != string(contents) {
 		t.Fatalf("artifact content = %q", artifact.Content)
+	}
+}
+
+func TestBenchmarkArtifactUsesProtectedEvidenceRoot(t *testing.T) {
+	t.Parallel()
+	evidenceRoot := t.TempDir()
+	workRoot := filepath.Join(evidenceRoot, "benchmarks", "benchmark-work")
+	if err := os.MkdirAll(workRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte(`{"latency":10}`)
+	if err := os.WriteFile(filepath.Join(workRoot, "raw.json"), contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	metadata := symphony.EvidenceArtifact{ID: "artifact", WorkID: "benchmark-work", RelativePath: "raw.json", ByteSize: int64(len(contents)), ContentSHA256: hex.EncodeToString(digest[:]), ContractVersion: 1}
+	store := fixtureStore{
+		artifact: metadata, repository: filepath.Join(t.TempDir(), "wrong-worktree"),
+		work: symphony.RuntimeWork{Work: symphony.WorkView{ID: "benchmark-work", Role: symphony.RoleBenchmark}},
+	}
+	artifact, err := workbench.New(store, nil, evidenceRoot).Artifact(context.Background(), "artifact")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(artifact.Content) != string(contents) {
+		t.Fatalf("Benchmark artifact content = %q", artifact.Content)
 	}
 }
 

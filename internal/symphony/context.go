@@ -50,7 +50,7 @@ func (e *Engine) ContextProjection(ctx context.Context, sessionID string) (Conte
 			return ContextProjection{}, err
 		}
 	}
-	if target.FlowVersion == FlowVersion2 {
+	if target.FlowVersion >= FlowVersion2 {
 		projection.KnowledgeExperiments = append(projection.KnowledgeExperiments, target.IterationExperiments...)
 		// History limit governs cross-Attempt learning as well as transcript
 		// references. Current Diagnosis and current-Round records remain present

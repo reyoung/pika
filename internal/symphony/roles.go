@@ -23,6 +23,10 @@ var roleDescriptors = map[WorkRole]RoleDescriptor{
 		Role: RoleDiagnosis, ConfigurationKey: "iteration", InstructionName: "diagnosis",
 		TerminalOperation: "finish_diagnosis", ToolCatalog: []string{"finish_diagnosis"}, InjectSkills: true, FollowUpEligible: true,
 	},
+	RoleBenchmark: {
+		Role: RoleBenchmark, ConfigurationKey: "benchmark", InstructionName: "benchmark",
+		TerminalOperation: "finish_iteration_benchmark", ToolCatalog: []string{"finish_iteration_benchmark"}, InjectSkills: true,
+	},
 	RoleIteration: {
 		Role: RoleIteration, ConfigurationKey: "iteration", InstructionName: "iteration",
 		TerminalOperation: "finish_iteration", ToolCatalog: []string{"commit_changes", "record_iteration_experiment", "finish_iteration"}, InjectSkills: true, FollowUpEligible: true,

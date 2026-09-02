@@ -17,6 +17,7 @@ var catalog = map[string]string{
 	"baseline":                  "baseline.md",
 	"baseline-verify":           "baseline-verify.md",
 	"diagnosis":                 "diagnosis.md",
+	"benchmark":                 "benchmark.md",
 	"iteration":                 "iteration.md",
 	"integration":               "integration.md",
 	"follow-up/baseline-verify": "follow-up-baseline-verify.md",

@@ -22,10 +22,10 @@ func (e *Engine) seedOptimization(ctx context.Context, tx *sql.Tx, optimizationI
 		return err
 	}
 	var flowVersion FlowVersion
-	if err := tx.QueryRowContext(ctx, `SELECT flow_version FROM optimizations WHERE id = ?`, optimizationID).Scan(&flowVersion); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(flow_version_override, flow_version) FROM optimizations WHERE id = ?`, optimizationID).Scan(&flowVersion); err != nil {
 		return fmt.Errorf("read Optimization flow version: %w", err)
 	}
-	if flowVersion == FlowVersion2 {
+	if flowVersion >= FlowVersion2 {
 		return e.createDiagnosisWork(ctx, tx, optimizationID, baselineID, now)
 	}
 	return e.seedInitialIterationAttempts(ctx, tx, optimizationID, baselineID, bestSHA, now)
@@ -45,7 +45,7 @@ func (e *Engine) seedInitialIterationAttempts(ctx context.Context, tx *sql.Tx, o
 }
 
 func (e *Engine) createIterationAttempt(ctx context.Context, tx *sql.Tx, optimizationID, baselineID string, slot, bestSequence int64, bestSHA, kind, backOffMessage, now string) error {
-	attemptID, roundID, workID, effectID := e.newID(), e.newID(), e.newID(), e.newID()
+	attemptID, roundID := e.newID(), e.newID()
 	var historyLimit int64
 	if err := tx.QueryRowContext(ctx, `SELECT iteration_history_limit FROM optimizations WHERE id = ?`, optimizationID).Scan(&historyLimit); err != nil {
 		return fmt.Errorf("read iteration history limit: %w", err)
@@ -63,6 +63,14 @@ func (e *Engine) createIterationAttempt(ctx context.Context, tx *sql.Tx, optimiz
 	if err := snapshotIterationCaseSet(ctx, tx, optimizationID, attemptID, 1); err != nil {
 		return err
 	}
+	var flowVersion FlowVersion
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(flow_version_override, flow_version) FROM optimizations WHERE id = ?`, optimizationID).Scan(&flowVersion); err != nil {
+		return fmt.Errorf("read Attempt flow version: %w", err)
+	}
+	if flowVersion == FlowVersion3 {
+		return e.startExperimentCycle(ctx, tx, optimizationID, baselineID, attemptID, 1, bestSHA, now)
+	}
+	workID, effectID := e.newID(), e.newID()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO works
 		(id, optimization_id, baseline_revision_id, role, status, generation, attempt_id, iteration_round, created_at)
 		VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?)`, workID, optimizationID, baselineID, RoleIteration, WorkPending, attemptID, now); err != nil {
@@ -89,10 +97,11 @@ func (e *Engine) applyFinishIteration(ctx context.Context, tx *sql.Tx, command F
 		return Receipt{}, domainError(CodeInvalidTransition, "iteration can finish only while optimizing")
 	}
 	var attemptID, baselineID string
+	var experimentCycleID sql.NullString
 	var round int64
 	var role WorkRole
 	var workStatus WorkStatus
-	if err := tx.QueryRowContext(ctx, `SELECT attempt_id, baseline_revision_id, iteration_round, role, status FROM works WHERE id = ?`, command.WorkID).Scan(&attemptID, &baselineID, &round, &role, &workStatus); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT attempt_id, baseline_revision_id, iteration_round, role, status, experiment_cycle_id FROM works WHERE id = ?`, command.WorkID).Scan(&attemptID, &baselineID, &round, &role, &workStatus, &experimentCycleID); errors.Is(err, sql.ErrNoRows) {
 		return Receipt{}, domainError(CodeWorkNotFound, "iteration work was not found")
 	} else if err != nil {
 		return Receipt{}, fmt.Errorf("read iteration work: %w", err)
@@ -100,18 +109,29 @@ func (e *Engine) applyFinishIteration(ctx context.Context, tx *sql.Tx, command F
 	if role != RoleIteration || workStatus != WorkPending {
 		return Receipt{}, domainError(CodeInvalidTransition, "work is not an active iteration")
 	}
+	if optimization.FlowVersion == FlowVersion3 && !experimentCycleID.Valid {
+		return Receipt{}, domainError(CodeStateCorrupt, "flow v3 Iteration Work has no Experiment Cycle")
+	}
 	if command.Outcome == IterationCandidate {
-		if optimization.FlowVersion == FlowVersion2 {
+		if optimization.FlowVersion >= FlowVersion2 {
 			if command.ExperimentID == "" {
-				return Receipt{}, domainError(CodeInvalidCommand, "flow v2 candidate requires experiment_id")
+				return Receipt{}, domainError(CodeInvalidCommand, "flow v2+ candidate requires experiment_id")
 			}
 			var experimentID, checkpoint, experimentJSON, currentCheckpoint string
-			err := tx.QueryRowContext(ctx, `SELECT e.id, e.checkpoint_sha, e.experiment_json, r.current_checkpoint_sha
+			query := `SELECT e.id, e.checkpoint_sha, e.experiment_json, r.current_checkpoint_sha
 				FROM iteration_experiments e JOIN iteration_rounds r ON r.attempt_id = e.attempt_id AND r.round = e.iteration_round
 				WHERE e.attempt_id = ? AND e.iteration_round = ? AND e.outcome = 'kept'
-				ORDER BY e.sequence DESC LIMIT 1`, attemptID, round).Scan(&experimentID, &checkpoint, &experimentJSON, &currentCheckpoint)
+				ORDER BY e.sequence DESC LIMIT 1`
+			args := []any{attemptID, round}
+			if optimization.FlowVersion == FlowVersion3 {
+				query = `SELECT e.id, e.checkpoint_sha, e.experiment_json, r.current_checkpoint_sha
+					FROM iteration_experiments e JOIN iteration_rounds r ON r.attempt_id = e.attempt_id AND r.round = e.iteration_round
+					WHERE e.work_id = ? AND e.outcome = 'kept'`
+				args = []any{command.WorkID}
+			}
+			err := tx.QueryRowContext(ctx, query, args...).Scan(&experimentID, &checkpoint, &experimentJSON, &currentCheckpoint)
 			if errors.Is(err, sql.ErrNoRows) {
-				return Receipt{}, domainError(CodeInvalidTransition, "flow v2 candidate has no kept Experiment")
+				return Receipt{}, domainError(CodeInvalidTransition, "candidate has no kept Experiment in its required scope")
 			}
 			if err != nil {
 				return Receipt{}, fmt.Errorf("read latest kept Experiment: %w", err)
@@ -147,6 +167,30 @@ func (e *Engine) applyFinishIteration(ctx context.Context, tx *sql.Tx, command F
 		}
 	}
 	now, receiptID := e.timestamp(), e.newID()
+	if optimization.FlowVersion == FlowVersion3 {
+		var experimentCount int64
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM iteration_experiments WHERE work_id = ?`, command.WorkID).Scan(&experimentCount); err != nil {
+			return Receipt{}, fmt.Errorf("count flow v3 terminal Experiments: %w", err)
+		}
+		if experimentCount > 1 {
+			return Receipt{}, domainError(CodeStateCorrupt, "flow v3 Iteration Work contains multiple Experiments")
+		}
+		if command.Outcome == IterationCandidate && experimentCount != 1 {
+			return Receipt{}, domainError(CodeInvalidTransition, "flow v3 candidate requires exactly one Experiment")
+		}
+		cycleStatus := "completed"
+		if experimentCount == 0 {
+			cycleStatus = "abandoned"
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE experiment_cycles SET status = ?, failure_reason = NULLIF(?, ''), completed_at = ?
+			WHERE id = ? AND status = 'iteration_active'`, cycleStatus, command.Summary, now, experimentCycleID.String)
+		if err != nil {
+			return Receipt{}, fmt.Errorf("close Experiment Cycle: %w", err)
+		}
+		if changed, _ := result.RowsAffected(); changed != 1 {
+			return Receipt{}, domainError(CodeInvalidTransition, "Experiment Cycle is not active")
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE works SET status = ?, finished_at = ? WHERE id = ?`, WorkCompleted, now, command.WorkID); err != nil {
 		return Receipt{}, err
 	}
@@ -346,6 +390,17 @@ func (e *Engine) startPendingRefresh(ctx context.Context, tx *sql.Tx, optimizati
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE iteration_rounds SET status = 'running' WHERE attempt_id = ? AND round = ? AND status = 'queued'`, attemptID, round); err != nil {
 		return err
+	}
+	var checkpointSHA string
+	var flowVersion FlowVersion
+	if err := tx.QueryRowContext(ctx, `SELECT current_checkpoint_sha FROM iteration_rounds WHERE attempt_id = ? AND round = ?`, attemptID, round).Scan(&checkpointSHA); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(flow_version_override, flow_version) FROM optimizations WHERE id = ?`, optimizationID).Scan(&flowVersion); err != nil {
+		return err
+	}
+	if flowVersion == FlowVersion3 {
+		return e.startExperimentCycle(ctx, tx, optimizationID, baselineID, attemptID, round, checkpointSHA, now)
 	}
 	workID := e.newID()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO works
@@ -630,13 +685,23 @@ func (e *Engine) applyAttemptCancellation(ctx context.Context, tx *sql.Tx, optim
 	if _, err := tx.ExecContext(ctx, `UPDATE attempts SET status = 'cancelled', failure_reason = 'user_cancelled', updated_at = ? WHERE id = ?`, now, attemptID); err != nil {
 		return Receipt{}, err
 	}
-	if role == RoleIteration {
+	if role == RoleIteration || role == RoleBenchmark {
 		var round int64
 		if err := tx.QueryRowContext(ctx, `SELECT iteration_round FROM works WHERE id = ?`, command.WorkID).Scan(&round); err != nil {
 			return Receipt{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE iteration_rounds SET status = 'cancelled', finished_at = ? WHERE attempt_id = ? AND round = ?`, now, attemptID, round); err != nil {
 			return Receipt{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE experiment_cycles SET status = 'abandoned', failure_reason = 'user_cancelled', completed_at = ?
+			WHERE id = (SELECT experiment_cycle_id FROM works WHERE id = ?) AND status IN ('benchmark_pending', 'iteration_active')`, now, command.WorkID); err != nil {
+			return Receipt{}, fmt.Errorf("abandon cancelled Experiment Cycle: %w", err)
+		}
+		if role == RoleBenchmark {
+			if _, err := tx.ExecContext(ctx, `UPDATE benchmark_runs SET status = 'unavailable', failure_reason = 'user_cancelled', finished_at = ?
+				WHERE work_id = ? AND status = 'pending'`, now, command.WorkID); err != nil {
+				return Receipt{}, fmt.Errorf("cancel Benchmark Run: %w", err)
+			}
 		}
 	} else {
 		if integrationID == "" {

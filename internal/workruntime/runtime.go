@@ -548,7 +548,7 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) (resultE
 		AgentKind:        session.AgentKind,
 		Repository:       work.Repository,
 		PreferredPaneID:  payload.PreferredPaneID,
-		DedicatedTab:     work.Work.Role == symphony.RoleIteration,
+		DedicatedTab:     work.Work.Role == symphony.RoleIteration || work.Work.Role == symphony.RoleBenchmark,
 		TabLabel:         workTabLabel(work),
 		PaneLabel:        workTabLabel(work),
 		PaneLabelNeedsID: false,
@@ -594,7 +594,7 @@ func (s Sink) start(ctx context.Context, effect symphony.RuntimeEffect) (resultE
 
 func workTabLabel(work symphony.RuntimeWork) string {
 	label := workPaneLabel(work)
-	if work.Work.Role != symphony.RoleIteration || work.Work.AttemptID == "" {
+	if (work.Work.Role != symphony.RoleIteration && work.Work.Role != symphony.RoleBenchmark) || work.Work.AttemptID == "" {
 		return label
 	}
 	attemptID := work.Work.AttemptID
@@ -618,6 +618,11 @@ func workPaneLabel(work symphony.RuntimeWork) string {
 		return withBaselineNumber("Verify")
 	case symphony.RoleDiagnosis:
 		return withBaselineNumber("Diagnosis")
+	case symphony.RoleBenchmark:
+		if work.Work.IterationRound > 0 {
+			return fmt.Sprintf("Benchmark R%d", work.Work.IterationRound)
+		}
+		return "Benchmark"
 	case symphony.RoleIteration:
 		if work.Work.IterationRound > 0 {
 			return fmt.Sprintf("Iteration R%d", work.Work.IterationRound)

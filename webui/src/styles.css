@@ -59,6 +59,7 @@ select { height: 29px; padding: 0 7px; }
 .react-flow__edge-path { stroke: #40516a; stroke-width: 1.5; }
 .lineage-edge--best_spine .react-flow__edge-path { stroke: var(--blue); stroke-width: 2.3; }
 .lineage-edge--accepted .react-flow__edge-path { stroke: var(--teal); stroke-width: 2.1; }
+.lineage-edge--benchmark_gate .react-flow__edge-path, .lineage-edge--reference .react-flow__edge-path { stroke: #d3a85c; stroke-width: 1.9; }
 .lineage-edge.is-dashed .react-flow__edge-path { stroke-dasharray: 7 5; stroke: var(--amber); }
 .loading-grid { height: 100%; display: grid; place-items: center; color: var(--muted); background-image: radial-gradient(#1e2b3c 1px, transparent 1px); background-size: 22px 22px; }
 
@@ -67,8 +68,13 @@ select { height: 29px; padding: 0 7px; }
 .workbench-node.kind-best { border-left-color: var(--blue); background: linear-gradient(145deg, #14243a, #0e1724); }
 .workbench-node.kind-baseline { border-left-color: #a58de0; }
 .workbench-node.kind-integration { border-left-color: var(--teal); }
+.workbench-node.kind-experiment_cycle { border-left-color: #d3a85c; background: linear-gradient(145deg, #282116, #15140f); }
+.workbench-node.kind-reference_receipt { border-left-color: #f0ca75; background: linear-gradient(145deg, #252316, #12150f); }
+.workbench-node.kind-experiment { border-left-color: #62a8e8; }
+.workbench-node.kind-artifact { border-left-color: #7b8798; }
 .workbench-node.status-rejected, .workbench-node.status-cancelled { border-left-color: var(--red); opacity: .82; }
 .workbench-node.status-stale, .workbench-node.status-backed_off, .workbench-node.status-refresh_pending { border-left-color: var(--amber); }
+.workbench-node.status-benchmark_unavailable { border-left-color: var(--red); }
 .node-eyebrow, .node-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .node-eyebrow { color: #708095; font: 700 8px/1 monospace; text-transform: uppercase; letter-spacing: .11em; }
 .node-state { display: flex; align-items: center; gap: 4px; letter-spacing: 0; }

@@ -42,6 +42,21 @@ func StrictEvidenceSchema() map[string]any { return evidenceContractSchema() }
 // schema when nested inside strict contracts such as Iteration Experiment v1.
 func StrictMeasurementComparisonSchema() map[string]any { return measurementComparisonSchema() }
 
+// StrictMeasurementSetSchema is the reference-only/candidate-only v1 shape
+// used by flow-v3 Benchmark and Iteration Work.
+func StrictMeasurementSetSchema() map[string]any {
+	values := map[string]any{"type": "object", "minProperties": 1, "additionalProperties": map[string]any{"type": "number", "exclusiveMinimum": 0}}
+	item := strictObject(map[string]any{
+		"case_id": map[string]any{"type": "string", "minLength": 1},
+		"values":  values,
+	}, "case_id", "values")
+	return strictObject(map[string]any{
+		"schema_version":     map[string]any{"type": "integer", "const": MeasurementSchemaVersion},
+		"cases":              map[string]any{"type": "array", "minItems": 1, "items": item},
+		"independent_retest": performanceClaimSchema()["properties"].(map[string]any)["independent_retest"],
+	}, "schema_version", "cases")
+}
+
 // IntegrationSchema returns the Integration validation schema, including the
 // performance claim whose >=10x branch is enforced by ValidateIntegration.
 func IntegrationSchema() map[string]any {

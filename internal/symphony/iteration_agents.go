@@ -38,21 +38,33 @@ func (e *Engine) ReconfigureIterationAgents(ctx context.Context, count int64) er
 		return nil
 	}
 
-	rows, err := tx.QueryContext(ctx, `SELECT w.id, a.id FROM attempts a JOIN works w ON w.attempt_id = a.id
+	rows, err := tx.QueryContext(ctx, `SELECT w.id, a.id, w.role, w.status, COALESCE(c.status, '')
+		FROM attempts a JOIN works w ON w.attempt_id = a.id
+		LEFT JOIN experiment_cycles c ON c.id = w.experiment_cycle_id
 		WHERE a.optimization_id = ? AND a.status = 'iterating' AND a.slot_index >= ?
-		AND w.role = 'iteration' AND w.status = 'pending'`, optimizationID, count)
+		AND w.role IN ('benchmark', 'iteration')
+		AND (w.status = 'pending' OR (w.role = 'benchmark' AND c.status = 'benchmark_unavailable'))`, optimizationID, count)
 	if err != nil {
 		return fmt.Errorf("inspect removed Iteration slots: %w", err)
 	}
 	var removedWorks, removedAttempts []string
+	var removedRoles []WorkRole
+	var removedWorkStatuses []WorkStatus
+	removedUnavailableBenchmark := false
 	for rows.Next() {
 		var workID, attemptID string
-		if err := rows.Scan(&workID, &attemptID); err != nil {
+		var role WorkRole
+		var workStatus WorkStatus
+		var cycleStatus string
+		if err := rows.Scan(&workID, &attemptID, &role, &workStatus, &cycleStatus); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("scan removed Iteration slot: %w", err)
 		}
 		removedWorks = append(removedWorks, workID)
 		removedAttempts = append(removedAttempts, attemptID)
+		removedRoles = append(removedRoles, role)
+		removedWorkStatuses = append(removedWorkStatuses, workStatus)
+		removedUnavailableBenchmark = removedUnavailableBenchmark || cycleStatus == "benchmark_unavailable"
 	}
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close removed Iteration slot rows: %w", err)
@@ -63,8 +75,10 @@ func (e *Engine) ReconfigureIterationAgents(ctx context.Context, count int64) er
 	now := e.timestamp()
 	for index, workID := range removedWorks {
 		attemptID := removedAttempts[index]
-		if _, err := tx.ExecContext(ctx, `UPDATE works SET status = 'cancelled', finished_at = ? WHERE id = ?`, now, workID); err != nil {
-			return fmt.Errorf("cancel Work in removed Iteration slot: %w", err)
+		if removedWorkStatuses[index] == WorkPending {
+			if _, err := tx.ExecContext(ctx, `UPDATE works SET status = 'cancelled', finished_at = ? WHERE id = ? AND status = 'pending'`, now, workID); err != nil {
+				return fmt.Errorf("cancel Work in removed Iteration slot: %w", err)
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE iteration_rounds SET status = 'cancelled', finished_at = ?
 			WHERE attempt_id = ? AND status IN ('queued', 'running')`, now, attemptID); err != nil {
@@ -74,8 +88,32 @@ func (e *Engine) ReconfigureIterationAgents(ctx context.Context, count int64) er
 			WHERE id = ? AND status = 'iterating'`, now, attemptID); err != nil {
 			return fmt.Errorf("cancel Attempt in removed Iteration slot: %w", err)
 		}
-		if err := insertEffect(ctx, tx, e.newID(), optimizationID, "work.close_requested", mustJSON(map[string]string{"work_id": workID}), now); err != nil {
-			return err
+		if _, err := tx.ExecContext(ctx, `UPDATE experiment_cycles SET status = 'abandoned', failure_reason = 'iteration_agent_removed', completed_at = ?
+			WHERE id = (SELECT experiment_cycle_id FROM works WHERE id = ?) AND status IN ('benchmark_pending', 'benchmark_unavailable', 'iteration_active')`, now, workID); err != nil {
+			return fmt.Errorf("abandon Experiment Cycle in removed Iteration slot: %w", err)
+		}
+		if removedRoles[index] == RoleBenchmark {
+			if _, err := tx.ExecContext(ctx, `UPDATE benchmark_runs SET status = 'unavailable', failure_reason = 'iteration_agent_removed', finished_at = ?
+				WHERE work_id = ? AND status = 'pending'`, now, workID); err != nil {
+				return fmt.Errorf("cancel Benchmark Run in removed Iteration slot: %w", err)
+			}
+		}
+		if removedWorkStatuses[index] == WorkPending {
+			if err := insertEffect(ctx, tx, e.newID(), optimizationID, "work.close_requested", mustJSON(map[string]string{"work_id": workID}), now); err != nil {
+				return err
+			}
+		}
+	}
+	if optimizationStatus == OptimizationPaused && removedUnavailableBenchmark {
+		var unavailable int64
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM experiment_cycles WHERE optimization_id = ? AND status = 'benchmark_unavailable'`, optimizationID).Scan(&unavailable); err != nil {
+			return fmt.Errorf("count remaining unavailable Benchmark Cycles: %w", err)
+		}
+		if unavailable == 0 {
+			if _, err := tx.ExecContext(ctx, `UPDATE optimizations SET status = ?, updated_at = ? WHERE id = ? AND status = ?`, OptimizationOptimizing, now, optimizationID, OptimizationPaused); err != nil {
+				return fmt.Errorf("resume Optimization after removing unavailable Benchmark slot: %w", err)
+			}
+			optimizationStatus = OptimizationOptimizing
 		}
 	}
 

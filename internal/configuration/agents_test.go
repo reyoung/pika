@@ -104,6 +104,35 @@ func TestRenderedConfigurationDerivesConcurrencyFromOneIterationAgent(t *testing
 	}
 }
 
+func TestBenchmarkAgentOptsNewConfigurationIntoVersionTwo(t *testing.T) {
+	t.Parallel()
+	agents := configuration.DefaultAgents()
+	agents["benchmark"] = configuration.Agent{Kind: "codex", Model: "gpt-5.6-sol", ReasoningEffort: "high"}
+	contents, err := configuration.RenderConfiguration("/repo", agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(contents, "version = 2\n") || !strings.Contains(contents, "[agents.benchmark]") {
+		t.Fatalf("benchmark configuration did not opt into version 2:\n%s", contents)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := configuration.LoadIdentity(path)
+	if err != nil || identity.Version != 2 {
+		t.Fatalf("configuration identity = %+v err=%v", identity, err)
+	}
+	configured, err := configuration.HasAgent(path, "benchmark")
+	if err != nil || !configured {
+		t.Fatalf("HasAgent benchmark = %v err=%v", configured, err)
+	}
+	benchmark, err := configuration.LoadAgent(path, "benchmark")
+	if err != nil || benchmark.Kind != "codex" || benchmark.Model != "gpt-5.6-sol" {
+		t.Fatalf("benchmark Agent = %+v err=%v", benchmark, err)
+	}
+}
+
 func TestLoadAgentReadsStaticRoleConfiguration(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.toml")

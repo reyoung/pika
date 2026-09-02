@@ -20,6 +20,7 @@ type WorkScope string
 const (
 	DiagnosisScope WorkScope = "diagnoses"
 	IterationScope WorkScope = "iterations"
+	BenchmarkScope WorkScope = "benchmarks"
 )
 
 // EnsureWorkRoot is the canonical owner of Pika-managed evidence paths. Both
@@ -29,7 +30,7 @@ func EnsureWorkRoot(base string, scope WorkScope, workID string) (string, error)
 	if base == "" || !filepath.IsAbs(base) {
 		return "", errors.New("absolute Pika evidence root is required")
 	}
-	if scope != DiagnosisScope && scope != IterationScope {
+	if scope != DiagnosisScope && scope != IterationScope && scope != BenchmarkScope {
 		return "", errors.New("recognized evidence scope is required")
 	}
 	if workID == "" || workID == "." || workID == ".." || filepath.IsAbs(workID) || filepath.Base(workID) != workID || strings.ContainsAny(workID, `/\\`) {

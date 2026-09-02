@@ -237,7 +237,7 @@ func probeProviders(ctx context.Context, providers *provider.Registry, kinds []s
 }
 
 // ProbeConfiguredProviders validates one complete persisted configuration and
-// probes exactly the distinct provider kinds referenced by its five Roles.
+// probes exactly the distinct provider kinds referenced by its configured Roles.
 func ProbeConfiguredProviders(ctx context.Context, path string, providers *provider.Registry, executables map[string]string, modelRequests map[string]provider.ModelRequest) error {
 	identity, err := LoadIdentity(path)
 	if err != nil {
@@ -275,6 +275,15 @@ func configuredCodingProviderKinds(path string, providers *provider.Registry) (m
 		return nil, err
 	}
 	for _, agent := range iterations {
+		result[agent.Kind] = true
+	}
+	if configured, err := HasAgent(path, "benchmark"); err != nil {
+		return nil, err
+	} else if configured {
+		agent, err := LoadAgentWithRegistry(path, "benchmark", providers)
+		if err != nil {
+			return nil, err
+		}
 		result[agent.Kind] = true
 	}
 	return result, nil
@@ -315,6 +324,21 @@ func validateConfiguredModelCatalog(ctx context.Context, path string, providers 
 			return fmt.Errorf("validate agents.%s model selection: %w", role, err)
 		}
 	}
+	if configured, err := HasAgent(path, "benchmark"); err != nil {
+		return err
+	} else if configured {
+		agent, err := LoadAgentWithRegistry(path, "benchmark", providers)
+		if err != nil {
+			return err
+		}
+		request, found := modelRequests[agent.Kind]
+		if !found {
+			return fmt.Errorf("provider model catalog request is required for %s", agent.Kind)
+		}
+		if err := providers.ValidateModelCatalog(ctx, agent, request); err != nil {
+			return fmt.Errorf("validate agents.benchmark model selection: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -339,6 +363,13 @@ func validateConfigurationPath(path, repository string, providers *provider.Regi
 	if _, err := LoadFollowUp(path); err != nil {
 		return nil, err
 	}
+	benchmarkConfigured, err := HasAgent(path, "benchmark")
+	if err != nil {
+		return nil, err
+	}
+	if benchmarkConfigured && identity.Version != 2 {
+		return nil, errors.New("agents.benchmark requires configuration version 2")
+	}
 	seen := map[string]bool{}
 	var kinds []string
 	for _, role := range []string{"baseline", "baseline_verify", "iteration", "integration", "follow_up"} {
@@ -348,6 +379,15 @@ func validateConfigurationPath(path, repository string, providers *provider.Regi
 		}
 		if !seen[agent.Kind] {
 			seen[agent.Kind] = true
+			kinds = append(kinds, agent.Kind)
+		}
+	}
+	if benchmarkConfigured {
+		agent, err := LoadAgentWithRegistry(path, "benchmark", providers)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[agent.Kind] {
 			kinds = append(kinds, agent.Kind)
 		}
 	}
@@ -451,7 +491,11 @@ func RenderConfiguration(repository string, agents map[string]Agent, configuredI
 		}
 	}
 	var builder strings.Builder
-	builder.WriteString(`version = 1
+	configurationVersion := 1
+	if _, configured := agents["benchmark"]; configured {
+		configurationVersion = 2
+	}
+	builder.WriteString(`version = ` + strconv.Itoa(configurationVersion) + `
 
 [optimization]
 repository = ` + strconv.Quote(repository) + `
@@ -488,6 +532,16 @@ history_limit = 20
 			continue
 		}
 		writeAgent("[agents."+role+"]", agents[role])
+	}
+	if benchmark, configured := agents["benchmark"]; configured {
+		adapter, err := registry.Resolve(benchmark.Kind)
+		if err != nil {
+			return "", err
+		}
+		if err := adapter.Validate(benchmark); err != nil {
+			return "", fmt.Errorf("validate agents.benchmark: %w", err)
+		}
+		writeAgent("[agents.benchmark]", benchmark)
 	}
 	builder.WriteString(`[follow_up]
 pane_idle_timeout = "5m"

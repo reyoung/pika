@@ -32,8 +32,8 @@ func (e *Engine) MintAgentGrant(ctx context.Context, sessionID string, catalog [
 	}
 	defer tx.Rollback()
 	grant := AgentGrant{ID: e.newID(), Token: token, AgentSessionID: sessionID, Catalog: catalogJSON}
-	if err := tx.QueryRowContext(ctx, `SELECT work_id, generation, role FROM agent_sessions
-		WHERE id = ? AND status IN ('starting', 'running')`, sessionID).Scan(&grant.WorkID, &grant.Generation, &grant.Role); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT work_id, generation, role, agent_kind, agent_name FROM agent_sessions
+		WHERE id = ? AND status IN ('starting', 'running')`, sessionID).Scan(&grant.WorkID, &grant.Generation, &grant.Role, &grant.AgentKind, &grant.AgentName); errors.Is(err, sql.ErrNoRows) {
 		return AgentGrant{}, domainError(CodeInvalidTransition, "agent session is not current")
 	} else if err != nil {
 		return AgentGrant{}, fmt.Errorf("read agent session for grant: %w", err)
@@ -62,11 +62,11 @@ func (e *Engine) ResolveAgentGrant(ctx context.Context, token string) (AgentGran
 	hash := sha256.Sum256([]byte(token))
 	var grant AgentGrant
 	var revokedAt sql.NullString
-	err := e.db.QueryRowContext(ctx, `SELECT g.id, g.agent_session_id, s.work_id, s.generation, s.role, s.status,
+	err := e.db.QueryRowContext(ctx, `SELECT g.id, g.agent_session_id, s.work_id, s.generation, s.role, s.agent_kind, s.agent_name, s.status,
 		g.catalog_json, g.expires_at, g.revoked_at
 		FROM session_grants g JOIN agent_sessions s ON s.id = g.agent_session_id
 		WHERE g.token_sha256 = ?`, hex.EncodeToString(hash[:])).Scan(
-		&grant.ID, &grant.AgentSessionID, &grant.WorkID, &grant.Generation, &grant.Role, &grant.SessionStatus,
+		&grant.ID, &grant.AgentSessionID, &grant.WorkID, &grant.Generation, &grant.Role, &grant.AgentKind, &grant.AgentName, &grant.SessionStatus,
 		&grant.Catalog, &grant.ExpiresAt, &revokedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {

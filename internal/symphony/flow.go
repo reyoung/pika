@@ -34,7 +34,7 @@ func normalizedFlowVersion(version FlowVersion) (FlowVersion, error) {
 	if version == 0 {
 		return FlowVersion1, nil
 	}
-	if version != FlowVersion1 && version != FlowVersion2 {
+	if version != FlowVersion1 && version != FlowVersion2 && version != FlowVersion3 {
 		return 0, fmt.Errorf("unsupported flow version %d", version)
 	}
 	return version, nil
@@ -43,7 +43,7 @@ func normalizedFlowVersion(version FlowVersion) (FlowVersion, error) {
 func validateSkillSnapshotInput(snapshot *SkillSnapshotInput) error {
 	expectedSources := expectedSkillSourcesForCurrentProcess()
 	if snapshot == nil {
-		return errors.New("flow v2 requires a frozen skill snapshot")
+		return errors.New("flow v2+ requires a frozen skill snapshot")
 	}
 	if snapshot.SchemaVersion != SkillSnapshotSchemaV1 || !isSHA256(snapshot.SnapshotID) || !filepath.IsAbs(snapshot.RootPath) ||
 		!json.Valid(snapshot.Manifest) || !isSHA256(snapshot.ManifestSHA256) || len(snapshot.Entries) != len(expectedSources) {

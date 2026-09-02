@@ -131,7 +131,7 @@ func LoadIdentity(path string) (Identity, error) {
 		return Identity{}, fmt.Errorf("read instance configuration: %w", err)
 	}
 	version, err := strconv.ParseInt(versionText, 10, 64)
-	if err != nil || version != 1 {
+	if err != nil || (version != 1 && version != 2) {
 		return Identity{}, fmt.Errorf("unsupported configuration version %q", versionText)
 	}
 	repository, err := strconv.Unquote(repositoryText)
@@ -366,6 +366,28 @@ func LoadPaneIdleTimeout(path string) (time.Duration, error) {
 
 func LoadAgent(path, role string) (Agent, error) {
 	return LoadAgentWithRegistry(path, role, provider.DefaultRegistry())
+}
+
+// HasAgent reports whether the singleton role section is present without
+// weakening validation of its contents. Call LoadAgent after a true result.
+func HasAgent(path, role string) (bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Errorf("open instance configuration: %w", err)
+	}
+	defer file.Close()
+	target := "agents." + role
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		section, _, header := parseSectionHeader(strings.TrimSpace(scanner.Text()))
+		if header && section == target {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("read instance configuration: %w", err)
+	}
+	return false, nil
 }
 
 func LoadAgentWithRegistry(path, role string, providers *provider.Registry) (Agent, error) {

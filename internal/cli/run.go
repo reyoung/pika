@@ -807,6 +807,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 		var followUpInactivity time.Duration
 		var followUpPolicies map[symphony.WorkRole]symphony.FollowUpPolicy
 		var configuredIterationAgentCount int64
+		var benchmarkAgentConfigured bool
 		if _, statErr := os.Stat(instanceConfigPath); statErr == nil {
 			resumePreflight = func(preflightCtx context.Context) error {
 				return configuration.ProbeConfiguredProviders(preflightCtx, instanceConfigPath, providerRegistry,
@@ -825,6 +826,11 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				return 1
 			}
 			configuredIterationAgentCount = int64(len(iterationAgents))
+			benchmarkAgentConfigured, configErr = configuration.HasAgent(instanceConfigPath, "benchmark")
+			if configErr != nil {
+				writeDaemonLog(stderr, "error", "configuration.load_failed", configErr, nil)
+				return 1
+			}
 			if !maintenanceActive {
 				if configErr := resumePreflight(ctx); configErr != nil {
 					writeDaemonLog(stderr, "error", "provider.preflight_failed", configErr, nil)
@@ -902,6 +908,22 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				_ = engine.Close()
 			}
 		}()
+		if configuredView, inspectErr := engine.Inspect(ctx, symphony.Status{}); inspectErr == nil {
+			if configuredView.Optimization.FlowVersion == symphony.FlowVersion3 && !benchmarkAgentConfigured {
+				writeDaemonLog(stderr, "error", "configuration.benchmark_agent_failed", errors.New("flow v3 Optimization requires [agents.benchmark]; dynamic downgrade is not allowed"), nil)
+				return 1
+			}
+			if configuredView.Optimization.FlowVersion < symphony.FlowVersion3 && benchmarkAgentConfigured {
+				writeDaemonLog(stderr, "error", "configuration.benchmark_agent_failed", errors.New("an existing flow-v1/v2 Optimization cannot be upgraded by adding [agents.benchmark]"), nil)
+				return 1
+			}
+		} else {
+			var domainErr *symphony.DomainError
+			if !errors.As(inspectErr, &domainErr) || domainErr.Code != symphony.CodeNotInitialized {
+				writeDaemonLog(stderr, "error", "configuration.benchmark_agent_failed", inspectErr, nil)
+				return 1
+			}
+		}
 		if configuredIterationAgentCount != 0 {
 			if handoffCandidate {
 				view, inspectErr := engine.Inspect(ctx, symphony.Status{})
@@ -982,7 +1004,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				return workruntime.Snapshot{}, nil
 			}
 			return observeRuntime(observeCtx)
-		})
+		}, paths.EvidenceRoot)
 		cursorMCPPath := os.Getenv("PIKA_GO_CURSOR_MCP_PATH")
 		cursorHooksPath := os.Getenv("PIKA_GO_CURSOR_HOOKS_PATH")
 		if cursorMCPPath == "" {
@@ -1122,8 +1144,14 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 				}
 				return configurationErr
 			}
+			flowVersion := symphony.FlowVersion2
+			if configured, configuredErr := configuration.HasAgent(instanceConfigPath, "benchmark"); configuredErr != nil {
+				return daemon.PreparedInit{}, configuredErr
+			} else if configured {
+				flowVersion = symphony.FlowVersion3
+			}
 			return daemon.PreparedInit{Rollback: rollback, IterationConcurrency: int64(len(iterationAgents)), MaxPendingAttempts: schedulerConfig.MaxPendingAttempts, IterationHistoryLimit: contextConfig.IterationHistoryLimit,
-				FlowVersion: symphony.FlowVersion2, SkillSnapshot: &snapshot.Input}, nil
+				FlowVersion: flowVersion, SkillSnapshot: &snapshot.Input}, nil
 		}
 		initOptions = func(optionsCtx context.Context) (protocol.InitOptionsResponse, error) {
 			_, statErr := os.Stat(instanceConfigPath)
@@ -1424,7 +1452,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	if engine != nil {
 		backup = func(backupCtx context.Context, destination string) error {
 			view, inspectErr := engine.Inspect(backupCtx, symphony.Status{})
-			if inspectErr == nil && view.Optimization.FlowVersion == symphony.FlowVersion2 {
+			if inspectErr == nil && view.Optimization.FlowVersion >= symphony.FlowVersion2 {
 				if view.SkillSnapshot == nil {
 					return errors.New("flow v2 backup has no frozen skill snapshot provenance")
 				}
@@ -1753,7 +1781,7 @@ func validateFlowV2Evidence(ctx context.Context, engine *symphony.Engine, eviden
 		}
 		return err
 	}
-	if view.Optimization.FlowVersion != symphony.FlowVersion2 {
+	if view.Optimization.FlowVersion < symphony.FlowVersion2 {
 		return nil
 	}
 	for _, work := range view.Works {
@@ -1768,6 +1796,8 @@ func validateFlowV2Evidence(ctx context.Context, engine *symphony.Engine, eviden
 		switch work.Role {
 		case symphony.RoleDiagnosis:
 			root, err = evidence.EnsureWorkRoot(evidenceRoot, evidence.DiagnosisScope, work.ID)
+		case symphony.RoleBenchmark:
+			root, err = evidence.EnsureWorkRoot(evidenceRoot, evidence.BenchmarkScope, work.ID)
 		case symphony.RoleIteration:
 			root, err = evidence.EnsureWorkRoot(evidenceRoot, evidence.IterationScope, work.ID)
 		default:
