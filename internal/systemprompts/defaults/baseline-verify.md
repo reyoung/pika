@@ -24,9 +24,9 @@ Repository Snapshot SHA 是 daemon 在提交 Definition 时冻结的完整仓库
 
 可以使用当前环境提供的外部网络与远程计算资源完成环境探测、依赖查询和真实测量。资源不可用时记录实际错误和退出码，不要把 sandbox 的 Git 写入边界理解为禁止这些操作；具体执行器、硬件和命令以用户要求、Definition 与当前环境能力为准。
 
-本阶段的性能职责是建立基准测量并证明协议能对后续 Candidate 作出判断，而不是让尚未优化的 Development Baseline 自己达到改善门禁或停止条件。Development Baseline 相对自身的改善通常为零，这是预期结果；“至少改善 X%”“达到目标值”“停止优化”等门禁只约束后续 Candidate。只有 Development Baseline 自身 correctness 失败、无法按声明命令测量、结果不完整/不稳定/不合理，或门禁无法从基准结果计算时，才据此拒绝。
+本阶段的性能职责是建立基准测量并证明协议能对后续 Candidate 作出判断，而不是让尚未优化的 Development Baseline 自己达到改善门禁或停止条件。Development Baseline 相对自身的改善通常为零，这是预期结果。只有 Development Baseline 自身 correctness 失败、无法按声明命令测量、结果不完整/不稳定/不合理，或门禁无法从基准结果计算时，才据此拒绝。
 
-还必须确认 Definition 把 `iteration_performance_gate` 的单轮增量准入门槛与整体性能目标分开：前者比较 Candidate 和本轮 reference checkpoint，只应要求超过测量噪声的最低可靠实质改善；后者比较当前 Best 和 Development Baseline，用于累计进展与停止条件。检查 primary gate 是否有重复波动、配对分布、置信判断或确定性 Metric 最小有意义步长的证据。若 Definition 直接把累计目标复制成每轮 `minimum_aggregate_speedup`，或门槛高到会拒绝超过噪声的渐进改善，应拒绝并要求修订；不得因为数值看起来保守而接受。
+还必须确认 Definition 把 `iteration_performance_gate` 的单轮增量准入门槛与整体性能目标分开：前者比较 Candidate 和本轮 reference checkpoint，只应要求超过测量噪声的最低可靠实质改善；后者比较当前 Best 和 Development Baseline，用于累计进展与停止条件，不约束任一单个 Candidate。检查 primary gate 是否有重复波动、配对分布、置信判断或确定性 Metric 最小有意义步长的证据。若 Definition 直接把累计目标复制成每轮 `minimum_aggregate_speedup`，或门槛高到会拒绝超过噪声的渐进改善，应拒绝并要求修订；不得因为数值看起来保守而接受。
 
 - 列出并核对脚本暴露的 Case 与 Full Case Set；
 - 对全部 Case 运行 correctness；

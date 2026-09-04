@@ -1,13 +1,19 @@
 package systemprompts_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/reyoung/pika-go/internal/benchmarkintegrity"
-	"github.com/reyoung/pika-go/internal/candidatepolicy"
+	"github.com/reyoung/pika-go/internal/symphony"
 	"github.com/reyoung/pika-go/internal/systemprompts"
+	"github.com/reyoung/pika-go/internal/toolapp"
 )
 
 func TestRoleSystemPromptsAreEmbeddedAndMatchCurrentContracts(t *testing.T) {
@@ -186,76 +192,125 @@ func TestBaselinePromptsDistinguishDurableRevisionFromExecutionWork(t *testing.T
 
 func TestPerformancePromptsSeparateIncrementalGateFromOverallGoal(t *testing.T) {
 	t.Parallel()
-	draft, err := systemprompts.Content("baseline")
+	tests := []struct {
+		role      string
+		required  []string
+		forbidden []string
+	}{
+		{role: "baseline", required: []string{"iteration_performance_gate", "单轮增量准入门槛", "测量噪声", "不得直接复制", "实际存在的已跟踪冻结验证资产"}},
+		{role: "baseline-verify", required: []string{"前者比较 Candidate 和本轮 reference checkpoint", "后者比较当前 Best 和 Development Baseline", "不约束任一单个 Candidate", "应拒绝并要求修订"}, forbidden: []string{"门禁只约束后续 Candidate"}},
+		{role: "iteration", required: []string{"当前 checkpoint", "单轮增量准入门槛", "整体性能目标只用于评估 Best 的累计进展"}},
+		{role: "integration", required: []string{"Candidate 相对当前 Best", "超过噪声的渐进改善可以 Accept", "整体性能目标只用于累计进展和停止条件"}},
+	}
+	for _, test := range tests {
+		prompt, err := systemprompts.Content(test.role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, phrase := range test.required {
+			if !strings.Contains(string(prompt), phrase) {
+				t.Errorf("%s prompt omits performance contract %q", test.role, phrase)
+			}
+		}
+		for _, phrase := range test.forbidden {
+			if strings.Contains(string(prompt), phrase) {
+				t.Errorf("%s prompt retains conflated performance contract %q", test.role, phrase)
+			}
+		}
+	}
+}
+
+func TestBaselinePromptExamplePassesDaemonContract(t *testing.T) {
+	t.Parallel()
+	prompt, err := systemprompts.Content("baseline")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"iteration_performance_gate",
-		`"minimum_aggregate_speedup"`,
-		`"maximum_case_regression_fraction"`,
-		"单轮增量准入门槛",
-		"整体性能目标",
-		"测量噪声",
-		"不得直接复制",
-	} {
-		if !strings.Contains(string(draft), want) {
-			t.Errorf("Baseline Draft prompt does not separate the incremental gate from the overall goal; missing %q", want)
-		}
-	}
-	draftText := string(draft)
-	exampleStart := strings.Index(draftText, "```json\n")
-	if exampleStart < 0 {
-		t.Fatal("Baseline Draft prompt has no JSON contract example")
-	}
-	exampleStart += len("```json\n")
-	exampleEnd := strings.Index(draftText[exampleStart:], "\n```")
-	if exampleEnd < 0 {
-		t.Fatal("Baseline Draft prompt has an unterminated JSON contract example")
-	}
-	example := json.RawMessage(draftText[exampleStart : exampleStart+exampleEnd])
-	if err := candidatepolicy.ValidateNewDefinition(example); err != nil {
-		t.Fatalf("Baseline Draft prompt's JSON contract example has an invalid candidate change policy: %v", err)
-	}
-	definition, err := benchmarkintegrity.ParseFrozenMeasurementDefinition(example)
-	if err != nil {
-		t.Fatalf("Baseline Draft prompt's JSON contract example is invalid: %v", err)
-	}
-	if err := benchmarkintegrity.RequireIterationGate(definition); err != nil {
-		t.Fatalf("Baseline Draft prompt's JSON contract example omits the required incremental gate: %v", err)
+	example := fencedJSONExample(t, string(prompt))
+	if err := submitBaselineThroughDaemon(t, example); err != nil {
+		t.Fatalf("Baseline prompt example was rejected by submit_baseline_definition: %v", err)
 	}
 
-	verification, err := systemprompts.Content("baseline-verify")
-	if err != nil {
-		t.Fatal(err)
+	invalid := json.RawMessage(strings.Replace(string(example), `"minimum_aggregate_speedup": 1.01`, `"minimum_aggregate_speedup": 1`, 1))
+	if string(invalid) == string(example) {
+		t.Fatal("Baseline prompt example no longer contains the gate exercised by this test")
 	}
-	for _, want := range []string{
-		"前者比较 Candidate 和本轮 reference checkpoint",
-		"后者比较当前 Best 和 Development Baseline",
-		"若 Definition 直接把累计目标复制成每轮 `minimum_aggregate_speedup`，或门槛高到会拒绝超过噪声的渐进改善，应拒绝并要求修订",
-	} {
-		if !strings.Contains(string(verification), want) {
-			t.Errorf("Baseline Verification prompt cannot reject a conflated performance gate; missing %q", want)
-		}
+	if err := submitBaselineThroughDaemon(t, invalid); err == nil {
+		t.Fatal("submit_baseline_definition accepted a non-improving iteration gate")
 	}
+}
 
-	iteration, err := systemprompts.Content("iteration")
-	if err != nil {
-		t.Fatal(err)
+func fencedJSONExample(t *testing.T, prompt string) json.RawMessage {
+	t.Helper()
+	_, remainder, found := strings.Cut(prompt, "```json\n")
+	if !found {
+		t.Fatal("prompt has no JSON contract example")
 	}
-	for _, want := range []string{"当前 checkpoint", "单轮增量准入门槛", "整体性能目标"} {
-		if !strings.Contains(string(iteration), want) {
-			t.Errorf("Iteration prompt does not explain the incremental gate scope; missing %q", want)
-		}
+	example, _, found := strings.Cut(remainder, "\n```")
+	if !found {
+		t.Fatal("prompt has an unterminated JSON contract example")
 	}
+	return json.RawMessage(example)
+}
 
-	integration, err := systemprompts.Content("integration")
+func submitBaselineThroughDaemon(t *testing.T, definition json.RawMessage) error {
+	t.Helper()
+	ctx := context.Background()
+	repository := filepath.Join(t.TempDir(), "repository")
+	if err := os.MkdirAll(filepath.Join(repository, "tests"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "tests", "correctness_test.py"), []byte("# frozen correctness asset\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runPromptTestGit(t, repository, "init", "--quiet", "--initial-branch=main")
+	runPromptTestGit(t, repository, "add", "tests/correctness_test.py")
+	runPromptTestGit(t, repository, "-c", "user.name=Pika Test", "-c", "user.email=pika@example.invalid", "commit", "--quiet", "-m", "baseline")
+
+	engine, err := symphony.Open(ctx, filepath.Join(t.TempDir(), "pika.db"), symphony.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"当前 Best", "超过噪声的渐进改善可以 Accept", "整体性能目标"} {
-		if !strings.Contains(string(integration), want) {
-			t.Errorf("Integration prompt does not accept incremental improvements above noise; missing %q", want)
-		}
+	t.Cleanup(func() { _ = engine.Close() })
+	if _, err := engine.Apply(ctx, symphony.Init{Meta: symphony.CommandMeta{RequestID: "init"}, OptimizationID: "optimization", Repository: repository}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := engine.Inspect(ctx, symphony.Status{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := view.Works[0]
+	session := symphony.AgentSession{ID: "session", WorkID: work.ID, Generation: work.Generation, Role: work.Role, AgentKind: "codex", AgentName: "prompt-test", Status: symphony.AgentSessionStarting}
+	if err := engine.EnsureAgentSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.BindPane(ctx, session.ID, symphony.PaneBinding{WorkspaceID: "workspace", TabID: "tab", PaneID: "pane", TerminalID: "terminal"}); err != nil {
+		t.Fatal(err)
+	}
+	grant, err := engine.MintAgentGrant(ctx, session.ID, toolapp.CatalogForRole(work.Role), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments, err := json.Marshal(struct {
+		IdempotencyKey string          `json:"idempotency_key"`
+		Definition     json.RawMessage `json:"definition"`
+	}{IdempotencyKey: "submit", Definition: definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := (toolapp.Application{Store: engine, WorktreeRoot: filepath.Join(t.TempDir(), "worktrees")}).Invoke(
+		ctx, grant.Token, toolapp.Call{Name: "submit_baseline_definition", Arguments: arguments},
+	)
+	if err == nil && !invocation.Terminal {
+		return fmt.Errorf("submit_baseline_definition was not terminal")
+	}
+	return err
+}
+
+func runPromptTestGit(t *testing.T, repository string, arguments ...string) {
+	t.Helper()
+	output, err := exec.Command("git", append([]string{"-C", repository}, arguments...)...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", arguments, err, output)
 	}
 }
