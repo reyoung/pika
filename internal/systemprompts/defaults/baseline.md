@@ -52,6 +52,13 @@ daemon 会硬校验 Definition 中的 `benchmark_integrity` v1 和 `benchmark_me
 
 ```json
 {
+  "candidate_change_policy": {
+    "schema_version": 1,
+    "protected_validation_paths": [{
+      "path": "tests/correctness_test.py",
+      "kind": "unit_test"
+    }]
+  },
   "benchmark_integrity": {
     "schema_version": 1,
     "case_ids": ["case-id"],

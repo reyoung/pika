@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/reyoung/pika-go/internal/benchmarkintegrity"
+	"github.com/reyoung/pika-go/internal/candidatepolicy"
 	"github.com/reyoung/pika-go/internal/systemprompts"
 )
 
@@ -213,6 +214,9 @@ func TestPerformancePromptsSeparateIncrementalGateFromOverallGoal(t *testing.T) 
 		t.Fatal("Baseline Draft prompt has an unterminated JSON contract example")
 	}
 	example := json.RawMessage(draftText[exampleStart : exampleStart+exampleEnd])
+	if err := candidatepolicy.ValidateNewDefinition(example); err != nil {
+		t.Fatalf("Baseline Draft prompt's JSON contract example has an invalid candidate change policy: %v", err)
+	}
 	definition, err := benchmarkintegrity.ParseFrozenMeasurementDefinition(example)
 	if err != nil {
 		t.Fatalf("Baseline Draft prompt's JSON contract example is invalid: %v", err)
@@ -225,7 +229,11 @@ func TestPerformancePromptsSeparateIncrementalGateFromOverallGoal(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"单轮增量准入门槛", "整体性能目标", "测量噪声", "拒绝"} {
+	for _, want := range []string{
+		"前者比较 Candidate 和本轮 reference checkpoint",
+		"后者比较当前 Best 和 Development Baseline",
+		"若 Definition 直接把累计目标复制成每轮 `minimum_aggregate_speedup`，或门槛高到会拒绝超过噪声的渐进改善，应拒绝并要求修订",
+	} {
 		if !strings.Contains(string(verification), want) {
 			t.Errorf("Baseline Verification prompt cannot reject a conflated performance gate; missing %q", want)
 		}
