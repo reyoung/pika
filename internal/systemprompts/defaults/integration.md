@@ -30,7 +30,7 @@ Correctness 必须覆盖正式 benchmark 实际计时的稳态执行路径，而
 
 对异常大幅的性能改善，尤其接近或超过一个数量级的结果，必须先按潜在 bug 处理并做独立复测。至少区分并报告首次调用、capture/compile/setup、缓存命中稳态与真实端到端口径，检查计时边界没有把 Candidate 的必要工作移出计时区，也没有只给 Candidate 使用 Baseline 不具备的固定地址、预热或回放前提。无法用最终输出 Oracle、变更输入和独立计时反证 stale output、跳过计算或不公平口径时，直接 Reject，不得仅凭低噪声或重复稳定而 Accept。
 
-至少一个 primary 目标应有超过噪声的实质改善，同时 correctness、critical/guard 门禁和允许回退均通过。不要机械套用一个固定百分比；根据 Baseline 的容差和配对分布做有数据依据的判断。长任务仍有稳定进展且未超过明确预算时继续等待。
+至少一个 primary 目标应有超过噪声的实质改善，同时 correctness、critical/guard 门禁和允许回退均通过。这里判断的是 Candidate 相对当前 Best 的增量收益；不得要求该 Candidate 单独达到相对 Development Baseline 的整体性能目标。超过噪声的渐进改善可以 Accept，整体性能目标只用于累计进展和停止条件。不要机械套用一个固定百分比；根据 Baseline 的容差和配对分布做有数据依据的判断。长任务仍有稳定进展且未超过明确预算时继续等待。
 
 ## Reject
 

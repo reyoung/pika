@@ -34,6 +34,8 @@ Candidate 实现通常可以修改任意实现和构建路径，包括 `include/
 
 使用 Baseline 定义的标准 correctness 和 benchmark 协议，精确覆盖 `required_case_set.case_ids` 中的全部 Case。检查正确性、性能、数值稳定性、实际 artifact identity、Git diff 和工作目录。保留完整原始输出；不得伪造平均提升、隐藏坏 Case 或用旧缓存冒充本轮结果。长任务仍有稳定进展且未超过明确预算时继续等待。
 
+`iteration_performance_gate` 是 Candidate 相对当前 checkpoint（flow-v3 中即 `reference_receipt` 绑定的 checkpoint）的单轮增量准入门槛，只用于判断本次改动是否可靠超过测量噪声并满足 guard/Case 回退限制；它不是相对 Development Baseline 的整体性能目标。不要要求一次 Experiment 独自达到累计目标或停止条件。渐进改善只要超过冻结的噪声门槛并满足其余门禁，就可以 `kept` 并提交 Integration；整体性能目标只用于评估 Best 的累计进展和是否结束 Optimization。
+
 以下情况可以直接拒绝：正确性失败、实现不可行、有效采样没有超过噪声的改善、存在明确坏 Case，或继续占用 Integration 没有价值。拒绝仍应给出具体原因和已有证据。
 
 每个具体实验都必须调用非终态 `record_iteration_experiment`。调用前先读取 MCP catalog 的 `inputSchema`；它是当前 flow 的唯一字段契约，不能按旧报告格式猜测字段。所有原始 Experiment artifact 必须写入动态 Context 的 `iteration_context.evidence_root`，`experiment.artifacts[].path` 是该目录下的相对路径，并为本 Work 中的每次实验使用不复用的路径；不要把 profiler/benchmark 输出写进源码 worktree 或通过 `commit_changes` 提交。特别是 `change` 是含 `summary`、`paths`、`mechanism` 的对象。`kept` 只能在 `commit_changes` 创建干净 checkpoint 后提交，并推进 Round checkpoint；`rejected` 与 `inconclusive` 必须先恢复 parent checkpoint 且干净，外置 evidence root 会保留恢复前的原始结果。只有 correctness 通过、正式测量有合理收益、Candidate 已是最新 kept Experiment checkpoint 且 worktree 完全干净时，才能提交 Candidate。Codex 的普通 Shell sandbox 可能禁止写 `.git`；不要请求提权或放宽 sandbox。调用非终态 `commit_changes` MCP，提供唯一 `idempotency_key`、简洁 `message` 和明确的仓库相对 `paths`，再以返回的 `commit_sha` 作为 `candidate_sha` 并要求 `clean=true`。该 SHA 必须是 `PIKA_BASE_SHA` 的后代。

@@ -20,7 +20,7 @@ Definition 的持久身份是当前 Baseline Revision ID，内容身份是 daemo
 
 在提交前确认并记录：
 
-- 优化目标、非目标和停止条件；
+- 整体性能目标、非目标和停止条件，以及与之分离的单轮增量准入门槛；
 - Target、Development Baseline、Correctness Oracle 的身份与入口；
 - Full Case Set、critical case、输入分布和 workload 权重；
 - primary、guard、informational metrics 的方向、单位、聚合方式与容差；
@@ -84,11 +84,21 @@ daemon 会硬校验 Definition 中的 `benchmark_integrity` v1 和 `benchmark_me
       "direction": "lower_is_better",
       "sample_statistic": "median",
       "aggregation": "weighted_geomean_of_ratios"
-    }]
+    }],
+    "iteration_performance_gate": {
+      "schema_version": 1,
+      "metrics": [{
+        "metric_id": "latency",
+        "minimum_aggregate_speedup": 1.01,
+        "maximum_case_regression_fraction": 0.01
+      }]
+    }
   }
 }
 ```
 
 `benchmark_measurements.cases` 必须与 `benchmark_integrity.case_ids` 恰好一致，每个 Case 使用有限正数 `weight`。每个 Metric 的 `id`、`label`、`unit` 和 `sample_statistic` 必须非空；`role` 只能是 `primary`、`guard` 或 `informational`，且必须恰有一个 primary；`direction` 只能是 `lower_is_better` 或 `higher_is_better`；`aggregation` 只能是 `weighted_geomean_of_ratios` 或 `ratio_of_weighted_arithmetic_means`。Case ID 和 Metric ID 必须唯一。
+
+`iteration_performance_gate` 是 Candidate 相对本轮不可变 reference checkpoint 的单轮增量准入门槛，不是相对 Development Baseline 的整体性能目标或停止条件。为每个 primary 和 guard Metric 各声明一个 gate；primary 的 `minimum_aggregate_speedup` 必须大于 1，`maximum_case_regression_fraction` 必须位于 `[0, 1)`。其中 primary 的最小提升应取能够可靠超过测量噪声和量化误差的最低实质改善，并由正式 benchmark 的重复波动、配对分布或确定性 Metric 的最小有意义步长支持。不得直接复制“累计提升 2x”“延迟降至 X”之类的整体性能目标作为单轮门槛；渐进优化只要增量收益超过噪声并通过 correctness、guard 和 Case 回退限制，就应允许进入 Integration。上例中的 `1.01` 和 `0.01` 只是结构占位符，必须用实测噪声和用户容差确定，不能机械照抄。整体目标仅用于判断相对 Development Baseline 的累计进展和何时停止 Optimization。
 
 讨论、自然语言总结、进程退出或 Agent idle 都不会完成 Work。仅当 terminal MCP 成功返回时才算完成；成功后不要再次提交。

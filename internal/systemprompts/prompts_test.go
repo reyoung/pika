@@ -1,9 +1,11 @@
 package systemprompts_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/reyoung/pika-go/internal/benchmarkintegrity"
 	"github.com/reyoung/pika-go/internal/systemprompts"
 )
 
@@ -177,6 +179,75 @@ func TestBaselinePromptsDistinguishDurableRevisionFromExecutionWork(t *testing.T
 	for _, want := range []string{"Verification Work ID", "必然不同于", "不能作为 Definition 有效性判断", "不得在仓库中物化内联 Definition", "daemon 存储的 JSON 字节"} {
 		if !strings.Contains(string(verification), want) {
 			t.Fatalf("Baseline Verification prompt omits %q:\n%s", want, verification)
+		}
+	}
+}
+
+func TestPerformancePromptsSeparateIncrementalGateFromOverallGoal(t *testing.T) {
+	t.Parallel()
+	draft, err := systemprompts.Content("baseline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"iteration_performance_gate",
+		`"minimum_aggregate_speedup"`,
+		`"maximum_case_regression_fraction"`,
+		"单轮增量准入门槛",
+		"整体性能目标",
+		"测量噪声",
+		"不得直接复制",
+	} {
+		if !strings.Contains(string(draft), want) {
+			t.Errorf("Baseline Draft prompt does not separate the incremental gate from the overall goal; missing %q", want)
+		}
+	}
+	draftText := string(draft)
+	exampleStart := strings.Index(draftText, "```json\n")
+	if exampleStart < 0 {
+		t.Fatal("Baseline Draft prompt has no JSON contract example")
+	}
+	exampleStart += len("```json\n")
+	exampleEnd := strings.Index(draftText[exampleStart:], "\n```")
+	if exampleEnd < 0 {
+		t.Fatal("Baseline Draft prompt has an unterminated JSON contract example")
+	}
+	example := json.RawMessage(draftText[exampleStart : exampleStart+exampleEnd])
+	definition, err := benchmarkintegrity.ParseFrozenMeasurementDefinition(example)
+	if err != nil {
+		t.Fatalf("Baseline Draft prompt's JSON contract example is invalid: %v", err)
+	}
+	if err := benchmarkintegrity.RequireIterationGate(definition); err != nil {
+		t.Fatalf("Baseline Draft prompt's JSON contract example omits the required incremental gate: %v", err)
+	}
+
+	verification, err := systemprompts.Content("baseline-verify")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"单轮增量准入门槛", "整体性能目标", "测量噪声", "拒绝"} {
+		if !strings.Contains(string(verification), want) {
+			t.Errorf("Baseline Verification prompt cannot reject a conflated performance gate; missing %q", want)
+		}
+	}
+
+	iteration, err := systemprompts.Content("iteration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"当前 checkpoint", "单轮增量准入门槛", "整体性能目标"} {
+		if !strings.Contains(string(iteration), want) {
+			t.Errorf("Iteration prompt does not explain the incremental gate scope; missing %q", want)
+		}
+	}
+
+	integration, err := systemprompts.Content("integration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"当前 Best", "超过噪声的渐进改善可以 Accept", "整体性能目标"} {
+		if !strings.Contains(string(integration), want) {
+			t.Errorf("Integration prompt does not accept incremental improvements above noise; missing %q", want)
 		}
 	}
 }
