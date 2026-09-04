@@ -284,9 +284,6 @@ func submitBaselineThroughDaemon(t *testing.T, definition json.RawMessage) error
 	if err := engine.EnsureAgentSession(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.BindPane(ctx, session.ID, symphony.PaneBinding{WorkspaceID: "workspace", TabID: "tab", PaneID: "pane", TerminalID: "terminal"}); err != nil {
-		t.Fatal(err)
-	}
 	grant, err := engine.MintAgentGrant(ctx, session.ID, toolapp.CatalogForRole(work.Role), time.Hour)
 	if err != nil {
 		t.Fatal(err)
